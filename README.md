@@ -89,7 +89,8 @@ The arm64 tools were used once, on an x86-64 machine with Ubuntu 24.04.
 `--with-web` 448 packages, 877 MB). `arm64cross.py --suite portable` configured and built
 the tree with both backends and every optional part (354 steps, 0 errors, 0 warnings)
 and ran the suite `portable` under qemu-user (2 of 2 pass). In that build the 68 tests
-that need no display were then started by hand under qemu-user: 65 pass, 2 fail in a
+that need neither a display nor an OpenGL context were then started by hand, one by one,
+under qemu-user: 65 pass, 2 fail in a
 timing check that means nothing under emulation, 1 starts itself again and cannot run
 there. `arm64cross.py` got two corrections after that run (`--keep-build` keeps the
 console logs; a test that is handed a program of the build is left out, not reported as
