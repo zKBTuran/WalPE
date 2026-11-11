@@ -80,7 +80,7 @@ fluid simulation and their switches), [SOUND.md](docs/SOUND.md), [VIDEO.md](docs
 ./build.sh --tuning=alderlake  # the same with -march=alderlake and friends (see below)
 # or by hand:
 meson setup build
-ninja -C build
+ninja -C build programs        # the installed programs only (plain `ninja -C build`: tests too)
 ```
 
 `build.sh` (POSIX sh) runs ninja with as many jobs as the machine has CPUs (`-j <CPUs> -l
@@ -88,6 +88,9 @@ ninja -C build
 directory (default `build`). `--tuning=<value>` is passed on as `-Dnative_tuning=<value>`,
 every other argument goes to `meson setup` (`./build.sh -Dweb=disabled`). An existing build
 directory is reconfigured, not wiped, and keeps the options it was set up with.
+`build.sh` builds the installed programs only (the ninja target `programs`); tests and
+developer tools are built only by `meson test` (or `ninja -C build <name>`, e.g. `ninja -C
+build sceneshot`).
 
 The default is a release build (`-O3`, `NDEBUG`, LTO, hardening flags) with **generic CPU
 tuning**: the binaries run on any CPU of the architecture they were built for.
@@ -706,7 +709,7 @@ Things the code relies on:
 ## Tests
 
 ```sh
-meson test -C build            # everything
+meson test -C build            # everything (builds the test programs first)
 meson test -C build config ctl # single suites
 ```
 

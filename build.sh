@@ -44,4 +44,6 @@ else
 	meson setup "$dir" "$@"
 fi
 
-exec ninja -C "$dir" -j "$jobs" -l "$load"
+# the installed programs only (meson.build: alias_target programs); the tests
+# and developer tools are built by `meson test` or `ninja -C <dir> <name>`
+exec ninja -C "$dir" -j "$jobs" -l "$load" programs

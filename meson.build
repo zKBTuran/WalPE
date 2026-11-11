@@ -585,6 +585,13 @@ signals_lib = static_library('walpe-signals', signals_srcs,
 signals_dep = declare_dependency(link_with: signals_lib, include_directories: inc,
   compile_args: signals_args, dependencies: signals_deps)
 
+# Every test program and developer tool from here on has build_by_default:
+# false. meson still puts every program a test() names into its default
+# target (`ninja` with no target), so ./build.sh builds the alias target
+# `programs` (the installed programs, at the end of this file) instead.
+# `meson test` builds what the tests it runs need; one tool by its name:
+# `ninja -C build sceneshot`.
+
 # which provider can work where: capability lists made up after real
 # compositors, the window arithmetic, WALPE_LOGIND, the status entry
 # "pause_rules", and the real providers with nothing to talk to (each one
@@ -593,7 +600,7 @@ signals_dep = declare_dependency(link_with: signals_lib, include_directories: in
 test('sig-select', executable('sig-select-test', 'tests/sig_select_test.c',
   include_directories: inc,
   dependencies: [signals_dep],
-  install: false), timeout: 60)
+  install: false, build_by_default: false), timeout: 60)
 
 # the logind provider against a stand-in login manager on a private bus
 # (GTestDBus + a thread of the test owning org.freedesktop.login1): how the
@@ -603,7 +610,7 @@ test('sig-select', executable('sig-select-test', 'tests/sig_select_test.c',
 test('sig-logind', executable('sig-logind-test', 'tests/sig_logind_test.c',
   include_directories: inc,
   dependencies: [signals_dep],
-  install: false), timeout: 120)
+  install: false, build_by_default: false), timeout: 120)
 
 # the Wayland providers against a stand-in compositor (libwayland-server on
 # a thread, private runtime directory): focus / covered per output,
@@ -617,7 +624,7 @@ if have_wl_signals and wl_server_dep.found()
     wl_gen['ext-foreign-toplevel-list-v1'][1], wl_gen['ext-foreign-toplevel-list-v1'][2],
     include_directories: inc,
     dependencies: [signals_dep, wl_server_dep],
-    install: false), timeout: 120)
+    install: false, build_by_default: false), timeout: 120)
 endif
 
 # ------------------------------------------------------- dlopen'd modules
@@ -664,7 +671,7 @@ endif
 test('webhost-select', executable('webhost-select-test', 'tests/webhost_select_test.c',
   include_directories: inc,
   dependencies: [glib],
-  install: false))
+  install: false, build_by_default: false))
 
 # the private page host (src/engine/webhost_wl.c, compiled into the test)
 # against a plain Wayland client doing what GTK does: one client only and
@@ -680,10 +687,10 @@ if have_wl_scan and wl_server_dep.found() and wl_client_dep.found()
     # <features.h> would resolve to src/engine/features.h)
     include_directories: inc,
     dependencies: [glib, wl_server_dep, wl_client_dep],
-    install: false), timeout: 60)
+    install: false, build_by_default: false), timeout: 60)
 endif
 if have_ffmpeg
-  shared_module('walpe-video', 'src/engine/video_custom.c', 'src/engine/sounddec.c',
+  video_mod = shared_module('walpe-video', 'src/engine/video_custom.c', 'src/engine/sounddec.c',
     name_prefix: '',
     include_directories: inc,
     c_args: ['-fvisibility=hidden'],
@@ -776,7 +783,7 @@ endif
 test('fx-repair', executable('fx-repair-test', 'tests/fx_repair_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # OpenGL ES path. glapi: the gl_api preference, the context ladder walked
 # with made-up EGL capability sets, the fallback table (no GL). fx-essl: the
@@ -789,15 +796,15 @@ test('fx-repair', executable('fx-repair-test', 'tests/fx_repair_test.c',
 test('glapi', executable('glapi-test', 'tests/glapi_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 test('fx-essl', executable('fx-essl-test', 'tests/fx_essl_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 test('gles-scene', executable('gles-scene-test', 'tests/gles_scene_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 180)
+  install: false, build_by_default: false), timeout: 180)
 
 # shared file-texture cache (engine/glutil.c): 1/2-channel storage of RGBA8
 # data, one texture for identical pixels, stored mip levels, DXT kept
@@ -806,7 +813,7 @@ test('gles-scene', executable('gles-scene-test', 'tests/gles_scene_test.c',
 test('texcache', executable('texcache-test', 'tests/texcache_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # how a layer picture gets to the GPU: reduced on the CPU before the upload
 # (the texels of the GL blit, never a full-size texture), PNG / JPEG decoded
@@ -816,7 +823,7 @@ test('texcache', executable('texcache-test', 'tests/texcache_test.c',
 texload_test = executable('texload-test', 'tests/texload_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false)
+  install: false, build_by_default: false)
 test('texload', texload_test, timeout: 120)
 # the same with the opt-in switch: odd-sized pictures reduced before the upload too
 test('texload-odd', texload_test, env: ['WALPE_TEX_CPU_REDUCE=2'], timeout: 120)
@@ -827,7 +834,7 @@ test('texload-odd', texload_test, env: ['WALPE_TEX_CPU_REDUCE=2'], timeout: 120)
 test('scene-frames', executable('scene-frames-test', 'tests/scene_frames_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # layer textures as the input of effects (stored reduced only where that
 # gives the same picture; exact with tex_downscale off) and layers attached
@@ -836,7 +843,7 @@ test('scene-frames', executable('scene-frames-test', 'tests/scene_frames_test.c'
 test('scene-fit', executable('scene-fit-test', 'tests/scene_fit_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # integration gate: with frame skipping and the static bake an idle scene
 # (0 fps) must still repaint when something outside its layers changes the
@@ -845,7 +852,7 @@ test('scene-fit', executable('scene-fit-test', 'tests/scene_fit_test.c',
 test('idle-repaint', executable('idle-repaint-test', 'tests/idle_repaint_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # scene bloom and camera shake. postfx: the parts without GL - the two
 # switches (rows of engine/features.h), their place in config.json, the
@@ -860,14 +867,14 @@ test('idle-repaint', executable('idle-repaint-test', 'tests/idle_repaint_test.c'
 postfx_test = executable('postfx-test', 'tests/postfx_test.c',
   include_directories: inc,
   dependencies: [core_dep, m_lib],
-  install: false)
+  install: false, build_by_default: false)
 test('postfx', postfx_test)
 test('postfx-env', postfx_test, args: ['env'],
   env: ['WALPE_FEATURES=bloom=off,camera_shake=on,some_other_feature=off'])
 postfx_gl_test = executable('postfx-gl-test', 'tests/postfx_gl_test.c',
   include_directories: inc,
   dependencies: [core_dep, m_lib],
-  install: false)
+  install: false, build_by_default: false)
 test('postfx-gl', postfx_gl_test, timeout: 300)
 # the same with the 1:1 copy of the frame that a multisampled window needs
 test('postfx-gl-fullcopy', postfx_gl_test, env: ['WALPE_BLOOM_COPY=full'], timeout: 300)
@@ -880,7 +887,7 @@ test('postfx-gl-fullcopy', postfx_gl_test, env: ['WALPE_BLOOM_COPY=full'], timeo
 test('scene-clock', executable('scene-clock-test', 'tests/scene_clock_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 120)
+  install: false, build_by_default: false), timeout: 120)
 
 # what a wallpaper script sees of a real scene (a generated one, through the
 # content API): set-then-get of every layer / text / particle instance
@@ -891,7 +898,7 @@ test('scene-clock', executable('scene-clock-test', 'tests/scene_clock_test.c',
 test('scene-props', executable('scene-props-test', 'tests/scene_props_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 120)
+  install: false, build_by_default: false), timeout: 120)
 
 # a generated scene whose scripts drive layers and effects with hostile
 # values (version 0.12.2 security pass): zero / huge / non-finite vectors on
@@ -901,7 +908,7 @@ test('scene-props', executable('scene-props-test', 'tests/scene_props_test.c',
 test('scene-hostile', executable('scene-hostile-test', 'tests/scene_hostile_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 900)
+  install: false, build_by_default: false), timeout: 900)
 
 # the text files of a scene wallpaper and the entries of its folder
 # (tests/scene_files_test.c): a FIFO or an outside link as scene.pkg, the
@@ -912,7 +919,7 @@ test('scene-hostile', executable('scene-hostile-test', 'tests/scene_hostile_test
 test('scene-files', executable('scene-files-test', 'tests/scene_files_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 600)
+  install: false, build_by_default: false), timeout: 600)
 
 # effect pass programs (fx_specialize.h, fx_verify.h, fx_rewrite.h,
 # fx_fuse.h): program sharing byte-identical to one program per pass, baked
@@ -924,7 +931,7 @@ test('scene-files', executable('scene-files-test', 'tests/scene_files_test.c',
 test('fx-spec', executable('fx-spec-test', 'tests/fx_spec_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # what the effect executor keeps over frames (static cache, held sets of the
 # effect update rate, prefixes) against what fx_specialize / fx_quality=fast
@@ -934,7 +941,7 @@ test('fx-spec', executable('fx-spec-test', 'tests/fx_spec_test.c',
 test('fx-hold', executable('fx-hold-test', 'tests/fx_hold_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # simulation effects (Wallpaper Engine's Fluid Simulation; src/engine/fx_sim.h):
 # the fixed step at 30 / 60 / 144 frames per second, fbos[].fit, the
@@ -945,7 +952,7 @@ test('fx-hold', executable('fx-hold-test', 'tests/fx_hold_test.c',
 test('fx-sim', executable('fx-sim-test', 'tests/fx_sim_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false),
+  install: false, build_by_default: false),
   env: ['WALPE_FLUID=', 'WALPE_FLUID_QUALITY='])
 
 # a layer's opacity goes in before its effects (Wallpaper Engine's order:
@@ -957,7 +964,7 @@ test('fx-sim', executable('fx-sim-test', 'tests/fx_sim_test.c',
 test('fx-alpha', executable('fx-alpha-test', 'tests/fx_alpha_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 180)
+  install: false, build_by_default: false), timeout: 180)
 
 # effect passes restricted to what is read later (fx_region.h): which
 # lookups count as local, the rectangle arithmetic, and - GL part, every
@@ -968,7 +975,7 @@ test('fx-alpha', executable('fx-alpha-test', 'tests/fx_alpha_test.c',
 test('fx-region', executable('fx-region-test', 'tests/fx_region_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 180)
+  install: false, build_by_default: false), timeout: 180)
 
 # the effect shader pipeline against hostile shader text and effect JSON
 # (version 0.12.2 security pass): time scan and #include expansion stay bounded,
@@ -977,7 +984,7 @@ test('fx-region', executable('fx-region-test', 'tests/fx_region_test.c',
 test('fx-hostile', executable('fx-hostile-test', 'tests/fx_hostile_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 900)
+  install: false, build_by_default: false), timeout: 900)
 
 # statements of stock effect shaders, recognised by key (fx_keys.h): the key
 # functions against strstr (), the recognisers of fx_rewrite.h and of the
@@ -987,7 +994,7 @@ test('fx-hostile', executable('fx-hostile-test', 'tests/fx_hostile_test.c',
 test('fx-rewrite-keys', executable('fx-keys-test', 'tests/fx_keys_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # workshop browsing: parsers on saved Steam replies, settings file mode,
 # steamcmd job with a fake steamcmd. WALPE_WS_LIVE=1 adds live Steam calls.
@@ -995,14 +1002,14 @@ test('workshop', executable('workshop-test', 'tests/workshop_test.c',
   include_directories: inc,
   c_args: ['-DSRCDIR="' + meson.current_source_dir() + '"'],
   dependencies: [core_dep],
-  install: false), timeout: 120)
+  install: false, build_by_default: false), timeout: 120)
 
 # control socket (common/ipc.c): large replies, request limit, socket mode,
 # single-instance lock, a client that does not read. No daemon, no display.
 test('ipc', executable('ipc-test', 'tests/ipc_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 60)
+  install: false, build_by_default: false), timeout: 60)
 
 # x86-64 and aarch64 give the same results (`meson test --suite portable`):
 # byte readers at every alignment, the hashes whose values are kept (the
@@ -1013,7 +1020,7 @@ test('ipc', executable('ipc-test', 'tests/ipc_test.c',
 test('portable', executable('portable-test', 'tests/portable_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), suite: 'portable', timeout: 120)
+  install: false, build_by_default: false), suite: 'portable', timeout: 120)
 
 # the pixel loops of the CPU side (2x2 texture halving with its SSE2
 # kernel on x86, YUV -> BGRA full and half size, premultiply) against a
@@ -1022,7 +1029,7 @@ test('portable', executable('portable-test', 'tests/portable_test.c',
 test('simd-equal', executable('simd-equal-test', 'tests/simd_equal_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), suite: 'portable', timeout: 120)
+  install: false, build_by_default: false), suite: 'portable', timeout: 120)
 
 # what the daemon and its clients trust on
 # the local machine - the socket's directory, config.json's mode and a
@@ -1032,7 +1039,7 @@ test('simd-equal', executable('simd-equal-test', 'tests/simd_equal_test.c',
 test('sec-local', executable('sec-local-test', 'tests/sec_local_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 120)
+  install: false, build_by_default: false), timeout: 120)
 
 # the same review against a running daemon on an X server of its own
 # (Xvfb -displayfd; exit 77 = skipped where Xvfb is not installed): a
@@ -1053,20 +1060,20 @@ endif
 test('guard', executable('guard-test', 'tests/guard_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 60)
+  install: false, build_by_default: false), timeout: 60)
 
 # opt-in resource rules in config.json, IPC state pushes
 # ("subscribe" / broadcast) and the subscribing client. No daemon, no display.
 test('respolicy', executable('respolicy-test', 'tests/respolicy_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 60)
+  install: false, build_by_default: false), timeout: 60)
 
 # spectrum analysis: both channels from one FFT, band values, silence
 test('audio', executable('audio-test', 'tests/audio_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # scene sound (engine/scenesound.c) on the null device, with WAV files the
 # test writes: players, the switches (the setting, a wallpaper's own, volume,
@@ -1075,7 +1082,7 @@ test('audio', executable('audio-test', 'tests/audio_test.c',
 test('scenesound', executable('scenesound-test', 'tests/scenesound_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), env: ['WALPE_SOUND_NULL=1'], timeout: 240)
+  install: false, build_by_default: false), env: ['WALPE_SOUND_NULL=1'], timeout: 240)
 # scene sound and the sound server (engine/scenesound.c, out_connect), with
 # stand-ins for the five functions of libpulse-simple: players that start
 # together and are refused by a server whose queue is full ask again at
@@ -1085,7 +1092,7 @@ if have_pulse
   test('scenesound-server', executable('scenesound-server-test', 'tests/scenesound_server_test.c',
     include_directories: inc,
     dependencies: [core_dep],
-    install: false), timeout: 120)
+    install: false, build_by_default: false), timeout: 120)
 endif
 # the decoders of compressed sound files (engine/sounddec.c, the part of
 # walpe-video.so that scene sound uses, compiled into the test): hostile
@@ -1095,7 +1102,7 @@ if have_ffmpeg
   test('sounddec', executable('sounddec-test', 'tests/sounddec_test.c', 'src/engine/sounddec.c',
     include_directories: inc,
     dependencies: [core_dep] + deps_ffmpeg,
-    install: false), env: ['WALPE_SOUND_NULL=1'], timeout: 240)
+    install: false, build_by_default: false), env: ['WALPE_SOUND_NULL=1'], timeout: 240)
 endif
 
 # the size limits on wallpaper files in the loaders that work at reduced size: the
@@ -1105,7 +1112,7 @@ endif
 test('limits', executable('limits-test', 'tests/limits_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 120)
+  install: false, build_by_default: false), timeout: 120)
 
 # video module (engine/video_custom.c, compiled into the test): the box
 # filter kernels against a plain loop, the frame limit rules, and - with a
@@ -1121,7 +1128,7 @@ if have_ffmpeg
   video_test = executable('video-test', 'tests/video_test.c', 'src/engine/sounddec.c',
     include_directories: inc,
     dependencies: [core_dep] + deps_ffmpeg,
-    install: false)
+    install: false, build_by_default: false)
   test('video', video_test, timeout: 300)
   test('video-nv12', video_test, env: ['WALPE_VIDEO_TEST_NV12=1'], timeout: 300)
 endif
@@ -1130,7 +1137,7 @@ endif
 test('pixfps', executable('pixfps-test', 'tests/pixfps_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # decoder threads by need (src/engine/video_threads.h): the count
 # never exceeds version 0.12's, a clip that falls behind (also by a few percent)
@@ -1138,7 +1145,7 @@ test('pixfps', executable('pixfps-test', 'tests/pixfps_test.c',
 test('video-threads', executable('video-threads-test', 'tests/video_threads_test.c',
   include_directories: inc,
   dependencies: [glib, m_lib],
-  install: false))
+  install: false, build_by_default: false))
 
 # hardware video decoding by capability (src/engine/video_hwsel.h): the
 # setting's words, the order of the attempts for made-up machines and made-up
@@ -1148,7 +1155,7 @@ test('video-threads', executable('video-threads-test', 'tests/video_threads_test
 test('video-hwsel', executable('video-hwsel-test', 'tests/video_hwsel_test.c',
   include_directories: inc,
   dependencies: [glib],
-  install: false))
+  install: false, build_by_default: false))
 
 # walpe-ctl's command line (bad input is named and exits with 1,
 # no daemon = 2, refused = 3), what it sends for `set` / `setprop` / `click`
@@ -1159,7 +1166,7 @@ test('video-hwsel', executable('video-hwsel-test', 'tests/video_hwsel_test.c',
 test('ctl', executable('ctl-test', 'tests/ctl_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false),
+  install: false, build_by_default: false),
   args: [ctl, files('src/daemon/main.c'), files('docs/SETTINGS.md')], timeout: 120)
 
 # renderer feature switches (engine/features.h): defaults, the serial, their
@@ -1169,7 +1176,7 @@ test('ctl', executable('ctl-test', 'tests/ctl_test.c',
 test('features', executable('features-test', 'tests/features_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false),
+  install: false, build_by_default: false),
   args: [files('src/daemon/main.c')], env: ['WALPE_FEATURES='])
 
 # camera parallax, the parts without GL (scenenode.h): the move of a layer
@@ -1178,7 +1185,7 @@ test('features', executable('features-test', 'tests/features_test.c',
 test('parallax', executable('parallax-test', 'tests/parallax_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # sprite-sheet image layers, the parts without GL (scenenode.h): the frame
 # table as it is played, its validation against the sheet (hostile tables,
@@ -1187,7 +1194,7 @@ test('parallax', executable('parallax-test', 'tests/parallax_test.c',
 test('sprite-sheet', executable('sprite-sheet-test', 'tests/sprite_sheet_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), env: ['WALPE_FEATURES='], timeout: 120)
+  install: false, build_by_default: false), env: ['WALPE_FEATURES='], timeout: 120)
 
 # camera parallax and sprite-sheet layers on generated scenes: positions of
 # layers for pointer positions, the feature switches, frames of a sheet over
@@ -1198,7 +1205,7 @@ test('sprite-sheet', executable('sprite-sheet-test', 'tests/sprite_sheet_test.c'
 test('scene-feat', executable('scene-feat-test', 'tests/scene_feat_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), env: ['WALPE_FEATURES='], is_parallel: false, timeout: 300)
+  install: false, build_by_default: false), env: ['WALPE_FEATURES='], is_parallel: false, timeout: 300)
 
 # config.json: defaults as documented, every key through save +
 # load, members of other versions kept by a save, a version 0.12 file, files that
@@ -1206,7 +1213,7 @@ test('scene-feat', executable('scene-feat-test', 'tests/scene_feat_test.c',
 test('config', executable('config-test', 'tests/config_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # the video importer: the 1080p cap and what is copied as it
 # is (no ffmpeg needed); with ffmpeg / ffprobe in PATH real runs on clips made
@@ -1214,7 +1221,7 @@ test('config', executable('config-test', 'tests/config_test.c',
 test('import', executable('import-test', 'tests/import_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 300)
+  install: false, build_by_default: false), timeout: 300)
 
 # the window system the daemon draws on (common/backend.h): the setting's
 # names, --backend / WALPE_BACKEND / config precedence, the automatic rule
@@ -1223,7 +1230,7 @@ test('import', executable('import-test', 'tests/import_test.c',
 test('backend', executable('backend-test', 'tests/backend_test.c',
   include_directories: inc,
   dependencies: [glib],
-  install: false))
+  install: false, build_by_default: false))
 
 # monitors across changes (platform/outputs.c, the layout decision of
 # platform.h): comparing, copying and finding outputs, and what the daemon
@@ -1232,7 +1239,7 @@ test('backend', executable('backend-test', 'tests/backend_test.c',
 test('outputs', executable('outputs-test', 'tests/outputs_test.c', 'src/platform/outputs.c',
   include_directories: inc,
   dependencies: [glib, gobject, jsonglib, epoxy, egl, m_lib],
-  install: false))
+  install: false, build_by_default: false))
 
 # the Wayland backend's arithmetic (sizes, positions, pointer mapping),
 # where its source brings such a test along: no Wayland library, no display
@@ -1240,7 +1247,7 @@ if fs.exists('tests/wayland_logic_test.c')
   test('wayland_logic', executable('wayland-logic-test', 'tests/wayland_logic_test.c',
     include_directories: inc,
     dependencies: [glib, m_lib],
-    install: false))
+    install: false, build_by_default: false))
 endif
 
 # the registry of pause-signal providers (platform/signals.c): who starts
@@ -1249,7 +1256,7 @@ endif
 test('signals', executable('signals-test', 'tests/signals_test.c', 'src/platform/signals.c',
   include_directories: inc,
   dependencies: [glib],
-  install: false))
+  install: false, build_by_default: false))
 
 # render resolution per output (common/resolution.c, config.json format 4):
 # values read and refused, sizes by the output's shape, the texture limit of
@@ -1259,14 +1266,14 @@ test('signals', executable('signals-test', 'tests/signals_test.c', 'src/platform
 test('resolution', executable('resolution-test', 'tests/resolution_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # presentation rules (present.h): present mode per monitor, swap interval
 # with / without a compositing manager, gpu.conf, driver hints. No display.
 test('present', executable('present-test', 'tests/present_test.c',
   include_directories: inc,
   dependencies: [glib],
-  install: false))
+  install: false, build_by_default: false))
 
 # quality-for-load knobs (common/quality.c, engine/fxclass.c): presets,
 # JSON, config.json round trip with per-wallpaper settings, the daemon's
@@ -1276,7 +1283,7 @@ test('present', executable('present-test', 'tests/present_test.c',
 test('quality', executable('quality-test', 'tests/quality_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 60)
+  install: false, build_by_default: false), timeout: 60)
 
 # "Skip hidden areas": the rectangle-set arithmetic behind the visible
 # region of a monitor (common/region.c) against a bitmap, on fixed window
@@ -1284,7 +1291,7 @@ test('quality', executable('quality-test', 'tests/quality_test.c',
 test('region', executable('region-test', 'tests/region_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # "Skip hidden areas" in the renderer: which lookups of an effect shader
 # are local, what each pass has to fill, and (GL part: EGL device or
@@ -1295,7 +1302,7 @@ test('region', executable('region-test', 'tests/region_test.c',
 test('clip', executable('clip-test', 'tests/clip_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 300)
+  install: false, build_by_default: false), timeout: 300)
 
 # SceneScript limits and semantics: the time budget of a runaway script, a
 # built-in that never returns (regular expression), zero-delay timers,
@@ -1303,7 +1310,7 @@ test('clip', executable('clip-test', 'tests/clip_test.c',
 test('scenescript', executable('scenescript-test', 'tests/scenescript_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 120)
+  install: false, build_by_default: false), timeout: 120)
 
 # SceneScript against a hostile script (version 0.12.2 security pass): the
 # module rewriter on cut-off and deeply nested sources, promise reactions
@@ -1313,21 +1320,21 @@ test('scenescript', executable('scenescript-test', 'tests/scenescript_test.c',
 test('script-hostile', executable('script-hostile-test', 'tests/script_hostile_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 900)
+  install: false, build_by_default: false), timeout: 900)
 
 # particle instance overrides "count" and "rate": values a script drives and
 # values of the scene file (WALPE_WE_STATIC_OVERRIDES_AS_WE). No GL, no files.
 test('weparticles', executable('weparticles-test', 'tests/weparticles_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # the same test with WALPE_PT_CAP=count in the environment
 # (the opt-in switch: the cap of live particles follows the instance's count)
 test('weparticles-cap-count', executable('weparticles-capcount-test', 'tests/weparticles_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), env: ['WALPE_PT_CAP=count'])
+  install: false, build_by_default: false), env: ['WALPE_PT_CAP=count'])
 
 # the particle simulation without GL - child systems that
 # follow events of their parent (one instance per parent particle: bursts of
@@ -1338,7 +1345,7 @@ test('weparticles-cap-count', executable('weparticles-capcount-test', 'tests/wep
 particle_sim_test = executable('particle-sim-test', 'tests/particle_sim_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false)
+  install: false, build_by_default: false)
 test('particle-sim', particle_sim_test)
 # the same checks with the other reading of alphafade's fade-out time
 test('particle-sim-fade-span', particle_sim_test, env: ['WALPE_PT_FADE=span'])
@@ -1351,7 +1358,7 @@ test('particle-sim-fade-span', particle_sim_test, env: ['WALPE_PT_FADE=span'])
 test('particle-rate', executable('particle-rate-test', 'tests/particle_rate_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # particle objects of a scene made by the test, through
 # the content API: the instance colour ("colorn" and the older "color" in
@@ -1361,14 +1368,14 @@ test('particle-rate', executable('particle-rate-test', 'tests/particle_rate_test
 test('particle-scene', executable('particle-scene-test', 'tests/particle_scene_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 180)
+  install: false, build_by_default: false), timeout: 180)
 
 # version 0.12.1: sprite-sheet frames of a particle (sequence / once /
 # randomframe, sequencemultiplier, frame blending and its flag); no GL
 test('particle-sheet', executable('particle-sheet-test', 'tests/particle_sheet_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # version 0.12.1: "Render on CPU" - Mesa's EGL vendor file among others (fake
 # vendor dirs), llvmpipe thread count, the software environment, the probe's
@@ -1376,7 +1383,7 @@ test('particle-sheet', executable('particle-sheet-test', 'tests/particle_sheet_t
 test('swrender', executable('swrender-test', 'tests/swrender_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # which GPU renders (common/gpusel.h), without a GPU: the device list read
 # from made-up sysfs trees (tests/fakegpu.h), integrated / discrete, the
@@ -1386,7 +1393,7 @@ test('swrender', executable('swrender-test', 'tests/swrender_test.c',
 test('gpusel', executable('gpusel-test', 'tests/gpusel_test.c',
   include_directories: [inc, include_directories('tests')],
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # the capability structure (common/gpucaps.h), without a GL context: driver,
 # API and version, features and format fallbacks from the strings and
@@ -1394,7 +1401,7 @@ test('gpusel', executable('gpusel-test', 'tests/gpusel_test.c',
 test('gpucaps', executable('gpucaps-test', 'tests/gpucaps_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # "Adjust layers" (common/layeradj.h): layer keys and their matching,
 # validation, config.json round trip, forgetting a wallpaper; and, with an
@@ -1404,7 +1411,7 @@ test('gpucaps', executable('gpucaps-test', 'tests/gpucaps_test.c',
 test('layers', executable('layers-test', 'tests/layers_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 180)
+  install: false, build_by_default: false), timeout: 180)
 
 # dev tool (not installed): one frame of a wallpaper, rendered off screen
 # (EGL pbuffer; no X server, no daemon), as a PNG plus a hash of its pixels:
@@ -1412,7 +1419,7 @@ test('layers', executable('layers-test', 'tests/layers_test.c',
 executable('sceneshot', 'tests/sceneshot.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false)
+  install: false, build_by_default: false)
 
 # developer tool (not installed): what a wallpaper's frames cost, as counters
 # (fragments shaded, draws, clears, copies, binds, GL calls per frame), and
@@ -1421,7 +1428,7 @@ executable('sceneshot', 'tests/sceneshot.c',
 executable('scenecount', 'tests/scenecount.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false)
+  install: false, build_by_default: false)
 
 # a text layer whose string changes is rendered
 # and uploaded only where the old or the new string has ink; the texture
@@ -1429,7 +1436,7 @@ executable('scenecount', 'tests/scenecount.c',
 test('text-part', executable('text-part-test', 'tests/text_part_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 120)
+  install: false, build_by_default: false), timeout: 120)
 
 # a text layer's ink lies inside its texture and at the side the layer
 # aligns it to: left / centre / right x no width limit / wrapped, for Latin,
@@ -1438,7 +1445,7 @@ test('text-part', executable('text-part-test', 'tests/text_part_test.c',
 test('text-layout', executable('text-layout-test', 'tests/text_layout_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 120)
+  install: false, build_by_default: false), timeout: 120)
 
 # dev tool (not installed): render-thread CPU time of a scene per frame by
 # phase (scripts, transforms, text, particle simulation / vertex data / GL,
@@ -1448,7 +1455,7 @@ test('text-layout', executable('text-layout-test', 'tests/text_layout_test.c',
 executable('scenecpu', 'tests/scenecpu.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false)
+  install: false, build_by_default: false)
 
 # GPU round: particle submission - instanced quads against the vertex by
 # vertex reference, off-screen culling, idle systems, the reduced-resolution
@@ -1457,7 +1464,7 @@ executable('scenecpu', 'tests/scenecpu.c',
 test('particle-draw', executable('particle-draw-test', 'tests/particle_draw_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 120)
+  install: false, build_by_default: false), timeout: 120)
 
 # wallpaper deletion: path validation against the library roots (symlinks,
 # "..", roots, loose media), trash + permanent removal, config forgetting.
@@ -1465,7 +1472,7 @@ test('particle-draw', executable('particle-draw-test', 'tests/particle_draw_test
 test('library', executable('library-test', 'tests/library_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # hostile wallpaper files (version 0.12 audit): preset dependency cycles, pkg
 # entries that share bytes / leave the target dir, oversized pictures and
@@ -1474,7 +1481,7 @@ test('library', executable('library-test', 'tests/library_test.c',
 test('formats', executable('formats-test', 'tests/formats_test.c', 'src/ui/store.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 120)
+  install: false, build_by_default: false), timeout: 120)
 
 # hostile wallpaper files, second set: the json nesting limit
 # against comments / single quotes, json file size, symbolic links that leave
@@ -1486,7 +1493,7 @@ test('formats', executable('formats-test', 'tests/formats_test.c', 'src/ui/store
 test('parsers', executable('parsers-test', 'tests/parsers_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 240)
+  install: false, build_by_default: false), timeout: 240)
 
 # puppet-warp models (.mdl): animation headers with an absurd length / fps
 # must not index outside the frame table. puppet.c is compiled into the
@@ -1494,7 +1501,7 @@ test('parsers', executable('parsers-test', 'tests/parsers_test.c',
 test('puppet', executable('puppet-test', 'tests/puppet_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # Steam subscriptions: "is Steam running" (a fake steam.pid/steam.pipe), the
 # Workshop-page command with stub `steam` / `xdg-open`, the delete plan's
@@ -1503,7 +1510,7 @@ test('puppet', executable('puppet-test', 'tests/puppet_test.c',
 test('steamsub', executable('steamsub-test', 'tests/steamsub_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 60)
+  install: false, build_by_default: false), timeout: 60)
 
 # what a reply can do to the Workshop client.
 # A loopback stand-in for the Steam Web API sends a body without end, gzip
@@ -1514,7 +1521,7 @@ test('steamsub', executable('steamsub-test', 'tests/steamsub_test.c',
 test('wsnet', executable('wsnet-test', 'tests/wsnet_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 180)
+  install: false, build_by_default: false), timeout: 180)
 
 # text of a wallpaper or a Workshop listing made fit for a label
 # (src/common/uitext.c), the library scan's use of it and the import of a
@@ -1522,7 +1529,7 @@ test('wsnet', executable('wsnet-test', 'tests/wsnet_test.c',
 test('uitext', executable('uitext-test', 'tests/uitext_test.c', 'src/ui/store.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # memory / disk reductions keep their results: partial LZ4 decode of padded
 # .tex levels, stored mip levels (walpe_tex_load_level / walpe_tex_probe),
@@ -1530,7 +1537,7 @@ test('uitext', executable('uitext-test', 'tests/uitext_test.c', 'src/ui/store.c'
 test('resmem', executable('resmem-test', 'tests/resmem_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 120)
+  install: false, build_by_default: false), timeout: 120)
 
 # a wallpaper that fails to load: which monitors return to their previous
 # wallpaper and what the saved choice becomes (common/restore.h). No
@@ -1538,7 +1545,7 @@ test('resmem', executable('resmem-test', 'tests/resmem_test.c',
 test('restore', executable('restore-test', 'tests/restore_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # the daemon end to end (scripts/lifecheck.py with its harness
 # scripts/checkenv.py: a private Xvfb and a private walpe-daemon on
@@ -1668,7 +1675,7 @@ add_test_setup('tsan',
 test('webdamage', executable('webdamage-test', 'tests/webdamage_test.c',
   include_directories: inc,
   dependencies: [glib],
-  install: false))
+  install: false, build_by_default: false))
 
 # GPU profiler (gpuprof.h): report formatting (table order, top 15, totals,
 # JSON, the no-timer fallback), driver-message de-duplication, pixel and
@@ -1679,7 +1686,7 @@ test('webdamage', executable('webdamage-test', 'tests/webdamage_test.c',
 test('gpuprof', executable('gpuprof-test', 'tests/gpuprof_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 120)
+  install: false, build_by_default: false), timeout: 120)
 
 # scripts/walpe-gpu-report.sh against a stand-in nvidia-smi: every field
 # supported, fields a laptop GPU reports as [N/A], field names the tool
@@ -1707,7 +1714,7 @@ test('gpu-report', find_program('sh'),
 test('gpustat', executable('gpustat-test', 'tests/gpustat_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false),
+  install: false, build_by_default: false),
   args: [meson.current_source_dir() / 'tests/fake-gpustat-tree.sh',
          meson.current_source_dir() / 'tests/fake-nvidia-smi'],
   timeout: 180)
@@ -1718,14 +1725,14 @@ test('proplabel', executable('proplabel-test', 'tests/proplabel_test.c',
   'src/ui/props.c', 'src/ui/uiipc.c',
   include_directories: inc,
   dependencies: [core_dep, gtk4],
-  install: false))
+  install: false, build_by_default: false))
 
 # GUI previews (src/ui/thumbs.c): GIF block parser on cut / damaged files,
 # animation frames at tile size and their limits. No display.
 test('thumbs', executable('thumbs-test', 'tests/thumbs_test.c',
   include_directories: inc,
   dependencies: [core_dep, gtk4],
-  install: false))
+  install: false, build_by_default: false))
 
 # render resolution per monitor, the GUI's side (src/ui/resmodel.c): the
 # value text, the status reply and the listing read into one state, the
@@ -1736,7 +1743,7 @@ test('thumbs', executable('thumbs-test', 'tests/thumbs_test.c',
 test('resmodel', executable('resmodel-test', 'tests/resmodel_test.c', 'src/ui/resmodel.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false))
+  install: false, build_by_default: false))
 
 # hostile input for the web, video and import parts ------------
 # hostile video files: the CPU YUV converter with odd picture sizes (it
@@ -1746,7 +1753,7 @@ if have_ffmpeg
   test('videosec', executable('videosec-test', 'tests/videosec_test.c', 'src/engine/sounddec.c',
     include_directories: inc,
     dependencies: [core_dep] + deps_ffmpeg,
-    install: false), timeout: 180)
+    install: false, build_by_default: false), timeout: 180)
 endif
 # the importer / converter with stand-in ffmpeg + ffprobe scripts: command
 # line, output that is not UTF-8 (the job used to hang), size limit of a
@@ -1754,14 +1761,14 @@ endif
 test('importsec', executable('importsec-test', 'tests/importsec_test.c',
   include_directories: inc,
   dependencies: [core_dep],
-  install: false), timeout: 180)
+  install: false, build_by_default: false), timeout: 180)
 # a hostile web wallpaper against the running daemon: the network switch
 # and other loopback ports, the X selections of other clients, page-made
 # log lines. Starts its own Xvfb; skips itself without Xvfb / python3 /
 # WebKit.
 if have_web and have_x11
   websec_selown = executable('websec-selown', 'tests/websec_selown.c',
-    dependencies: [x11], install: false)
+    dependencies: [x11], install: false, build_by_default: false)
   test('websec', find_program('sh'),
     args: [files('tests/websec_test.sh'), meson.current_build_dir()],
     env: ['WALPE_BACKEND=x11'],     # its own Xvfb, also inside a Wayland session
@@ -1787,7 +1794,7 @@ endif
 executable('propshot', 'tests/propshot.c', 'src/ui/props.c', 'src/ui/uiipc.c',
   include_directories: inc,
   dependencies: [core_dep, gtk4],
-  install: false)
+  install: false, build_by_default: false)
 
 # dev tool (not installed, needs a display): time to the first frames of a
 # label set up like the GUI's, with N characters of text - the measurement
@@ -1797,7 +1804,7 @@ executable('propshot', 'tests/propshot.c', 'src/ui/props.c', 'src/ui/uiipc.c',
 #   labelbench tile 20000 W       library tile title, unbroken     (2.6 s)
 executable('labelbench', 'tests/labelbench.c',
   dependencies: [gtk4],
-  install: false)
+  install: false, build_by_default: false)
 
 # ---------------------------------------------------- concurrency ("race")
 # State shared between the daemon's threads (one render thread per monitor,
@@ -1813,14 +1820,14 @@ executable('labelbench', 'tests/labelbench.c',
 
 test('race-shim', executable('race-shim-test', 'tests/race_shim_test.c',
   dependencies: [glib, gio, dependency('threads')] + tsan_deps,
-  install: false), suite: 'race', priority: 10, timeout: 120)
+  install: false, build_by_default: false), suite: 'race', priority: 10, timeout: 120)
 
 # the shapes that were made safe (common/lazy.h, g_once_init_enter, tests
 # under the lock, an atomic signal note), hammered by four threads
 test('race-patterns', executable('race-patterns-test', 'tests/race_patterns_test.c',
   include_directories: inc,
   dependencies: [glib, dependency('threads')] + tsan_deps,
-  install: false), suite: 'race', timeout: 120)
+  install: false, build_by_default: false), suite: 'race', timeout: 120)
 if tsan
   # the same file with the shapes the tree had before: expected to fail,
   # i.e. the sanitizer reports them (shows that it can see each of them)
@@ -1828,7 +1835,7 @@ if tsan
     include_directories: inc,
     c_args: ['-DRACE_OLD'],
     dependencies: [glib, dependency('threads')] + tsan_deps,
-    install: false), suite: 'race', should_fail: true, timeout: 120)
+    install: false, build_by_default: false), suite: 'race', should_fail: true, timeout: 120)
 endif
 
 # config.c: options asked by render threads while the main thread stores
@@ -1836,14 +1843,14 @@ endif
 test('race-config', executable('race-config-test', 'tests/race_config_test.c',
   include_directories: inc,
   dependencies: [core_dep, dependency('threads')],
-  install: false), suite: 'race', timeout: 120)
+  install: false, build_by_default: false), suite: 'race', timeout: 120)
 
 # media.c: the media thread started, retired after the grace time and
 # started again under several users (WALPE_NO_MEDIA: no session bus)
 test('race-media', executable('race-media-test', 'tests/race_media_test.c',
   include_directories: inc,
   dependencies: [core_dep, dependency('threads')],
-  install: false), suite: 'race', timeout: 120)
+  install: false, build_by_default: false), suite: 'race', timeout: 120)
 
 # GPU numbers for a bug report: the kernel's statistics (walpe-ctl gpu-stats) or
 # nvidia-smi, /proc samples, then a profile
@@ -1874,7 +1881,7 @@ install_data('data/icons/walpe.svg',
 test('ui-session', executable('ui-session-test', 'tests/ui_session_test.c',
   include_directories: inc,
   dependencies: [gtk4],
-  install: false))
+  install: false, build_by_default: false))
 
 # ------------------------------------------------------------ walpe-tray
 # System tray icon (src/tray/): a separate process, so a tray problem can
@@ -1901,7 +1908,7 @@ if have_tray
       tray_deps += xi   # menu grabs through XInput2 (what GDK listens to)
     endif
   endif
-  executable('walpe-tray', tray_srcs,
+  tray = executable('walpe-tray', tray_srcs,
     include_directories: inc,
     c_args: tray_args,
     dependencies: tray_deps,
@@ -1921,11 +1928,11 @@ if have_tray
   # menu items over dbusmenu
   executable('sni-host-stub', 'tests/tray/sni_host_stub.c',
     dependencies: [gio, glib, dependency('cairo')],
-    install: false)
+    install: false, build_by_default: false)
   if have_tray_xembed
     executable('xembed-host-stub', 'tests/tray/xembed_host_stub.c',
       dependencies: [x11, glib],
-      install: false)
+      install: false, build_by_default: false)
   endif
   # which protocol is used in which session (traysel.h): X11 with and
   # without a StatusNotifierWatcher / host, Wayland, forced names, a build
@@ -1933,8 +1940,24 @@ if have_tray
   test('tray-select', executable('tray-select-test', 'tests/tray_select_test.c',
     include_directories: inc,
     dependencies: [glib],
-    install: false))
+    install: false, build_by_default: false))
 endif
 
 summary({'x11': have_x11, 'wayland': have_wayland},
   section: 'Display backends (walpe-daemon)', bool_yn: true)
+
+# What ./build.sh builds: the installed programs and modules, nothing else.
+# (A plain `ninja -C build` also builds every test program: meson adds the
+# programs of all test()s to its default target whatever their
+# build_by_default says.)
+programs = [daemon, ui, ctl]
+if have_tray
+  programs += tray
+endif
+if have_web
+  programs += web_mod
+endif
+if have_ffmpeg
+  programs += video_mod
+endif
+alias_target('programs', programs)
