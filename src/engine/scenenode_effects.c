@@ -3234,8 +3234,11 @@ static int fx_rt_format_id (const char *name)
  *    static set, the last chain of a static prefix. Their other targets
  *    go when the run is over (fx_chain_drop_targets).
  * Idle pool entries are freed after FX_POOL_IDLE_US, with the scene
- * (fx_targets_release) and when the scene is paused. */
+ * (fx_targets_release) and when the scene is paused - and, when a target
+ * of a size the pool does not hold has to be made, the ones that were not
+ * lent for more than FX_POOL_STALE_FRAMES frames (fx_pool_get_fmt). */
 #define FX_POOL_IDLE_US (5 * G_USEC_PER_SEC)
+#define FX_POOL_STALE_FRAMES 3
 
 typedef struct {
     GLuint fbo, tex;
@@ -3299,6 +3302,28 @@ static int fx_pool_get_fmt (int w, int h, FxRtFormat fmt, GLuint *fbo, GLuint *t
         }
     }
     if (!r) {
+        /* The pool is about to grow by a size it does not hold. A layer
+         * whose working size changes from frame to frame - a compose layer
+         * that crosses a screen edge while the camera parallax, a camera
+         * shake or a script moves it: its size is the rectangle of the
+         * frame under it - asks for another one in every frame, and each
+         * stayed for its idle time: hundreds of targets of about that
+         * layer's size while it moved (fx_capture_get knows this for the
+         * copy of the frame; the chains that run over the copy ask here).
+         * So the targets that no run of the last FX_POOL_STALE_FRAMES
+         * frames was lent go first. A size that is asked for in every
+         * frame, or in every second or third one (the effect update rate
+         * of the lower presets), is never among them, and while no new
+         * size is asked for nothing is freed before its idle time. */
+        for (guint i = 0; i < fx_pool->len; i++) {
+            FxPoolRt *e = &g_array_index (fx_pool, FxPoolRt, i);
+            if (e->tex && !e->busy && fx_pool_frame - e->used_frame > FX_POOL_STALE_FRAMES) {
+                fx_drop_rt (&e->fbo, &e->tex, e->w, e->h);
+                e->pinned = FALSE;
+                if (slot < 0 || (int) i < slot)
+                    slot = (int) i;
+            }
+        }
         if (slot < 0) {
             FxPoolRt z = { 0 };
             g_array_append_val (fx_pool, z);

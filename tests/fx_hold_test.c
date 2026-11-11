@@ -28,7 +28,11 @@
  *    lent again for its output. The run still hands back the effects'
  *    result, and the same picture whatever the pool held before (targets
  *    recycled, freed after their idle time, made under other names, full
- *    of another layer's pixels).
+ *    of another layer's pixels);
+ * 7. a layer whose working size is another one in every frame (a compose
+ *    layer that moves across a screen edge) does not leave one target per
+ *    size in the pool for the idle time, and the targets of a layer that
+ *    is redrawn in every third frame only stay where they are.
  *
  * The engine file is included so the static functions are reachable. */
 #include "../src/engine/scenenode_effects.c"
@@ -1071,6 +1075,56 @@ static void tint_pool_checks (GLuint in)
     g_atomic_int_set (&fxs_spec_on, spec);
 }
 
+/* ---- 7. a working size that changes with every frame and the pool */
+
+/* targets the pool holds: all of them (w = 0), or the ones of w x h */
+static int pool_targets (int w, int h)
+{
+    int n = 0;
+    for (guint i = 0; fx_pool && i < fx_pool->len; i++) {
+        const FxPoolRt *e = &g_array_index (fx_pool, FxPoolRt, i);
+        n += e->tex && (!w || (e->w == w && e->h == h));
+    }
+    return n;
+}
+
+static void pool_size_checks (GLuint in)
+{
+    const int spec = g_atomic_int_get (&fxs_spec_on);
+    g_atomic_int_set (&fxs_spec_on, 0);
+    fx_targets_release ();
+    /* one effect over the part of the frame under a layer that moves across
+     * the screen edge: 60 frames, 60 sizes. Next to it a layer of two
+     * effects whose size stands still and which is drawn in every third
+     * frame only (an effect update rate of 1/3). */
+    struct FxSet *mov = build_set ("[" FX ("pu") "]", FALSE);
+    struct FxSet *still = build_set ("[" FX ("pu") "," FXC ("pu", "\"amp\":0.2") "]", FALSE);
+    int most = 0, steady = 0;
+    gboolean kept = TRUE;
+    for (guint f = 1; f <= 60; f++) {
+        fx_set_frame_info (W, H, ptr_x, ptr_y, 1.0f / 30);
+        fx_set_quality (1, FALSE, WALPE_POST_FULL, 30.0, f);
+        if (f % 3 == 1) {
+            if (f > 1)
+                kept &= pool_targets (W, H) == steady;
+            fx_run_for_object (still, in, W, H, W, H, f / 30.0, 1.0f, FALSE);
+            if (f == 1)
+                steady = pool_targets (W, H);
+        }
+        fx_run_for_object (mov, in, 100 + (int) f, H + 8, W, H, f / 30.0, 1.0f, FALSE);
+        most = MAX (most, pool_targets (0, 0));
+    }
+    char *d = g_strdup_printf ("most targets in the pool at once: %d, of them the steady layer's: %d", most, steady);
+    result (steady >= 1 && most <= steady + FX_POOL_STALE_FRAMES + 2,
+            "a working size that changes in every frame: the pool keeps the last few sizes, not all of them", d);
+    g_free (d);
+    result (kept, "... and the targets of a layer drawn in every third frame are still there for its next run", NULL);
+    fx_free_for_object (mov);
+    fx_free_for_object (still);
+    fx_targets_release ();
+    g_atomic_int_set (&fxs_spec_on, spec);
+}
+
 static void rm_rf (const char *path)
 {
     GDir *dir = g_dir_open (path, 0, NULL);
@@ -1143,6 +1197,7 @@ static gboolean gl_run (EGLDisplay dpy)
     post_level_checks (in);
     g_atomic_int_set (&fxs_quality, 0);
     tint_pool_checks (in);
+    pool_size_checks (in);
     glDeleteTextures (1, &in);
     fx_targets_release ();
     gint64 tb = 0;
