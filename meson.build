@@ -614,9 +614,11 @@ test('sig-logind', executable('sig-logind-test', 'tests/sig_logind_test.c',
 
 # the Wayland providers against a stand-in compositor (libwayland-server on
 # a thread, private runtime directory): focus / covered per output,
-# fullscreen, see-through list, idle timeout, outputs that go or change
-# their id, a dropped connection; a window list of version 1 and outputs
-# without names; a compositor with only the stateless ext list.
+# fullscreen and the output of the fullscreen window, see-through list,
+# idle timeout, outputs that go or change their id, a dropped connection;
+# a window list of version 1 and outputs without names (also: a fullscreen
+# window whose output cannot be told); a compositor with only the
+# stateless ext list.
 if have_wl_signals and wl_server_dep.found()
   test('sig-wl', executable('sig-wl-test', 'tests/sig_wl_test.c',
     wl_gen['ext-idle-notify-v1'][1],
@@ -1252,8 +1254,19 @@ endif
 
 # the registry of pause-signal providers (platform/signals.c): who starts
 # on which backend, "not available" with its reason, values of several
-# providers combined, per-output values, batches. Made-up providers.
+# providers combined, per-output values, a value for every output,
+# batches. Made-up providers.
 test('signals', executable('signals-test', 'tests/signals_test.c', 'src/platform/signals.c',
+  include_directories: inc,
+  dependencies: [glib],
+  install: false, build_by_default: false))
+
+# which monitors a focused fullscreen window is on (platform/fsplace.h: the
+# X11 side of "Pause for fullscreen apps" per monitor): a window on the
+# second monitor, across several, with a tiling window manager's border or
+# gap, monitors with offsets and turned ones, no monitor, a window without
+# a rectangle, the focus on another window. Made-up rectangles: no display.
+test('fsplace', executable('fsplace-test', 'tests/fsplace_test.c',
   include_directories: inc,
   dependencies: [glib],
   install: false, build_by_default: false))
@@ -1551,6 +1564,8 @@ test('restore', executable('restore-test', 'tests/restore_test.c',
 # scripts/checkenv.py: a private Xvfb and a private walpe-daemon on
 # generated scenes): the pointer after a load, settings
 # that reload scenes, the restart in place, quality numbers of a still scene,
+# "Pause for fullscreen apps" per monitor (two monitors, a window with the
+# EWMH properties of a focused fullscreen one),
 # a video the decoder refuses (the clip is made with the ffmpeg program:
 # that case is skipped where there is none).
 # Skipped (77) without Xvfb. `meson test -C build daemon-life`

@@ -66,6 +66,8 @@ static void test_defaults (void)
     CHECK (c->fps == 60 && WALPE_FPS_DEFAULT == 60);
     CHECK (c->config_version == 4);
     CHECK (!c->paused && c->pause_fullscreen && c->pause_dpms && c->pause_covered);
+    /* a fullscreen window pauses its own monitor only */
+    CHECK (!c->pause_fullscreen_all);
     CHECK (c->cover_transparent && !g_strcmp0 (c->transparent_windows, "st"));
     CHECK (c->render_shared && c->fx_cache && c->tex_downscale && c->parallax);
     CHECK (!c->software_render && c->software_threads == 0);
@@ -360,6 +362,57 @@ static void test_broken (void)
     walpe_config_free (c);
 }
 
+/* "pause_fullscreen_all" (a focused fullscreen window pauses every monitor,
+ * as up to 0.12): off by default and not written then (an untouched config
+ * keeps its bytes), written and read back when set, gone from the file
+ * again when switched off, and a value that is no switch reads as off. */
+static void test_fullscreen_all (void)
+{
+    g_unlink (cfg_path);
+    WalpeConfig *c = walpe_config_load ();
+    CHECK (!c->pause_fullscreen_all && c->pause_fullscreen);
+    walpe_config_save (c);
+    walpe_config_free (c);
+    JsonNode *n = read_config ();
+    JsonObject *o = n ? json_node_get_object (n) : NULL;
+    CHECK (o && json_object_has_member (o, "pause_fullscreen") &&
+           !json_object_has_member (o, "pause_fullscreen_all"));
+    if (n)
+        json_node_unref (n);
+
+    c = walpe_config_load ();
+    c->pause_fullscreen_all = TRUE;
+    walpe_config_save (c);
+    walpe_config_free (c);
+    n = read_config ();
+    o = n ? json_node_get_object (n) : NULL;
+    CHECK (o && json_object_has_member (o, "pause_fullscreen_all") &&
+           wpj_bool (o, "pause_fullscreen_all", FALSE));
+    if (n)
+        json_node_unref (n);
+    c = walpe_config_load ();
+    CHECK (c->pause_fullscreen_all && c->pause_fullscreen);     /* the rule's own switch is another key */
+    c->pause_fullscreen_all = FALSE;
+    walpe_config_save (c);
+    walpe_config_free (c);
+    n = read_config ();
+    o = n ? json_node_get_object (n) : NULL;
+    CHECK (o && !json_object_has_member (o, "pause_fullscreen_all"));
+    if (n)
+        json_node_unref (n);
+
+    /* written by hand */
+    put_config ("{\"config_version\":4,\"pause_fullscreen\":false,\"pause_fullscreen_all\":true}");
+    c = walpe_config_load ();
+    CHECK (!c->broken_copy && c->pause_fullscreen_all && !c->pause_fullscreen);
+    walpe_config_free (c);
+    put_config ("{\"config_version\":4,\"pause_fullscreen_all\":\"every\"}");
+    c = walpe_config_load ();
+    CHECK (!c->broken_copy && !c->pause_fullscreen_all);
+    walpe_config_free (c);
+    g_unlink (cfg_path);
+}
+
 /* the window system keys: "backend" (auto / x11 / wayland) and
  * "wayland_pointer" (auto / off). Not written at their defaults (an
  * untouched config keeps its bytes), read back when set, anything that is
@@ -522,6 +575,7 @@ int main (void)
     test_round12 ();
     test_broken ();
     test_backend_keys ();
+    test_fullscreen_all ();
     test_save_failure ();
 
     broken_copies (TRUE);

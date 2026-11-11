@@ -227,6 +227,23 @@ static gpointer client_thread (gpointer u)
     if (n)
         json_node_unref (n);
 
+    /* the fullscreen rule for every monitor: its short name and its full
+     * one send the same switch */
+    CHECK (run_ctl (NULL, "set", "fs=on", "fs_all=on", NULL) == 0);
+    n = sent ();
+    o = n ? json_node_get_object (n) : NULL;
+    CHECK (is_type (o, "pause_fullscreen", G_TYPE_BOOLEAN) && wpj_bool (o, "pause_fullscreen", FALSE));
+    CHECK (is_type (o, "pause_fullscreen_all", G_TYPE_BOOLEAN) && wpj_bool (o, "pause_fullscreen_all", FALSE));
+    CHECK (o && !json_object_has_member (o, "fs_all") && !walpe_set_check (o));
+    if (n)
+        json_node_unref (n);
+    CHECK (run_ctl (NULL, "set", "pause_fullscreen_all=off", NULL) == 0);
+    n = sent ();
+    o = n ? json_node_get_object (n) : NULL;
+    CHECK (is_type (o, "pause_fullscreen_all", G_TYPE_BOOLEAN) && !wpj_bool (o, "pause_fullscreen_all", TRUE));
+    if (n)
+        json_node_unref (n);
+
     /* the window system: `backend NAME` and `set backend=NAME` send the
      * same member, as text ("on" / "off" stay text too: wayland_pointer) */
     /* ... and walpe-ctl passes the daemon's "restart_needed" on as a note
@@ -847,6 +864,8 @@ table:
     REFUSED ("{\"cmd\":\"set\",\"fps\":true}", "fps needs a number");
     REFUSED ("{\"cmd\":\"set\",\"fps\":\"30\"}", "fps needs a number");
     REFUSED ("{\"cmd\":\"set\",\"pause_covered\":\"yes\"}", "pause_covered is a switch");
+    TAKEN ("{\"cmd\":\"set\",\"pause_fullscreen_all\":true}");
+    REFUSED ("{\"cmd\":\"set\",\"pause_fullscreen_all\":\"all\"}", "pause_fullscreen_all is a switch");
     REFUSED ("{\"cmd\":\"set\",\"focus_action\":false}", "focus_action needs a name");
     TAKEN ("{\"cmd\":\"set\",\"backend\":\"wayland\",\"wayland_pointer\":\"auto\"}");
     REFUSED ("{\"cmd\":\"set\",\"backend\":true}", "backend needs a name");

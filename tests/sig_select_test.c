@@ -3,7 +3,8 @@
  *  1. wlplan.h on capability lists made up after real compositors
  *     (wlroots with and without the newer protocols, GNOME Shell, KWin, a
  *     compositor that only has the ext window list, no connection);
- *  2. the window arithmetic (what counts as fullscreen / focus / covering);
+ *  2. the window arithmetic (what counts as fullscreen / focus / covering,
+ *     and whether a fullscreen window's output can be told);
  *  3. WALPE_LOGIND (logindopt.h);
  *  4. the status entry "pause_rules" with made-up providers, some of which
  *     decline: every setting names its source or the reason there is none;
@@ -129,6 +130,59 @@ static void test_windows (void)
     CHECK (!walpe_tl_listed (NULL, "foot") && !walpe_tl_listed ("", "foot") &&
            !walpe_tl_listed ("foot", NULL) && !walpe_tl_listed ("foot", ""), "empty lists and ids");
     CHECK (walpe_tl_listed (",,org.wezfurlong.wezterm,", "org.wezfurlong.wezterm"), "empty entries");
+}
+
+/* which output a focused fullscreen window is on, as far as the
+ * compositor's words can be matched to the daemon's outputs (wlplan.h):
+ * the fullscreen rule pauses that monitor, or every monitor where the
+ * answer is "cannot be told" */
+static void test_where (void)
+{
+    const gboolean yes = TRUE, no = FALSE;
+    /* one output, named, the daemon's: known */
+    CHECK (walpe_tl_where (1, (guint32[]) { 11 }, (gboolean[]) { yes }) == WALPE_TL_WHERE_KNOWN,
+           "on a named output of the daemon");
+    /* spanning two of the daemon's outputs */
+    CHECK (walpe_tl_where (2, (guint32[]) { 11, 22 }, (gboolean[]) { yes, yes }) == WALPE_TL_WHERE_KNOWN,
+           "on two outputs");
+    /* a named output the daemon shows nothing on (--monitor N): known, and
+     * on none of the daemon's - no monitor pauses for it */
+    CHECK (walpe_tl_where (1, (guint32[]) { 0 }, (gboolean[]) { yes }) == WALPE_TL_WHERE_KNOWN,
+           "a named output that is not the daemon's is still an answer");
+    CHECK (walpe_tl_where (2, (guint32[]) { 0, 22 }, (gboolean[]) { yes, yes }) == WALPE_TL_WHERE_KNOWN,
+           "one of the daemon's and one that is not");
+    /* no names, but the daemon has a single output: the lookup gave its id */
+    CHECK (walpe_tl_where (1, (guint32[]) { 7 }, (gboolean[]) { no }) == WALPE_TL_WHERE_KNOWN,
+           "an output without a name that the daemon could still tell (its only one)");
+    /* no names and several outputs: no id, and no name to say whose it is */
+    CHECK (walpe_tl_where (1, (guint32[]) { 0 }, (gboolean[]) { no }) == WALPE_TL_WHERE_NO_NAME,
+           "an output without a name among several: cannot be matched");
+    CHECK (walpe_tl_where (2, (guint32[]) { 11, 0 }, (gboolean[]) { yes, no }) == WALPE_TL_WHERE_NO_NAME,
+           "one output matched, one not: the whole answer is unknown");
+    /* the compositor names no output for the window at all */
+    CHECK (walpe_tl_where (0, NULL, NULL) == WALPE_TL_WHERE_NO_OUTPUT, "no output announced");
+    /* the sentences for status */
+    CHECK (walpe_tl_where_why (WALPE_TL_WHERE_KNOWN) == NULL, "known: nothing to say");
+    CHECK (strstr (walpe_tl_where_why (WALPE_TL_WHERE_NO_OUTPUT), "which output") != NULL,
+           "no output: says the compositor does not tell");
+    CHECK (strstr (walpe_tl_where_why (WALPE_TL_WHERE_NO_NAME), "wl_output") != NULL &&
+           strstr (walpe_tl_where_why (WALPE_TL_WHERE_NO_NAME), "version 4") != NULL,
+           "no name: names what is missing");
+
+    /* rules.h: the note under "Pause for fullscreen apps" */
+    char *n = walpe_pause_rule_everywhere_note (NULL, FALSE);
+    CHECK (n == NULL, "the monitor is known: no note");
+    g_free (n);
+    n = walpe_pause_rule_everywhere_note ("", FALSE);
+    CHECK (n == NULL, "an empty reason is no reason");
+    g_free (n);
+    n = walpe_pause_rule_everywhere_note (WALPE_WLPLAN_FS_NO_NAME, FALSE);
+    CHECK (n && strstr (n, "pauses every monitor") && strstr (n, "wl_output"),
+           "not known: says that every monitor pauses, and why: %s", n ? n : "(null)");
+    g_free (n);
+    n = walpe_pause_rule_everywhere_note (WALPE_WLPLAN_FS_NO_NAME, TRUE);
+    CHECK (n == NULL, "every monitor is what the user set (pause_fullscreen_all): nothing to explain");
+    g_free (n);
 }
 
 static void test_logind_opt (void)
@@ -328,6 +382,7 @@ int main (void)
     g_setenv ("WALPE_SIG_WAYLAND_DISPLAY", "/nonexistent/walpe-test/wayland-none", TRUE);
     g_setenv ("WALPE_LOGIND", "0", TRUE);
     test_plans ();
+    test_where ();
     test_windows ();
     test_logind_opt ();
     test_status ();

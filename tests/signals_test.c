@@ -1,8 +1,10 @@
 /* signals_test.c - the registry of pause-signal providers
  * (platform/signals.c): which providers start on which backend, a
  * provider that is "not available" and its reason, values of two
- * providers combined, per-output values, batches, what the daemon is told
- * and when, asking providers to look again, late registration, stop.
+ * providers combined, per-output values, a value for every output (the
+ * fullscreen window whose monitor nobody can name), batches, what the
+ * daemon is told and when, asking providers to look again, late
+ * registration, stop.
  * Made-up providers; no display, no daemon. */
 #include <glib.h>
 #include <string.h>
@@ -294,6 +296,92 @@ static void test_wayland (void)
     g_string_free (order, TRUE);
 }
 
+/* the fullscreen rule per monitor: "the focused fullscreen window is on
+ * this output" next to the global "there is one", and WALPE_OUTPUT_ALL for
+ * a provider that knows of the window but not of its output */
+static void test_every_output (void)
+{
+    const WalpeSignal ON = WALPE_SIG_FULLSCREEN_ON;
+    order = g_string_new (NULL);
+    told_reset ();
+    stops = 0;
+    walpe_signals_register (&p_x);
+    walpe_signals_register (&p_any);
+    walpe_signals_start (WALPE_BACKEND_X11, &sink, &told);
+    CHECK (!walpe_signal_get (ON, 1) && !walpe_signal_get (ON, WALPE_OUTPUT_ALL));
+
+    /* a fullscreen window gets the focus on output 2: the daemon hears of
+     * the window and of its output in one piece of news */
+    walpe_signals_begin ();
+    walpe_signal_set (&p_x, WALPE_SIG_FULLSCREEN, 0, TRUE);
+    walpe_signal_set (&p_x, ON, 2, TRUE);
+    walpe_signals_end ();
+    CHECK (told == 1 && told_last == (BIT (WALPE_SIG_FULLSCREEN) | BIT (ON)));
+    CHECK (walpe_signal_get (WALPE_SIG_FULLSCREEN, 0));
+    CHECK (walpe_signal_get (ON, 2) && !walpe_signal_get (ON, 1));
+    /* (asking for "every output" is not asking for "any output") */
+    CHECK (!walpe_signal_get (ON, WALPE_OUTPUT_ALL));
+
+    /* the window is moved to output 1 */
+    walpe_signals_begin ();
+    walpe_signal_set (&p_x, ON, 2, FALSE);
+    walpe_signal_set (&p_x, ON, 1, TRUE);
+    walpe_signals_end ();
+    CHECK (told == 2 && told_last == BIT (ON));
+    CHECK (walpe_signal_get (ON, 1) && !walpe_signal_get (ON, 2));
+    CHECK (walpe_signal_get (WALPE_SIG_FULLSCREEN, 0));
+
+    /* where it is can no longer be told: every output, also one that was
+     * never named */
+    walpe_signal_set (&p_x, ON, WALPE_OUTPUT_ALL, TRUE);
+    CHECK (told == 3 && told_last == BIT (ON));
+    CHECK (walpe_signal_get (ON, 1) && walpe_signal_get (ON, 2) && walpe_signal_get (ON, 77));
+    CHECK (walpe_signal_get (ON, WALPE_OUTPUT_ALL));
+    /* an id set or taken back meanwhile changes nothing anybody can read:
+     * no news */
+    walpe_signal_set (&p_x, ON, 1, FALSE);
+    walpe_signal_set (&p_x, ON, 3, TRUE);
+    CHECK (told == 3 && walpe_signal_get (ON, 1) && walpe_signal_get (ON, 3));
+    /* known again: what is left is the id set meanwhile */
+    walpe_signal_set (&p_x, ON, WALPE_OUTPUT_ALL, FALSE);
+    CHECK (told == 4 && told_last == BIT (ON));
+    CHECK (!walpe_signal_get (ON, 1) && !walpe_signal_get (ON, 2) && walpe_signal_get (ON, 3));
+    CHECK (!walpe_signal_get (ON, 77) && !walpe_signal_get (ON, WALPE_OUTPUT_ALL));
+
+    /* two providers: "every output" from one, an id from the other */
+    walpe_signal_set (&p_any, ON, WALPE_OUTPUT_ALL, TRUE);
+    CHECK (told == 5 && walpe_signal_get (ON, 9) && walpe_signal_get (ON, 3));
+    walpe_signal_set (&p_x, ON, 3, FALSE);          /* hidden under the other's value */
+    CHECK (told == 5 && walpe_signal_get (ON, 3));
+    walpe_signal_set (&p_any, ON, WALPE_OUTPUT_ALL, FALSE);
+    CHECK (told == 6 && !walpe_signal_get (ON, 3) && !walpe_signal_get (ON, 9));
+
+    /* no focused fullscreen window any more */
+    walpe_signals_begin ();
+    walpe_signal_set (&p_x, ON, 4, TRUE);
+    walpe_signals_end ();
+    told_reset ();
+    walpe_signals_begin ();
+    walpe_signal_set (&p_x, WALPE_SIG_FULLSCREEN, 0, FALSE);
+    walpe_signal_set (&p_x, ON, 4, FALSE);
+    walpe_signals_end ();
+    CHECK (told == 1 && told_last == (BIT (WALPE_SIG_FULLSCREEN) | BIT (ON)));
+    CHECK (!walpe_signal_get (WALPE_SIG_FULLSCREEN, 0) && !walpe_signal_get (ON, 4));
+
+    /* the other per-output signals: an id is that output's alone, as ever
+     * (no provider reports them for every output) */
+    walpe_signal_set (&p_x, WALPE_SIG_COVERED, 1, TRUE);
+    CHECK (walpe_signal_get (WALPE_SIG_COVERED, 1) && !walpe_signal_get (WALPE_SIG_COVERED, 2));
+    CHECK (!walpe_signal_get (WALPE_SIG_COVERED, WALPE_OUTPUT_ALL));
+
+    /* a provider that stops takes "every output" with it */
+    walpe_signal_set (&p_x, ON, WALPE_OUTPUT_ALL, TRUE);
+    CHECK (walpe_signal_get (ON, 5));
+    walpe_signals_stop ();
+    CHECK (!walpe_signal_get (ON, 5) && !walpe_signal_get (ON, WALPE_OUTPUT_ALL));
+    g_string_free (order, TRUE);
+}
+
 static void test_names (void)
 {
     CHECK (!strcmp (walpe_signal_name (WALPE_SIG_FULLSCREEN), "fullscreen"));
@@ -301,8 +389,13 @@ static void test_names (void)
     CHECK (!strcmp (walpe_signal_name (WALPE_SIG_IDLE), "idle"));
     CHECK (!strcmp (walpe_signal_name (WALPE_SIG_COVERED), "covered"));
     CHECK (!strcmp (walpe_signal_name (WALPE_SIG_FOCUS_APP), "focus_app"));
+    CHECK (!strcmp (walpe_signal_name (WALPE_SIG_FULLSCREEN_ON), "fullscreen_on"));
     CHECK (!strcmp (walpe_signal_name (-1), "?") && !strcmp (walpe_signal_name (WALPE_SIG_N), "?"));
     CHECK ((WALPE_SIG_PER_OUTPUT & BIT (WALPE_SIG_COVERED)) && (WALPE_SIG_PER_OUTPUT & BIT (WALPE_SIG_FOCUS_APP)));
+    /* "a fullscreen window has the focus" stays one value for the session;
+     * which monitor it is on is the per-output one */
+    CHECK (WALPE_SIG_PER_OUTPUT & BIT (WALPE_SIG_FULLSCREEN_ON));
+    CHECK (WALPE_OUTPUT_ALL == 0);      /* never an output's id (platform.h) */
     CHECK (!(WALPE_SIG_PER_OUTPUT & (BIT (WALPE_SIG_FULLSCREEN) | BIT (WALPE_SIG_ASLEEP) | BIT (WALPE_SIG_IDLE))));
 }
 
@@ -313,6 +406,7 @@ int main (void)
     test_names ();
     test_x11 ();
     test_wayland ();
+    test_every_output ();
     if (fails)
         g_printerr ("signals-test: %d check(s) failed\n", fails);
     else

@@ -43,6 +43,14 @@ not what the daemon believes it drew. Each case starts its own daemon:
             drawing, the daemon still answers, loads another wallpaper and
             quits at once; all comes back when the output is on again or
             the window is gone.
+  fullscreen  "Pause for fullscreen apps" per monitor: two outputs, the
+            library window `walpe` made fullscreen on one of them. The
+            wallpaper of that output pauses and the other one keeps
+            drawing; moved to the other output it is the other way round;
+            nothing pauses for it while the focus is elsewhere; `set
+            fs_all=on` pauses both, as earlier versions did. Status names
+            the output per monitor and has no note about every monitor
+            pausing (the compositor names the window's output).
   backend   (builds with both backends) with an X server and a Wayland
             compositor both in the environment: without a setting Wayland
             is taken, config.json "backend" picks the other, WALPE_BACKEND
@@ -888,10 +896,131 @@ def case_cycles(env, W, rounds=6):
     env.stop_daemon()
 
 
+# --------------------------------------------------------------- fullscreen
+def case_fullscreen(env, W):
+    gui = os.path.join(env.build, "walpe")
+    if not os.path.exists(gui):
+        print("skip fullscreen (no library window program in the build)")
+        return
+    # (covered stays off, as in CONFIG: only the fullscreen rule may pause; each output
+    # draws its own scene)
+    if not start(env, [("A", 640, 360, 0, 0), ("B", 480, 270, 640, 0)], "fullscreen",
+                 config={"render_shared": False}):
+        return
+    mark = env.mark()
+    (a, *_), (b, *_) = env.mons
+    env.open(W["anim"])
+    lc.loaded(env, W["anim"])
+
+    def mons():
+        """status of the two outputs, A first (the daemon's own order is its business)"""
+        by = {m.get("name"): m for m in env.state().get("monitors") or []}
+        return [by.get(a) or {}, by.get(b) or {}]
+
+    def flags(key):
+        return [bool(m.get(key)) for m in mons()]
+
+    def drawn(seconds=2.0):
+        n = [m.get("frames") or 0 for m in mons()]
+        time.sleep(seconds * PATIENCE)
+        return [(m.get("frames") or 0) - k for m, k in zip(mons(), n)]
+
+    def is_state(here, paused, what):
+        ok = wait_for(lambda: flags("fullscreen") == here and flags("paused") == paused, 20, 0.2)
+        st = env.state()
+        check(bool(ok), "fullscreen: %s: fullscreen %s, paused %s" % (what, here, paused),
+              {"fullscreen": flags("fullscreen"), "paused": flags("paused"),
+               "monitors_state": st.get("monitors_state"), "windows": env.display.windows()})
+        n = drawn()
+        # (a paused monitor draws nothing; one that runs behind a fullscreen window is
+        # not asked for frames by the compositor, so only an uncovered one is counted)
+        good = all(k <= 2 for k, p in zip(n, paused) if p) and \
+            all(k > 3 for k, p, h in zip(n, paused, here) if not p and not h)
+        check(good, "fullscreen: %s: a paused output stops drawing, a free one draws" % what,
+              "frames in %.0f s: %s" % (2.0 * PATIENCE, n))
+        return st
+
+    wait_for(lambda: min(drawn(1.0)) > 3, 20, 0.1)
+    st = is_state([False, False], [False, False], "no window")
+    sig = st.get("pause_signals") or {}
+    src = (sig.get("fullscreen_on") or {}).get("from")
+    if not check(src == "wl-fullscreen", "fullscreen: the compositor's window list tells the window's output",
+                 sig.get("fullscreen_on")):
+        env.stop_daemon()
+        return
+    rule = (st.get("pause_rules") or {}).get("pause_fullscreen") or {}
+    check(rule.get("works") is True and "note" not in rule,
+          "fullscreen: status: the rule works and has nothing to explain (outputs have names)", rule)
+
+    genv = dict(env.run_env)
+    genv.update({"GDK_BACKEND": "wayland", "GSK_RENDERER": "cairo", "GTK_A11Y": "none"})
+    with open(os.path.join(env.tmp, "gui.log"), "ab") as log:
+        p = subprocess.Popen([gui], env=genv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                             cwd=env.tmp)
+    try:
+        if not wait_for(lambda: [w for w in env.display.windows() if w["pid"] == p.pid] or p.poll() is not None,
+                        60, 0.5) or p.poll() is not None:
+            print("skip fullscreen (the library window did not come up on the compositor)")
+            return
+        sel = "[pid=%d] " % p.pid
+        # the focus is moved between outputs below, and sway would take the pointer along
+        # (mouse_warping output, its default): a pointer left at an output's edge would be
+        # in the pictures of the cases that follow. The pointer stays where it is.
+        env.display.cmd("mouse_warping none")
+
+        def put(out):
+            """the window fullscreen on this output, with the focus"""
+            env.display.cmd(sel + "move container to output " + out)
+            env.display.cmd(sel + "fullscreen enable")
+            env.display.cmd(sel + "focus")
+
+        # a plain window with the focus pauses nothing
+        env.display.cmd(sel + "move container to output " + a)
+        env.display.cmd(sel + "focus")
+        is_state([False, False], [False, False], "a window that is not fullscreen")
+        put(a)
+        check(bool(wait_for(lambda: any(w["fullscreen"] for w in env.display.windows() if w["pid"] == p.pid), 15)),
+              "fullscreen: the compositor shows the library window fullscreen")
+        st = is_state([True, False], [True, False], "the window fullscreen on the first output")
+        check(st.get("fullscreen") is True and st.get("fullscreen_pause") is True,
+              "fullscreen: the status of all monitors: a fullscreen window has the focus, the rule pauses",
+              {k: st.get(k) for k in ("fullscreen", "fullscreen_pause")})
+        rule = (st.get("pause_rules") or {}).get("pause_fullscreen") or {}
+        check("note" not in rule, "fullscreen: no note about every monitor pausing", rule)
+        put(b)
+        is_state([False, True], [False, True], "the window moved to the second output")
+        # every monitor, as before the rule looked at outputs
+        code, rep = env.ctl("set", "fs_all=on")
+        check(code == 0 and bool(rep and rep.get("ok")), "fullscreen: walpe-ctl set fs_all=on is taken", rep)
+        is_state([False, True], [True, True], "pause_fullscreen_all on: both outputs pause")
+        env.ctl("set", "fs_all=off")
+        is_state([False, True], [False, True], "pause_fullscreen_all off: the first output runs again")
+        # the focus leaves the window (to the empty first output): the rule needs the focus
+        env.display.cmd("focus output " + a)
+        st = is_state([False, False], [False, False], "the focus is on the other output")
+        check(st.get("fullscreen") is False, "fullscreen: ... and no fullscreen window has the focus",
+              st.get("fullscreen"))
+        env.display.cmd(sel + "focus")
+        is_state([False, True], [False, True], "the focus is back on the fullscreen window")
+    finally:
+        p.terminate()
+        try:
+            p.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+        env.display.cmd("focus output " + a)        # as the cases before left it
+        env.display.cmd("mouse_warping output")
+    is_state([False, False], [False, False], "the window is gone")
+    healthy(env, mark, "fullscreen")
+    env.stop_daemon()
+
+
 OPT_IN = ("cycles",)
 CASES = [("start", case_start), ("two", case_two), ("mode", case_mode), ("scale", case_scale),
          ("noviewport", case_noviewport), ("rotate", case_rotate), ("hotplug", case_hotplug),
-         ("pointer", case_pointer), ("covered", case_covered), ("backend", case_backend),
+         ("pointer", case_pointer), ("covered", case_covered), ("fullscreen", case_fullscreen),
+         ("backend", case_backend),
          ("noshell", case_noshell), ("cycles", case_cycles), ("lost", case_lost)]
 
 

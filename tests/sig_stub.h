@@ -128,8 +128,10 @@ gboolean walpe_signal_get (WalpeSignal sig, guint32 output)
 {
     if (!(WALPE_SIG_PER_OUTPUT & WALPE_SIG_BIT (sig)))
         output = 0;
+    /* (a value given for WALPE_OUTPUT_ALL holds for every output) */
     for (guint i = 0; i < Stub.n_val; i++)
-        if (Stub.val[i].sig == sig && Stub.val[i].output == output && Stub.val[i].on)
+        if (Stub.val[i].sig == sig && Stub.val[i].on &&
+            (Stub.val[i].output == output || Stub.val[i].output == WALPE_OUTPUT_ALL))
             return TRUE;
     return FALSE;
 }

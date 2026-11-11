@@ -37,6 +37,15 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             test runs in a child process: the child ends with it instead of
             staying behind as a second "walpe-daemon". Skipped in a build
             without the web module.
+  fullscreen  "Pause for fullscreen apps" per monitor (X11): two monitors,
+            a window that says it is fullscreen and has the focus - the
+            check plays the window manager and sets the EWMH properties
+            itself. The monitor the window is on pauses and the other one
+            keeps drawing: with a border around the window (tiling window
+            managers), inside a frame window (reparenting ones), moved to
+            the other monitor, across both; nothing pauses while the focus
+            is on another window; `set fs_all=on` pauses every monitor as
+            earlier versions did; status says all of it per monitor.
   video     a video's load ends with its first picture: a clip the decoder
             cannot do anything with (its container reads well) is a failed
             load with a reason in status, and the wallpaper from before
@@ -953,9 +962,236 @@ def case_probe(env, W):
     env.stop_daemon()
 
 
+# --------------------------------------------------------------- fullscreen
+class XClient:
+    """a second X client that plays window manager and application: plain windows, the
+    EWMH properties a window manager would set (_NET_WM_STATE on a window,
+    _NET_ACTIVE_WINDOW and _NET_CLIENT_LIST on the root). Xlib through ctypes."""
+
+    XA_ATOM, XA_WINDOW = 4, 33
+
+    def __init__(self, display):
+        import ctypes
+        import ctypes.util
+        self.c = ctypes
+        x = ctypes.CDLL(ctypes.util.find_library("X11") or "libX11.so.6")
+        ul, i, u, vp = ctypes.c_ulong, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p
+        x.XOpenDisplay.restype, x.XOpenDisplay.argtypes = vp, [ctypes.c_char_p]
+        x.XDefaultRootWindow.restype, x.XDefaultRootWindow.argtypes = ul, [vp]
+        x.XCreateSimpleWindow.restype = ul
+        x.XCreateSimpleWindow.argtypes = [vp, ul, i, i, u, u, u, ul, ul]
+        x.XInternAtom.restype, x.XInternAtom.argtypes = ul, [vp, ctypes.c_char_p, i]
+        x.XChangeProperty.argtypes = [vp, ul, ul, ul, i, i, ctypes.POINTER(ctypes.c_long), i]
+        x.XDeleteProperty.argtypes = [vp, ul, ul]
+        x.XMapWindow.argtypes = [vp, ul]
+        x.XMoveResizeWindow.argtypes = [vp, ul, i, i, u, u]
+        x.XDestroyWindow.argtypes = [vp, ul]
+        x.XSync.argtypes = [vp, i]
+        x.XCloseDisplay.argtypes = [vp]
+        self.x = x
+        self.d = x.XOpenDisplay(display.encode())
+        if not self.d:
+            raise OSError("cannot open the X display")
+        self.root = x.XDefaultRootWindow(self.d)
+        self.wins = []
+
+    def atom(self, name):
+        return self.x.XInternAtom(self.d, name.encode(), 0)
+
+    def prop(self, win, name, kind, values):
+        arr = (self.c.c_long * max(len(values), 1))(*values)
+        self.x.XChangeProperty(self.d, win, self.atom(name), kind, 32, 0, arr, len(values))   # PropModeReplace
+        self.x.XSync(self.d, 0)
+
+    def window(self, x, y, w, h, parent=None):
+        win = self.x.XCreateSimpleWindow(self.d, parent or self.root, x, y, w, h, 0, 0, 0)
+        self.x.XMapWindow(self.d, win)
+        self.x.XSync(self.d, 0)
+        self.wins.append(win)
+        return win
+
+    def move(self, win, x, y, w, h):
+        self.x.XMoveResizeWindow(self.d, win, x, y, w, h)
+        self.x.XSync(self.d, 0)
+
+    def fullscreen(self, win, on):
+        self.prop(win, "_NET_WM_STATE", self.XA_ATOM, [self.atom("_NET_WM_STATE_FULLSCREEN")] if on else [])
+
+    def focus(self, win):
+        """win gets the focus as a window manager says it (0 = no window has it)"""
+        self.prop(self.root, "_NET_ACTIVE_WINDOW", self.XA_WINDOW, [win])
+
+    def clients(self, wins):
+        self.prop(self.root, "_NET_CLIENT_LIST", self.XA_WINDOW, wins)
+
+    def close(self):
+        for name in ("_NET_ACTIVE_WINDOW", "_NET_CLIENT_LIST"):
+            self.x.XDeleteProperty(self.d, self.root, self.atom(name))
+        for win in reversed(self.wins):
+            self.x.XDestroyWindow(self.d, win)
+        self.x.XSync(self.d, 0)
+        self.x.XCloseDisplay(self.d)
+
+
+def case_fullscreen(env, W):
+    """"Pause for fullscreen apps" pauses the monitor the focused fullscreen window is on,
+    and only that one."""
+    A, B = ("A", 640, 360, 0, 0), ("B", 640, 360, 640, 0)
+    if env.display.winsys != "x11":
+        print("skip fullscreen (the check sets a window manager's X properties itself: X11 only; "
+              "scripts/waylandcheck.py has the case for a compositor)")
+        return
+    try:
+        xc = XClient(env.env["DISPLAY"])
+    except OSError:
+        print("skip fullscreen (no libX11 for ctypes: cannot make a window)")
+        return
+    # (covered off: only the fullscreen rule may pause; each monitor draws its own scene)
+    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False,
+                          "render_shared": False})
+    try:
+        if not check(env.start_daemon([A, B]), "fullscreen: daemon started on two monitors"):
+            return
+        mark = env.mark()
+        env.open(W["anim"])
+        loaded(env, W["anim"])
+
+        def mons():
+            ms = (env.state().get("monitors") or [])
+            return ms if len(ms) == 2 else [{}, {}]
+
+        def flags(key):
+            return [bool(m.get(key)) for m in mons()]
+
+        def drawn(seconds=1.5):
+            n = [m.get("frames") or 0 for m in mons()]
+            time.sleep(seconds * PATIENCE)
+            return [(m.get("frames") or 0) - k for m, k in zip(mons(), n)]
+
+        def is_state(here, paused, what):
+            """monitors' "fullscreen" and "paused" become what is wanted; then the frames follow"""
+            ok = wait_for(lambda: flags("fullscreen") == here and flags("paused") == paused, 10, 0.1)
+            st = env.state()
+            check(bool(ok), "fullscreen: %s: fullscreen %s, paused %s" % (what, here, paused),
+                  {"fullscreen": flags("fullscreen"), "paused": flags("paused"),
+                   "monitors_state": st.get("monitors_state")})
+            n = drawn()
+            good = all((k <= 2) if p else (k > 3) for k, p in zip(n, paused))
+            check(good, "fullscreen: %s: the paused monitor stops drawing, the other one draws" % what,
+                  "frames in %.1f s: %s" % (1.5 * PATIENCE, n))
+            return st
+
+        wait_for(lambda: min(drawn(1.0)) > 3, 20, 0.1)
+        st = is_state([False, False], [False, False], "no window")
+        check(st.get("fullscreen") is False and st.get("fullscreen_pause") is False,
+              "fullscreen: no window: the status of all monitors says so too",
+              {k: st.get(k) for k in ("fullscreen", "fullscreen_pause")})
+        check(st.get("pause_fullscreen_all") is False, "fullscreen: pause_fullscreen_all is off by default",
+              st.get("pause_fullscreen_all"))
+        src = ((st.get("pause_signals") or {}).get("fullscreen_on") or {}).get("from")
+        check(src == "x11", "fullscreen: status names who tells the window's monitor", src)
+
+        # a fullscreen window on A gets the focus
+        w1 = xc.window(0, 0, 640, 360)
+        xc.clients([w1])
+        xc.fullscreen(w1, True)
+        is_state([False, False], [False, False], "a fullscreen window that does not have the focus")
+        xc.focus(w1)
+        st = is_state([True, False], [True, False], "a focused fullscreen window on the first monitor")
+        check(st.get("fullscreen") is True and st.get("fullscreen_pause") is True,
+              "fullscreen: the status of all monitors: a fullscreen window has the focus, the rule pauses",
+              {k: st.get(k) for k in ("fullscreen", "fullscreen_pause")})
+        check([bool(m.get("fullscreen_pause")) for m in st.get("monitors") or []] == [True, False],
+              "fullscreen: per monitor: the rule pauses the first one only",
+              [m.get("fullscreen_pause") for m in st.get("monitors") or []])
+        check("mon0:paused,fullscreen" in (st.get("monitors_state") or "") and
+              "mon1:running" in (st.get("monitors_state") or ""),
+              "fullscreen: monitors_state names the monitor and the reason", st.get("monitors_state"))
+
+        # a tiling window manager's border and gap around it: still that monitor, and only it
+        xc.move(w1, 12, 30, 616, 318)
+        is_state([True, False], [True, False], "a border and a bar's gap around the window")
+        # a frame that hangs a few pixels over into the neighbour
+        xc.move(w1, 4, 0, 640, 360)
+        is_state([True, False], [True, False], "four pixels of it on the neighbour")
+        # moved to the second monitor (the window manager's "move to monitor")
+        xc.move(w1, 640, 0, 640, 360)
+        is_state([False, True], [False, True], "the window moved to the second monitor")
+        # across both
+        xc.move(w1, 0, 0, 1280, 360)
+        is_state([True, True], [True, True], "the window across both monitors")
+        xc.move(w1, 0, 0, 640, 360)
+        is_state([True, False], [True, False], "back on the first monitor")
+
+        # the focus goes to a plain window on the second monitor: the rule needs the focus
+        w2 = xc.window(700, 40, 300, 200)
+        xc.clients([w1, w2])
+        xc.focus(w2)
+        st = is_state([False, False], [False, False],
+                      "the focus is on a plain window, the fullscreen one sits on the first monitor")
+        check(st.get("fullscreen") is False, "fullscreen: ... and no fullscreen window has the focus",
+              st.get("fullscreen"))
+        xc.focus(w1)
+        is_state([True, False], [True, False], "the focus is back on the fullscreen window")
+
+        # every monitor, as before the rule looked at monitors
+        code, rep = env.ctl("set", "fs_all=on")
+        check(code == 0 and bool(rep and rep.get("ok")), "fullscreen: walpe-ctl set fs_all=on is taken", rep)
+        st = is_state([True, False], [True, True], "pause_fullscreen_all on: every monitor pauses")
+        check(st.get("pause_fullscreen_all") is True and
+              [bool(m.get("fullscreen_pause")) for m in st.get("monitors") or []] == [True, True],
+              "fullscreen: status: the setting, and the rule pauses both",
+              (st.get("pause_fullscreen_all"), [m.get("fullscreen_pause") for m in st.get("monitors") or []]))
+        try:
+            saved = json.load(open(env.config)).get("pause_fullscreen_all")
+        except (OSError, ValueError):
+            saved = None
+        check(saved is True, "fullscreen: the setting is saved in config.json", saved)
+        code, rep = env.ctl("set", "pause_fullscreen_all=off")
+        check(code == 0 and bool(rep and rep.get("ok")), "fullscreen: ... and off again under its full name", rep)
+        is_state([True, False], [True, False], "pause_fullscreen_all off: the second monitor runs again")
+        try:
+            saved = "pause_fullscreen_all" in json.load(open(env.config))
+        except (OSError, ValueError):
+            saved = None
+        check(saved is False, "fullscreen: switched off, the key leaves config.json again", saved)
+
+        # the rule itself off: nothing pauses, status still says where the window is
+        env.ctl("set", "fs=off")
+        st = is_state([True, False], [False, False], "pause_fullscreen off")
+        check(st.get("fullscreen") is True and st.get("fullscreen_pause") is False,
+              "fullscreen: rule off: a fullscreen window has the focus, nothing is paused for it",
+              {k: st.get(k) for k in ("fullscreen", "fullscreen_pause")})
+        env.ctl("set", "fs=on")
+        is_state([True, False], [True, False], "pause_fullscreen on again")
+
+        # the window leaves fullscreen
+        xc.fullscreen(w1, False)
+        is_state([False, False], [False, False], "the window is no longer fullscreen")
+
+        # under a reparenting window manager the client sits inside a frame: its own
+        # position is the one in the frame (a few pixels), its place on the screen the frame's
+        frame = xc.window(640, 0, 640, 360)
+        w3 = xc.window(3, 20, 634, 337, parent=frame)
+        xc.clients([w1, w2, w3])
+        xc.fullscreen(w3, True)
+        xc.focus(w3)
+        is_state([False, True], [False, True], "a fullscreen client inside a frame window on the second monitor")
+        xc.move(frame, 0, 0, 640, 360)
+        is_state([True, False], [True, False], "its frame moved to the first monitor")
+        xc.focus(0)
+        is_state([False, False], [False, False], "no window has the focus")
+        lc_bad = [ln for ln in env.since(mark).splitlines()
+                  if re.search(r"CRITICAL \*\*|AddressSanitizer|runtime error:|Segmentation fault", ln)]
+        check(env.daemon.poll() is None and not lc_bad, "fullscreen: the daemon runs, its log is clean", lc_bad[:5])
+    finally:
+        xc.close()
+    env.stop_daemon()
+
+
 CASES = [("pointer", case_pointer), ("reload", case_reload), ("restart", case_restart),
          ("layout", case_layout), ("stats", case_stats), ("busy", case_busy), ("probe", case_probe),
-         ("video", case_video)]
+         ("fullscreen", case_fullscreen), ("video", case_video)]
 
 
 

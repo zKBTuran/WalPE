@@ -9,10 +9,11 @@
  * state and outputs as the test tells it. The providers are the real
  * ones; the registry is tests/sig_stub.h.
  *
- *   A  everything offered: focus / covered per output, fullscreen, the
- *      see-through list, minimized and closed windows, the idle timeout
- *      (set, changed, off), outputs that go away or change their id, the
- *      compositor dropping the connection
+ *   A  everything offered: focus / covered per output, fullscreen and the
+ *      output the fullscreen window is on, the see-through list,
+ *      minimized and closed windows, the idle timeout (set, changed, off),
+ *      outputs that go away or change their id, the compositor dropping
+ *      the connection
  *   B  window list version 1, outputs without names: no fullscreen
  *      provider (with the reason), covered still works on a single output
  *   C  only the stateless ext list, no idle notifier: every provider
@@ -21,6 +22,9 @@
  *   E  a compositor that never answers: the providers give up
  *   F  a TMPDIR too long for a socket path: this test, run again with
  *      one, still brings its compositor up and ends
+ *   G  fullscreen where the window's output cannot be told (outputs
+ *      without names and several monitors; a window the compositor names
+ *      no output for): every output, and status says so
  *
  * No real compositor, no display, no GPU. */
 #include "walpe-build-config.h"
@@ -611,6 +615,8 @@ static void providers_start (void)
 }
 
 #define FS  (&walpe_sig_wl_fullscreen)
+#define ON  WALPE_SIG_FULLSCREEN_ON     /* per output: the focused fullscreen window is on it */
+#define ALL WALPE_OUTPUT_ALL            /* ... or on one that cannot be told: every output */
 #define WIN (&walpe_sig_wl_windows)
 #define IDL (&walpe_sig_wl_idle)
 #define A_ WALPE_TL_ACTIVATED
@@ -646,6 +652,9 @@ static void scenario_a (void)
     CHECK (stub_value (WIN, WALPE_SIG_FOCUS_APP, 22) == 0 && stub_value (WIN, WALPE_SIG_COVERED, 22) == 0,
            "A: the other output has values too (off)");
     CHECK (stub_value (FS, WALPE_SIG_FULLSCREEN, 0) == 0, "A: no fullscreen");
+    CHECK (stub_value (FS, ON, 11) != 1 && stub_value (FS, ON, 22) != 1 && stub_value (FS, ON, ALL) == 0,
+           "A: no fullscreen window on any output");
+    CHECK (walpe_sig_wl_fullscreen_everywhere () == NULL, "A: named outputs: the rule can tell the monitors apart");
     CHECK (stub_value (WIN, WALPE_SIG_COVERED, 0) == -1, "A: nothing is reported for an output that is not the daemon's");
 
     win_set (0, A_ | M_, 1u << 0);
@@ -654,12 +663,18 @@ static void scenario_a (void)
     win_set (0, A_ | F_, 1u << 0);
     EXPECT (FS, WALPE_SIG_FULLSCREEN, 0, 1, "A: focused + fullscreen");
     EXPECT (WIN, WALPE_SIG_COVERED, 11, 1, "A: fullscreen covers");
+    EXPECT (FS, ON, 11, 1, "A: the fullscreen window is on the first output");
+    CHECK (stub_value (FS, ON, 22) != 1 && stub_value (FS, ON, ALL) == 0,
+           "A: ... and on no other: the second output's wallpaper runs on");
+    CHECK (walpe_signal_get (ON, 11) && !walpe_signal_get (ON, 22), "A: as the daemon reads it");
 
     /* a second, unfocused fullscreen window on the other output */
     win_add (1, "mpv", F_, 1u << 1);
     settle ();
     CHECK (stub_value (WIN, WALPE_SIG_COVERED, 22) == 0, "A: an unfocused fullscreen window does not cover by default");
     CHECK (stub_value (WIN, WALPE_SIG_FOCUS_APP, 22) == 0, "A: and has no focus");
+    CHECK (stub_value (FS, ON, 22) != 1 && stub_value (FS, ON, 11) == 1,
+           "A: a fullscreen window without the focus does not count for its output");
 
     /* the focus moves to it */
     win_set (0, F_, 1u << 0);
@@ -669,13 +684,23 @@ static void scenario_a (void)
     EXPECT (WIN, WALPE_SIG_FOCUS_APP, 11, 0, "A: the first output lost the focus");
     EXPECT (WIN, WALPE_SIG_COVERED, 11, 0, "A: and is no longer counted as covered");
     CHECK (stub_value (FS, WALPE_SIG_FULLSCREEN, 0) == 1, "A: still a focused fullscreen window");
+    EXPECT (FS, ON, 22, 1, "A: the focused fullscreen window is on the second output now");
+    EXPECT (FS, ON, 11, 0, "A: the first output has a fullscreen window without the focus: not its rule");
 
     /* a window on two outputs counts on both */
     win_set (1, A_ | M_, (1u << 0) | (1u << 1));
     EXPECT (WIN, WALPE_SIG_COVERED, 11, 1, "A: a window spanning both outputs covers both");
     EXPECT (FS, WALPE_SIG_FULLSCREEN, 0, 0, "A: no longer fullscreen");
+    EXPECT (FS, ON, 22, 0, "A: maximized is not fullscreen, on either output");
+    CHECK (stub_value (FS, ON, 11) == 0, "A: maximized is not fullscreen, on either output");
+    win_set (1, A_ | F_, (1u << 0) | (1u << 1));
+    EXPECT (FS, ON, 11, 1, "A: a fullscreen window spanning both outputs is on the first");
+    EXPECT (FS, ON, 22, 1, "A: ... and on the second");
+    CHECK (stub_value (FS, ON, ALL) == 0, "A: two outputs by name, not \"every output\"");
     win_set (1, A_ | F_, 1u << 1);
     EXPECT (WIN, WALPE_SIG_COVERED, 11, 0, "A: back on one output");
+    EXPECT (FS, ON, 11, 0, "A: back on one output");
+    CHECK (stub_value (FS, ON, 22) == 1, "A: back on one output");
 
     /* the see-through list */
     walpe_sigprov_set_see_through ("st, MPV");
@@ -687,19 +712,27 @@ static void scenario_a (void)
     /* a window on an output the daemon does not show on */
     win_set (1, A_ | F_, 1u << 2);
     EXPECT (WIN, WALPE_SIG_COVERED, 22, 0, "A: moved to a foreign output");
-    CHECK (stub_value (FS, WALPE_SIG_FULLSCREEN, 0) == 1, "A: the global fullscreen rule does not look at outputs");
+    CHECK (stub_value (FS, WALPE_SIG_FULLSCREEN, 0) == 1, "A: the global fullscreen value does not look at outputs");
+    EXPECT (FS, ON, 22, 0, "A: the fullscreen window left the daemon's outputs");
+    CHECK (stub_value (FS, ON, 11) == 0 && stub_value (FS, ON, ALL) == 0,
+           "A: on a named output that is not the daemon's: known, and no monitor of the daemon has it");
+    CHECK (walpe_sig_wl_fullscreen_everywhere () == NULL, "A: nothing to explain in status");
     win_set (1, A_ | F_, 1u << 1);
     EXPECT (WIN, WALPE_SIG_COVERED, 22, 1, "A: and back");
+    EXPECT (FS, ON, 22, 1, "A: and back");
 
     /* minimized, then closed */
     win_set (1, A_ | F_ | N_, 1u << 1);
     EXPECT (FS, WALPE_SIG_FULLSCREEN, 0, 0, "A: minimized");
     EXPECT (WIN, WALPE_SIG_COVERED, 22, 0, "A: minimized covers nothing");
+    EXPECT (FS, ON, 22, 0, "A: minimized: no fullscreen window on its output");
     win_set (1, A_ | F_, 1u << 1);
     EXPECT (FS, WALPE_SIG_FULLSCREEN, 0, 1, "A: restored");
+    EXPECT (FS, ON, 22, 1, "A: restored");
     int destroyed = g_atomic_int_get (&S.handles_destroyed);
     srv_run (s_win_close, GINT_TO_POINTER (1));
     EXPECT (FS, WALPE_SIG_FULLSCREEN, 0, 0, "A: closed");
+    EXPECT (FS, ON, 22, 0, "A: closed");
     EXPECT (WIN, WALPE_SIG_COVERED, 22, 0, "A: closed");
     EXPECT (WIN, WALPE_SIG_FOCUS_APP, 22, 0, "A: closed");
     settle ();
@@ -737,12 +770,18 @@ static void scenario_a (void)
     /* ---- outputs */
     win_set (0, A_ | M_, 1u << 0);
     EXPECT (WIN, WALPE_SIG_COVERED, 11, 1, "A: covered again");
+    win_set (0, A_ | F_, 1u << 0);
+    EXPECT (FS, ON, 11, 1, "A: fullscreen on the first output again");
     /* the daemon renumbers its outputs */
     id_map[0].id = 33;
     walpe_sigprov_outputs_changed ();
     EXPECT (WIN, WALPE_SIG_COVERED, 33, 1, "A: the value follows the new id");
     EXPECT (WIN, WALPE_SIG_COVERED, 11, 0, "A: and is taken off the old one");
     EXPECT (WIN, WALPE_SIG_FOCUS_APP, 11, 0, "A: focus too");
+    EXPECT (FS, ON, 33, 1, "A: the fullscreen window's output follows the new id");
+    EXPECT (FS, ON, 11, 0, "A: and is taken off the old one");
+    win_set (0, A_ | M_, 1u << 0);
+    EXPECT (FS, ON, 33, 0, "A: maximized again");
     /* an output is unplugged */
     win_add (2, "imv", A_ | F_, 1u << 1);
     win_set (0, M_, 1u << 0);
@@ -751,10 +790,19 @@ static void scenario_a (void)
     EXPECT (WIN, WALPE_SIG_COVERED, 22, 0, "A: its output went away: nothing is covered there");
     EXPECT (WIN, WALPE_SIG_FOCUS_APP, 22, 0, "A: nor focused");
     CHECK (stub_value (FS, WALPE_SIG_FULLSCREEN, 0) == 1, "A: the window itself is still fullscreen and focused");
+    /* ... on an output that is gone, and the compositor has named no new
+     * one for it: where it is cannot be told, so it counts for every
+     * output (as the rule did before it looked at outputs) */
+    EXPECT (FS, ON, ALL, 1, "A: a fullscreen window on no output counts for every output");
+    EXPECT (FS, ON, 22, 0, "A: not under the id of the output that is gone");
+    CHECK (walpe_signal_get (ON, 33) && walpe_signal_get (ON, 22), "A: as the daemon reads it: every output");
+    CHECK (walpe_sig_wl_fullscreen_everywhere () &&
+           strstr (walpe_sig_wl_fullscreen_everywhere (), "which output"), "A: and status can say why");
 
     /* ---- the compositor drops the connection */
     srv_run (s_kill_clients, NULL);
     EXPECT (FS, WALPE_SIG_FULLSCREEN, 0, 0, "A: connection lost");
+    EXPECT (FS, ON, ALL, 0, "A: connection lost");
     EXPECT (WIN, WALPE_SIG_COVERED, 33, 0, "A: connection lost");
     EXPECT (WIN, WALPE_SIG_FOCUS_APP, 33, 0, "A: connection lost");
     CHECK (!walpe_signal_get (WALPE_SIG_IDLE, 0), "A: connection lost: not idle");
@@ -838,6 +886,112 @@ static void scenario_d (void)
     g_usleep (100000);
     CHECK (g_atomic_int_get (&S.handles_destroyed) >= before + 2, "D: stop destroys the window handles");
     g_unsetenv ("WALPE_WL_COVERED");
+    srv_down ();
+}
+
+/* the note of the fullscreen rule in status ("pause_rules"), NULL = none */
+static char *fs_note (gboolean all_wanted)
+{
+    WalpeConfig cfg = { 0 };
+    cfg.pause_fullscreen = TRUE;
+    cfg.pause_fullscreen_all = all_wanted;
+    JsonBuilder *b = json_builder_new ();
+    json_builder_begin_object (b);
+    walpe_sigprov_status_json (b, &cfg);
+    json_builder_end_object (b);
+    JsonNode *root = json_builder_get_root (b);
+    g_object_unref (b);
+    JsonObject *r = json_object_get_object_member (json_node_get_object (root), "pause_rules");
+    JsonObject *o = r ? json_object_get_object_member (r, "pause_fullscreen") : NULL;
+    char *note = o && json_object_has_member (o, "note")
+                     ? g_strdup (json_object_get_string_member (o, "note")) : NULL;
+    if (o && !json_object_get_boolean_member (o, "works")) {
+        g_free (note);
+        note = g_strdup ("(the rule does not work)");
+    }
+    json_node_unref (root);
+    return note;
+}
+
+/* ---- G: fullscreen windows whose output cannot be told. A compositor
+ * whose wl_output is older than version 4 names no output: with one
+ * monitor every window is on that one; with several nothing says which,
+ * and the fullscreen rule counts the window for every output - what it
+ * did before it looked at outputs - and says so in status. The same for
+ * a window the compositor announces no output for. */
+static void scenario_g (void)
+{
+    SrvConf conf = { .seat = 7, .idle = 0, .toplevel = 3, .out_version = 3,
+                     .out_names = { "unnamed-0", "unnamed-1" } };
+    if (!srv_start (&conf, "G"))
+        return;
+    memset (id_map, 0, sizeof id_map);
+    single_id = 7;          /* the daemon shows on a single output */
+    walpe_sigprov_set_output_lookup (lookup, NULL);
+    walpe_sigprov_set_see_through (NULL);
+    walpe_sigprov_set_idle_timeout (0);
+    win_add (0, "mpv", A_ | F_, 1u << 0);
+    providers_start ();
+    CHECK (started (FS) && started (WIN), "G: both window providers start (%s|%s)", why_of (FS), why_of (WIN));
+    CHECK (!g_strcmp0 (walpe_signal_sources (ON), "wl-fullscreen"), "G: status names who tells the output");
+    EXPECT (FS, WALPE_SIG_FULLSCREEN, 0, 1, "G: a focused fullscreen window");
+    EXPECT (FS, ON, 7, 1, "G: no names, one monitor: the window is on that one");
+    CHECK (stub_value (FS, ON, ALL) == 0, "G: ... by its id, not as \"every output\"");
+    char *note = fs_note (FALSE);
+    CHECK (walpe_sig_wl_fullscreen_everywhere () == NULL && note == NULL,
+           "G: one monitor: nothing to explain (%s)", note ? note : "no note");
+    g_free (note);
+
+    /* the daemon shows on several outputs: an output without a name can be
+     * any of them */
+    single_id = 0;
+    walpe_sigprov_outputs_changed ();
+    EXPECT (FS, ON, ALL, 1, "G: no names, several monitors: every output");
+    EXPECT (FS, ON, 7, 0, "G: and no id of its own");
+    CHECK (stub_value (FS, WALPE_SIG_FULLSCREEN, 0) == 1, "G: the window is still there");
+    CHECK (walpe_signal_get (ON, 1) && walpe_signal_get (ON, 2), "G: as the daemon reads it: each of its monitors");
+    const char *why = walpe_sig_wl_fullscreen_everywhere ();
+    CHECK (why && strstr (why, "wl_output") && strstr (why, "version 4"), "G: the reason: %s", why ? why : "(none)");
+    note = fs_note (FALSE);
+    CHECK (note && strstr (note, "pauses every monitor") && strstr (note, "wl_output"),
+           "G: status says that every monitor pauses and why: %s", note ? note : "(no note)");
+    g_free (note);
+    note = fs_note (TRUE);
+    CHECK (note == NULL, "G: with pause_fullscreen_all set that is what was asked for: no note (%s)",
+           note ? note : "none");
+    g_free (note);
+
+    /* the window loses the focus: no monitor has a focused fullscreen
+     * window, but status still says what would happen (the outputs are
+     * as unnamed as before) */
+    win_set (0, F_, 1u << 0);
+    EXPECT (FS, WALPE_SIG_FULLSCREEN, 0, 0, "G: focus lost");
+    EXPECT (FS, ON, ALL, 0, "G: focus lost: no output has it");
+    why = walpe_sig_wl_fullscreen_everywhere ();
+    CHECK (why && strstr (why, "wl_output"), "G: status keeps the reason while nothing is fullscreen");
+
+    /* one monitor again; a window the compositor names no output for */
+    single_id = 7;
+    walpe_sigprov_outputs_changed ();
+    settle ();
+    CHECK (walpe_sig_wl_fullscreen_everywhere () == NULL, "G: one monitor again: no reason left");
+    win_set (0, A_ | F_, 0);
+    EXPECT (FS, ON, ALL, 1, "G: a fullscreen window on no announced output: every output");
+    why = walpe_sig_wl_fullscreen_everywhere ();
+    CHECK (why && strstr (why, "which output"), "G: the reason: %s", why ? why : "(none)");
+    win_set (0, A_ | F_, 1u << 1);
+    EXPECT (FS, ON, ALL, 0, "G: the compositor names its output: known again");
+    EXPECT (FS, ON, 7, 1, "G: ... the only monitor");
+    CHECK (walpe_sig_wl_fullscreen_everywhere () == NULL, "G: nothing to explain any more");
+
+    /* stopping leaves no value on */
+    win_set (0, A_ | F_, 0);
+    EXPECT (FS, ON, ALL, 1, "G: every output once more");
+    walpe_signals_stop ();
+    CHECK (!walpe_signal_get (ON, 7) && !walpe_signal_get (ON, ALL) &&
+           !walpe_signal_get (WALPE_SIG_FULLSCREEN, 0), "G: stopped: nothing stays on");
+    CHECK (walpe_sig_wl_fullscreen_everywhere () == NULL, "G: stopped: no reason");
+    stub_reset ();
     srv_down ();
 }
 
@@ -981,6 +1135,7 @@ int main (int argc, char **argv)
         scenario_b ();
         scenario_c ();
         scenario_d ();
+        scenario_g ();
         scenario_e (dir);
         char *self = g_file_read_link ("/proc/self/exe", NULL);
         scenario_f (self ? self : argv[0], dir);
