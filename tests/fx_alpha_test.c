@@ -24,7 +24,9 @@
  *     kept result of a static effect set is redone); the same with the
  *     effect update rate halved (a held set is redrawn at once).
  *
- * Skipped (exit 0, "skip") without EGL surfaceless / GL 3.3.
+ * Skipped (exit 0, "skip") without EGL surfaceless / GL 3.3. In a build
+ * without QuickJS (-Dscenescript=disabled) no script runs: the checks of
+ * the scripted opacity are left out and the others run.
  * `meson test -C build fx-alpha` */
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -33,6 +35,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "walpe-build-config.h"
 #include "common/quality.h"
 #include "engine/content.h"
 #include "engine/glutil.h"
@@ -316,8 +319,9 @@ static void static_checks (void)
 }
 
 /* a script takes the opacity from 0.5 to 0.2; fx: "add" (static set, its
- * result is kept) or "addt" (animated); rate 2 holds an animated set */
-static void animated_checks (const char *fx, int rate, gboolean after, const char *what)
+ * result is kept) or "addt" (animated); rate 2 holds an animated set.
+ * (Not called in a build without QuickJS: the opacity never changes there.) */
+G_GNUC_UNUSED static void animated_checks (const char *fx, int rate, gboolean after, const char *what)
 {
     char *dir = make_scene (ALPHA_SCRIPT, fx, FALSE);
     Run r = { 0 };
@@ -413,10 +417,14 @@ int main (void)
     g_unsetenv ("WALPE_PROP_PROBE");
     g_unsetenv ("WALPE_FX_TIME");
     static_checks ();
+#ifdef HAVE_QUICKJS
     animated_checks ("add", 1, FALSE, "scripted opacity, static effect");
     animated_checks ("addt", 1, FALSE, "scripted opacity, animated effect");
     animated_checks ("addt", 2, FALSE, "scripted opacity, effect at half rate");
     animated_checks ("add", 1, TRUE, "scripted opacity, WALPE_FX_ALPHA=after");
+#else
+    printf ("skip  scripted opacity (4 cases, 8 checks): built without QuickJS, no script runs\n");
+#endif
     eglMakeCurrent (dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglDestroySurface (dpy, surf);
     eglDestroyContext (dpy, ctx);

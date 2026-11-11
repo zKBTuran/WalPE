@@ -705,12 +705,22 @@ static void test_render_main (WalpeConfig *cfg, const char *dir)
     for (int j = 1; j < 4; j++)
         shot_frame (&s);
 
-    /* ---- script-driven origin: still offset, on every frame of its cycle ---- */
+    /* ---- script-driven origin: still offset, on every frame of its cycle ----
+     * (Without QuickJS the block stays where the scene file puts it, at
+     * 100,100, and 200 pixels to the left of that is outside the picture:
+     * nothing to compare. The adjustment is made and the frames are drawn
+     * all the same, so that what follows sees the same scene.) */
     adj (cfg, dir, "42:blue", -200, 100, 1, 0);
     for (int j = 0; j < 4; j++) {
         f = shot_frame (&s);                            /* 21..24 */
+#ifdef HAVE_QUICKJS
         CHECK (moved (blue[j], box_of (f, W, H, BLUE), -200, 100, 0));
+#endif
     }
+#ifndef HAVE_QUICKJS
+    printf ("note: built without QuickJS: the 4 checks of the script-driven layer's offset are "
+            "left out\n");
+#endif
 
     /* ---- child of a scaled + rotated parent: scene pixels, not the
      *      parent's units; the parent itself: its child follows ---- */
