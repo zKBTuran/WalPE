@@ -20,7 +20,12 @@ static const struct {
         "wallpaper scripts move and zoom the view" },
     [WALPE_FEAT_SPRITE_SHEETS] = { "sprite_sheets", TRUE, TRUE,
         "animated (sprite sheet) textures of image layers play" },
-    [WALPE_FEAT_SCRIPT_TEXANIM] = { "script_texanim", TRUE, FALSE,
+    /* (read at load: what a script did to an animation - paused it, set
+     * its frame, its rate, switched its loop off - stays with the animation.
+     * Switched off live, the layers kept the state the scripts had left
+     * them in, which is not the picture of a scene loaded with the switch
+     * off: its animations play by themselves.) */
+    [WALPE_FEAT_SCRIPT_TEXANIM] = { "script_texanim", TRUE, TRUE,
         "wallpaper scripts play / pause / stop / set the frame of animated textures" },
     [WALPE_FEAT_BLOOM] = { "bloom", TRUE, FALSE, "bloom of scenes that switch it on" },
     [WALPE_FEAT_CAMERA_SHAKE] = { "camera_shake", TRUE, FALSE,

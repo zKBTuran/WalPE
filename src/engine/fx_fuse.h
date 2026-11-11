@@ -595,7 +595,7 @@ static gboolean fxf_build_group (struct FxSet *set, const int *idx, int n, FxFus
     g_string_append (fs, "#define varying in\nout vec4 _we_fragColor;\n#define gl_FragColor _we_fragColor\n");
     GHashTable *dv = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
     GHashTable *df = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
-    EffectChain *fc = g_new0 (EffectChain, 1);
+    EffectChain *fc = fx_chain_new (1);
     EffPass *fp = &fc->passes[0];
     int next_unit = 1;
     gboolean ok = TRUE;

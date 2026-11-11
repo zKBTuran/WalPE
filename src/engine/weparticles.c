@@ -1335,7 +1335,7 @@ static WeSys *sys_new (JsonObject *j, const char *dir, const char *we,
          * (event.worldPosition) for a vortex and an attraction around the
          * mouse; taken relative to the system, they sat off by the
          * object's origin (half a screen away from the pointer). */
-        if ((int) jnum (cp, "flags", 0) & 2) {
+        if (walpe_d2i (jnum (cp, "flags", 0)) & 2) {
             s->cp_world |= 1u << id;
             memcpy (s->cpw[id], s->cp[id], sizeof (s->cpw[id]));
         }
@@ -2000,12 +2000,31 @@ static void sys_update (WeSys *s, double dt, float audio, const float *at_origin
             float iv = s->rope_len / (float) s->rope_seg;
             p->hacc += fdt;
             if (p->hn == 0 || p->hacc >= iv) {
-                int keep = MIN (p->hn, s->rope_seg - 1);
-                memmove (h + 3, h, sizeof (float) * 3 * (gsize) keep);
-                for (int c = 0; c < 3; c++)
-                    h[c] = p->p[c] + off[c];
-                p->hn = keep + 1;
-                p->hacc = p->hn == 1 ? 0.0f : fmodf (p->hacc, iv);
+                /* A step longer than the interval owes more than one point
+                 * (the stock shooting star: 0.2 s in 24 points = 8.3 ms, a
+                 * 60 Hz frame is two of them, a 30 Hz frame four). With one
+                 * point per step, whatever its length, the 24 points spanned
+                 * 24 frames: the tail was `length` seconds long at 120 Hz
+                 * and above, twice that at 60 Hz, four times at 30 Hz. The
+                 * points a step owes lie on the way the particle went in
+                 * it; the newest is where it is now, as before. */
+                float rest = p->hn == 0 ? 0.0f : fmodf (p->hacc, iv);
+                int owed = p->hn == 0 ? 1 : (int) MIN (p->hacc / iv, (float) s->rope_seg);
+                for (int j = MAX (owed, 1) - 1; j >= 0; j--) {
+                    int keep = MIN (p->hn, s->rope_seg - 1);
+                    memmove (h + 3, h, sizeof (float) * 3 * (gsize) keep);
+                    if (j == 0 || !(fdt > 0)) {
+                        for (int c = 0; c < 3; c++)
+                            h[c] = p->p[c] + off[c];
+                    } else {
+                        /* (rest + j intervals) ago */
+                        float back = MIN ((rest + (float) j * iv) / fdt, 1.0f);
+                        for (int c = 0; c < 3; c++)
+                            h[c] = p->p[c] - p->dp[c] * back + off[c];
+                    }
+                    p->hn = keep + 1;
+                }
+                p->hacc = p->hn == 1 ? 0.0f : rest;
             }
         }
         p->d_alpha = CLAMP (p->alpha * am, 0, 1);
@@ -4645,6 +4664,20 @@ int walpe_weparticles_sys_count (WalpeWeParticles *w, int sys)
 {
     WeSys *s = w && w->root && sys >= 0 ? sys_nth (w->root, &sys) : NULL;
     return s ? s->count : -1;
+}
+
+/* ropetrail systems: how many history points the i-th live particle of
+ * system `sys` has (0: none, -1: no such particle or no ropetrail) and
+ * where the oldest of them lies */
+int walpe_weparticles_sys_trail (WalpeWeParticles *w, int sys, int i, float oldest[3])
+{
+    WeSys *s = w && w->root && sys >= 0 ? sys_nth (w->root, &sys) : NULL;
+    if (!s || !s->hist || i < 0 || i >= s->count)
+        return -1;
+    const Pt *p = &s->pts[i];
+    if (p->hn > 0)
+        memcpy (oldest, s->hist + ((gsize) i * s->rope_seg + (gsize) (p->hn - 1)) * 3, sizeof (float) * 3);
+    return p->hn;
 }
 
 /* the alpha the i-th live particle of system `sys` was last drawn with

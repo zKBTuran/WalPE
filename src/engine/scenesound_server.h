@@ -1,7 +1,7 @@
 /* scenesound_server.h - tests only: stand-ins for the five functions of
  * libpulse-simple that scenesound.c calls, so that a test can stand in
- * for the sound server (one that refuses connections, one that does not
- * answer) without one. Only in a build with libpulse. */
+ * for the sound server (how many streams are being opened at a time, a
+ * server that does not answer) without one. Only in a build with libpulse. */
 #ifndef WALPE_SCENESOUND_SERVER_H
 #define WALPE_SCENESOUND_SERVER_H
 #include <pulse/simple.h>

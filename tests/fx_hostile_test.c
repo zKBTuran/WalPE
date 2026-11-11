@@ -1014,6 +1014,16 @@ static char *built_from (const char *head, const char *unit, gsize bytes, const 
     return s;
 }
 
+/* what the repairs print, one "<level> <text>" line each */
+static GString *size_said;
+
+static void size_log (const gchar *domain, GLogLevelFlags level, const gchar *msg, gpointer user)
+{
+    (void) domain; (void) user;
+    if (size_said)
+        g_string_append_printf (size_said, "%d %s\n", (int) (level & G_LOG_LEVEL_MASK), msg);
+}
+
 static void repair_size_checks (void)
 {
     static const char *VMAIN = "attribute vec3 a_Position;\nvoid main() {\n\tgl_Position = vec4(a_Position, 1.0);\n}\n";
@@ -1036,6 +1046,78 @@ static void repair_size_checks (void)
     g_free (before);
     g_free (v);
     g_free (f);
+    /* OpenGL ES. The body of a source has to be rewritten there
+     * (fx_essl.h), and the rewriting walks the symbol lists the repairs
+     * walk. A source beyond the limit is not compiled on OpenGL ES: the
+     * pass builder is told so, one line says why, the texts stay as they
+     * were and megabytes of names cost nothing. GLSL 3.30 is as above. */
+    {
+        static const char *EMAIN = "void main() {\n\tfloat k = 1;\n\tgl_FragColor = vec4(k);\n}\n";
+        GLogFunc old_log = g_log_set_default_handler (size_log, NULL);
+        char *m;
+        fx_set_glsl_es (300);
+        v = built_from ("", "// %u %u\n", 1000, VMAIN, TRUE);
+        f = built_from ("", "// %u %u\n", 1000, EMAIN, FALSE);
+        size_said = g_string_new (NULL);
+        gboolean go = fx_prepass (&v, &f, "small");
+        result (go && strstr (f, "float k = 1.0;") != NULL && !strstr (size_said->str, "not compiled"),
+                "repair size, GLSL ES: a source of ordinary size is rewritten and compiled");
+        g_free (f);
+        f = built_from ("", "// filler line %u %u\n", FX_MAX_REPAIR_SOURCE, EMAIN, FALSE);
+        char *v0 = g_strdup (v), *f0 = g_strdup (f);
+        g_string_truncate (size_said, 0);
+        go = fx_prepass (&v, &f, "large");
+        m = g_strdup_printf ("%d fx: shader large: a source of more than %d KiB is not compiled on OpenGL ES "
+                             "(no HLSL-semantics repairs, no GLSL ES rewriting)\n",
+                             (int) G_LOG_LEVEL_WARNING, FX_MAX_REPAIR_SOURCE / 1024);
+        result (!go && !strcmp (size_said->str, m) && !strcmp (v, v0) && !strcmp (f, f0),
+                "repair size, GLSL ES: a source beyond the limit is not compiled, and one line says so");
+        g_free (m);
+        /* the same pair as GLSL 3.30: compiled as written, the line it always printed */
+        fx_set_glsl_es (0);
+        g_free (v);
+        g_free (f);
+        v = built_from ("", "// %u %u\n", 1000, VMAIN, TRUE);
+        f = built_from ("", "// filler line %u %u\n", FX_MAX_REPAIR_SOURCE, EMAIN, FALSE);
+        g_free (v0);
+        g_free (f0);
+        v0 = g_strdup (v);
+        f0 = g_strdup (f);
+        g_string_truncate (size_said, 0);
+        go = fx_prepass (&v, &f, "large");
+        m = g_strdup_printf ("%d fx: shader large: a source of more than %d KiB is compiled as written "
+                             "(no HLSL-semantics repairs)\n", (int) G_LOG_LEVEL_MESSAGE,
+                             FX_MAX_REPAIR_SOURCE / 1024);
+        result (go && !strcmp (size_said->str, m) && !strcmp (v, v0) && !strcmp (f, f0),
+                "repair size, GLSL 3.30: the same source is compiled as written, with the line it always printed");
+        g_free (m);
+        g_free (v0);
+        g_free (f0);
+        g_free (v);
+        g_free (f);
+        /* names by the megabyte on OpenGL ES: declared, then used */
+        fx_set_glsl_es (300);
+        GString *uses = g_string_new ("void main() {\n\tfloat x = 1;\n");
+        for (guint i = 0; uses->len < FX_MAX_SOURCE / 2; i++)
+            g_string_append_printf (uses, "\tx = x + g%u * 2;\n", i);
+        g_string_append (uses, "\tgl_FragColor = vec4(x);\n}\n");
+        v = built_from ("", "// %u %u\n", 1000, VMAIN, TRUE);
+        f = built_from ("", "float g%u = 1; // %u\n", FX_MAX_SOURCE / 2, uses->str, FALSE);
+        g_string_free (uses, TRUE);
+        double e0 = (double) clock () / CLOCKS_PER_SEC;
+        go = fx_prepass (&v, &f, "names");
+        double de = (double) clock () / CLOCKS_PER_SEC - e0;
+        m = g_strdup_printf ("repair size, GLSL ES: %d MiB of names declared and used: %.2f s of CPU, not compiled",
+                             FX_MAX_SOURCE >> 20, de);
+        result (!go && de < 5.0, m);
+        g_free (m);
+        g_free (v);
+        g_free (f);
+        fx_set_glsl_es (0);
+        g_string_free (size_said, TRUE);
+        size_said = NULL;
+        g_log_set_default_handler (old_log, NULL);
+    }
     /* declarations by the megabyte, in both stages: every interface
      * repair looked at each of them against all the others */
     static const char *const unit[] = {

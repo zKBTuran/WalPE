@@ -18,6 +18,9 @@
  *   C  only the stateless ext list, no idle notifier: every provider
  *      declines with its sentence
  *   D  WALPE_WL_COVERED=all: an unfocused fullscreen window covers
+ *   E  a compositor that never answers: the providers give up
+ *   F  a TMPDIR too long for a socket path: this test, run again with
+ *      one, still brings its compositor up and ends
  *
  * No real compositor, no display, no GPU. */
 #include "walpe-build-config.h"
@@ -28,6 +31,8 @@
 #include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include <unistd.h>
 #include <wayland-server.h>
 #include "ext-idle-notify-v1-server-protocol.h"
@@ -364,6 +369,7 @@ static gpointer srv_thread (gpointer u)
     S.loop = wl_display_get_event_loop (S.dpy);
     wl_list_init (&S.idles);
     if (wl_display_add_socket (S.dpy, S.socket) != 0) {
+        wl_display_destroy (S.dpy);
         g_atomic_int_set (&S.ready, -1);
         return NULL;
     }
@@ -435,6 +441,17 @@ static void srv_down (void)
         g_error ("eventfd");
     g_thread_join (S.thread);
     S.thread = NULL;
+}
+
+/* A scenario starts here. Without its compositor it is over: the thread
+ * has ended, and srv_run () would wait for ever for a call nobody takes. */
+static gboolean srv_start (const SrvConf *conf, const char *name)
+{
+    const gboolean up = srv_up (conf);
+    CHECK (up, "compositor %s up", name);
+    if (!up)
+        srv_down ();
+    return up;
 }
 
 /* ---- what the test asks of it (each runs on the compositor thread) */
@@ -605,7 +622,8 @@ static void scenario_a (void)
 {
     SrvConf conf = { .seat = 7, .idle = 1, .toplevel = 3, .ext_list = 1, .out_version = 4,
                      .out_names = { "DP-1", "HDMI-A-1", "DP-9" } };
-    CHECK (srv_up (&conf), "compositor A up");
+    if (!srv_start (&conf, "A"))
+        return;
     id_map[0].name = "DP-1";      id_map[0].id = 11;
     id_map[1].name = "HDMI-A-1";  id_map[1].id = 22;
     id_map[2].name = NULL;        /* DP-9 is not one of the daemon's */
@@ -747,7 +765,8 @@ static void scenario_a (void)
 static void scenario_b (void)
 {
     SrvConf conf = { .seat = 5, .idle = 0, .toplevel = 1, .out_version = 3, .out_names = { "ignored" } };
-    CHECK (srv_up (&conf), "compositor B up");
+    if (!srv_start (&conf, "B"))
+        return;
     memset (id_map, 0, sizeof id_map);
     single_id = 7;
     walpe_sigprov_set_output_lookup (lookup, NULL);
@@ -779,7 +798,8 @@ static void scenario_c (void)
 {
     SrvConf conf = { .seat = 7, .idle = 0, .toplevel = 0, .ext_list = 1, .out_version = 4,
                      .out_names = { "DP-1" } };
-    CHECK (srv_up (&conf), "compositor C up");
+    if (!srv_start (&conf, "C"))
+        return;
     providers_start ();
     CHECK (!started (FS) && !started (WIN) && !started (IDL), "C: nothing starts");
     CHECK (strstr (why_of (WIN), "ext_foreign_toplevel_list_v1") && strstr (why_of (WIN), "state"),
@@ -794,7 +814,8 @@ static void scenario_c (void)
 static void scenario_d (void)
 {
     SrvConf conf = { .seat = 7, .idle = 2, .toplevel = 2, .out_version = 4, .out_names = { "eDP-1" } };
-    CHECK (srv_up (&conf), "compositor D up");
+    if (!srv_start (&conf, "D"))
+        return;
     memset (id_map, 0, sizeof id_map);
     id_map[0].name = "eDP-1";
     id_map[0].id = 5;
@@ -851,24 +872,120 @@ static void scenario_e (const char *dir)
     g_free (path);
 }
 
-int main (void)
+/* ---- F: a temporary directory whose path leaves no room for a socket
+ * name (TMPDIR of a build deep in the file system). The compositor's
+ * thread ended with "socket path too long" and the test waited for ever
+ * for it. This test is run again with such a TMPDIR, start only: it takes
+ * a directory of its own (main), its compositor comes up, and it ends. */
+#define LONG_NAME 120
+
+static void scenario_start_only (void)
 {
-    /* a runtime directory of its own: the socket never meets a real session */
+    SrvConf conf = { .seat = 7, .out_version = 4, .out_names = { "DP-1" } };
+    if (!srv_start (&conf, "of the start-only run"))
+        return;
+    win_add (0, "foot", A_, 1u << 0);
+    srv_down ();
+}
+
+static void scenario_f (const char *self, const char *dir)
+{
+    char name[LONG_NAME + 1];
+    memset (name, 'x', LONG_NAME);
+    name[LONG_NAME] = 0;
+    char *deep = g_build_filename (dir, name, NULL);
+    CHECK (g_mkdir (deep, 0700) == 0, "F: a directory with a name of %d bytes", LONG_NAME);
+    char **env = g_environ_setenv (g_get_environ (), "TMPDIR", deep, TRUE);
+    char *argv[] = { (char *) self, (char *) "--start-only", NULL };
+    GPid pid = 0;
+    gboolean ended = FALSE;
+    int st = 0;
+    if (g_spawn_async (NULL, argv, env, G_SPAWN_DO_NOT_REAP_CHILD, NULL, NULL, &pid, NULL)) {
+        const gint64 until = g_get_monotonic_time () + 20 * G_USEC_PER_SEC;
+        while (!(ended = waitpid (pid, &st, WNOHANG) == pid) && g_get_monotonic_time () < until)
+            g_usleep (20000);
+        if (!ended) {
+            kill (pid, SIGKILL);
+            waitpid (pid, &st, 0);
+        }
+        CHECK (ended, "F: the run with a TMPDIR of %d bytes ends by itself", (int) strlen (deep));
+        CHECK (ended && WIFEXITED (st) && WEXITSTATUS (st) == 0, "F: ... and passes (wait status 0x%x)",
+               (guint) st);
+    } else {
+        CHECK (FALSE, "F: %s --start-only is started", self);
+    }
+    g_strfreev (env);
+    /* (what a run that had to be stopped left behind) */
+    GDir *d = g_dir_open (deep, 0, NULL);
+    const char *sub;
+    while (d && (sub = g_dir_read_name (d))) {
+        char *subdir = g_build_filename (deep, sub, NULL);
+        GDir *d2 = g_dir_open (subdir, 0, NULL);
+        const char *leaf;
+        while (d2 && (leaf = g_dir_read_name (d2))) {
+            char *lp = g_build_filename (subdir, leaf, NULL);
+            g_unlink (lp);
+            g_free (lp);
+        }
+        if (d2)
+            g_dir_close (d2);
+        g_rmdir (subdir);
+        g_free (subdir);
+    }
+    if (d)
+        g_dir_close (d);
+    g_rmdir (deep);
+    g_free (deep);
+}
+
+/* the sockets of this test under dir: the compositor's ("walpe-sigtest-N")
+ * and scenario E's, the longest name. An address holds sizeof sun_path
+ * bytes with its NUL (108 on Linux). */
+static gboolean dir_fits (const char *dir)
+{
+    struct sockaddr_un sa;
+    return strlen (dir) + 1 + strlen ("walpe-sigtest-silent") < sizeof sa.sun_path;
+}
+
+int main (int argc, char **argv)
+{
+    const gboolean start_only = argc > 1 && !strcmp (argv[1], "--start-only");
+    /* a runtime directory of its own: the socket never meets a real
+     * session. Where TMPDIR points to is not ours to choose, and may be
+     * too long for a socket path: then a directory in /tmp. */
     char *dir = g_dir_make_tmp ("walpe-sigwl-XXXXXX", NULL);
     if (!dir) {
         fprintf (stderr, "sig-wl: no temporary directory\n");
         return 1;
+    }
+    if (!dir_fits (dir)) {
+        g_rmdir (dir);
+        g_free (dir);
+        dir = g_strdup ("/tmp/walpe-sigwl-XXXXXX");
+        if (!g_mkdtemp (dir)) {
+            printf ("sig-wl: skipped: the temporary directory's path is too long for a socket and no "
+                    "directory can be made in /tmp\n");
+            g_free (dir);
+            return 77;
+        }
     }
     g_setenv ("XDG_RUNTIME_DIR", dir, TRUE);
     g_setenv ("WALPE_LOGIND", "0", TRUE);
     S.wake_fd = eventfd (0, EFD_CLOEXEC | EFD_NONBLOCK);
     S.calls = g_async_queue_new ();
 
-    scenario_a ();
-    scenario_b ();
-    scenario_c ();
-    scenario_d ();
-    scenario_e (dir);
+    if (start_only) {
+        scenario_start_only ();
+    } else {
+        scenario_a ();
+        scenario_b ();
+        scenario_c ();
+        scenario_d ();
+        scenario_e (dir);
+        char *self = g_file_read_link ("/proc/self/exe", NULL);
+        scenario_f (self ? self : argv[0], dir);
+        g_free (self);
+    }
 
     /* the sockets and their lock files */
     for (int i = 0; i < srv_serial; i++) {
@@ -886,6 +1003,6 @@ int main (void)
         fprintf (stderr, "sig-wl: %d check(s) failed\n", stub_fails);
         return 1;
     }
-    printf ("sig-wl: ok\n");
+    printf (start_only ? "sig-wl: start ok\n" : "sig-wl: ok\n");
     return 0;
 }

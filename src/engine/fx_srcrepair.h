@@ -170,7 +170,9 @@ typedef struct {
  * varying declarations in each stage - one shader file may be that large -
  * took 20 s of stage 1 in an optimised build, and the 4 MiB a shader may
  * have with its includes took minutes, for every pass that uses the
- * shader, on the render thread. At the limit it is about a second. */
+ * shader, on the render thread. At the limit it is about a second.
+ * On an OpenGL ES context such a source is not compiled at all: see
+ * fx_prepass (). */
 #define FX_MAX_REPAIR_SOURCE (256 * 1024)
 
 static gboolean fx_repairable (const char *src)
@@ -2692,14 +2694,30 @@ static void fx_prepass_essl (char **vsrc, char **fsrc, const char *name)
                  name, ev + ef, fx_essl (), ev, ef);
 }
 
-static void fx_prepass (char **vsrc, char **fsrc, const char *name)
+/* FALSE: the pass is not to be compiled (the reason has been printed). */
+static gboolean fx_prepass (char **vsrc, char **fsrc, const char *name)
 {
     if (fx_env_on ("WALPE_FX_NO_PREPASS"))
-        return;
+        return TRUE;
     if (!fx_repairable (*vsrc) || !fx_repairable (*fsrc)) {
+        if (fx_essl ()) {
+            /* GLSL 3.30 takes a body as Wallpaper Engine wrote it; GLSL ES
+             * takes it only after the rewriting of fx_essl.h, and that
+             * walks the same symbol lists as the repairs, once per name a
+             * statement uses: one fragment source of names declared and
+             * used took 2 s at 1 MiB, 10 s at 2 MiB and 36 s at 4 MiB in
+             * an optimised build - the work the limit is there to keep
+             * off the render thread. A body that is not rewritten is no
+             * GLSL ES, so the pass is left out here instead of handing
+             * megabytes of it to the compiler. */
+            g_warning ("fx: shader %s: a source of more than %d KiB is not compiled on OpenGL ES "
+                       "(no HLSL-semantics repairs, no GLSL ES rewriting)", name,
+                       FX_MAX_REPAIR_SOURCE / 1024);
+            return FALSE;
+        }
         g_message ("fx: shader %s: a source of more than %d KiB is compiled as written (no "
                    "HLSL-semantics repairs)", name, FX_MAX_REPAIR_SOURCE / 1024);
-        return;
+        return TRUE;
     }
     /* the pair of texts decides everything below (the name is only
      * printed): while a scene load keeps a memo, the second pass with
@@ -2721,7 +2739,7 @@ static void fx_prepass (char **vsrc, char **fsrc, const char *name)
             fx_prepass_said (name, k->nv, k->nf, k->vary);
             g_atomic_int_inc (&fx_memo_reused);
             fx_prepass_essl (vsrc, fsrc, name);
-            return;
+            return TRUE;
         }
         fx_said_tape = g_ptr_array_new_with_free_func (fx_said_free);
     }
@@ -2741,6 +2759,7 @@ static void fx_prepass (char **vsrc, char **fsrc, const char *name)
     }
     fx_prepass_said (name, nv, nf, vary);
     fx_prepass_essl (vsrc, fsrc, name);
+    return TRUE;
 }
 
 /* ------------------------------------------- stage 2: error-driven fallback */

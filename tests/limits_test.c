@@ -512,6 +512,30 @@ static void test_art (void)
         g_byte_array_unref (pj);
     }
 
+    /* cover art in a format that is not a cover's (the decoder is chosen
+     * by the first bytes, whatever the name or the data: URL says) is not
+     * decoded: SVG, XPM, PNM */
+    {
+        static const char *const other[] = {
+            "<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" "
+            "height=\"36\"><rect width=\"64\" height=\"36\" fill=\"red\"/></svg>\n",
+            "/* XPM */\nstatic char *x[] = {\n\"2 2 1 1\",\n\". c #FF0000\",\n\"..\",\n\"..\"\n};\n",
+            "P3\n2 2\n255\n255 0 0 255 0 0 255 0 0 255 0 0\n",
+        };
+        for (guint i = 0; i < G_N_ELEMENTS (other); i++) {
+            char *f = P ("cover-other.png");
+            CHECK (g_file_set_contents (f, other[i], -1, NULL));
+            CHECK (!walpe_media_art_probe (f, &w, &h, &n, &bytes));
+            char *b64 = g_base64_encode ((const guchar *) other[i], strlen (other[i]));
+            char *du = g_strconcat ("data:image/png;base64,", b64, NULL);
+            CHECK (!walpe_media_art_probe (du, &w, &h, &n, &bytes));
+            g_free (du);
+            g_free (b64);
+            g_unlink (f);
+            g_free (f);
+        }
+    }
+
     /* a cover whose file changed is not served from the cache */
     copy_over (c3, c1);
     struct stat st;

@@ -78,6 +78,10 @@ int walpe_weparticles_sys_count (WalpeWeParticles *p, int sys);
 /* alpha the i-th live particle of that system is drawn with after its
  * operators (fades, oscillation); -1 = none */
 float walpe_weparticles_sys_alpha (WalpeWeParticles *p, int sys, int i);
+/* ropetrail systems: the history points of the i-th live particle of that
+ * system (0 = none yet, -1 = no such particle, or no ropetrail) and the
+ * place of the oldest one */
+int walpe_weparticles_sys_trail (WalpeWeParticles *p, int sys, int i, float oldest[3]);
 
 /* sys = parsed particle json object; dir = project dir (textures, child
  * systems); we_assets = WE install assets dir or NULL. No GL. NULL when

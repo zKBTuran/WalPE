@@ -22,7 +22,13 @@
  *    the same verdict whatever times its first draws happen at, and sees
  *    a difference that only shows later in the effect's cycle;
  * 5. constant values written with commas ("0.0, 1.0": annotation defaults
- *    of workshop shaders) are read as the vectors they are.
+ *    of workshop shaders) are read as the vectors they are;
+ * 6. the layer's own colour / opacity pass and the pool: the copy it draws
+ *    sits in a lent target, which a later effect of the same layer can be
+ *    lent again for its output. The run still hands back the effects'
+ *    result, and the same picture whatever the pool held before (targets
+ *    recycled, freed after their idle time, made under other names, full
+ *    of another layer's pixels).
  *
  * The engine file is included so the static functions are reachable. */
 #include "../src/engine/scenenode_effects.c"
@@ -915,6 +921,156 @@ static void post_level_checks (GLuint in)
         fx_free_for_object (fade);
 }
 
+/* ---- 6. the layer's own colour / opacity pass and the pool */
+
+static GLuint tex_of (const guint8 *px)
+{
+    GLuint t = 0;
+    glGenTextures (1, &t);
+    glBindTexture (GL_TEXTURE_2D, t);
+    glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    return t;
+}
+
+/* every target the pool holds, filled with a colour no effect here makes */
+static void pool_fill (float r, float g, float b, float a)
+{
+    GLint fb = 0;
+    glGetIntegerv (GL_DRAW_FRAMEBUFFER_BINDING, &fb);
+    glDisable (GL_SCISSOR_TEST);
+    for (guint i = 0; fx_pool && i < fx_pool->len; i++) {
+        FxPoolRt *e = &g_array_index (fx_pool, FxPoolRt, i);
+        if (!e->tex)
+            continue;
+        glBindFramebuffer (GL_FRAMEBUFFER, e->fbo);
+        glClearColor (r, g, b, a);
+        glClear (GL_COLOR_BUFFER_BIT);
+    }
+    glBindFramebuffer (GL_FRAMEBUFFER, (GLuint) fb);
+}
+
+static void layer_look (struct FxSet *set)
+{
+    static const float tint[3] = { 0.5f, 1.0f, 0.75f };
+    fx_set_input_tint (set, tint);
+    fx_set_input_alpha (set, 0.65f);
+}
+
+/* `first` with the layer's colour and opacity, then `second` on what that
+ * gave, each as a set of its own (8-bit in between): what the two effects
+ * of one layer have to show, within rounding */
+static void two_step (const char *first, const char *second, GLuint in, double t, gboolean in_static,
+                      guint8 *out)
+{
+    static guint8 mid[NPX];
+    struct FxSet *s1 = build_set (first, FALSE), *s2 = build_set (second, FALSE);
+    layer_look (s1);
+    frame_of (s1, in, t, 1, 1, FALSE, in_static, mid, NULL, NULL);
+    GLuint m = tex_of (mid);
+    frame_of (s2, m, t, 1, 1, FALSE, FALSE, out, NULL, NULL);
+    glDeleteTextures (1, &m);
+    fx_free_for_object (s1);
+    fx_free_for_object (s2);
+}
+
+static void tint_pool_checks (GLuint in)
+{
+    static guint8 a[NPX], b[NPX], ref[NPX], src[NPX];
+    char *d;
+    /* the default programs: what a wallpaper runs with */
+    const int spec = g_atomic_int_get (&fxs_spec_on);
+    g_atomic_int_set (&fxs_spec_on, 0);
+    read_tex (in, src);
+    fx_targets_release ();
+
+    /* a static effect and an animated one behind it, over a picture that
+     * stands still: the static one keeps its result in a target of its
+     * own, the animated one is lent the target the tinted copy was in */
+    const char *g1 = "[" FXC ("gain", "\"gain\":0.6") "]", *p1 = "[" FX ("pu") "]";
+    const char *gp = "[" FXC ("gain", "\"gain\":0.6") "," FX ("pu") "]";
+    struct FxSet *set = build_set (gp, FALSE);
+    layer_look (set);
+    two_step (g1, p1, in, 1 / 30.0, TRUE, ref);
+    fx_targets_release ();
+    GLuint o = frame_of (set, in, 1 / 30.0, 1, 1, FALSE, TRUE, a, NULL, NULL);
+    d = g_strdup_printf ("max difference to the two effects one after the other: %d, to the layer's picture: %d",
+                         max_diff (a, ref), max_diff (a, src));
+    result (o != in && max_diff (a, ref) <= 2,
+            "colour + opacity, a static and an animated effect: the first frame shows the effects' result", d);
+    g_free (d);
+    two_step (g1, p1, in, 2 / 30.0, TRUE, ref);
+    o = frame_of (set, in, 2 / 30.0, 2, 1, FALSE, TRUE, a, NULL, NULL);
+    d = g_strdup_printf ("max difference %d", max_diff (a, ref));
+    result (o != in && max_diff (a, ref) <= 2, "... and so does the next one, drawn behind the kept static part", d);
+    g_free (d);
+    /* the same frame again, with the pool as an idle time or a pause
+     * leaves it: empty, so that every lent target is a new one */
+    fx_targets_release ();
+    o = frame_of (set, in, 2 / 30.0, 2, 1, FALSE, TRUE, b, NULL, NULL);
+    d = g_strdup_printf ("max difference %d", max_diff (a, b));
+    result (o != in && max_diff (a, b) == 0, "the frame is the same after the pool was emptied", d);
+    g_free (d);
+    /* ... with new targets that get other names than the old ones had */
+    fx_targets_release ();
+    GLuint names[8];
+    glGenTextures (8, names);
+    for (int i = 0; i < 8; i++)
+        glBindTexture (GL_TEXTURE_2D, names[i]);
+    o = frame_of (set, in, 2 / 30.0, 2, 1, FALSE, TRUE, b, NULL, NULL);
+    glDeleteTextures (8, names);
+    d = g_strdup_printf ("max difference %d", max_diff (a, b));
+    result (o != in && max_diff (a, b) == 0, "... and when the new targets have other texture names", d);
+    g_free (d);
+    /* ... and with recycled targets that hold another picture */
+    pool_fill (1.0f, 0.0f, 1.0f, 0.37f);
+    o = frame_of (set, in, 2 / 30.0, 2, 1, FALSE, TRUE, b, NULL, NULL);
+    d = g_strdup_printf ("max difference %d", max_diff (a, b));
+    result (o != in && max_diff (a, b) == 0, "... and when the recycled targets hold other pixels", d);
+    g_free (d);
+    fx_free_for_object (set);
+
+    /* two animated effects over a picture that changes (a video layer):
+     * nothing is kept, the second effect's output is lent the target of
+     * the tinted copy in every frame */
+    const char *p2 = "[" FXC ("pu", "\"amp\":0.2") "]";
+    const char *pp = "[" FX ("pu") "," FXC ("pu", "\"amp\":0.2") "]";
+    set = build_set (pp, FALSE);
+    layer_look (set);
+    gboolean ok = TRUE;
+    int worst = 0;
+    for (guint f = 1; f <= 3; f++) {
+        two_step (p1, p2, in, f / 3.0, FALSE, ref);
+        if (f == 2)
+            fx_targets_release ();
+        if (f == 3)
+            pool_fill (0.0f, 1.0f, 0.0f, 1.0f);
+        o = frame_of (set, in, f / 3.0, f, 1, FALSE, FALSE, a, NULL, NULL);
+        ok &= o != in;
+        worst = MAX (worst, max_diff (a, ref));
+    }
+    d = g_strdup_printf ("max difference to the two effects one after the other: %d", worst);
+    result (ok && worst <= 2,
+            "colour + opacity, two animated effects over a changing picture: every frame shows the effects' result", d);
+    g_free (d);
+    fx_free_for_object (set);
+
+    /* no effect of the layer draws: the run hands the layer's picture
+     * back and the caller applies colour and opacity, as before */
+    set = build_set (gp, FALSE);
+    layer_look (set);
+    fx_set_enabled (set, 0, FALSE);
+    fx_set_enabled (set, 1, FALSE);
+    o = frame_of (set, in, 1 / 30.0, 1, 1, FALSE, TRUE, NULL, NULL, NULL);
+    result (o == in, "both effects switched off: the run hands back the layer's own picture", NULL);
+    fx_free_for_object (set);
+    fx_targets_release ();
+    g_atomic_int_set (&fxs_spec_on, spec);
+}
+
 static void rm_rf (const char *path)
 {
     GDir *dir = g_dir_open (path, 0, NULL);
@@ -986,6 +1142,7 @@ static gboolean gl_run (EGLDisplay dpy)
     constant_checks (in);
     post_level_checks (in);
     g_atomic_int_set (&fxs_quality, 0);
+    tint_pool_checks (in);
     glDeleteTextures (1, &in);
     fx_targets_release ();
     gint64 tb = 0;

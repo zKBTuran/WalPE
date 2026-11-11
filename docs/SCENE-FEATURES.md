@@ -20,7 +20,7 @@ size instead of at most 2048 pixels, on purpose, and are sharper than in 0.12.1
 | `parallax_offset` | **off** | such layers are also displaced while the pointer rests | next frame |
 | `script_camera` | on | scripts move and zoom the view | next frame |
 | `sprite_sheets` | on | animated (sprite sheet) pictures of image layers play | the wallpaper is loaded again |
-| `script_texanim` | on | scripts drive those animations | next frame |
+| `script_texanim` | on | scripts drive those animations | the wallpaper is loaded again |
 | `bloom` | on | scenes that ask for bloom get a glow around bright parts | at once |
 | `camera_shake` | on | scenes that ask for camera shake sway | at once |
 | `fluid_sim` | on | Wallpaper Engine's Fluid Simulation effect runs | at once |

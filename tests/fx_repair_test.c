@@ -415,7 +415,7 @@ static void apply_fx (const float off[2], const float sc[2], float ang, float x,
 
 static EffectChain *xf_chain (float ox, float oy, float sx, float sy, float ang)
 {
-    EffectChain *ch = g_new0 (EffectChain, 1);
+    EffectChain *ch = fx_chain_new (1);
     EffPass *p = &ch->passes[0];
     ch->n_passes = 1;
     ch->enabled = TRUE;
@@ -568,7 +568,7 @@ static void gl_transform_check (void)
         XF_BODY (""));
     char *fs = g_strdup (FS_HEAD "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
                          "void main() {\n    gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n}\n");
-    EffectChain *ch = g_new0 (EffectChain, 1);
+    EffectChain *ch = fx_chain_new (1);
     EffPass *p = &ch->passes[0];
     ch->n_passes = 1;
     ch->enabled = TRUE;
@@ -656,7 +656,7 @@ static EffectChain *target_test_chain (const char *fbody, gboolean partial)
                          "    gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
                          "    v_TexCoord = a_TexCoord;\n}\n");
     char *fs = g_strconcat (FS_HEAD, fbody, NULL);
-    EffectChain *ch = g_new0 (EffectChain, 1);
+    EffectChain *ch = fx_chain_new (1);
     EffPass *p = &ch->passes[0];
     ch->n_passes = 1;
     ch->enabled = TRUE;
@@ -1695,6 +1695,40 @@ static void memo_checks (void)
     g_log_set_default_handler (old, NULL);
 }
 
+/* ---- a chain is allocated with the passes it has (fx_chain_new): it
+ * used to carry room for FX_MAX_PASSES whatever it used */
+static void chain_size_checks (void)
+{
+    gsize one = sizeof (EffectChain) + sizeof (EffPass);
+    result (sizeof (EffectChain) < 4 * sizeof (EffPass),
+            "chain: the chain itself holds no pass", NULL);
+    for (guint n = 1; n <= FX_MAX_PASSES; n += n < 4 ? 1 : 14) {
+        EffectChain *c = fx_chain_new (n);
+        gsize want = sizeof (EffectChain) + n * sizeof (EffPass);
+        gboolean zero = TRUE;
+        for (gsize i = 0; i < want; i++)
+            zero &= ((const guint8 *) c)[i] == 0;
+        /* every pass can be written and read back, the last one too */
+        for (guint k = 0; k < n; k++)
+            memset (&c->passes[k], (int) (k + 1), sizeof (EffPass));
+        gboolean kept = TRUE;
+        for (guint k = 0; k < n; k++)
+            kept &= ((const guint8 *) &c->passes[k])[sizeof (EffPass) - 1] == (guint8) (k + 1);
+        char *what = g_strdup_printf ("chain: %u pass(es): %" G_GSIZE_FORMAT " bytes, all zero, "
+                                      "every pass its own", n, want);
+        result (zero && kept && c->n_passes == 0 && want == one + (n - 1) * sizeof (EffPass), what, NULL);
+        g_free (what);
+        g_free (c);
+    }
+    /* out of range: one pass at least, never more than the limit */
+    EffectChain *lo = fx_chain_new (0), *hi = fx_chain_new (1000000);
+    memset (&lo->passes[0], 1, sizeof (EffPass));
+    memset (&hi->passes[FX_MAX_PASSES - 1], 1, sizeof (EffPass));
+    result (lo && hi, "chain: a count of 0 or far too many is brought into 1..FX_MAX_PASSES", NULL);
+    g_free (lo);
+    g_free (hi);
+}
+
 int main (int argc, char **argv)
 {
     if (argc > 2 && !strcmp (argv[1], "--changes"))
@@ -1705,6 +1739,7 @@ int main (int argc, char **argv)
     fallback_checks ();
     varying_checks ();
     memo_checks ();
+    chain_size_checks ();
     transform_checks ();
     gl_checks (argc > 1 ? argv[1] : NULL);
     printf ("%s (%d check(s), %d failure(s))\n", fails ? "FAILED" : "PASSED", checks, fails);

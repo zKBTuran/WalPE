@@ -5308,9 +5308,15 @@ static gboolean scenenode_gl_render (WalpeContent *c, int w, int h, float px, fl
     {
         /* solid layers: the cap of their effects' working size follows the
          * render size once that is wider than the built-in cap
-         * (solid_fx_size). With a render size of up to 2048 pixels on its
-         * longer side nothing in here ever runs. */
-        const int cap = MAX (SOLID_FX_CAP, MAX (win_w, win_h));
+         * (solid_fx_size) - when a render size was chosen for this picture
+         * (content.h render_w / render_h). At the output's own size, which
+         * is what every monitor has until its user chooses another, the cap
+         * stays the built-in one: the sizes, the picture and the cost of
+         * such a layer are then the ones they always were, also on an
+         * output wider than 2048 pixels. With a render size of up to 2048
+         * pixels on its longer side nothing in here ever runs. */
+        const int cap = c->render_w > 0 && c->render_h > 0
+                            ? MAX (SOLID_FX_CAP, MAX (win_w, win_h)) : SOLID_FX_CAP;
         if (cap != (s->solid_cap ? s->solid_cap : SOLID_FX_CAP)) {
             s->solid_cap = cap;
             for (guint i = 0; i < s->nodes->len; i++) {

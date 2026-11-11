@@ -276,7 +276,7 @@ static void test_plan (void)
     const FxClipNeed r = { FXN_RECT, 1, { { 0.25f, 0.25f, 0.5f, 0.5f } } };
     /* one pass with a displaced lookup of the input: the pass fills the
      * rectangle, the input is needed whole */
-    EffectChain *ch = g_new0 (EffectChain, 1);
+    EffectChain *ch = fx_chain_new (1);
     ch->n_passes = 1;
     pass_reads (&ch->passes[0], 0);
     FxClipNeed in = fx_chain_plan (ch, r, 400, 200);
@@ -341,7 +341,7 @@ static void test_plan (void)
      * (taps: displaced), combine A + the effect input (both local).
      * Only the combine pass can be cut; the blurred target it reads is
      * needed around the rectangle, and blur y needs all of B. */
-    ch = g_new0 (EffectChain, 1);
+    ch = fx_chain_new (4);
     ch->n_passes = 4;
     ch->n_targets = 2;
     strcpy (ch->targets[0].name, "A");
@@ -377,7 +377,7 @@ static void test_plan (void)
     g_free (ch);
 
     /* a target nothing reads afterwards is not drawn */
-    ch = g_new0 (EffectChain, 1);
+    ch = fx_chain_new (2);
     ch->n_passes = 2;
     ch->n_targets = 1;
     strcpy (ch->targets[0].name, "T");

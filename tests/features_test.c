@@ -58,8 +58,8 @@ static void test_registry (void)
     CHECK (walpe_feature (WALPE_FEAT_CAMERA_SHAKE));
     /* decided when a scene loads */
     CHECK (walpe_feature_reloads (WALPE_FEAT_SPRITE_SHEETS) && walpe_feature_reloads (WALPE_FEAT_CAMERA_PARALLAX));
-    CHECK (!walpe_feature_reloads (WALPE_FEAT_PARALLAX_OFFSET) && !walpe_feature_reloads (WALPE_FEAT_SCRIPT_TEXANIM) &&
-           !walpe_feature_reloads (WALPE_FEAT_SCRIPT_CAMERA));
+    CHECK (walpe_feature_reloads (WALPE_FEAT_SCRIPT_TEXANIM));
+    CHECK (!walpe_feature_reloads (WALPE_FEAT_PARALLAX_OFFSET) && !walpe_feature_reloads (WALPE_FEAT_SCRIPT_CAMERA));
 
     guint s0 = walpe_feature_serial ();
     CHECK (walpe_feature_set ("sprite_sheets", FALSE) && !walpe_feature (WALPE_FEAT_SPRITE_SHEETS));

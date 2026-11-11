@@ -16,7 +16,8 @@
  *   7. frames of no length (the first frame of a scene, a frame drawn while
  *      the scene is paused) change nothing, bit for bit;
  *   8. two systems stepped in turns do not see each other (same numbers as
- *      alone, bit for bit), and a second run repeats the first.
+ *      alone, bit for bit), and a second run repeats the first;
+ *   9. a ropetrail's tail is `length` seconds long.
  * Forces (gravity, drag, turbulence, control points) are integrated with
  * one explicit step per frame and are not part of this test.
  *
@@ -390,6 +391,35 @@ int main (void)
         walpe_weparticles_free (d);
         walpe_weparticles_free (other);
         g_free (j);
+    }
+
+    /* --- 9. a ropetrail is `length` seconds long at every frame rate ---
+     * one particle at 100 units a second, a trail of 0.2 s in 24 points
+     * (8.3 ms apart: a 60 Hz frame is two of them, a 30 Hz frame four) */
+    for (guint k = 0; k < G_N_ELEMENTS (patterns); k++) {
+        JsonNode *n = wpj_parse_data (
+            "{ \"emitter\": [ { \"name\": \"boxrandom\", \"id\": 1, \"distancemax\": \"0 0 0\", \"rate\": 0,"
+            "                   \"instantaneous\": 1 } ],"
+            "  \"initializer\": [ { \"name\": \"lifetimerandom\", \"id\": 2, \"min\": 50, \"max\": 50 },"
+            "                     { \"name\": \"velocityrandom\", \"id\": 3, \"min\": \"100 0 0\", \"max\": \"100 0 0\" } ],"
+            "  \"operator\": [ { \"name\": \"movement\", \"id\": 4 } ],"
+            "  \"renderer\": [ { \"name\": \"ropetrail\", \"id\": 5, \"length\": 0.2, \"segments\": 24 } ],"
+            "  \"maxcount\": 4 }", -1);
+        seed_n = 0;
+        WalpeWeParticles *p = n ? walpe_weparticles_new (json_node_get_object (n), tmpdir, NULL, NULL) : NULL;
+        if (n)
+            json_node_unref (n);
+        if (!p)
+            continue;
+        advance (p, &patterns[k], T, NULL);
+        float pos[3], vel[3], age, old[3] = { 0, 0, 0 };
+        int pts = walpe_weparticles_sys_trail (p, 0, 0, old);
+        gboolean have = walpe_weparticles_sys_peek (p, 0, 0, pos, vel, &age);
+        float span = have ? (pos[0] - old[0]) / 100.0f : -1.0f;   /* seconds from the particle to the tail's end */
+        CHECK (have && pts == 24 && span > 0.2f - 0.2f / 24.0f - 0.012f && span < 0.2f + 0.012f,
+               "ropetrail of 0.2 s, %s: %d points, the tail ends where the particle was %.3f s ago", patterns[k].name,
+               pts, (double) span);
+        walpe_weparticles_free (p);
     }
 
     /* the temp dir */

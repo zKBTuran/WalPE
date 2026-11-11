@@ -78,6 +78,8 @@ static GLuint image_upload (GdkPixbuf *pb, gboolean *premult)
     return tex;
 }
 
+static gboolean picture_format_ok (GdkPixbufFormat *fmt, const char *path, GError **err);
+
 /* a picture of w x h pixels (as its file declares) is within the limits
  * of image.h; else FALSE with err set */
 static gboolean picture_dims_ok (int w, int h, GError **err)
@@ -98,11 +100,12 @@ static gboolean picture_dims_ok (int w, int h, GError **err)
 static ImageTex *image_tex_load (const char *path, int side, GError **error)
 {
     int fw = 0, fh = 0;
-    gboolean pixbuf_format = gdk_pixbuf_get_file_info (path, &fw, &fh) != NULL;
+    GdkPixbufFormat *fmt = gdk_pixbuf_get_file_info (path, &fw, &fh);
+    gboolean pixbuf_format = fmt != NULL;
     /* the declared size, not `side`: see the top of the file. Checked
      * here, before each decode - the file may have been replaced since
-     * walpe_image_new looked at it. */
-    if (pixbuf_format && !picture_dims_ok (fw, fh, error))
+     * walpe_image_new looked at it. The format likewise. */
+    if (pixbuf_format && (!picture_format_ok (fmt, path, error) || !picture_dims_ok (fw, fh, error)))
         return NULL;
     ImageTex *it = g_new0 (ImageTex, 1);
     if (!pixbuf_format) {
@@ -280,11 +283,13 @@ static gboolean image_gl_init (WalpeContent *c, GError **err)
 {
     ImageContent *s = (ImageContent *) c;
     int fw = 0, fh = 0;
-    s->scalable = gdk_pixbuf_get_file_info (s->base.path, &fw, &fh) != NULL;
-    /* too large by its header: refused here, before any GL call and
-     * before anything is decoded (walpe_image_new checked the file as it
-     * was when the wallpaper was chosen) */
-    if (s->scalable && !picture_dims_ok (fw, fh, err))
+    GdkPixbufFormat *fmt = gdk_pixbuf_get_file_info (s->base.path, &fw, &fh);
+    s->scalable = fmt != NULL;
+    /* too large by its header (or another kind of file now): refused
+     * here, before any GL call and before anything is decoded
+     * (walpe_image_new checked the file as it was when the wallpaper was
+     * chosen) */
+    if (s->scalable && (!picture_format_ok (fmt, s->base.path, err) || !picture_dims_ok (fw, fh, err)))
         return FALSE;
     s->img_w = fw;
     s->img_h = fh;
@@ -369,12 +374,32 @@ static void image_free (WalpeContent *c)
     g_free (c);
 }
 
+/* The picture formats a picture or GIF wallpaper is decoded as. gdk-pixbuf
+ * picks its decoder from the file's bytes, whatever the name says: a
+ * "photo.png" that is an SVG document went to librsvg, a ".gif" that is
+ * XPM text to that decoder, and so on for every loader the system has
+ * (Windows icons and cursors, PNM, QuickTime pictures ...). */
+static gboolean picture_format_ok (GdkPixbufFormat *fmt, const char *path, GError **err)
+{
+    static const char *const ok[] = { "png", "jpeg", "gif", "bmp", "tiff", "webp", "tga", "avif",
+                                      "heif/avif", "jxl", NULL };
+    char *name = gdk_pixbuf_format_get_name (fmt);
+    gboolean found = name && g_strv_contains (ok, name);
+    if (!found)
+        g_set_error (err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                     "%s is a %s file, not a picture format a wallpaper can be", path,
+                     name ? name : "?");
+    g_free (name);
+    return found;
+}
+
 gboolean walpe_picture_size_ok (const char *path, GError **err)
 {
     int w = 0, h = 0;
-    if (!gdk_pixbuf_get_file_info (path, &w, &h))
+    GdkPixbufFormat *fmt = gdk_pixbuf_get_file_info (path, &w, &h);
+    if (!fmt)
         return TRUE;    /* not a gdk-pixbuf format: its own loader decides */
-    return picture_dims_ok (w, h, err);
+    return picture_format_ok (fmt, path, err) && picture_dims_ok (w, h, err);
 }
 
 WalpeContent *walpe_image_new (const char *path, GError **err)

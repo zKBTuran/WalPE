@@ -512,28 +512,39 @@ static void art_job_free (ArtJob *j)
         g_atomic_int_add (&art_decodes_alive, -1);
 }
 
-/* decode at most ~THUMB_MAX: a small compressed file (a player's art URL,
- * e.g. a web page's MediaSession artwork) can declare 30000x30000 px and
- * would otherwise be decoded at full size (GBs) before the scale-down */
-static void art_size_prepared (GdkPixbufLoader *ld, int w, int h, gpointer user)
+/* Cover art goes to the decoder of the format its own first bytes name,
+ * and only JPEG, PNG, GIF, WebP or BMP (util.h, walpe_picture_decode): the
+ * bytes are a file a D-Bus peer names or whatever a server sent for the
+ * URL it names, and gdk-pixbuf left to choose runs any loader the system
+ * has on them - SVG (librsvg), ANI / ICO, XPM, PNM, TGA, QTIF, ICNS ...
+ *
+ * Decoded at most ~THUMB_MAX: a small compressed file (a player's art
+ * URL, e.g. a web page's MediaSession artwork) can declare 30000x30000 px
+ * and would otherwise be decoded at full size (GBs) before the scale-down.
+ * The size asked for is honoured by the JPEG loader only: PNG (and others)
+ * decode at full size first - a 31 KB PNG of 16000x16000 cost 750 MB.
+ * Cover art beyond ART_MAX_SIDE is refused before any pixel exists. */
+static const char *const art_kinds[] = { "jpeg", "png", "gif", "webp", "bmp", NULL };
+
+typedef struct { gboolean too_big; int w, h; } ArtSize;
+
+static gboolean art_size (const char *kind, int w, int h, int *sw, int *sh, gpointer user)
 {
-    int *too_big = user;       /* [0] = refused, [1] x [2] = its size */
+    (void) kind;
+    ArtSize *as = user;
     int lim = THUMB_MAX * 2;   /* headroom: the precise scale happens below */
-    /* set_size is honoured by the JPEG loader only: PNG (and others)
-     * decode at full size first - a 31 KB PNG of 16000x16000 cost 750 MB.
-     * Cover art beyond ART_MAX_SIDE is refused before any pixel exists:
-     * size 0x0 makes the loaders stop with an error instead of allocating. */
     if (w > ART_MAX_SIDE || h > ART_MAX_SIDE) {
-        too_big[0] = TRUE;
-        too_big[1] = w;
-        too_big[2] = h;
-        gdk_pixbuf_loader_set_size (ld, 0, 0);
-        return;
+        as->too_big = TRUE;
+        as->w = w;
+        as->h = h;
+        return FALSE;
     }
     if (w > lim || h > lim) {
         double k = (double) lim / MAX (w, h);
-        gdk_pixbuf_loader_set_size (ld, MAX (1, (int) (w * k)), MAX (1, (int) (h * k)));
+        *sw = MAX (1, (int) (w * k));
+        *sh = MAX (1, (int) (h * k));
     }
+    return TRUE;
 }
 
 static void art_decode_thread (GTask *t, gpointer src, gpointer data, GCancellable *c)
@@ -558,41 +569,16 @@ static void art_decode_thread (GTask *t, gpointer src, gpointer data, GCancellab
                 g_mapped_file_unref (mf);
         }
     }
-    /* Only a JPEG with one scan is scaled while it is read (art_size_prepared).
-     * A progressive one, or one with a scan per component, is held whole
-     * by its decoder first, whatever size is asked for: 128 bytes per
-     * 8 x 8 block of every component (util.h). A few hundred bytes that
-     * declare 8192 x 8192 in four components - short enough for a data:
-     * URL - cost 512 MiB that way. Refused like a picture with
-     * too many pixels. */
-    gsize dlen = 0;
-    const guint8 *d = j->data ? g_bytes_get_data (j->data, &dlen) : NULL;
-    if (d && !g_strcmp0 (walpe_picture_kind (d, dlen), "jpeg") &&
-        walpe_jpeg_store_bytes (d, dlen) > WALPE_JPEG_STORE_MAX) {
-        g_set_error_literal (&err, G_IO_ERROR, G_IO_ERROR_FAILED,
-                             "a JPEG that has to be held whole to be decoded, and too large for that");
-    } else if (d && !walpe_gif_layout_ok (d, dlen, &err)) {
-        /* a GIF whose frames are not all inside its picture, or have no
-         * pixels (gifcheck.h; other data passes): not given to the decoder.
-         * err is set */
-    } else if (j->data) {
-        GdkPixbufLoader *ld = gdk_pixbuf_loader_new ();
-        int too_big[3] = { FALSE, 0, 0 };
-        g_signal_connect (ld, "size-prepared", G_CALLBACK (art_size_prepared), too_big);
-        if (gdk_pixbuf_loader_write_bytes (ld, j->data, &err) && gdk_pixbuf_loader_close (ld, &err) &&
-            !too_big[0]) {
-            pb = gdk_pixbuf_loader_get_pixbuf (ld);
-            if (pb)
-                g_object_ref (pb);
-        } else {
-            gdk_pixbuf_loader_close (ld, NULL);
-        }
-        g_object_unref (ld);
-        if (too_big[0]) {
+    if (j->data) {
+        gsize dlen = 0;
+        const guint8 *d = g_bytes_get_data (j->data, &dlen);
+        ArtSize as = { FALSE, 0, 0 };
+        pb = walpe_picture_decode (d, dlen, art_kinds, art_size, &as, &err);
+        if (as.too_big) {
             g_clear_error (&err);
             g_set_error (&err, G_IO_ERROR, G_IO_ERROR_FAILED,
                          "%dx%d px is more than the %d px per side accepted for cover art",
-                         too_big[1], too_big[2], ART_MAX_SIDE);
+                         as.w, as.h, ART_MAX_SIDE);
         }
     }
     if (!pb) {

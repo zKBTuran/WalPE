@@ -104,6 +104,7 @@ int main (int argc, char **argv)
             if (!walpe_res_parse (argv[++i], &r, &rerr) || r.kind != WALPE_RES_CUSTOM) {
                 fprintf (stderr, "sceneshot: --render needs WIDTHxHEIGHT%s%s\n", rerr ? ": " : "",
                          rerr ? rerr : "");
+                g_free (rerr);
                 return 1;
             }
             render_w = r.w;

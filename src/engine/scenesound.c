@@ -501,8 +501,8 @@ void walpe_sound_set_server_calls (const WalpeSoundServerCalls *calls)
     }
 }
 
-/* The server refused a connection: asked again a few times, one player at
- * a time, before the layer is left to play into nothing.
+/* One stream is opened at a time, and a connection the server refused is
+ * asked for again a few times before the layer is left to play into nothing.
  * Every player has a connection of its own, and the players of a scene ask
  * for theirs in the same instant: when the scene is loaded, and again after
  * every silence of more than LINGER_US (a pause, a covered monitor, mute).
@@ -514,22 +514,23 @@ void walpe_sound_set_server_calls (const WalpeSoundServerCalls *calls)
  * to 10 were refused in seven of the starts; of 12, 2 to 6 in four; of 8, 1
  * or 2 in three. A refused layer played into nothing for SERVER_RETRY_US:
  * five seconds of a scene without some of its sound, after every start.
- * The queue is empty again within milliseconds. The players that were
- * refused take turns here, so that their further attempts do not meet in
- * the queue as their first ones did: up to CONNECT_AGAIN of them, 10 ms
- * apart. A player waits for its turn for CONNECT_TURN_US at most and then
+ * So the players take turns: with one connection on its way at a time the
+ * queue never holds more than that one (the layers of a scene get their
+ * streams a few milliseconds apart instead of together). Should the server
+ * still refuse one (a queue full of other clients), that player asks
+ * again, in its turn: up to CONNECT_AGAIN times, 10 ms apart.
+ * A player waits for its turn for CONNECT_TURN_US at most and then
  * goes on as before (into nothing, asking again later): should the server
  * stop answering the one whose turn it is, nobody else waits behind it
  * without a limit. Turn and attempts together stay below the half second
  * by which a player on the null device may be late and still keep its
- * place in time (out_write). A connection that is not refused is not
- * touched by any of this. */
+ * place in time (out_write). */
 #define CONNECT_TURN_US (G_USEC_PER_SEC / 4)
 #define CONNECT_AGAIN 4
 #define CONNECT_AGAIN_US 10000
 static GMutex turn_lock;          /* (taken alone, by a player's thread, for a few instructions) */
 static GCond turn_cond;
-static gboolean turn_taken;       /* turn_lock: a refused player is asking the server again */
+static gboolean turn_taken;       /* turn_lock: a player is opening its stream */
 
 static gboolean connect_turn_take (void)
 {
@@ -552,18 +553,16 @@ static void connect_turn_give (void)
     g_mutex_unlock (&turn_lock);
 }
 
-/* (*e is PA_ERR_CONNECTIONREFUSED and stays that unless an attempt ends otherwise) */
-static pa_simple *connect_again (const pa_sample_spec *ss, const pa_buffer_attr *ba, const char *name, int *e)
+/* In the caller's turn. The first attempt, then while the server refuses
+ * up to CONNECT_AGAIN more, 10 ms apart. */
+static pa_simple *connect_turn_open (const pa_sample_spec *ss, const pa_buffer_attr *ba, const char *name,
+                                     int *e)
 {
-    pa_simple *pa = NULL;
-    if (!connect_turn_take ())
-        return NULL;
+    pa_simple *pa = Pas.new_stream (NULL, "walpe", PA_STREAM_PLAYBACK, env.sink, name, ss, NULL, ba, e);
     for (int i = 0; i < CONNECT_AGAIN && !pa && *e == PA_ERR_CONNECTIONREFUSED; i++) {
-        if (i)
-            g_usleep (CONNECT_AGAIN_US);
+        g_usleep (CONNECT_AGAIN_US);
         pa = Pas.new_stream (NULL, "walpe", PA_STREAM_PLAYBACK, env.sink, name, ss, NULL, ba, e);
     }
-    connect_turn_give ();
     return pa;
 }
 
@@ -579,10 +578,11 @@ static gboolean out_connect (Out *o, const char *name)
     int e = 0;
     const gboolean lib = pas_load ();
     const char *why = "libpulse-simple.so.0 could not be loaded";
-    if (lib) {
-        o->pa = Pas.new_stream (NULL, "walpe", PA_STREAM_PLAYBACK, env.sink, name, &ss, NULL, &ba, &e);
-        if (!o->pa && e == PA_ERR_CONNECTIONREFUSED)
-            o->pa = connect_again (&ss, &ba, name, &e);
+    if (lib && !connect_turn_take ()) {
+        why = "the sound server is still busy with another stream";
+    } else if (lib) {
+        o->pa = connect_turn_open (&ss, &ba, name, &e);
+        connect_turn_give ();
         why = pa_strerror (e);
     }
     if (!o->pa)

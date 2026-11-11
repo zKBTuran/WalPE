@@ -6,18 +6,15 @@
  * (engine/scenesound_server.h) before the first stream is opened.
  *
  *  1. The players of a scene start together, each with a connection of its
- *     own. A server takes connections from a short queue and refuses what
- *     does not fit: a refused player asks again at once, and all of them
- *     are heard - not only those that came first, with the others silent
- *     until the next attempt five seconds later.
- *  2. A server that stops answering while a refused player asks again
- *     holds that one player. The others do not wait behind it without a
- *     limit: they play into nothing, and their group can be freed. */
+ *     own. A server takes connections from a short queue, and what does
+ *     not fit is refused: streams are opened one at a time.
+ *  2. A server that does not answer the stream being opened holds that one
+ *     player. The others do not wait behind it without a limit: they play
+ *     into nothing, as after a refusal, and their group can be freed. */
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <stdio.h>
 #include <string.h>
-#include <pulse/def.h>
 #include "engine/scenesound.h"
 #include "engine/scenesound_server.h"
 
@@ -26,42 +23,39 @@ static int fails;
 /* waits up to ms milliseconds for cond */
 #define WAIT(cond, ms) do { for (int w_ = 0; w_ < (ms) && !(cond); w_++) g_usleep (1000); } while (0)
 
-/* ---- the stand-in server ----
- * Its queue has room for QUEUE players: the first call of every further
- * thread is refused, as a connect () is that finds the queue full. A call
- * that follows a refusal is taken. */
-enum { QUEUE = 5 };
+/* ---- the stand-in server ---- */
 typedef struct { guint bytes_per_s; } Stream;
-static GPrivate seen;        /* this thread has called before */
-static gint callers;         /* threads that have called */
-static gint refused;         /* calls that were refused */
+static gint inside;          /* calls of new_stream that have not returned */
+static gint most_inside;     /* the largest number of them at one time */
 static gint opened, closed;
-static gint hang;            /* 1: the next call after a refusal does not return until this is 0 again */
-static gint hanging;         /* such a call is held */
+static gint hang;            /* 1: the next new_stream does not return until this is 0 again */
+static gint hanging;         /* a new_stream is held */
 
 static pa_simple *srv_new (const char *server, const char *app, pa_stream_direction_t dir, const char *device,
                            const char *stream, const pa_sample_spec *spec, const pa_channel_map *map,
                            const pa_buffer_attr *attr, int *error)
 {
     (void) server; (void) app; (void) dir; (void) device; (void) stream; (void) map; (void) attr;
-    if (!g_private_get (&seen)) {
-        g_private_set (&seen, &seen);
-        if (g_atomic_int_add (&callers, 1) >= QUEUE) {
-            g_atomic_int_inc (&refused);
-            *error = PA_ERR_CONNECTIONREFUSED;
-            return NULL;
-        }
-    } else if (g_atomic_int_compare_and_exchange (&hang, 1, 2)) {
+    const gint now = g_atomic_int_add (&inside, 1) + 1;
+    for (;;) {
+        const gint most = g_atomic_int_get (&most_inside);
+        if (now <= most || g_atomic_int_compare_and_exchange (&most_inside, most, now))
+            break;
+    }
+    if (g_atomic_int_compare_and_exchange (&hang, 1, 2)) {
         g_atomic_int_set (&hanging, 1);
         while (g_atomic_int_get (&hang))
             g_usleep (1000);
         g_atomic_int_set (&hanging, 0);
+    } else {
+        g_usleep (3000);     /* the round trips of opening a stream */
     }
-    g_usleep (2000);         /* the round trips of opening a stream */
     Stream *st = g_new0 (Stream, 1);
     st->bytes_per_s = MAX (spec->rate * spec->channels * 2u, 1u);
     g_atomic_int_inc (&opened);
-    *error = 0;
+    g_atomic_int_add (&inside, -1);
+    if (error)
+        *error = 0;
     return (pa_simple *) st;
 }
 
@@ -139,7 +133,7 @@ static gboolean threads_gone (void)
 }
 
 /* ---- 1 ---- */
-static void test_refused_asks_again (const char *wav)
+static void test_one_at_a_time (const char *wav)
 {
     enum { N = WALPE_SOUND_MAX_STREAMS };
     WalpeSoundGroup *g = walpe_sound_group_new ("/w/server-a", 1);
@@ -147,14 +141,12 @@ static void test_refused_asks_again (const char *wav)
     for (int i = 0; i < N; i++)
         p[i] = player (g, wav);
     walpe_sound_group_set_active (g, TRUE);   /* all of them start now */
-    /* (three seconds: less than the five after which a layer that plays
-     * into nothing asks the server again) */
-    WAIT (g_atomic_int_get (&opened) == N, 3000);
-    CHECK (g_atomic_int_get (&refused) == N - QUEUE && g_atomic_int_get (&opened) == N,
-           "%d players start together, the server refuses %d of them at first: %d streams are open", N,
-           g_atomic_int_get (&refused), g_atomic_int_get (&opened));
+    WAIT (g_atomic_int_get (&opened) == N, 10000);
+    CHECK (g_atomic_int_get (&opened) == N, "%d players: %d streams were opened", N, g_atomic_int_get (&opened));
+    CHECK (g_atomic_int_get (&most_inside) == 1, "streams are opened one at a time: %d at once",
+           g_atomic_int_get (&most_inside));
     int sounding = 0;
-    for (int w = 0; w < 3000 && sounding < N; w++) {
+    for (int w = 0; w < 5000 && sounding < N; w++) {
         g_usleep (1000);
         sounding = 0;
         for (int i = 0; i < N; i++)
@@ -171,20 +163,18 @@ static void test_refused_asks_again (const char *wav)
 }
 
 /* ---- 2 ---- */
-static void test_server_stops_answering (const char *wav)
+static void test_server_does_not_answer (const char *wav)
 {
     enum { N = 4 };
-    const gint opened0 = g_atomic_int_get (&opened), refused0 = g_atomic_int_get (&refused);
+    const gint opened0 = g_atomic_int_get (&opened);
     g_atomic_int_set (&hang, 1);
-    /* (new threads: the queue is full for every one of them) */
     WalpeSoundGroup *g = walpe_sound_group_new ("/w/server-b", 1);
     WalpeSound *p[N];
     for (int i = 0; i < N; i++)
         p[i] = player (g, wav);
     walpe_sound_group_set_active (g, TRUE);
-    WAIT (g_atomic_int_get (&hanging) && g_atomic_int_get (&refused) == refused0 + N, 5000);
-    CHECK (g_atomic_int_get (&hanging) && g_atomic_int_get (&refused) == refused0 + N,
-           "%d players are refused, the first that asks again gets no answer", g_atomic_int_get (&refused) - refused0);
+    WAIT (g_atomic_int_get (&hanging), 5000);
+    CHECK (g_atomic_int_get (&hanging), "one stream is being opened and gets no answer");
     /* the other three give up their turn and play into nothing */
     int going = 0;
     for (int w = 0; w < 5000 && going < N - 1; w++) {
@@ -224,8 +214,8 @@ int main (void)
     walpe_sound_allow (TRUE);
     walpe_sound_set_master (1.0);
 
-    test_refused_asks_again (wav);
-    test_server_stops_answering (wav);
+    test_one_at_a_time (wav);
+    test_server_does_not_answer (wav);
 
     g_remove (wav);
     g_rmdir (dir);

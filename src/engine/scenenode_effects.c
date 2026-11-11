@@ -1857,7 +1857,6 @@ typedef struct {
 } EffTarget;
 
 typedef struct {
-    EffPass passes[FX_MAX_PASSES];
     int n_passes;
     EffTarget targets[FX_MAX_TARGETS];
     int n_targets;
@@ -1903,7 +1902,17 @@ typedef struct {
     gboolean kp_checked;       /* fx_keep_scan () looked at the passes */
     struct FxSim *sim;         /* fx_sim.h: the chain carries a simulation from
                                 * frame to frame (NULL = it does not) */
+    EffPass passes[];          /* n_passes of them (fx_chain_new): a chain used to
+                                * hold room for FX_MAX_PASSES, 44 kB of which a
+                                * chain of one or two passes used 1.4 or 2.8 */
 } EffectChain;
+
+/* a chain with room for n passes (1..FX_MAX_PASSES), all of it zero */
+static EffectChain *fx_chain_new (guint n)
+{
+    n = CLAMP (n, 1, FX_MAX_PASSES);
+    return g_malloc0 (sizeof (EffectChain) + (gsize) n * sizeof (EffPass));
+}
 
 #include "fx_sim_types.h"
 
@@ -2293,7 +2302,8 @@ static GLuint fx_build_program (char **vsrc, char **fsrc, const char *shader,
 {
     GLuint prog = 0;
     /* HLSL-semantics repairs, decided from the sources (fx_srcrepair.h) */
-    fx_prepass (vsrc, fsrc, shader);
+    if (!fx_prepass (vsrc, fsrc, shader))
+        return 0;
     gint64 vst = 0, fst = 0;
     if (!fx_expansion_sizes_once (*vsrc, &vst) || !fx_expansion_sizes_once (*fsrc, &fst)) {
         g_warning ("fx: shader %s (%s): its macros expand to more than %d tokens, not compiled",
@@ -2831,7 +2841,7 @@ static EffectChain *fx_chain_build_parsed (const char *dir, JsonObject *instance
         return NULL;
     }
 
-    EffectChain *ch = g_new0 (EffectChain, 1);
+    EffectChain *ch = fx_chain_new (npass);
     ch->cacheable = -1;
     ch->dyn = -1;
     ch->feedback = -1;
@@ -5545,6 +5555,12 @@ static GLuint fx_run_for_object_1 (gpointer fxset, GLuint input, int w, int h,
     fx_gls_begin ();
     int first = 0;
     int held = 0;   /* pool entry (+1) of the texture `current` lives in */
+    /* `current` is the layer's tinted copy and no chain has drawn since.
+     * Kept as a flag: the copy's texture name says nothing once its pool
+     * entry was handed back, because a later chain of the same run (or of
+     * a later run, while set->pre_tex still names a target lent long ago)
+     * can be lent that very target for its output. */
+    gboolean tint_only = FALSE;
     const gboolean pfx_ok = pfx_any && set->pfx.valid && set->pfx.end == pfx_end &&
         set->pfx.gen == pfx_gen &&
         set->pfx.input == input && set->pfx.w == w && set->pfx.h == h &&
@@ -5658,6 +5674,7 @@ static GLuint fx_run_for_object_1 (gpointer fxset, GLuint input, int w, int h,
         fullw = set->hpfx.out_fullw;
         fullh = set->hpfx.out_fullh;
         first = hp_end;
+        tint_only = set->pre_tex && !set->pre_pool && current == set->pre_tex;
     } else if (pfx_ok) {
         /* nothing the prefix depends on changed: start behind it */
         for (int i = 0; i < pfx_end; i++)
@@ -5667,6 +5684,8 @@ static GLuint fx_run_for_object_1 (gpointer fxset, GLuint input, int w, int h,
         fullw = set->pfx.out_fullw;
         fullh = set->pfx.out_fullh;
         first = pfx_end;
+        /* a prefix made of the tinted copy alone: the set's own target */
+        tint_only = set->pre_tex && !set->pre_pool && current == set->pre_tex;
     } else {
         set->pfx.valid = FALSE;
         if (pfx_any) {
@@ -5687,6 +5706,7 @@ static GLuint fx_run_for_object_1 (gpointer fxset, GLuint input, int w, int h,
                           pfx_any && pfx_last < 0, rg_tint.mode == FXR_RECTS ? &rg_tint : NULL);
             current = set->pre_tex;
             held = set->pre_pool;
+            tint_only = TRUE;
             fullw = w, fullh = h;   /* an unpadded FBO from here on */
         }
     }
@@ -5892,6 +5912,7 @@ static GLuint fx_run_for_object_1 (gpointer fxset, GLuint input, int w, int h,
         if (current != before) {
             fx_pool_put (held);
             held = res;
+            tint_only = FALSE;
         }
         if (keep && ch->feedback != 1 && !hold_keep)
             fx_chain_drop_targets (ch, current);   /* a cache holds only the result */
@@ -5912,7 +5933,7 @@ static GLuint fx_run_for_object_1 (gpointer fxset, GLuint input, int w, int h,
         FX_HPFX_DONE ();
 #undef FX_HPFX_DONE
     fx_gls_end ();
-    if (current == set->pre_tex && set->pre_tex) {
+    if (tint_only) {
         current = input;      /* no chain ran: the caller tints as usual */
         held = 0;
     }
