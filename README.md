@@ -16,8 +16,7 @@ version 0.13.0, which is not released; the last release is 0.12.2.
 > emulation. Nothing new has been run on real AMD, Intel, NVIDIA or ARM hardware or on a
 > real Wayland desktop.** The NVIDIA / X11 path is meant to be unchanged from 0.12.2,
 > except that scenes which ask for bloom, camera shake, sprite sheets or a script camera
-> now get them, that effects on colour-only layers are sharper on monitors wider than
-> 2048 pixels and that a fullscreen window pauses the wallpaper of its own monitor only
+> now get them and that a fullscreen window pauses the wallpaper of its own monitor only
 > ([Pausing](#pausing)); that too was checked on the software renderer only
 > ([Known limitations](#known-limitations)).
 
@@ -546,11 +545,10 @@ a key), `--action=next|random|pause-toggle` runs a menu entry.
   renderer (llvmpipe), a headless Wayland compositor, a null sound sink and - the build
   for 64-bit ARM - under emulation. Nothing new has been run on real AMD, Intel, NVIDIA
   or ARM hardware or on a real Wayland desktop**; the NVIDIA / X11 path is meant to be
-  unchanged from 0.12.2 with default settings, except for the 16 scenes of the next item,
-  for effects on colour-only layers on monitors wider than 2048 pixels and for the
-  fullscreen pause rule with more than one monitor ([Pausing](#pausing): the monitor of
-  the fullscreen window pauses, the others keep running; `fs_all=on` is the old rule), and
-  that too is so far shown only on the software renderer, in two steps. The development tree as it
+  unchanged from 0.12.2 with default settings, except for the 16 scenes of the next item
+  and for the fullscreen pause rule with more than one monitor ([Pausing](#pausing): the
+  monitor of the fullscreen window pauses, the others keep running; `fs_all=on` is the
+  old rule), and that too is so far shown only on the software renderer, in two steps. The development tree as it
   stood before the fixes of 0.12.2 were merged in was compared with release 0.12.1: the
   same frames of the 91 test scenes at 960x540 (16 of them with the switch of their new
   feature off), the same threads,
@@ -565,8 +563,9 @@ a key), `--action=next|random|pause-toggle` runs a menu entry.
   sprite_sheets=off script_camera=off` gives the earlier pictures back
   ([SCENE-FEATURES.md](docs/SCENE-FEATURES.md)). Wallpaper Engine's HDR bloom is not
   implemented (such scenes get the standard bloom), the look of the camera shake is an
-  estimate, and none of these was compared with Wallpaper Engine's own picture. On a
-  monitor wider than 2048 pixels, effects on colour-only layers are sharper than before.
+  estimate, and none of these was compared with Wallpaper Engine's own picture. Effects
+  on colour-only layers are as in 0.12 at a monitor's own resolution; a render size
+  chosen above 2048 pixels makes them sharper ([RESOLUTION.md](docs/RESOLUTION.md)).
 - **Wayland: tested headless only.** The Wayland backend needs a compositor with the
   layer shell (`zwlr_layer_shell_v1`); GNOME's Wayland session and weston's desktop shell
   have none and are not supported. Wallpapers were shown on a headless sway 1.9 with the

@@ -27,6 +27,7 @@ What to include:
 |---|---|
 | texture / picture | 16384 px per side and 8192 x 8192 px; all textures of a scene 1024 MiB (`WALPE_TEX_BUDGET_MB=<MiB>`, 0 = none), the largest are stored smaller beyond that |
 | picture inside a `.tex`, layer picture of the old scene format | PNG, JPEG, WebP (plain picture files also GIF, BMP, TIFF; old-format layers also TGA, AVIF, JXL), each read by its own decoder only, also when only its size is asked for |
+| picture or GIF wallpaper (a picture file chosen as the wallpaper) | shown only when gdk-pixbuf takes the file for a PNG, JPEG, GIF, BMP, TIFF, WebP, TGA, AVIF or JPEG XL picture, whatever its name says: a file it takes for anything else (an SVG document, XPM text, a Windows icon ...) is refused and not decoded as a picture; that loader has read the file's header by then, which is how the format is found out |
 | GIF (wallpaper, preview, cover art) | checked before any of it is decoded: the picture and every frame at least 1 x 1 pixel, every frame inside the picture; a GIF that fails is refused like a damaged picture |
 | `.json` | 32 MiB, 512 levels of nesting |
 | `scene.pkg` | a regular file inside the wallpaper's folder (no pipe, no link that leads out); entries stay inside the cache copy, at most 32 path components, 32768 files + directories, 4 x the package's size + 16 MiB written; the cache holds 1 GiB (`WALPE_PKG_CACHE_MB`) |
@@ -116,9 +117,12 @@ session bus names (a file, a `data:` URL or an http(s) address; any address a pl
 is fetched, also a local one). At most 16 MiB are read, counted after unpacking for a
 compressed http body; a picture of more than 8192 pixels per side is refused before any
 pixel exists, a JPEG that its decoder has to hold whole is not decoded beyond 256 MiB of
-that store, and a GIF is checked as in the table above. A known limit: the cover is decoded
-by whatever picture loader the system's gdk-pixbuf offers for it, not by a fixed list of
-formats (such a list is prepared and not part of this release).
+that store, and a GIF is checked as in the table above. The cover goes to a decoder only
+when its first bytes are those of a JPEG, PNG, GIF, WebP or BMP file, and then to the
+decoder of that one format: gdk-pixbuf is not left to pick one of its other loaders (SVG,
+XPM, PNM, TGA, ICO, TIFF ...) for bytes a music player or a server chose. A cover in any
+other format is not decoded, and the wallpaper is shown none (the log says "album art not
+decodable"). Test: `meson test -C build limits`.
 
 ## Parts added in 0.13
 

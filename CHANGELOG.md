@@ -11,8 +11,8 @@ built and tested only on Mesa's software renderer (llvmpipe), a headless Wayland
 compositor (sway 1.9), a PulseAudio null sink and - the build for 64-bit ARM - under
 emulation. Nothing of it has been run on real AMD, Intel, NVIDIA or ARM hardware or on a
 real Wayland desktop.** On NVIDIA's driver under X11 with default settings it is meant
-to behave as 0.12.2 does, apart from the scene features, the one change to effects on
-colour-only layers and - with more than one monitor - the fullscreen pause rule below. What was compared, on the software renderer: the development
+to behave as 0.12.2 does, apart from the scene features and - with more than one
+monitor - the fullscreen pause rule below. What was compared, on the software renderer: the development
 tree before the fixes of 0.12.2 were merged in with
 release 0.12.1, call by call (four scenes: the same OpenGL calls) and picture by picture
 (the 91 test scenes: the same frames with the new features off); then the pictures of
@@ -72,8 +72,9 @@ the final tree with those of that earlier tree.
 - Imported and converted videos are no longer tied to 1080p (`video_resolution`; a
   configuration from an older version keeps 1080p until you change it).
 - Effects on colour-only layers of a scene are computed as wide as the longer side of
-  the render size where that is more than 2048 pixels (0.12: 2048 at most). On a monitor
-  wider than 2048 pixels such a layer is sharper than before, also at native resolution.
+  a chosen render size where that is more than 2048 pixels (0.12: 2048 at most), and such
+  a layer is sharper then. At a monitor's own resolution (`native`, the default) they
+  stay at 2048 pixels as in 0.12, also on a monitor wider than that.
 
 ### Scenes
 
@@ -120,6 +121,12 @@ the final tree with those of that earlier tree.
 
 ### Other
 
+- Pictures from outside go to fewer decoders. A picture or GIF file chosen as the
+  wallpaper is shown only as PNG, JPEG, GIF, BMP, TIFF, WebP, TGA, AVIF or JPEG XL: a
+  file of another kind (an SVG document, a Windows icon ...), which earlier versions
+  handed to whatever loader gdk-pixbuf had for it, is refused now. Cover art of a wallpaper with
+  media integration is decoded as JPEG, PNG, GIF, WebP or BMP only
+  ([SECURITY.md](docs/SECURITY.md)).
 - The source builds for 64-bit ARM (aarch64) as well as x86-64, with meson cross files:
   cross-compiled with 0 warnings, and 65 of the 68 tests that need neither a display nor
   an OpenGL context pass under emulation. Not run on ARM hardware. OpenGL ES 3.1 is the

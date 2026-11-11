@@ -1,9 +1,10 @@
 # Scene features and their switches
 
 Things scene wallpapers can ask for that WalPE draws since 0.13, each with a switch. A
-scene that asks for none of them is drawn as in 0.12.1 at render sizes up to 2048 pixels
-on the longer side. Above that, effects on colour-only layers are computed at the render
-size instead of at most 2048 pixels, on purpose, and are sharper than in 0.12.1
+scene that asks for none of them is drawn as in 0.12.1 at the monitor's own resolution
+and at chosen render sizes up to 2048 pixels on the longer side. At a chosen render size
+above that, effects on colour-only layers are computed at the render size instead of at
+most 2048 pixels, on purpose, and are sharper than in 0.12.1
 ([RESOLUTION.md](RESOLUTION.md)).
 
 > **State of testing.** Built and tested only on Mesa's software renderer. With every

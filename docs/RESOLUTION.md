@@ -101,9 +101,11 @@ at 4K), and the frame is copied to the monitor once.
 ## Limits
 
 - Effects on colour-only layers of a scene (bars, gradients without a picture) are computed
-  at most 2048 pixels wide, or as wide as the longer side of the render size if that is
-  more. On a monitor wider than 2048 pixels such a layer is therefore sharper than in
-  0.12.1, also at native resolution.
+  at most 2048 pixels wide. Only a render size you chose - anything but the monitor's own
+  resolution - that is longer than 2048 pixels on its longer side makes them as wide as
+  that side, and such a layer sharper than in 0.12.1. At the monitor's own resolution
+  (`native`, the default) they stay at 2048 pixels, also on a monitor wider than that:
+  the picture and the cost of such a layer are then those of 0.12.1.
 - A monitor with a 10-bit-per-colour window: a scene rendered at a non-native size goes
   through an 8-bit picture (`render_scale` has the same property).
 - A typed size with another shape than the monitor's is stretched, not letterboxed.
