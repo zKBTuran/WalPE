@@ -86,6 +86,12 @@ struct WalpePuppet {
     /* GL (render thread) */
     GLuint vao, vbo, ebo;
     float *vbuf;         /* nverts * 4: pos.xy uv.xy */
+    /* what the vertex buffer on the GPU was made from: the skinning
+     * matrices and the half sizes of the last upload (up_ok: there was one
+     * into the buffer that exists now) */
+    Aff *up_skin;
+    float up_half[2];
+    gboolean up_ok;
     /* walpe_puppet_uv_cover: rectangles around the texture
      * coordinates of all triangles; cover_n -1 = not computed yet */
     int cover_n;
@@ -684,6 +690,19 @@ void walpe_puppet_draw (WalpePuppet *p, double t, float half_w, float half_h,
             skin[i] = aff_mul (&world[i], &p->bind_inv_world[i]);
     }
 
+    /* The vertex data is a function of the skinning matrices and the two
+     * half sizes (positions, weights and texture coordinates never change).
+     * With the ones of the last upload the buffer on the GPU holds exactly
+     * what would be computed and sent again: a puppet without bones, one
+     * that is not animated, an animation that stands at its last frame.
+     * (Compared as bytes: a matrix that is not a number is "the same" only
+     * as itself, and gives the same bytes.) */
+    const gboolean sent = p->vao && p->up_ok && p->up_half[0] == half_w && p->up_half[1] == half_h &&
+                          (nb == 0 || !memcmp (p->up_skin, skin, (gsize) nb * sizeof (Aff)));
+    if (sent) {
+        walpe_glutil_draw_mesh_tint (tex, premult, opacity, mvp, blend, tint, p->vao, p->nidx);
+        return;
+    }
     if (!p->vbuf)
         p->vbuf = g_new (float, p->nverts * 4);
     for (int v = 0; v < p->nverts; v++) {
@@ -729,6 +748,14 @@ void walpe_puppet_draw (WalpePuppet *p, double t, float half_w, float half_h,
     glBindBuffer (GL_ARRAY_BUFFER, p->vbo);
     glBufferSubData (GL_ARRAY_BUFFER, 0, (GLsizeiptr) p->nverts * 16, p->vbuf);
     glBindBuffer (GL_ARRAY_BUFFER, 0);
+    if (nb > 0) {
+        if (!p->up_skin)
+            p->up_skin = g_new (Aff, p->nbones);
+        memcpy (p->up_skin, skin, (gsize) nb * sizeof (Aff));
+    }
+    p->up_half[0] = half_w;
+    p->up_half[1] = half_h;
+    p->up_ok = TRUE;
     walpe_glutil_draw_mesh_tint (tex, premult, opacity, mvp, blend, tint, p->vao, p->nidx);
 }
 
@@ -896,6 +923,7 @@ void walpe_puppet_gl_free (WalpePuppet *p)
     if (p->ebo) glDeleteBuffers (1, &p->ebo);
     if (p->vao) glDeleteVertexArrays (1, &p->vao);
     p->vao = p->vbo = p->ebo = 0;
+    p->up_ok = FALSE;   /* the next buffer starts empty */
 }
 
 void walpe_puppet_free (WalpePuppet *p)
@@ -919,5 +947,6 @@ void walpe_puppet_free (WalpePuppet *p)
     g_free (p->att);
     g_free (p->pose_world);
     g_free (p->vbuf);
+    g_free (p->up_skin);
     g_free (p);
 }

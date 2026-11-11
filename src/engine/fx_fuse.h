@@ -318,6 +318,21 @@ static gboolean fxf_main_span (const char *text, const char **head, const char *
     return FALSE;
 }
 
+/* p behind the tokens of `toks` (a NULL-terminated list), white space only
+ * between them; NULL when the text at p is something else */
+static const char *fxf_past_tokens (const char *p, const char *const *toks)
+{
+    for (; *toks; toks++) {
+        gsize l = strlen (*toks);
+        while (g_ascii_isspace (*p))
+            p++;
+        if (strncmp (p, *toks, l) || (fx_is_ident ((*toks)[0]) && fx_is_ident (p[l])))
+            return NULL;
+        p += l;
+    }
+    return p;
+}
+
 /* The fragment source of a pure displacement, as a function
  * "vec2 _wf<i>(vec2 _wpx)" that returns the coordinate the effect reads
  * its input at when its varyings are taken _wpx pixels away from the
@@ -365,12 +380,19 @@ static char *fxf_warp_function (const char *text, GArray *globals, int idx)
         }
         g_string_free (s, TRUE);
         if (ok) {
-            const char *comma = strchr (strstr (fc, "g_Texture0"), ',');
-            const char *semi = strrchr (fc, ';');
-            const char *close = semi;
-            while (close > comma && *close != ')')
-                close--;
-            expr = g_strndup (comma + 1, (gsize) (close - comma - 1));
+            /* The comparison above ignores white space, also inside a name:
+             * "g_Tex ture0" (two macros, or a comment between them) passes
+             * it and is not this statement. The coordinate starts behind
+             * the tokens as they stand in the text. */
+            static const char *const toks[] = { "gl_FragColor", "=", "texSample2D", "(", "g_Texture0", ",", NULL };
+            const char *arg = fxf_past_tokens (fc, toks);
+            const char *close = strrchr (fc, ';');
+            ok = arg != NULL;
+            if (ok) {
+                while (close > arg && *close != ')')
+                    close--;
+                expr = g_strndup (arg, (gsize) (close - arg));
+            }
         }
     }
     /* the input is read nowhere else */

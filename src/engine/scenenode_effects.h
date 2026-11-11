@@ -198,6 +198,14 @@ int fx_failed_count (gpointer fxset);
 /* workshop id of the wallpaper whose effects are built next (WE zcompat
  * shader replacements apply up to a per-shader maximum project id) */
 void fx_set_project_id (guint64 id);
+/* Between these two calls (the load of one scene, on the thread that
+ * builds its effects) the work a pass does on its shader text alone is
+ * done once per text: most passes of a scene are a text an earlier pass
+ * of it had. Calls nest; nothing is kept past the last _end. stats: texts
+ * worked on / results taken over since the process started. */
+void fx_text_memo_begin (void);
+void fx_text_memo_end (void);
+void fx_text_memo_stats (guint *computed, guint *reused);
 /* effect chains built / failed since the last reset (diagnostics) */
 void fx_stats (int *ok, int *failed, gboolean reset);
 /* any pass reads g_AudioSpectrum* (the scene then captures audio) */

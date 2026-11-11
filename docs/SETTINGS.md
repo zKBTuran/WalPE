@@ -14,7 +14,11 @@ key=value ...`. Do not edit `config.json` while the daemon runs: it writes the w
 with every change. Members it does not know (a newer version's, a note written by hand) are
 written back as they were. A file that is not a JSON object is not used and not overwritten:
 it is kept as `config.json.broken-<time>`, the defaults apply and `walpe-ctl status` names
-the copy (`config_broken_copy`).
+the copy (`config_broken_copy`). The file is written next to itself and renamed, so a save
+that fails (a full disk, a home that cannot be written to) leaves the old file whole; the
+change is in effect in the running daemon all the same, the reply to the request carries
+the reason as `save_error` (`walpe-ctl` prints it) and `walpe-ctl status` shows
+`config_save_error` until a save succeeds.
 
 `walpe-ctl set` checks every pair before anything changes: one unknown key or one value of
 the wrong kind and the whole request is refused. A switch takes `on` / `off` (also `true` /
@@ -22,13 +26,18 @@ the wrong kind and the whole request is refused. A switch takes `on` / `off` (al
 
 ## config.json
 
-"set name" is the short name `walpe-ctl set` also accepts; the key itself always works.
+"set name" is the short name `walpe-ctl set` also accepts; the key itself works too. Where
+that column is in brackets `walpe-ctl set` does not take the key: it is changed by the
+command named there, or only in the file while the daemon is not running ("file only").
+`walpe-ctl status` shows every key `set` takes under the key's name (`video_backend` as
+`backend`, the quality knobs in `walpe-ctl quality`; `software_threads` there is the number
+in use, `software_threads_saved` the setting).
 
 ### Wallpapers and playback
 
 | Key | Default | set name | Meaning |
 |---|---|---|---|
-| `wallpapers_dir` | `~/.local/share/walpe/workshop` | | the library: project folders or loose media files |
+| `wallpapers_dir` | `~/.local/share/walpe/workshop` | (file only) | the library: project folders or loose media files |
 | `current` | `""` | (`walpe-ctl open`) | the wallpaper of every monitor that has no entry in `monitor_current` |
 | `monitor_current` | `{}` | (`walpe-ctl open --monitor N`) | output name -> wallpaper path |
 | `paused` | false | (`walpe-ctl pause` / `resume`) | |
@@ -36,18 +45,18 @@ the wrong kind and the whole request is refused. A switch takes `on` / `off` (al
 | `volume` | 0 | | stored only: the renderer is silent |
 | `parallax` | true | | scenes follow the pointer where they are made to |
 | `video_backend` | `ffmpeg` | | stored only |
-| `vsync`, `audio` | true, false | | stored only (presentation is set in `gpu.conf`) |
+| `vsync`, `audio` | true, false | (file only) | stored only (presentation is set in `gpu.conf`) |
 | `we_assets` | unset = auto-detect | | Wallpaper Engine install or its `assets/` folder; `we_assets=` (empty) goes back to auto-detection |
 | `steam_user` | unset | | Steam account name for steamcmd downloads (never a password) |
 | `props` | `{}` | (`walpe-ctl setprop` / `resetprops`) | wallpaper option overrides, `"<wallpaper path>\u001f<option>": "value"` |
 | `layers` | `{}` | (`walpe-ctl layers ...`) | "Adjust layers", per wallpaper (below) |
-| `config_version` | 3 | | format of the file; older files are migrated once (a frame rate that was an older version's default becomes 60) |
+| `config_version` | 3 | (written by the daemon) | format of the file; older files are migrated once (a frame rate that was an older version's default becomes 60) |
 
 ### Pausing and limits by desktop state
 
 | Key | Default | set name | Meaning |
 |---|---|---|---|
-| `pause_fullscreen` | true | `fs` | pause a monitor while a focused fullscreen window is on it |
+| `pause_fullscreen` | true | `fs` | pause every monitor while a focused fullscreen window is on one of them |
 | `pause_dpms` | true | `dpms` | pause while the display is in power save or the screensaver runs |
 | `pause_covered` | true | `covered` | pause a monitor while visible normal windows cover 85 % of it or more |
 | `transparent_windows` | `st` | | comma-separated WM_CLASS list of see-through windows |

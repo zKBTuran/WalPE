@@ -10,6 +10,13 @@
  *    few steps of an 8-bit channel, for additive and normal blending and
  *    both mixed; small sprites never use it; off means off.
  * 4. The particle density setting thins a system out.
+ * 5. The copy of the frame a refracting system reads goes when the scene
+ *    gives its targets back and with the last particle object.
+ * 6. A refracting system copies the part of the frame it can read and no
+ *    more: its picture is the one drawn from a copy of the whole frame,
+ *    byte for byte, with stale pixels everywhere else in the copy. A
+ *    system that follows another one copies only what the copy does not
+ *    hold or what was drawn on since - again the same bytes.
  * Every comparison draws ONE simulation state twice (the second render
  * advances it by 0 s). The systems' random numbers are a fixed sequence
  * all the same (g_rand_new below), so a run that passes passes every time.
@@ -649,6 +656,530 @@ static void test_world_children (void)
     g_free (pd);
 }
 
+/* ---- refraction: the copy of the frame a refracting system reads ------ */
+
+static void put_file (const char *rel, const void *data, gssize len)
+{
+    char *f = g_build_filename (tmpdir, rel, NULL);
+    char *d = g_path_get_dirname (f);
+    g_mkdir_with_parents (d, 0700);
+    g_file_set_contents (f, data, len, NULL);
+    g_free (d);
+    g_free (f);
+}
+
+static void del_file (const char *rel)
+{
+    char *f = g_build_filename (tmpdir, rel, NULL);
+    g_remove (f);
+    g_free (f);
+}
+
+/* a texture file with one raw 8 x 8 RGBA image; texel (x, y) = fn (x, y) */
+static void put_tex8 (const char *rel, guint32 (*fn) (int x, int y))
+{
+    GByteArray *o = g_byte_array_new ();
+    const guint32 hdr[7] = { 0, 0, 8, 8, 8, 8, 0 }, b1[2] = { 1, 0xffffffff }, mips = 1;
+    const guint32 m[5] = { 8, 8, 0, 8 * 8 * 4, 8 * 8 * 4 };
+    g_byte_array_append (o, (const guint8 *) "TEXV0005\0TEXI0001", 18);
+    g_byte_array_append (o, (const guint8 *) hdr, sizeof hdr);
+    g_byte_array_append (o, (const guint8 *) "TEXB0003", 9);
+    g_byte_array_append (o, (const guint8 *) b1, sizeof b1);
+    g_byte_array_append (o, (const guint8 *) &mips, 4);
+    g_byte_array_append (o, (const guint8 *) m, sizeof m);
+    for (int y = 0; y < 8; y++)
+        for (int x = 0; x < 8; x++) {
+            guint32 v = fn (x, y);
+            const guint8 px[4] = { (guint8) (v >> 24), (guint8) (v >> 16), (guint8) (v >> 8), (guint8) v };
+            g_byte_array_append (o, px, 4);
+        }
+    put_file (rel, o->data, (gssize) o->len);
+    g_byte_array_unref (o);
+}
+
+/* texels as 0xRRGGBBAA. The normal maps are in the layout the particle
+ * shader decodes for an uncompressed texture: x in alpha, y in green, both
+ * as 2 v - 1, the strength mask in red. */
+static guint32 tex_white (int x, int y) { (void) x; (void) y; return 0xffffffffu; }
+/* every texel: as far to the right as a normal goes, nothing up or down */
+static guint32 tex_right (int x, int y) { (void) x; (void) y; return 0xff8000ffu; }
+/* the four extremes, one per quadrant */
+static guint32 tex_corners (int x, int y)
+{
+    return 0xff000000u | (y < 4 ? 0x00ff0000u : 0u) | (x < 4 ? 0x000000ffu : 0u);
+}
+
+/* a refracting material: sprite texture, normal map (or none), amount */
+static void put_refract_material_as (const char *file, const char *normal, const char *amount)
+{
+    char *j = g_strdup_printf ("{\"passes\":[{\"blending\":\"translucent\",\"combos\":{\"REFRACT\":1},"
+                               "\"textures\":[\"particle/rsq\",%s%s%s],"
+                               "\"constantshadervalues\":{\"refractamount\":%s}}]}",
+                               normal ? "\"" : "", normal ? normal : "null", normal ? "\"" : "", amount);
+    put_file (file, j, -1);
+    g_free (j);
+}
+
+static void put_refract_material (const char *normal, const char *amount)
+{
+    put_refract_material_as ("materials/refr.json", normal, amount);
+}
+
+/* a ground of 40-pixel blocks, each its own colour: a sample taken from
+ * the wrong place, or from a copy made of another ground, shows */
+static void ground_blocks (guint seed)
+{
+    glBindFramebuffer (GL_FRAMEBUFFER, fbo);
+    glViewport (0, 0, W, H);
+    glEnable (GL_SCISSOR_TEST);
+    for (int by = 0; by < H; by += 40)
+        for (int bx = 0; bx < W; bx += 40) {
+            guint v = ((guint) (bx / 40) * 7u + (guint) (by / 40) * 13u + seed * 31u + 1u) * 2654435761u;
+            glScissor (bx, by, 40, 40);
+            glClearColor ((float) ((v >> 8) & 255) / 255.0f, (float) ((v >> 16) & 255) / 255.0f,
+                          (float) ((v >> 24) & 255) / 255.0f, 1.0f);
+            glClear (GL_COLOR_BUFFER_BIT);
+        }
+    glDisable (GL_SCISSOR_TEST);
+}
+
+/* the objects over that ground, simulation advanced by dt. patch_after >=
+ * 0: after that object something that is no particle system draws on the
+ * frame (a rectangle), announced the way a scene's other layers are. */
+static void frame_blocks_patch (WalpeWeParticles **ps, int n, double dt, guint seed, guint8 *px,
+                                int patch_after, const int *patch)
+{
+    float mvp[9], world[9], tail[9];
+    ground_blocks (seed);
+    object_matrix (1, 1, 0, mvp, world, tail);
+    walpe_weparticles_begin_frame (fbo, W, H);
+    for (int i = 0; i < n; i++) {
+        walpe_weparticles_set_world (ps[i], world);
+        walpe_weparticles_set_view (ps[i], tail, W / 2.0f, H / 2.0f, 0.0f, 1.0f, 400.0f);
+        walpe_weparticles_render (ps[i], mvp, dt, 1.0f, white);
+        if (i == patch_after) {
+            walpe_weparticles_flush ();
+            glEnable (GL_SCISSOR_TEST);
+            glScissor (patch[0], patch[1], patch[2], patch[3]);
+            glClearColor (0.9f, 0.1f, 0.6f, 1.0f);
+            glClear (GL_COLOR_BUFFER_BIT);
+            glDisable (GL_SCISSOR_TEST);
+        }
+    }
+    walpe_weparticles_end_frame ();
+    if (px) {
+        glBindFramebuffer (GL_FRAMEBUFFER, fbo);
+        glPixelStorei (GL_PACK_ALIGNMENT, 1);
+        glReadPixels (0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    }
+}
+
+static void frame_blocks (WalpeWeParticles **ps, int n, double dt, guint seed, guint8 *px)
+{
+    frame_blocks_patch (ps, n, dt, seed, px, -1, NULL);
+}
+
+/* sprites that stay where they were made */
+#define STILL(n, box, smin, smax, extra) \
+    "{\"material\":\"materials/refr.json\"," \
+    "\"emitter\":[{\"name\":\"boxrandom\",\"distancemax\":\"" box "\",\"rate\":0," \
+    "\"instantaneous\":" #n ",\"duration\":0.1}]," \
+    "\"initializer\":[{\"name\":\"lifetimerandom\",\"min\":600,\"max\":600}," \
+    "{\"name\":\"sizerandom\",\"min\":" #smin ",\"max\":" #smax "}" extra "]," \
+    "\"operator\":[{\"name\":\"movement\"}],\"renderer\":[{\"name\":\"sprite\"}],\"maxcount\":" #n "}"
+
+static const char *SYS_REFR_MANY = STILL (40, "100 60 0", 20, 44,
+    ",{\"name\":\"alpharandom\",\"min\":0.5,\"max\":1},"
+    "{\"name\":\"rotationrandom\",\"min\":\"0 0 0\",\"max\":\"0 0 6.28\"}");
+static const char *SYS_REFR_ONE = STILL (1, "0 0 0", 120, 120, "");
+
+/* One state of a refracting system drawn twice over the same ground: from
+ * the part of the frame it copies, and from a copy of the whole frame. The
+ * copy is filled with another ground first, so a sample from outside the
+ * part that was copied would show. Returns the share of the frame copied. */
+static double refract_case (const char *name, const char *json, const char *normal,
+                            const char *amount, guint8 *whole_px)
+{
+    static guint8 a[W * H * 4], b[W * H * 4];
+    WalpePtStats st;
+    put_refract_material (normal, amount);
+    seed_n = 4000;   /* the same particles in every case */
+    WalpeWeParticles *p = make (json);
+    if (!p)
+        return -1.0;
+    walpe_weparticles_set_lowres (WALPE_PT_LOWRES_OFF);
+    walpe_weparticles_set_refract_whole (TRUE);
+    for (int k = 0; k < 4; k++)
+        frame_blocks (&p, 1, 1.0 / 30, 77, NULL);   /* the copy now holds ground 77 */
+    walpe_weparticles_stats (&st, TRUE);
+    walpe_weparticles_set_refract_whole (FALSE);
+    frame_blocks (&p, 1, 0.0, 3, a);
+    walpe_weparticles_stats (&st, TRUE);
+    const guint copies = st.copies, drawn = st.drawn;
+    const double part = st.copied;
+    walpe_weparticles_set_refract_whole (TRUE);
+    frame_blocks (&p, 1, 0.0, 77, NULL);
+    walpe_weparticles_stats (&st, TRUE);
+    frame_blocks (&p, 1, 0.0, 3, b);
+    walpe_weparticles_stats (&st, TRUE);
+    walpe_weparticles_set_refract_whole (FALSE);
+    Diff d = compare (a, b);
+    printf ("refraction, %s: %u sprites, %.3f of the frame copied (%.3f as a whole); %ld pixels "
+            "differ (max %d)\n", name, drawn, part, st.copied, d.differing, d.max);
+    CHECK (drawn > 0 && copies == 1 && st.copies == 1, "%s: %u sprites, %u and %u copies", name, drawn,
+           copies, st.copies);
+    CHECK (st.copied > 0.999 && st.copied < 1.001, "%s: the whole frame is %.3f of it", name, st.copied);
+    CHECK (d.differing == 0, "%s: the picture from the part copied differs in %ld pixels (max %d)",
+           name, d.differing, d.max);
+    if (whole_px)
+        memcpy (whole_px, b, sizeof (b));
+    walpe_weparticles_free (p);
+    return part;
+}
+
+/* one sprite of 60 pixels that stays at x, y from the view's centre (y up) */
+static WalpeWeParticles *make_one (const char *material, int x, int y)
+{
+    char *j = g_strdup_printf (
+        "{%s%s%s\"emitter\":[{\"name\":\"boxrandom\",\"origin\":\"%d %d 0\",\"distancemax\":\"0 0 0\","
+        "\"rate\":0,\"instantaneous\":1,\"duration\":0.1}],"
+        "\"initializer\":[{\"name\":\"lifetimerandom\",\"min\":600,\"max\":600},"
+        "{\"name\":\"sizerandom\",\"min\":120,\"max\":120}],"
+        "\"operator\":[{\"name\":\"movement\"}],\"renderer\":[{\"name\":\"sprite\"}],\"maxcount\":1}",
+        material ? "\"material\":\"" : "", material ? material : "", material ? "\"," : "", x, y);
+    WalpeWeParticles *p = make (j);
+    g_free (j);
+    return p;
+}
+
+/* A frame of several objects, drawn from what each refracting system copies
+ * by itself and, for reference, from a copy of the whole frame per system;
+ * the copy holds another ground before each. The pictures must be the same
+ * byte for byte. *copies / *copied: the copies made and their share of the
+ * frame in the first. */
+static void refract_seq (const char *name, WalpeWeParticles **ps, int n, int patch_after,
+                         const int *patch, guint *copies, double *copied, guint8 *out)
+{
+    static guint8 a[W * H * 4], b[W * H * 4];
+    WalpePtStats st;
+    *copies = 0;
+    *copied = 0.0;
+    for (int i = 0; i < n; i++)
+        if (!ps[i])
+            return;
+    walpe_weparticles_set_lowres (WALPE_PT_LOWRES_OFF);
+    walpe_weparticles_set_refract_whole (TRUE);
+    for (int k = 0; k < 4; k++)
+        frame_blocks_patch (ps, n, 1.0 / 30, 77, NULL, patch_after, patch);
+    walpe_weparticles_set_refract_whole (FALSE);
+    walpe_weparticles_stats (&st, TRUE);
+    frame_blocks_patch (ps, n, 0.0, 3, a, patch_after, patch);
+    walpe_weparticles_stats (&st, TRUE);
+    *copies = st.copies;
+    *copied = st.copied;
+    walpe_weparticles_set_refract_whole (TRUE);
+    frame_blocks_patch (ps, n, 0.0, 77, NULL, patch_after, patch);
+    walpe_weparticles_stats (&st, TRUE);
+    frame_blocks_patch (ps, n, 0.0, 3, b, patch_after, patch);
+    walpe_weparticles_stats (&st, TRUE);
+    walpe_weparticles_set_refract_whole (FALSE);
+    Diff d = compare (a, b);
+    printf ("refraction, %s: %u copies = %.3f of the frame (%u = %.3f with whole copies); %ld "
+            "pixels differ (max %d)\n", name, *copies, *copied, st.copies, st.copied, d.differing, d.max);
+    CHECK (d.differing == 0, "%s: the picture differs from the one drawn with whole copies in %ld "
+           "pixels (max %d)", name, d.differing, d.max);
+    if (out)
+        memcpy (out, a, sizeof (a));
+}
+
+/* Two refracting systems in a row. The first reads 160 pixels to either
+ * side of its sprite, so it copies a wide box; the second reads only where
+ * its own sprite is. */
+static void test_refract_shared (void)
+{
+    static guint8 g[W * H * 4], apart[W * H * 4], over[W * H * 4];
+    WalpeWeParticles *ps[4];
+    guint n1, n2, n3, n4, n5, n6;
+    double c1, c2, c3, c4, c5, c6;
+    put_refract_material_as ("materials/refr_far.json", "particle/rright", "0.25");
+    put_refract_material_as ("materials/refr_here.json", NULL, "0.25");
+    frame_blocks (NULL, 0, 0.0, 3, g);
+
+    /* the first system alone */
+    ps[0] = make_one ("materials/refr_far.json", -150, 0);
+    refract_seq ("one system", ps, 1, -1, NULL, &n1, &c1, NULL);
+    CHECK (n1 == 1 && c1 > 0.3 && c1 < 0.6, "one system: %u copies, %.3f of the frame", n1, c1);
+
+    /* the second inside what the first copied, away from its sprite: the
+     * copy holds the frame there, nothing is copied again */
+    ps[1] = make_one ("materials/refr_here.json", -20, 0);
+    refract_seq ("a second system beside the first", ps, 2, -1, NULL, &n2, &c2, apart);
+    CHECK (n2 == 1 && c2 == c1, "second beside the first: %u copies, %.3f of the frame (the first "
+           "alone: 1, %.3f)", n2, c2, c1);
+    walpe_weparticles_free (ps[1]);
+
+    /* the second on top of the first one's sprite: what the first drew
+     * has to be in the copy, and only that is copied */
+    ps[1] = make_one ("materials/refr_here.json", -150, 10);
+    refract_seq ("a second system over the first", ps, 2, -1, NULL, &n3, &c3, over);
+    CHECK (n3 == 2 && c3 > c1 && c3 < c1 + 0.03, "second over the first: %u copies, %.3f of the "
+           "frame (the first alone: %.3f)", n3, c3, c1);
+    {
+        /* (the test of the test: the second sprite shows the first one's
+         * picture, which is not the ground under it) */
+        const guint8 *at = over + ((gsize) (H / 2 + 10) * W + W / 2 - 150) * 4;
+        CHECK (memcmp (at, g + ((gsize) (H / 2 + 10) * W + W / 2 - 150) * 4, 3) != 0 &&
+               memcmp (at, g + ((gsize) (H / 2 + 10) * W + W / 2 - 150 + 160) * 4, 3) == 0,
+               "second over the first: pixel %d,%d,%d is not the first sprite's picture", at[0],
+               at[1], at[2]);
+    }
+    walpe_weparticles_free (ps[1]);
+
+    /* a system that does not refract, drawn directly on the frame between
+     * the two, where the second reads */
+    ps[1] = make_one (NULL, -20, 0);
+    ps[2] = make_one ("materials/refr_here.json", -20, 5);
+    refract_seq ("a plain system between the two", ps, 3, -1, NULL, &n4, &c4, NULL);
+    CHECK (n4 == 2 && c4 > c1 && c4 < c1 + 0.03, "plain system between: %u copies, %.3f of the frame "
+           "(the first alone: %.3f)", n4, c4, c1);
+    walpe_weparticles_free (ps[1]);
+    walpe_weparticles_free (ps[2]);
+
+    /* three places drawn on in what the last system reads (the first one's
+     * sprite and two plain ones, left and right of it): it makes one copy,
+     * of one rectangle around them, not one per place - a system never
+     * makes more copy calls than the one it made before copies were shared */
+    ps[1] = make_one (NULL, -280, 0);
+    ps[2] = make_one (NULL, -20, 0);
+    ps[3] = make_one ("materials/refr_far.json", -150, 0);
+    refract_seq ("three places drawn on", ps, 4, -1, NULL, &n6, &c6, NULL);
+    CHECK (n6 == 2 && c6 > c1 && c6 <= 2.0 * c1, "three places drawn on: %u copies, %.3f of the frame "
+           "(the first alone: 1, %.3f)", n6, c6, c1);
+    walpe_weparticles_free (ps[1]);
+    walpe_weparticles_free (ps[2]);
+    walpe_weparticles_free (ps[3]);
+
+    /* something else draws on the frame between the two (a scene's layer):
+     * nothing is known about the copy afterwards */
+    ps[1] = make_one ("materials/refr_here.json", -20, 0);
+    const int patch[4] = { W / 2 - 40, H / 2 - 20, 40, 40 };
+    refract_seq ("another layer between the two", ps, 2, 0, patch, &n5, &c5, NULL);
+    CHECK (n5 == 2 && c5 > c1, "another layer between: %u copies, %.3f of the frame (the first "
+           "alone: %.3f)", n5, c5, c1);
+    walpe_weparticles_free (ps[1]);
+    walpe_weparticles_free (ps[0]);
+    (void) apart;
+    del_file ("materials/refr_far.json");
+    del_file ("materials/refr_here.json");
+}
+
+static void test_refract_copy (void)
+{
+    static guint8 g[W * H * 4], px[W * H * 4];
+    put_tex8 ("materials/particle/rsq.tex", tex_white);
+    put_tex8 ("materials/particle/rright.tex", tex_right);
+    put_tex8 ("materials/particle/rcorners.tex", tex_corners);
+    frame_blocks (NULL, 0, 0.0, 3, g);
+
+    /* no normal map: a sprite reads the frame where it is drawn, whatever
+     * the amount says */
+    double p1 = refract_case ("no normal map", SYS_REFR_MANY, NULL, "0.5", NULL);
+    double p2 = refract_case ("no normal map, amount 5", SYS_REFR_MANY, NULL, "5", NULL);
+    CHECK (p1 > 0.0 && p1 < 0.45, "no normal map: %.3f of the frame copied for sprites within "
+           "a 280 x 200 box", p1);
+    CHECK (p1 == p2, "no normal map: the amount changed the copy (%.3f, %.3f)", p1, p2);
+
+    /* a normal map: each sprite's own reach, from its tangents and alpha */
+    double n1 = refract_case ("normal map, amount 0.04", SYS_REFR_MANY, "particle/rcorners", "0.04", NULL);
+    double n2 = refract_case ("normal map, amount 0.08", SYS_REFR_MANY, "particle/rcorners", "0.08", NULL);
+    double n3 = refract_case ("normal map, amount 8", SYS_REFR_MANY, "particle/rcorners", "8", NULL);
+    CHECK (n1 > p1 && n2 > n1 && n2 < 0.999, "normal map: %.3f < %.3f < %.3f < 1 expected (none, "
+           "amount 0.04, amount 0.08)", p1, n1, n2);
+    CHECK (n3 > 0.999, "normal map, amount 8: %.3f of the frame copied, want all of it", n3);
+
+    /* one upright sprite whose normal map points right everywhere: it shows
+     * the ground a quarter of the view (160 pixels) to its right, so the
+     * copy has to reach that far */
+    double s1 = refract_case ("one sprite reading 160 pixels away", SYS_REFR_ONE, "particle/rright",
+                              "0.25", px);
+    const int cx = W / 2 + 10, cy = H / 2 + 10;
+    const guint8 *at = px + ((gsize) cy * W + cx) * 4, *far = g + ((gsize) cy * W + cx + 160) * 4;
+    CHECK (memcmp (at, far, 3) == 0 && memcmp (at, g + ((gsize) cy * W + cx) * 4, 3) != 0,
+           "one sprite: pixel %d,%d is %d,%d,%d; the ground 160 pixels right of it is %d,%d,%d",
+           cx, cy, at[0], at[1], at[2], far[0], far[1], far[2]);
+    CHECK (s1 > 0.0 && s1 < 0.6, "one sprite: %.3f of the frame copied", s1);
+
+    test_refract_shared ();
+
+    del_file ("materials/refr.json");
+    del_file ("materials/particle/rsq.tex");
+    del_file ("materials/particle/rright.tex");
+    del_file ("materials/particle/rcorners.tex");
+    del_file ("materials/particle");
+}
+
+
+/* A system whose material refracts reads a copy of the frame drawn so far.
+ * The copy is the render thread's: it goes when the scene gives its targets
+ * back (pause, idle) and with the last particle object - a frame of RGBA8
+ * that used to stay for every wallpaper shown afterwards - and the next
+ * refracting draw makes it again, with the same picture. */
+static void test_refract_copy_freed (void)
+{
+    char *mf = g_build_filename (tmpdir, "materials", "refr.json", NULL);
+    /* the texture names resolve to nothing: the soft dot, a flat normal */
+    g_file_set_contents (mf, "{\"passes\":[{\"blending\":\"translucent\",\"combos\":{\"REFRACT\":1},"
+                             "\"textures\":[\"none-a\",\"none-b\"]}]}", -1, NULL);
+    char *j = g_strconcat ("{\"material\":\"materials/refr.json\",", SYS_SPRITES + 1, NULL);
+    int n0 = 0, n1 = 0, n2 = 0, n3 = 0;
+    gint64 b0 = 0, b1 = 0, b2 = 0, b3 = 0, cb = 0;
+    const gint64 copy = (gint64) W * H * 4;
+    walpe_gl_tex_totals (&n0, &b0, &cb);
+    WalpeWeParticles *p = make (j);
+    g_free (j);
+    if (p) {
+        guint8 *a = g_malloc (W * H * 4), *b = g_malloc (W * H * 4);
+        walpe_weparticles_set_lowres (WALPE_PT_LOWRES_OFF);
+        frame (&p, 1, 0.5, 1, 1, 0, a);
+        walpe_gl_tex_totals (&n1, &b1, &cb);
+        CHECK (b1 >= b0 + copy, "refracting system: no copy of the frame was made (%" G_GINT64_FORMAT
+               " bytes of texture before, %" G_GINT64_FORMAT " drawing)", b0, b1);
+        walpe_weparticles_drop_targets ();
+        walpe_gl_tex_totals (&n2, &b2, &cb);
+        CHECK (b2 <= b1 - copy, "refracting system: the copy of the frame stays when the targets are "
+               "given back (%" G_GINT64_FORMAT " bytes of texture drawing, %" G_GINT64_FORMAT " after)",
+               b1, b2);
+        frame (&p, 1, 0.0, 1, 1, 0, b);
+        Diff d = compare (a, b);
+        CHECK (d.max == 0, "refracting system: the picture with a new copy of the frame differs "
+               "(max %d)", d.max);
+        walpe_weparticles_free (p);
+        walpe_gl_tex_totals (&n3, &b3, &cb);
+        CHECK (n3 == n0 && b3 == b0, "refracting system: %d texture(s) / %" G_GINT64_FORMAT
+               " bytes left after the last particle object (%d / %" G_GINT64_FORMAT " before it)",
+               n3, b3, n0, b0);
+        walpe_weparticles_set_lowres (WALPE_PT_LOWRES_AUTO);
+        g_free (a);
+        g_free (b);
+    }
+    g_remove (mf);
+    g_free (mf);
+}
+
+/* ---- how smooth a sprite is, is measured once per file: the systems
+ * that draw with one sprite file take the first one's measurement, and a
+ * file that changed is measured again */
+static void put32 (GByteArray *a, guint32 v)
+{
+    guint8 b[4] = { (guint8) v, (guint8) (v >> 8), (guint8) (v >> 16), (guint8) (v >> 24) };
+    g_byte_array_append (a, b, 4);
+}
+
+/* a texture container with one raw RGBA level: a soft dot of radius r */
+static void write_sprite (const char *path, int w, int h, float r)
+{
+    GByteArray *a = g_byte_array_new ();
+    g_byte_array_append (a, (const guint8 *) "TEXV0005\0TEXI0001\0", 18);
+    put32 (a, 0);
+    put32 (a, 2);
+    put32 (a, (guint32) w);
+    put32 (a, (guint32) h);
+    put32 (a, (guint32) w);
+    put32 (a, (guint32) h);
+    put32 (a, 0);
+    g_byte_array_append (a, (const guint8 *) "TEXB0003\0", 9);
+    put32 (a, 1);
+    put32 (a, 0xffffffffu);
+    put32 (a, 1);
+    put32 (a, (guint32) w);
+    put32 (a, (guint32) h);
+    put32 (a, 0);
+    put32 (a, (guint32) (w * h * 4));
+    put32 (a, (guint32) (w * h * 4));
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            float dx = (x + 0.5f) / (float) w * 2 - 1, dy = (y + 0.5f) / (float) h * 2 - 1;
+            float d = sqrtf (dx * dx + dy * dy);
+            guint8 v = d < r ? (guint8) ((1 - d / r) * 255.0f + 0.5f) : 0;
+            guint8 px[4] = { 255, 255, 255, v };
+            g_byte_array_append (a, px, 4);
+        }
+    g_file_set_contents (path, (const char *) a->data, a->len, NULL);
+    g_byte_array_unref (a);
+}
+
+static void test_sprite_measured_once (void)
+{
+    char *pd = g_build_filename (tmpdir, "materials", "particle", NULL);
+    char *tex = g_build_filename (pd, "softdot.tex", NULL);
+    char *mat = g_build_filename (tmpdir, "materials", "softdot.json", NULL);
+    g_mkdir_with_parents (pd, 0700);
+    write_sprite (tex, 48, 40, 0.8f);
+    g_file_set_contents (mat, "{\"passes\":[{\"blending\":\"additive\","
+                              "\"textures\":[\"particle/softdot\"]}]}", -1, NULL);
+    char *j = g_strconcat ("{\"material\":\"materials/softdot.json\",", SYS_SPRITES + 1, NULL);
+    guint m0 = 0, k0 = 0, m = 0, k = 0;
+    walpe_weparticles_soft_stats (&m0, &k0);
+    /* (the same particles in the first two: one seed sequence) */
+    WalpeWeParticles *p[3];
+    seed_n = 4000;
+    p[0] = make (j);
+    seed_n = 4000;
+    p[1] = make (j);
+    p[2] = make (j);
+    walpe_weparticles_soft_stats (&m, &k);
+    CHECK (p[0] && p[1] && p[2], "systems with a sprite file");
+    CHECK (m - m0 == 1 && k - k0 == 2,
+           "three systems with one sprite file: measured %u times, taken over %u times "
+           "(want 1 and 2)", m - m0, k - k0);
+    /* the system that measured and one that took the measurement over
+     * draw the same picture, magnified (the measurement decides who goes
+     * into the reduced layer) */
+    if (p[0] && p[1] && p[2]) {
+        static guint8 a[W * H * 4], b[W * H * 4], ground[W * H * 4];
+        walpe_weparticles_set_lowres (WALPE_PT_LOWRES_AUTO);
+        frame (NULL, 0, 0, 1, 1, 0, ground);
+        for (int f = 0; f < 12; f++)
+            frame (&p[0], 1, 1.0 / 30, 6, 6, 0, f == 11 ? a : NULL);
+        for (int f = 0; f < 12; f++)
+            frame (&p[1], 1, 1.0 / 30, 6, 6, 0, f == 11 ? b : NULL);
+        CHECK (lit (a, ground) > 2000, "sprites of the file: nothing drawn");
+        CHECK (!memcmp (a, b, sizeof (a)), "two systems of one sprite file draw different pictures");
+        walpe_weparticles_set_lowres (WALPE_PT_LOWRES_OFF);
+    }
+    /* another picture under the same name: measured again, once */
+    walpe_weparticles_soft_stats (&m0, &k0);
+    write_sprite (tex, 64, 40, 0.3f);
+    WalpeWeParticles *n1 = make (j), *n2 = make (j);
+    walpe_weparticles_soft_stats (&m, &k);
+    CHECK (m - m0 == 1 && k - k0 == 1,
+           "the sprite file was replaced: measured %u times, taken over %u times (want 1 and 1)",
+           m - m0, k - k0);
+    /* the same bytes written again (another time stamp): measured again;
+     * nothing is assumed about a file that was written to */
+    walpe_weparticles_soft_stats (&m0, &k0);
+    g_usleep (20000);
+    write_sprite (tex, 64, 40, 0.3f);
+    WalpeWeParticles *n3 = make (j);
+    walpe_weparticles_soft_stats (&m, &k);
+    CHECK (m - m0 == 1 && k - k0 == 0, "the sprite file was written again: measured %u times, "
+           "taken over %u times (want 1 and 0)", m - m0, k - k0);
+    printf ("sprite file measured once per file: ok\n");
+    for (int i = 0; i < 3; i++)
+        if (p[i])
+            walpe_weparticles_free (p[i]);
+    if (n1) walpe_weparticles_free (n1);
+    if (n2) walpe_weparticles_free (n2);
+    if (n3) walpe_weparticles_free (n3);
+    g_remove (tex);
+    g_remove (mat);
+    g_rmdir (pd);
+    g_free (j);
+    g_free (tex);
+    g_free (mat);
+    g_free (pd);
+}
+
 static void gl_run (EGLDisplay dpy)
 {
     EGLint maj, min, nc = 0;
@@ -698,6 +1229,9 @@ static void gl_run (EGLDisplay dpy)
         test_instancing_keeps_layer ();
         test_layer_factor_change ();
         test_world_children ();
+        test_refract_copy ();
+        test_refract_copy_freed ();
+        test_sprite_measured_once ();
     }
     glBindFramebuffer (GL_FRAMEBUFFER, 0);
     glDeleteFramebuffers (1, &fbo);

@@ -2,6 +2,7 @@
 #include "clip.h"
 #include "gpuprof.h"   /* GPUPROF hooks: WALPE_PROF_QUAD in the quad draws */
 #include "yuvconv.h"
+#include "common/gifcheck.h"
 #include "common/premult.h"
 #include "common/util.h"
 #include <string.h>
@@ -628,6 +629,22 @@ static gboolean blend_setup (GLuint tex, gboolean premult, float opacity, const 
     glUniform1i (b_loc_mode, mode);
     glDisable (GL_BLEND);
     return TRUE;
+}
+
+/* The scratch texture grows to the largest area a layer with one of
+ * Wallpaper Engine's blend modes covered - up to the frame - and used to
+ * stay for the life of the render thread: a frame of RGBA8 per monitor that
+ * outlived the wallpaper it was made for, a pause and an idle release.
+ * It goes with the scene that used it and when the scene gives its targets
+ * back; the next such draw makes it again at the size it needs. */
+void walpe_glutil_blend_release (void)
+{
+    if (b_tex)
+        glDeleteTextures (1, &b_tex);
+    if (b_fbo)
+        glDeleteFramebuffers (1, &b_fbo);
+    b_tex = b_fbo = 0;
+    b_tw = b_th = 0;
 }
 
 static void blend_done (void)
@@ -2614,6 +2631,14 @@ WalpeGlTex walpe_gl_tex_from_file (const char *path)
     const gint64 max_side = 16384, max_px = (gint64) 8192 * 8192;
     if (!fmt || iw <= 0 || ih <= 0 || !tex_file_format_ok (fmt)) {
         g_debug ("texture %s: not a picture format a wallpaper texture can have", path);
+        return out;
+    }
+    /* a GIF (its first frame is the texture): only with every frame inside
+     * the picture its header declares (gifcheck.h); the loader above refuses
+     * the same file by the same rule and must not be gone around here */
+    if (!walpe_gif_file_layout_ok (path, &err)) {
+        g_debug ("texture %s: %s", path, err ? err->message : "not loaded");
+        g_clear_error (&err);
         return out;
     }
     if (iw > max_side || ih > max_side || (gint64) iw * ih > max_px) {

@@ -155,6 +155,114 @@ typedef struct {
  * quadratic in the line length. Real shader lines stay under 2000 bytes;
  * a longer line (a 400 KB expression took minutes) is compiled as written. */
 #define FX_MAX_REPAIR_LINE 8192
+/* The repairs keep the symbols of a source in lists, and the interface
+ * repairs (varyings, fragment inputs, uniforms of two types) go through
+ * the source once per declaration they look at: the work grows with the
+ * square of the size. The largest shader file of a Wallpaper Engine
+ * install has 30 KiB, the largest Workshop ones some tens of KiB (see
+ * FX_MAX_SHADER_FILE). A source of more than FX_MAX_REPAIR_SOURCE bytes is
+ * compiled as written, like a line beyond FX_MAX_REPAIR_LINE: 1 MiB of
+ * varying declarations in each stage - one shader file may be that large -
+ * took 20 s of stage 1 in an optimised build, and the 4 MiB a shader may
+ * have with its includes took minutes, for every pass that uses the
+ * shader, on the render thread. At the limit it is about a second. */
+#define FX_MAX_REPAIR_SOURCE (256 * 1024)
+
+static gboolean fx_repairable (const char *src)
+{
+    return strnlen (src, FX_MAX_REPAIR_SOURCE + 1) <= FX_MAX_REPAIR_SOURCE;
+}
+
+/* ---- text work kept for one scene load (fx_text_memo_begin / _end)
+ * A scene builds one pass after the other, and most passes are a shader
+ * text that an earlier pass of the same scene already had (175 passes of
+ * 46 texts in one scene of the test library). What is computed from the
+ * text alone is computed once per text while a load keeps a memo: the
+ * repairs of fx_prepass () with the messages they print, fx_active_code ()
+ * and fx_expansion_ok (). Outside a load nothing is kept. Per thread. */
+typedef struct {
+    GLogLevelFlags level;
+    char *msg;
+} FxSaid;
+
+typedef struct {
+    char *vsrc, *fsrc;      /* the two sources as fx_prepass () left them */
+    GPtrArray *said;        /* FxSaid: what the repairs printed, in order */
+    int nv, nf;
+    gboolean vary;
+} FxKeptPrepass;
+
+static __thread struct {
+    int depth;              /* fx_text_memo_begin () calls not ended yet */
+    GHashTable *active;     /* source -> its fx_active_code () */
+    GHashTable *expansion;  /* source -> its longest statement * 4 + (fx_expansion_ok () + 1) */
+    GHashTable *prepass;    /* vertex length, vertex source, fragment source -> FxKeptPrepass */
+} fx_memo;
+static __thread GPtrArray *fx_said_tape;   /* FxSaid, while fx_prepass () computes for the memo */
+static gint fx_memo_computed, fx_memo_reused;
+
+static void fx_said_free (gpointer p)
+{
+    FxSaid *e = p;
+    g_free (e->msg);
+    g_free (e);
+}
+
+static void fx_kept_prepass_free (gpointer p)
+{
+    FxKeptPrepass *k = p;
+    g_free (k->vsrc);
+    g_free (k->fsrc);
+    g_ptr_array_unref (k->said);
+    g_free (k);
+}
+
+/* a message of the repairs: printed, and noted for the passes that take
+ * the result over (they print it again: the log reads as before) */
+static void fx_say (GLogLevelFlags level, const char *fmt, ...) G_GNUC_PRINTF (2, 3);
+static void fx_say (GLogLevelFlags level, const char *fmt, ...)
+{
+    va_list ap;
+    va_start (ap, fmt);
+    char *msg = g_strdup_vprintf (fmt, ap);
+    va_end (ap);
+    g_log (G_LOG_DOMAIN, level, "%s", msg);
+    if (fx_said_tape) {
+        FxSaid *e = g_new (FxSaid, 1);
+        e->level = level;
+        e->msg = msg;
+        g_ptr_array_add (fx_said_tape, e);
+    } else {
+        g_free (msg);
+    }
+}
+
+void fx_text_memo_begin (void)
+{
+    if (fx_memo.depth++ > 0)
+        return;
+    fx_memo.active = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
+    fx_memo.expansion = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+    fx_memo.prepass = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, fx_kept_prepass_free);
+}
+
+void fx_text_memo_end (void)
+{
+    if (fx_memo.depth <= 0 || --fx_memo.depth > 0)
+        return;
+    g_clear_pointer (&fx_memo.active, g_hash_table_unref);
+    g_clear_pointer (&fx_memo.expansion, g_hash_table_unref);
+    g_clear_pointer (&fx_memo.prepass, g_hash_table_unref);
+}
+
+void fx_text_memo_stats (guint *computed, guint *reused)
+{
+    if (computed)
+        *computed = (guint) g_atomic_int_get (&fx_memo_computed);
+    if (reused)
+        *reused = (guint) g_atomic_int_get (&fx_memo_reused);
+}
+
 
 static gint64 fx_pp_expr (FxPp *x, int minprec);
 
@@ -1777,7 +1885,8 @@ static gboolean fx_an_scan (FxAn *an, char **lines, guint nl, guint upto, guint 
         if (*d == '#') {
             char *fixed = fx_an_directive (an, lines[i], d, repair && i >= base);
             if (fixed) {
-                g_debug ("fx: source repair line %u: %s  ->  %s", i + 1 - base, lines[i], fixed);
+                fx_say (G_LOG_LEVEL_DEBUG, "fx: source repair line %u: %s  ->  %s", i + 1 - base, lines[i],
+                         fixed);
                 g_free (lines[i]);
                 lines[i] = fixed;
                 changed = TRUE;
@@ -1797,7 +1906,8 @@ static gboolean fx_an_scan (FxAn *an, char **lines, guint nl, guint upto, guint 
             char *fixed = fx_line_static (an, lines[i], code);
             if (!fixed)
                 break;
-            g_debug ("fx: source repair line %u: %s  ->  %s", i + 1 - base, lines[i], fixed);
+            fx_say (G_LOG_LEVEL_DEBUG, "fx: source repair line %u: %s  ->  %s", i + 1 - base, lines[i],
+                         fixed);
             g_free (lines[i]);
             lines[i] = fixed;
             changed = TRUE;
@@ -1814,7 +1924,7 @@ static gboolean fx_an_scan (FxAn *an, char **lines, guint nl, guint upto, guint 
 
 /* the compiled code of a source: lines of dead #if branches, directives,
  * comments and all white space removed (for textual checks) */
-static char *fx_active_code (const char *src)
+static char *fx_active_code_of (const char *src)
 {
     char **lines = g_strsplit (src, "\n", -1);
     FxAn an;
@@ -1835,6 +1945,24 @@ static char *fx_active_code (const char *src)
     fx_an_clear (&an);
     g_strfreev (lines);
     return g_string_free (o, FALSE);
+}
+
+/* ... once per text while a scene load keeps a memo (the traits of a
+ * pass ask for the same two texts several times, and the next pass of
+ * the same shader asks again) */
+static char *fx_active_code (const char *src)
+{
+    if (!fx_memo.active)
+        return fx_active_code_of (src);
+    const char *kept = g_hash_table_lookup (fx_memo.active, src);
+    if (kept) {
+        g_atomic_int_inc (&fx_memo_reused);
+        return g_strdup (kept);
+    }
+    char *r = fx_active_code_of (src);
+    g_hash_table_insert (fx_memo.active, g_strdup (src), g_strdup (r));
+    g_atomic_int_inc (&fx_memo_computed);
+    return r;
 }
 
 /* index of the first body line (after the prelude's "#line 1") */
@@ -1986,6 +2114,8 @@ static void fx_widen_varying (char **lines, guint nl, guint base, GArray *decls,
  * log): every declaration, the widest type. */
 static gboolean fx_varying_repair (char **vsrc, char **fsrc, gboolean lenient)
 {
+    if (!fx_repairable (*vsrc) || !fx_repairable (*fsrc))
+        return FALSE;
     char **vl = g_strsplit (*vsrc, "\n", -1), **fl = g_strsplit (*fsrc, "\n", -1);
     guint nv = g_strv_length (vl), nf = g_strv_length (fl);
     GArray *vv = g_array_new (FALSE, FALSE, sizeof (FxVary));
@@ -2007,13 +2137,13 @@ static gboolean fx_varying_repair (char **vsrc, char **fsrc, gboolean lenient)
         if (tv.n > tf.n) {
             fx_widen_varying (fl, nf, fx_body_base (fl, nf), fv, name, tf, tv);
             cf = TRUE;
-            g_message ("fx: varying %s: fragment input widened %s -> %s (HLSL semantics)", name,
-                       fx_ty_name (tf), fx_ty_name (tv));
+            fx_say (G_LOG_LEVEL_MESSAGE, "fx: varying %s: fragment input widened %s -> %s (HLSL semantics)",
+                    name, fx_ty_name (tf), fx_ty_name (tv));
         } else {
             fx_widen_varying (vl, nv, fx_body_base (vl, nv), vv, name, tv, tf);
             cv = TRUE;
-            g_message ("fx: varying %s: vertex output widened %s -> %s (HLSL semantics)", name,
-                       fx_ty_name (tv), fx_ty_name (tf));
+            fx_say (G_LOG_LEVEL_MESSAGE, "fx: varying %s: vertex output widened %s -> %s (HLSL semantics)",
+                    name, fx_ty_name (tv), fx_ty_name (tf));
         }
     }
     g_hash_table_unref (seen);
@@ -2143,11 +2273,30 @@ static gint64 fx_mx_text (FxMx *m, const char *s, const char *e, const FxMac *in
     return MIN (total, (gint64) FX_MAX_EXPANSION + 1);
 }
 
-/* FALSE: the source expands beyond FX_MAX_EXPANSION tokens */
-static gboolean fx_expansion_ok (const char *src)
+/* ---- statement size ------------------------------------------------------
+ * A driver's compiler walks an expression by recursion, and one statement
+ * may be as long as the source: on a very long statement the compiler can
+ * run out of stack (seen with Mesa 25.2, on statements several times as
+ * long as the limit below; the process then ends inside glCompileShader),
+ * and long chains of some operators take it seconds, growing with the
+ * square of their length.
+ * A statement of more than FX_MAX_STATEMENT tokens - at most half as many
+ * terms - is not handed to the driver. The longest statement in the
+ * shaders of a Wallpaper Engine installation and of 88 Workshop scenes
+ * (1552 files, macros expanded) has 575 tokens. This bounds neither how
+ * deep calls nest nor how many statements there are, and the margin is
+ * that of a thread with a stack of 8 MiB. */
+#define FX_MAX_STATEMENT 8192
+
+/* FALSE: the source expands beyond FX_MAX_EXPANSION tokens. *statement
+ * (when asked for): the tokens of its longest statement - what stands
+ * between two of ';', '{' and '}', macros expanded. A macro counts as part
+ * of the statement that uses it, whatever its body holds, and lines of
+ * dead #if branches count like the others. */
+static gboolean fx_expansion_sizes (const char *src, gint64 *statement)
 {
     FxMx m = { g_hash_table_new_full (g_str_hash, g_str_equal, g_free, fx_mac_free), 0 };
-    gint64 total = 0;
+    gint64 total = 0, run = 0, longest = 0;
     GString *ln = g_string_new (NULL);
     for (const char *p = src; *p && total <= FX_MAX_EXPANSION && m.work <= FX_MAX_EXPANSION;) {
         /* one logical line (backslash-newline joined) */
@@ -2165,7 +2314,22 @@ static gboolean fx_expansion_ok (const char *src)
         }
         const char *d = fx_sp (ln->str), *end = ln->str + ln->len;
         if (*d != '#') {
-            total += fx_mx_text (&m, d, end, NULL, NULL, 0);
+            /* statement by statement */
+            for (const char *s = d; total <= FX_MAX_EXPANSION && m.work <= FX_MAX_EXPANSION;) {
+                const char *q = s;
+                while (q < end && *q != ';' && *q != '{' && *q != '}')
+                    q++;
+                gint64 n = fx_mx_text (&m, s, q, NULL, NULL, 0);
+                total += n;
+                run += n;
+                longest = MAX (longest, run);
+                if (q >= end)
+                    break;
+                total++;   /* the ';', '{' or '}' */
+                m.work++;
+                run = 0;
+                s = q + 1;
+            }
             continue;
         }
         const char *w = fx_sp (d + 1), *we = w;
@@ -2205,7 +2369,39 @@ static gboolean fx_expansion_ok (const char *src)
     gboolean ok = total <= FX_MAX_EXPANSION && m.work <= FX_MAX_EXPANSION;
     g_string_free (ln, TRUE);
     g_hash_table_unref (m.macros);
+    if (statement)
+        *statement = longest;
     return ok;
+}
+
+/* ... once per text while a scene load keeps a memo: the answer and the
+ * longest statement are kept together (statement * 4 + 2 for "fits",
+ * + 1 for "expands too far") */
+static gboolean fx_expansion_sizes_once (const char *src, gint64 *statement)
+{
+    if (!fx_memo.expansion)
+        return fx_expansion_sizes (src, statement);
+    gpointer kept = g_hash_table_lookup (fx_memo.expansion, src);
+    if (kept) {
+        gsize v = GPOINTER_TO_SIZE (kept);
+        g_atomic_int_inc (&fx_memo_reused);
+        if (statement)
+            *statement = (gint64) (v >> 2);
+        return (v & 3) == 2;
+    }
+    gint64 st = 0;
+    gboolean ok = fx_expansion_sizes (src, &st);
+    gsize kept_st = (gsize) MIN (st, (gint64) (G_MAXSIZE >> 2));
+    g_hash_table_insert (fx_memo.expansion, g_strdup (src), GSIZE_TO_POINTER ((kept_st << 2) | (ok ? 2 : 1)));
+    g_atomic_int_inc (&fx_memo_computed);
+    if (statement)
+        *statement = st;
+    return ok;
+}
+
+static inline gboolean fx_expansion_ok (const char *src)
+{
+    return fx_expansion_sizes_once (src, NULL);
 }
 
 /* ---- fragment inputs the shader writes to -------------------------------
@@ -2335,7 +2531,8 @@ static int fx_input_write_repair (char **fsrc)
         lines[mline] = init;
         char *decl = g_strdup_printf ("%.*s %s %s;%s", (int) semi_off + 1, lines[d->line], tn, copy,
                                       lines[d->line] + semi_off + 1);
-        g_debug ("fx: source repair line %u: %s  ->  %s", d->line + 1 - base, lines[d->line], decl);
+        fx_say (G_LOG_LEVEL_DEBUG, "fx: source repair line %u: %s  ->  %s", d->line + 1 - base,
+                lines[d->line], decl);
         g_free (lines[d->line]);
         lines[d->line] = decl;
         g_free (copy);
@@ -2445,8 +2642,8 @@ static int fx_uniform_split_repair (const char *vsrc, char **fsrc)
                 fl[i] = r;
             }
         }
-        g_message ("fx: uniform %s: declared with another type in the vertex shader, the fragment "
-                   "shader's one is kept apart as %s (HLSL semantics)", d->name, to);
+        fx_say (G_LOG_LEVEL_MESSAGE, "fx: uniform %s: declared with another type in the vertex shader, "
+                "the fragment shader's one is kept apart as %s (HLSL semantics)", d->name, to);
         g_free (to);
         n++;
     }
@@ -2469,17 +2666,61 @@ static gboolean fx_env_on (const char *name)
 }
 
 /* stage 1 for one pass: both shaders, then their interface */
-static void fx_prepass (char **vsrc, char **fsrc, const char *name)
+static void fx_prepass_said (const char *name, int nv, int nf, gboolean vary)
 {
-    if (fx_env_on ("WALPE_FX_NO_PREPASS"))
-        return;
-    gboolean vary = fx_varying_repair (vsrc, fsrc, FALSE);
-    int nw = fx_input_write_repair (fsrc) + fx_uniform_split_repair (*vsrc, fsrc);
-    int nv = fx_prepass_src (vsrc), nf = nw + fx_prepass_src (fsrc);
     if (nv || nf || vary)
         g_message ("fx: shader %s: %d HLSL-semantics repair(s) from source inspection "
                    "(vertex %d, fragment %d%s)", name, nv + nf, nv, nf,
                    vary ? ", varying interface" : "");
+}
+
+static void fx_prepass (char **vsrc, char **fsrc, const char *name)
+{
+    if (fx_env_on ("WALPE_FX_NO_PREPASS"))
+        return;
+    if (!fx_repairable (*vsrc) || !fx_repairable (*fsrc)) {
+        g_message ("fx: shader %s: a source of more than %d KiB is compiled as written (no "
+                   "HLSL-semantics repairs)", name, FX_MAX_REPAIR_SOURCE / 1024);
+        return;
+    }
+    /* the pair of texts decides everything below (the name is only
+     * printed): while a scene load keeps a memo, the second pass with
+     * this pair takes the first one's result and prints what it printed */
+    char *key = NULL;
+    if (fx_memo.prepass) {
+        key = g_strdup_printf ("%" G_GSIZE_FORMAT ":%s%s", strlen (*vsrc), *vsrc, *fsrc);
+        const FxKeptPrepass *k = g_hash_table_lookup (fx_memo.prepass, key);
+        if (k) {
+            g_free (key);
+            for (guint i = 0; i < k->said->len; i++) {
+                const FxSaid *e = g_ptr_array_index (k->said, i);
+                g_log (G_LOG_DOMAIN, e->level, "%s", e->msg);
+            }
+            g_free (*vsrc);
+            g_free (*fsrc);
+            *vsrc = g_strdup (k->vsrc);
+            *fsrc = g_strdup (k->fsrc);
+            fx_prepass_said (name, k->nv, k->nf, k->vary);
+            g_atomic_int_inc (&fx_memo_reused);
+            return;
+        }
+        fx_said_tape = g_ptr_array_new_with_free_func (fx_said_free);
+    }
+    gboolean vary = fx_varying_repair (vsrc, fsrc, FALSE);
+    int nw = fx_input_write_repair (fsrc) + fx_uniform_split_repair (*vsrc, fsrc);
+    int nv = fx_prepass_src (vsrc), nf = nw + fx_prepass_src (fsrc);
+    if (key) {
+        FxKeptPrepass *k = g_new0 (FxKeptPrepass, 1);
+        k->vsrc = g_strdup (*vsrc);
+        k->fsrc = g_strdup (*fsrc);
+        k->said = g_steal_pointer (&fx_said_tape);
+        k->nv = nv;
+        k->nf = nf;
+        k->vary = vary;
+        g_hash_table_insert (fx_memo.prepass, key, k);
+        g_atomic_int_inc (&fx_memo_computed);
+    }
+    fx_prepass_said (name, nv, nf, vary);
 }
 
 /* ------------------------------------------- stage 2: error-driven fallback */
@@ -2733,6 +2974,8 @@ static GPtrArray *fx_candidates (char **lines, guint nl, guint base, guint idx)
 static gboolean fx_repair_by_lines (char **src, const char *log, FxTryFn try, gpointer user,
                                     int *budget)
 {
+    if (!fx_repairable (*src))
+        return FALSE;
     GArray *errs = g_array_new (FALSE, FALSE, sizeof (int));
     fx_log_error_lines (log, errs);
     char **lines = g_strsplit (*src, "\n", -1);

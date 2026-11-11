@@ -8,6 +8,8 @@
  * (results of a superseded load are dropped by generation number). */
 #include "walpe-build-config.h"
 #include "media.h"
+#include "util.h"
+#include "gifcheck.h"
 #include <gio/gio.h>
 #include <glib/gstdio.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
@@ -411,7 +413,19 @@ typedef struct {
     gulong chain_id;
     GSource *http_deadline;
     gsize http_got;
+    GObject *http_msg;         /* the request, while its body is read */
+    GInputStream *http_in;     /* the body as it comes out of the content decoder */
+    GByteArray *http_body;     /* what has been read of it */
+    gboolean decoding;         /* counted in art_decodes_alive (art_decode) */
 } ArtJob;
+
+/* Decode jobs that still exist. A job is the data of its GTask, and the
+ * worker thread of GLib's task pool gives its task up only after it has
+ * queued the result for this thread: the job - with its own reference to
+ * the decoded picture - can outlive art_done () by the time that thread
+ * needs to run again. Nothing is lost by that; walpe_media_art_settled ()
+ * lets a test wait for it. */
+static gint art_decodes_alive;
 
 /* The covers decoded last, by URL (media thread only). The published
  * thumbnail follows the active player: switching between two players, or
@@ -459,6 +473,17 @@ static char *art_cache_key (const char *url)
     return key;
 }
 
+/* the request and its body stream belong to the thread that made them:
+ * let go of both before a job moves on to the decode thread */
+static void art_http_release (ArtJob *j)
+{
+    if (j->http_msg) {
+        g_signal_handlers_disconnect_by_data (j->http_msg, j);
+        g_clear_object (&j->http_msg);
+    }
+    g_clear_object (&j->http_in);      /* closes it: an unfinished download ends here */
+}
+
 static void art_job_free (ArtJob *j)
 {
     if (j->http_deadline) {
@@ -470,6 +495,9 @@ static void art_job_free (ArtJob *j)
             g_cancellable_disconnect (j->chain_src, j->chain_id);
         g_object_unref (j->chain_src);
     }
+    art_http_release (j);
+    if (j->http_body)
+        g_byte_array_unref (j->http_body);
     g_clear_object (&j->http_cancel);
     g_free (j->url);
     g_free (j->path);
@@ -478,7 +506,10 @@ static void art_job_free (ArtJob *j)
     if (j->rgba)
         g_bytes_unref (j->rgba);
     g_free (j->data_url);
+    gboolean decoding = j->decoding;
     g_free (j);
+    if (decoding)
+        g_atomic_int_add (&art_decodes_alive, -1);
 }
 
 /* decode at most ~THUMB_MAX: a small compressed file (a player's art URL,
@@ -527,7 +558,24 @@ static void art_decode_thread (GTask *t, gpointer src, gpointer data, GCancellab
                 g_mapped_file_unref (mf);
         }
     }
-    if (j->data) {
+    /* Only a JPEG with one scan is scaled while it is read (art_size_prepared).
+     * A progressive one, or one with a scan per component, is held whole
+     * by its decoder first, whatever size is asked for: 128 bytes per
+     * 8 x 8 block of every component (util.h). A few hundred bytes that
+     * declare 8192 x 8192 in four components - short enough for a data:
+     * URL - cost 512 MiB that way. Refused like a picture with
+     * too many pixels. */
+    gsize dlen = 0;
+    const guint8 *d = j->data ? g_bytes_get_data (j->data, &dlen) : NULL;
+    if (d && !g_strcmp0 (walpe_picture_kind (d, dlen), "jpeg") &&
+        walpe_jpeg_store_bytes (d, dlen) > WALPE_JPEG_STORE_MAX) {
+        g_set_error_literal (&err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                             "a JPEG that has to be held whole to be decoded, and too large for that");
+    } else if (d && !walpe_gif_layout_ok (d, dlen, &err)) {
+        /* a GIF whose frames are not all inside its picture, or have no
+         * pixels (gifcheck.h; other data passes): not given to the decoder.
+         * err is set */
+    } else if (j->data) {
         GdkPixbufLoader *ld = gdk_pixbuf_loader_new ();
         int too_big[3] = { FALSE, 0, 0 };
         g_signal_connect (ld, "size-prepared", G_CALLBACK (art_size_prepared), too_big);
@@ -608,7 +656,14 @@ static void set_thumb (ArtJob *j)
     g_clear_pointer (&pub.thumb_data_url, g_free);
     pub.has_thumbnail = j != NULL;
     if (j) {
+        /* the picture that is published already (the cover from the cache
+         * once more, while another load was under way): the reference it
+         * holds was written over, one per such request, and the picture
+         * was never freed */
+        GBytes *shown = pub.thumb;
         pub.thumb = g_bytes_ref (j->rgba);
+        if (shown)
+            g_bytes_unref (shown);
         pub.thumb_w = j->w;
         pub.thumb_h = j->h;
         pub.thumb_data_url = g_strdup (j->data_url);
@@ -716,43 +771,92 @@ gboolean walpe_media_art_probe (const char *url, int *w, int *h, guint *cached, 
     return url && has;
 }
 
+/* tests: TRUE once no decode job exists any more (art_decodes_alive),
+ * FALSE when that took longer than max_ms. See media.h. */
+gboolean walpe_media_art_settled (guint max_ms)
+{
+    gint64 end = g_get_monotonic_time () + (gint64) max_ms * 1000;
+    while (g_atomic_int_get (&art_decodes_alive) > 0) {
+        if (g_get_monotonic_time () >= end)
+            return FALSE;
+        g_usleep (200);
+    }
+    return TRUE;
+}
+
 static void art_decode (ArtJob *j)
 {
     GTask *t = g_task_new (NULL, NULL, art_done, NULL);
+    j->decoding = TRUE;
+    g_atomic_int_inc (&art_decodes_alive);
     g_task_set_task_data (t, j, (GDestroyNotify) art_job_free);
     g_task_run_in_thread (t, art_decode_thread);
     g_object_unref (t);
 }
 
 #ifdef HAVE_SOUP
+/* The body is read in pieces and given up beyond ART_MAX_BYTES, counted
+ * as it comes out of libsoup's content decoder. Any URL a D-Bus peer names
+ * is fetched, so the server is anybody's: one that never stops, or a few
+ * hundred KB of "Content-Encoding: gzip" that unpack to gigabytes, grew
+ * the daemon until the OOM killer when the whole body was collected first
+ * and measured afterwards (the bytes counted on the wire are the packed
+ * ones). A Content-Length beyond the limit ends the request at once, and
+ * ART_HTTP_SECONDS bound the whole transfer. */
+#define ART_HTTP_PIECE 65536
+
+static void art_http_failed (ArtJob *j, GError *err, const char *why)
+{
+    if (j->gen == art_gen && active) {
+        g_message ("media: album art download failed (%s)", err ? err->message : why);
+        set_thumb (NULL);
+    }
+    g_clear_error (&err);
+    art_job_free (j);
+}
+
+static void art_http_piece (GObject *src, GAsyncResult *res, gpointer user)
+{
+    ArtJob *j = user;
+    GError *err = NULL;
+    GBytes *piece = g_input_stream_read_bytes_finish (G_INPUT_STREAM (src), res, &err);
+    gsize n = piece ? g_bytes_get_size (piece) : 0;
+    if (!piece || j->http_body->len + n > ART_MAX_BYTES) {
+        if (piece)
+            g_bytes_unref (piece);
+        art_http_failed (j, err, "too large");
+        return;
+    }
+    if (n > 0) {
+        g_byte_array_append (j->http_body, g_bytes_get_data (piece, NULL), (guint) n);
+        g_bytes_unref (piece);
+        g_input_stream_read_bytes_async (j->http_in, ART_HTTP_PIECE, G_PRIORITY_LOW, j->http_cancel,
+                                         art_http_piece, j);
+        return;
+    }
+    g_bytes_unref (piece);             /* the end of the body */
+    j->data = g_byte_array_free_to_bytes (j->http_body);
+    j->http_body = NULL;
+    art_http_release (j);
+    art_decode (j);
+}
+
 static void art_http_done (GObject *src, GAsyncResult *res, gpointer user)
 {
     ArtJob *j = user;
     GError *err = NULL;
-    GBytes *b = soup_session_send_and_read_finish (SOUP_SESSION (src), res, &err);
+    j->http_in = soup_session_send_finish (SOUP_SESSION (src), res, &err);
     SoupMessage *m = soup_session_get_async_result_message (SOUP_SESSION (src), res);
     guint code = m ? soup_message_get_status (m) : 0;
-    if (!b || code < 200 || code >= 300 || g_bytes_get_size (b) > ART_MAX_BYTES) {
-        if (j->gen == art_gen && active)
-            g_message ("media: album art download failed (%s)",
-                       err ? err->message : b ? "HTTP error or too large" : "?");
-        g_clear_error (&err);
-        if (b)
-            g_bytes_unref (b);
-        if (j->gen == art_gen && active)
-            set_thumb (NULL);
-        art_job_free (j);
+    if (!j->http_in || code < 200 || code >= 300) {
+        art_http_failed (j, err, "HTTP error");
         return;
     }
-    j->data = b;
-    art_decode (j);
+    j->http_body = g_byte_array_new ();
+    g_input_stream_read_bytes_async (j->http_in, ART_HTTP_PIECE, G_PRIORITY_LOW, j->http_cancel,
+                                     art_http_piece, j);
 }
 
-/* the body is counted as it arrives: soup_session_send_and_read buffers
- * all of it before the caller sees a byte, so a server that never stops
- * (any URL a D-Bus peer names is fetched) grew the daemon until the OOM
- * killer. Beyond ART_MAX_BYTES, or a Content-Length that says so, the
- * request is cancelled; ART_HTTP_SECONDS bound the whole transfer. */
 static void art_http_headers (SoupMessage *m, gpointer user)
 {
     ArtJob *j = user;
@@ -862,9 +966,8 @@ static void load_art (const char *url)
             g_source_attach (j->http_deadline, g_main_context_get_thread_default ());
             g_signal_connect (m, "got-headers", G_CALLBACK (art_http_headers), j);
             g_signal_connect (m, "got-body-data", G_CALLBACK (art_http_chunk), j);
-            soup_session_send_and_read_async (soup, m, G_PRIORITY_LOW, j->http_cancel,
-                                              art_http_done, j);
-            g_object_unref (m);
+            j->http_msg = G_OBJECT (m);
+            soup_session_send_async (soup, m, G_PRIORITY_LOW, j->http_cancel, art_http_done, j);
             return;
         }
 #else

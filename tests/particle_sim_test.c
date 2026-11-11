@@ -2,7 +2,8 @@
  * child systems that follow events of their parent (1 - 9), control points
  * placed in the scene (10), a burst whose emitter's duration is shorter
  * than the first step (11), the two readings of alphafade's fade-out time
- * (12; meson runs this source a second time with WALPE_PT_FADE=span).
+ * (12; meson runs this source a second time with WALPE_PT_FADE=span),
+ * play () after stop () and after pause () (13).
  *
  * Wallpaper Engine starts one instance of an "eventfollow" / "eventspawn" /
  * "eventdeath" child system per parent particle. The child file's maxcount
@@ -435,6 +436,52 @@ int main (void)
                 CHECK (fabsf (at[k] - want[k]) < 0.03f,
                        "alphafade 0.1 / 0.9 at %.1f s of 10 (%s): alpha %.3f, want %.3f", when[k],
                        span ? "WALPE_PT_FADE=span" : "default", at[k], want[k]);
+            walpe_weparticles_free (p);
+        }
+    }
+
+    /* --- 13. play () after stop () starts the system again ---
+     * SceneScript's stop () removes the particles; the play () that follows
+     * runs the emitters from their start: a burst fires again, an emitter
+     * with a duration emits for that long again. (The burst stayed "done"
+     * and the emitter's time stayed up: a burst-only system - a click
+     * effect - was empty for good after its first stop.) pause () / play ()
+     * only holds the emission back: no second burst. */
+    {
+        JsonNode *n = wpj_parse_data (
+            "{ \"emitter\": [ { \"name\": \"boxrandom\", \"id\": 1, \"distancemax\": \"0 0 0\", \"rate\": 0,"
+            "                   \"instantaneous\": 7 },"
+            "                 { \"name\": \"boxrandom\", \"id\": 2, \"distancemax\": \"0 0 0\", \"rate\": 20,"
+            "                   \"duration\": 0.5 } ],"
+            "  \"initializer\": [ { \"name\": \"lifetimerandom\", \"id\": 3, \"min\": 30, \"max\": 30 } ],"
+            "  \"operator\": [ { \"name\": \"movement\", \"id\": 4 } ],"
+            "  \"renderer\": [ { \"name\": \"sprite\", \"id\": 5 } ], \"maxcount\": 200 }", -1);
+        p = n ? walpe_weparticles_new (json_node_get_object (n), tmpdir, NULL, NULL) : NULL;
+        if (n)
+            json_node_unref (n);
+        if (p) {
+            run (p, 1.0);
+            n0 = walpe_weparticles_count (p);
+            CHECK (n0 >= 16 && n0 <= 17, "a burst of 7 and 20 a second for 0.5 s: %d particles after 1 s", n0);
+            walpe_weparticles_set_playing (p, 0);    /* pause */
+            run (p, 0.5);
+            walpe_weparticles_set_playing (p, 1);
+            run (p, 0.5);
+            CHECK (walpe_weparticles_count (p) == n0 && walpe_weparticles_is_playing (p),
+                   "pause, play: nothing new (%d particles, %d before)", walpe_weparticles_count (p), n0);
+            walpe_weparticles_set_playing (p, -1);   /* stop */
+            run (p, 0.5);
+            CHECK (walpe_weparticles_count (p) == 0 && !walpe_weparticles_is_playing (p),
+                   "stop: no particle left (%d), not playing", walpe_weparticles_count (p));
+            walpe_weparticles_set_playing (p, 1);
+            run (p, 0.1);
+            n1 = walpe_weparticles_count (p);
+            CHECK (n1 >= 8 && n1 <= 10, "play after stop: the burst fires again (%d particles after 0.1 s, 9 expected)", n1);
+            run (p, 0.9);
+            n1 = walpe_weparticles_count (p);
+            CHECK (n1 >= 16 && n1 <= 17,
+                   "play after stop: the 0.5 s emitter runs its time again (%d particles after 1 s, %d the first time)",
+                   n1, n0);
             walpe_weparticles_free (p);
         }
     }

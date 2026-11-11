@@ -492,46 +492,26 @@ static WalpeWsItem *item_from_json (JsonObject *o)
 /* json-glib parses by recursion: a reply nested some ten thousand levels
  * deep ("[[[[[...", 100 KB of it) overflowed the stack and took the GUI
  * down. Steam's replies have a handful of levels. Brackets inside strings
- * do not count. */
+ * do not count - and what a string is has to be read the way json-glib's
+ * scanner reads it (single quotes, comments): a count that knew double
+ * quotes only let /"/[[[[... through, because the quote inside the comment
+ * opened a string for the count alone. wpj_depth_ok counts under every
+ * such reading. */
 #define JSON_MAX_DEPTH 128
-
-static gboolean json_depth_ok (const char *d, gsize len)
-{
-    int depth = 0;
-    gboolean in_str = FALSE;
-    for (gsize i = 0; i < len; i++) {
-        char c = d[i];
-        if (in_str) {
-            if (c == '\\')
-                i++;
-            else if (c == '"')
-                in_str = FALSE;
-        } else if (c == '"') {
-            in_str = TRUE;
-        } else if (c == '[' || c == '{') {
-            if (++depth > JSON_MAX_DEPTH)
-                return FALSE;
-        } else if ((c == ']' || c == '}') && depth > 0) {
-            depth--;
-        }
-    }
-    return TRUE;
-}
 
 static JsonNode *parse_json (const char *data, gssize len, GError **err)
 {
-    if (!data || !json_depth_ok (data, len < 0 ? strlen (data) : (gsize) len)) {
+    if (!data || !wpj_depth_ok (data, len < 0 ? strlen (data) : (gsize) len, JSON_MAX_DEPTH)) {
         g_set_error (err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
                      "JSON nested deeper than %d levels", JSON_MAX_DEPTH);
         return NULL;
     }
-    JsonParser *p = json_parser_new ();
-    JsonNode *root = NULL;
-    if (json_parser_load_from_data (p, data, len, err)) {
-        root = json_parser_get_root (p);
-        root = root ? json_node_copy (root) : NULL;
-    }
-    g_object_unref (p);
+    /* the first value of the reply only: what this json-glib parses behind
+     * it is never freed (util.c, wpj_parse_first) */
+    gsize n = len < 0 ? strlen (data) : (gsize) len;
+    char *text = g_memdup2 (data, n);
+    JsonNode *root = wpj_parse_first (text, n, err);
+    g_free (text);
     if (!root && err && *err) {
         /* json-glib quotes the text it stumbled over - bytes of the reply,
          * not always UTF-8, as long as the reply likes. The message is
@@ -2065,58 +2045,50 @@ static gboolean preview_url_ok (const char *url)
     return ok;
 }
 
-/* A preview is decoded only when its header declares a size worth
+/* Workshop previews are JPEG, PNG or GIF (the CDN's renditions too, or
+ * WebP). The bytes go to the decoder of the format their own first bytes
+ * name and to no other (util.h, walpe_picture_decode): gdk-pixbuf asked to
+ * find the format itself runs whichever loader the system has for them -
+ * SVG (librsvg), XPM, TGA, ICO, TIFF, PNM, ... - before it can be asked
+ * what it found, on bytes that came off the network.
+ * A preview is decoded only when its header declares a size worth
  * decoding: JPEG is scaled while it is read, every other format is decoded
  * in full before it is scaled, and a few KB of PNG can declare gigabytes of
- * pixels. *w / *h = the declared size (0 when the header was not read). */
-static void preview_size_cb (GdkPixbufLoader *ld, int w, int h, gpointer user)
-{
-    int *wh = user;
-    wh[0] = w;
-    wh[1] = h;
-    gdk_pixbuf_loader_set_size (ld, 0, 0);   /* header only: stop here */
-}
+ * pixels. A JPEG that is progressive or has a scan per component is not
+ * scaled while it is read: libjpeg holds it whole first (util.h,
+ * walpe_jpeg_store_bytes), and the decode refuses it beyond
+ * WALPE_JPEG_STORE_MAX. */
+static const char *const preview_kinds[] = { "jpeg", "png", "gif", "webp", NULL };
 
-static gboolean preview_size_ok (const char *path, GBytes *mem, GError **err)
+typedef struct {
+    int w, h;                  /* the box the picture is fitted into */
+    int dw, dh;                /* the declared size */
+    gboolean too_large;
+} PreviewSize;
+
+static gboolean preview_size (const char *kind, int w, int h, int *sw, int *sh, gpointer user)
 {
-    int wh[2] = { 0, 0 };
-    char *fname = NULL;
-    if (path) {
-        GdkPixbufFormat *fmt = gdk_pixbuf_get_file_info (path, &wh[0], &wh[1]);
-        fname = fmt ? gdk_pixbuf_format_get_name (fmt) : NULL;
-    } else if (mem) {
-        gsize len = 0;
-        const guchar *d = g_bytes_get_data (mem, &len);
-        GdkPixbufLoader *ld = gdk_pixbuf_loader_new ();
-        g_signal_connect (ld, "size-prepared", G_CALLBACK (preview_size_cb), wh);
-        gboolean ok = TRUE;
-        for (gsize off = 0; ok && !wh[0] && off < len; off += 65536)
-            ok = gdk_pixbuf_loader_write (ld, d + off, MIN ((gsize) 65536, len - off), NULL);
-        GdkPixbufFormat *fmt = gdk_pixbuf_loader_get_format (ld);
-        fname = fmt ? gdk_pixbuf_format_get_name (fmt) : NULL;
-        gdk_pixbuf_loader_close (ld, NULL);
-        g_object_unref (ld);
-    }
-    gboolean jpeg = !g_strcmp0 (fname, "jpeg");
-    /* Workshop previews are JPEG, PNG or GIF (the CDN's renditions too, or
-     * WebP). Nothing else is handed to a decoder: gdk-pixbuf would pick
-     * any loader the system has by the file's first bytes - SVG (librsvg),
-     * XPM, TGA, ICO, TIFF, PNM, ... - for bytes that came off the network. */
-    gboolean known = jpeg || !g_strcmp0 (fname, "png") || !g_strcmp0 (fname, "gif") ||
-                     !g_strcmp0 (fname, "webp");
-    g_free (fname);
-    if (!known) {
-        g_set_error_literal (err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                             "the preview is not a JPEG, PNG, GIF or WebP picture");
+    PreviewSize *ps = user;
+    ps->dw = w;
+    ps->dh = h;
+    if (w < 1 || h < 1)
+        return FALSE;
+    if (strcmp (kind, "jpeg") &&
+        (w > 16384 || h > 16384 || (gint64) w * h > (gint64) 8192 * 8192)) {
+        ps->too_large = TRUE;
         return FALSE;
     }
-    if (wh[0] < 1 || wh[1] < 1)
-        return TRUE;    /* a damaged header: the decode says so */
-    if (jpeg || (wh[0] <= 16384 && wh[1] <= 16384 && (gint64) wh[0] * wh[1] <= (gint64) 8192 * 8192))
-        return TRUE;
-    g_set_error (err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                 "the preview picture is %d x %d pixels, too large to show", wh[0], wh[1]);
-    return FALSE;
+    /* fitted into the box with its shape kept */
+    if ((double) h * ps->w > (double) w * ps->h) {
+        w = (int) (0.5 + (double) w * ps->h / h);
+        h = ps->h;
+    } else {
+        h = (int) (0.5 + (double) h * ps->w / w);
+        w = ps->w;
+    }
+    *sw = MAX (w, 1);
+    *sh = MAX (h, 1);
+    return TRUE;
 }
 
 static void preview_thread (GTask *t, gpointer src, gpointer data, GCancellable *cancel)
@@ -2124,37 +2096,42 @@ static void preview_thread (GTask *t, gpointer src, gpointer data, GCancellable 
     (void) src; (void) cancel;
     PreviewCtx *x = data;
     GError *err = NULL;
-    if (!preview_size_ok (x->data ? NULL : x->path, x->data, &err)) {
-        if (!x->data)
-            g_unlink (x->path);   /* an oversized cache entry */
-        g_task_return_error (t, err);
-        return;
-    }
+    PreviewSize ps = { x->w, x->h, 0, 0, FALSE };
+    GdkPixbuf *pb;
     if (x->data) {
-        /* tmp + rename: a concurrent reader never sees half a file */
-        char *tmp = g_strdup_printf ("%s.%p.tmp", x->path, (void *) x);
-        if (g_file_set_contents (tmp, g_bytes_get_data (x->data, NULL),
-                                 (gssize) g_bytes_get_size (x->data), NULL))
-            g_rename (tmp, x->path);
-        g_unlink (tmp);
-        g_free (tmp);
+        gsize len = 0;
+        const guint8 *d = g_bytes_get_data (x->data, &len);
+        pb = walpe_picture_decode (d, len, preview_kinds, preview_size, &ps, &err);
+        if (pb) {
+            /* only a preview that decoded is kept. tmp + rename: a
+             * concurrent reader never sees half a file */
+            char *tmp = g_strdup_printf ("%s.%p.tmp", x->path, (void *) x);
+            if (g_file_set_contents (tmp, (const char *) d, (gssize) len, NULL))
+                g_rename (tmp, x->path);
+            g_unlink (tmp);
+            g_free (tmp);
+        }
     } else {
-        utimes (x->path, NULL);   /* LRU: recently used */
-    }
-    GdkPixbuf *pb = gdk_pixbuf_new_from_file_at_scale (x->path, x->w, x->h, TRUE, &err);
-    if (!pb && x->data) {
-        /* decode straight from memory if the cache dir is not writable */
-        GInputStream *in = g_memory_input_stream_new_from_bytes (x->data);
-        g_clear_error (&err);
-        pb = gdk_pixbuf_new_from_stream_at_scale (in, x->w, x->h, TRUE, NULL, &err);
-        g_object_unref (in);
+        pb = walpe_picture_decode_file (x->path, preview_kinds, preview_size, &ps, &err);
+        if (pb)
+            utimes (x->path, NULL);   /* LRU: recently used */
+        else
+            g_unlink (x->path);       /* a cache entry that cannot be shown */
     }
     if (pb) {
         g_task_return_pointer (t, pb, g_object_unref);
-    } else {
-        g_unlink (x->path);   /* corrupt cache entry */
-        g_task_return_error (t, err);
+        return;
     }
+    if (ps.too_large) {
+        g_clear_error (&err);
+        g_set_error (&err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                     "the preview picture is %d x %d pixels, too large to show", ps.dw, ps.dh);
+    } else if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED)) {
+        g_clear_error (&err);
+        g_set_error_literal (&err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                             "the preview is not a JPEG, PNG, GIF or WebP picture");
+    }
+    g_task_return_error (t, err);
 }
 
 static void preview_got (GObject *src, GAsyncResult *res, gpointer user)

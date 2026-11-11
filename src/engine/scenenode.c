@@ -89,6 +89,7 @@ typedef struct {
                           * which scripts read and change ("inst.*") */
     guint inst_scripted; /* WALPE_WE_OV_*: count / rate are driven by a script */
     gboolean text_dirty; /* a script changed text_value: re-render */
+    gint64 text_bytes;   /* what its text texture counts in SceneNodeContent.text_bytes */
     int parent;          /* resolved node index (-1 = root) */
     /* per frame: world transform (parent chain applied, size excluded)
      * and visibility inherited from the parents */
@@ -205,6 +206,8 @@ typedef struct {
     gint64 tex_budget;   /* bytes of file textures this scene may hold, 0 = no limit
                           * (WALPE_TEX_BUDGET_MB, default 1024) */
     gint64 tex_eager_bytes; /* effect, sprite and not deferred layer textures */
+    gint64 text_bytes;   /* level 0 of the text layers' textures (refresh_text) */
+    gboolean text_over_said; /* ... and that one did not fit was logged */
     float slack_pct;     /* magnification tolerance (tex_slack), per cent */
     guint tex_serial;    /* counts every change of a layer texture after its
                           * first load (another level, a mip chain added):
@@ -912,6 +915,9 @@ static gsize text_clamp_len (const char *s)
     return n;
 }
 
+/* make_text_texture: the size of a texture walpe_text_render_part refused */
+static __thread float text_refused[2];
+
 /* text -> premultiplied BGRA texture at the layer's box size (WE renders
  * text into a texture the size of the object, see scenetext.c) */
 static void make_text_texture (NodeObj *nv)
@@ -929,10 +935,14 @@ static void make_text_texture (NodeObj *nv)
     int part[4];
     const gboolean have_tex = nv->tex && nv->tex_ready_text && nv->text_ink.w > 0 &&
                               nv->text_ink.w == nv->tex_w && nv->text_ink.h == nv->tex_h;
+    q[2] = q[3] = 0;
     cairo_surface_t *sf = walpe_text_render_part (nv->tstyle, nv->text_value, q,
                                                   have_tex ? &nv->text_ink : NULL, &ink, part);
-    if (!sf)
+    if (!sf) {
+        text_refused[0] = q[2];   /* the size that was not rendered (refresh_text) */
+        text_refused[1] = q[3];
         return;
+    }
     const int tw = cairo_image_surface_get_width (sf), th = cairo_image_surface_get_height (sf);
     const int pw = part[2], ph = part[3];
     const gboolean whole = pw == tw && ph == th;
@@ -2341,17 +2351,41 @@ static float fx_res_scale (int level, NodeObj *nv, const WalpeMat3 *m, int w, in
     return k;
 }
 
-/* (re)render a text layer whose string a script changed */
+/* (re)render a text layer whose string a script changed.
+ * The text textures of a scene together stay within the texture budget
+ * (s->tex_budget, counted apart from the file textures): each may be 8192 x
+ * 8192 pixels, the size is the layer's "size" in the scene file, and nothing
+ * bounded their number - ten layers with one letter each were 3.4 GiB of
+ * textures and half a minute for the first frame, a hundred more memory
+ * than the machine has. A layer whose texture does not fit any more is not
+ * drawn. (The largest sum in 88 Workshop scenes is 93 MiB.) */
 static void make_text_texture (NodeObj *nv);
-static void refresh_text (NodeObj *nv)
+static void refresh_text (SceneNodeContent *s, NodeObj *nv)
 {
     nv->text_dirty = FALSE;
     nv->tex_ready = FALSE;
     nv->pix_serial++;
+    if (nv->tstyle)
+        nv->tstyle->max_bytes = s->tex_budget > 0
+            ? MAX ((gint64) 1, s->tex_budget - (s->text_bytes - nv->text_bytes)) : 0;
+    text_refused[0] = text_refused[1] = 0;
     make_text_texture (nv);      /* into the same texture when the size is the same */
     if (!nv->tex_ready && nv->tex) {
         glDeleteTextures (1, &nv->tex);   /* empty string / not drawable */
         nv->tex = 0;
+    }
+    gint64 now = nv->tex_ready && nv->tex ? (gint64) nv->tex_w * nv->tex_h * 4 : 0;
+    s->text_bytes += now - nv->text_bytes;
+    nv->text_bytes = now;
+    if (!nv->tex_ready && nv->tstyle && nv->tstyle->max_bytes > 0 && !s->text_over_said &&
+        text_refused[0] >= 1 && text_refused[1] >= 1 && text_refused[0] <= 8192 &&
+        text_refused[1] <= 8192 &&
+        (gint64) text_refused[0] * (gint64) text_refused[1] * 4 > nv->tstyle->max_bytes) {
+        s->text_over_said = TRUE;
+        g_warning ("scenenode: text layer %s (%.0f x %.0f pixels) is not drawn: the text layers of "
+                   "this scene hold %.0f MiB of textures, the limit is %.0f MiB (WALPE_TEX_BUDGET_MB)",
+                   nv->name ? nv->name : "?", text_refused[0], text_refused[1],
+                   s->text_bytes / 1048576.0, s->tex_budget / 1048576.0);
     }
     fx_invalidate (nv->fxset);   /* new pixels, maybe under the same name */
 }
@@ -4020,6 +4054,7 @@ static void scenenode_drop_targets (SceneNodeContent *s)
     bake_drop (s);
     scene_target_drop (&s->rs.fbo, &s->rs.tex);
     walpe_weparticles_drop_targets ();
+    walpe_glutil_blend_release ();
     fx_targets_release ();
     s->trim_heap = TRUE;
     if (g_getenv ("WALPE_GPU_MEM"))
@@ -4384,12 +4419,18 @@ static gboolean scenenode_gl_render (WalpeContent *c, int w, int h, float px, fl
         scenenode_particles_changed (s);
     }
     gint64 now_us = g_get_monotonic_time ();
-    /* "Skip hidden areas": a frame drawn while the scene is paused - a
-     * window moved off a part of the wallpaper - shows the instant the
-     * clock stopped at, the picture the rest of the window holds, not the
-     * present (the clock goes on from that instant at the resume). Only
-     * with a clip set: without one nothing here changes. */
-    const gint64 held_us = s->paused_at && walpe_clip_serial () ? s->paused_at : 0;
+    /* A frame drawn while the scene is paused - the X server exposed a
+     * part of the window, a window moved off a part of the wallpaper
+     * ("Skip hidden areas"), the first frame of a wallpaper loaded under
+     * a window, a layer the user adjusts - shows the instant the clock
+     * stopped at, not the present: the clock goes on from that instant at
+     * the resume. (This used to hold only while a clip was set. Without
+     * one such a frame ran at the present time: scripts saw engine.runtime
+     * jump ahead by the length of the pause so far and fall back at the
+     * resume, a setInterval timer that fired in the frame was next due
+     * that much after the resume, and the picture of a paused wallpaper
+     * moved with every exposed frame.) */
+    const gint64 held_us = s->paused_at;
     if (held_us)
         now_us = held_us;
     if (s->pprobe) {
@@ -4498,7 +4539,7 @@ static gboolean scenenode_gl_render (WalpeContent *c, int w, int h, float px, fl
     for (guint i = 0; i < s->nodes->len; i++) {
         NodeObj *nv = &g_array_index (s->nodes, NodeObj, i);
         if (nv->text_dirty && nv->world_visible)
-            refresh_text (nv);
+            refresh_text (s, nv);
     }
     walpe_cph_to (WALPE_CPH_OTHER);
     if (s->tex_deferred)
@@ -5324,6 +5365,7 @@ static void scenenode_gl_free (WalpeContent *c)
         nv->ctex = nv->cfbo = 0;
         nv->tex = 0;
         nv->tex_ready = FALSE;
+        nv->text_bytes = 0;
         g_clear_pointer (&nv->parts, walpe_particles_free);
         g_clear_pointer (&nv->weparts, walpe_weparticles_free);
         g_clear_pointer (&nv->text_value, g_free);
@@ -5331,9 +5373,11 @@ static void scenenode_gl_free (WalpeContent *c)
         fx_free_for_object (nv->fxset);
         nv->fxset = NULL;
     }
+    s->text_bytes = 0;
     bake_drop (s);
     scene_target_drop (&s->rs.fbo, &s->rs.tex);
     fx_targets_release ();   /* the pool of this render thread */
+    walpe_glutil_blend_release ();
     if (s->px_query) {   /* quality accounting */
         if (s->px_state == 1)
             glEndQuery (GL_FRAGMENT_SHADER_INVOCATIONS_ARB);
@@ -5617,7 +5661,11 @@ WalpeContent *walpe_scenenode_new_from_root (JsonNode *root, const char *project
      * frame are loaded while the objects are parsed: counted, and held to
      * the budget in load order (glutil.h) */
     walpe_gl_tex_scope_begin (s->tex_budget);
+    /* (the effects of all its layers are built in here: one memo of the
+     * shader text work for the scene) */
+    fx_text_memo_begin ();
     parse_nodes (wpj_arr (ro, "objects"), s->nodes, s->dir, s);
+    fx_text_memo_end ();
     s->tex_eager_bytes = walpe_gl_tex_scope_end ();
     parse_user_props = NULL;
     /* resolve "parent" ids to node indices */

@@ -15,6 +15,7 @@
 #include <glib.h>
 #include <json-glib/json-glib.h>
 #include <string.h>
+#include "common/config.h"      /* walpe_skip_hidden_parse */
 
 typedef enum {
     WALPE_SET_BOOL,     /* a switch: JSON true / false (a number counts as one, as before) */
@@ -118,6 +119,23 @@ static inline char *walpe_set_check (JsonObject *req)
         } else if (k->kind == WALPE_SET_STR && t != G_TYPE_STRING) {
             err = g_strdup_printf ("%s needs a name or text, not a switch or a number; nothing was "
                                    "changed", name);
+        }
+        /* Values of the right type that ipc_set () read as "leave it as it
+         * is" and answered with ok: a mistyped mode of "Skip hidden areas",
+         * a negative width, a video backend that does not exist (dropped
+         * without a word when the request had another key in it). */
+        if (err || !n || !JSON_NODE_HOLDS_VALUE (n))
+            continue;
+        if (!strcmp (name, "skip_hidden") && t == G_TYPE_STRING &&
+            walpe_skip_hidden_parse (json_node_get_string (n), -1) < 0) {
+            err = g_strdup ("skip_hidden: off, auto or always; nothing was changed");
+        } else if ((!strcmp (name, "skip_hidden_margin") || !strcmp (name, "skip_hidden_inset")) &&
+                   num && json_node_get_double (n) < 0) {
+            err = g_strdup_printf ("%s: a number of pixels from 0 on; nothing was changed", name);
+        } else if (!strcmp (name, "video_backend") && t == G_TYPE_STRING &&
+                   strcmp (json_node_get_string (n), "ffmpeg") && strcmp (json_node_get_string (n), "mpv")) {
+            err = g_strdup ("video_backend: ffmpeg (mpv is still taken and means the same: FFmpeg is "
+                            "the one video backend); nothing was changed");
         }
     }
     g_list_free (ks);

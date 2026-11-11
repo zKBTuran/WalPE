@@ -16,7 +16,9 @@
  *             and direction characters in names
  *   calls     Subscribe / Unsubscribe are sent once and end after the
  *             total time limit; a reply that trickles in ends too
- *   previews  only JPEG / PNG / GIF / WebP bytes reach a decoder
+ *   previews  only JPEG / PNG / GIF / WebP bytes reach a decoder, and no
+ *             JPEG that its decoder would have to hold whole at a size
+ *             beyond the limit (progressive, a scan per component)
  *
  * Run: meson test -C build wsnet -v */
 #include "walpe-build-config.h"
@@ -172,9 +174,18 @@ static void test_limits (void)
  * runs off the stack (SIGSEGV) - the reply has to be refused before that */
 static void test_depth (void)
 {
-    for (int kind = 0; kind < 3; kind++) {
+    /* kinds 3 to 6: the brackets stand behind a quote that json-glib does
+     * not read as the start of a string (inside a /comment/, a 'string',
+     * a # line) - a depth count that knows double quotes only skips them */
+    static const char *const lead[] = { "/\"/", "'\"'", "#\"\n",
+                                        "{\"response\":{\"x\":'\"',\"publishedfiledetails\":" };
+    for (int kind = 0; kind < 7; kind++) {
         GString *s = g_string_new (NULL);
-        if (kind == 0) {
+        if (kind >= 3) {
+            g_string_append (s, lead[kind - 3]);
+            for (int i = 0; i < 100000; i++)
+                g_string_append_c (s, '[');
+        } else if (kind == 0) {
             for (int i = 0; i < 100000; i++)
                 g_string_append_c (s, '[');
         } else if (kind == 1) {
@@ -703,6 +714,21 @@ static void preview_done (GObject *src, GAsyncResult *res, gpointer user)
     g_main_loop_quit (w->loop);
 }
 
+/* is gdk-pixbuf's loader module for this format in the process? (They are
+ * loaded when bytes are first handed to them and stay. A loader built into
+ * gdk-pixbuf itself never shows up here.) */
+static gboolean loader_module_mapped (const char *format)
+{
+    char *maps = NULL, *a = g_strdup_printf ("pixbufloader-%s.", format),
+         *b = g_strdup_printf ("pixbufloader_%s.", format);
+    gboolean found = g_file_get_contents ("/proc/self/maps", &maps, NULL, NULL) &&
+                     (strstr (maps, a) || strstr (maps, b));
+    g_free (maps);
+    g_free (a);
+    g_free (b);
+    return found;
+}
+
 /* A preview that is already in the disk cache is decoded without a
  * request: plant bytes there under the name the client uses and ask for
  * it. TRUE = a picture came back. */
@@ -728,6 +754,60 @@ static gboolean cached_preview (WalpeWsClient *c, const char *id, const char *by
     g_free (h);
     g_free (url);
     return ok;
+}
+
+/* A JPEG of w x h written by hand. kind 0: progressive, one AC scan per
+ * component in which every block lies inside an end-of-band run (15 zero
+ * bits cover 16384 blocks) - a few hundred bytes that a decoder has to
+ * hold whole at full size. kind 1: sequential with a scan per component
+ * (held whole as well). kind 2: sequential, one scan for all components
+ * (decoded as it is read). sub: the first component sampled 2 x 2. */
+static GByteArray *hand_jpeg (guint w, guint h, guint ncomp, int kind, gboolean sub)
+{
+    GByteArray *o = g_byte_array_new ();
+    #define SEG(m, body, n) do { guint8 hd_[4] = { 0xFF, (m), (guint8) (((n) + 2) >> 8), (guint8) ((n) + 2) }; \
+                                 g_byte_array_append (o, hd_, 4); g_byte_array_append (o, (body), (n)); } while (0)
+    g_byte_array_append (o, (const guint8 *) "\xFF\xD8", 2);
+    guint8 dqt[65];
+    memset (dqt, 1, sizeof dqt);
+    dqt[0] = 0;
+    SEG (0xDB, dqt, 65);
+    guint8 sof[6 + 3 * 4] = { 8, (guint8) (h >> 8), (guint8) h, (guint8) (w >> 8), (guint8) w, (guint8) ncomp };
+    for (guint c = 0; c < ncomp; c++) {
+        sof[6 + 3 * c] = (guint8) (c + 1);
+        sof[7 + 3 * c] = sub && c == 0 ? 0x22 : 0x11;
+        sof[8 + 3 * c] = 0;
+    }
+    SEG (kind == 0 ? 0xC2 : 0xC0, sof, 6 + 3 * ncomp);
+    /* AC table 0: one code, '0', for symbol 0xE0 (an end-of-band run of
+     * 2^14 blocks plus 14 more bits); DC table 0: one code for "no change" */
+    guint8 dht[18] = { 0x10, 1 };
+    dht[17] = kind == 0 ? 0xE0 : 0x00;
+    SEG (0xC4, dht, 18);
+    dht[0] = 0x00;
+    dht[17] = 0x00;
+    SEG (0xC4, dht, 18);
+    if (kind == 2) {
+        guint8 sos[1 + 2 * 4 + 3] = { (guint8) ncomp };
+        for (guint c = 0; c < ncomp; c++)
+            sos[1 + 2 * c] = (guint8) (c + 1);
+        sos[1 + 2 * ncomp + 1] = 63;
+        SEG (0xDA, sos, 1 + 2 * ncomp + 3);
+    } else {
+        guint64 blocks = (guint64) ((w + 7) / 8) * ((h + 7) / 8) * (sub ? 4 : 1);
+        guint zeros = (guint) (((blocks + 16383) / 16384 * 15 + 7) / 8 + 2);
+        guint8 *z = g_malloc0 (zeros);
+        for (guint c = 0; c < ncomp; c++) {
+            guint8 sos[6] = { 1, (guint8) (c + 1), 0, (guint8) (kind == 0 ? 1 : 0), 63, 0 };
+            SEG (0xDA, sos, 6);
+            if (kind == 0)
+                g_byte_array_append (o, z, zeros);
+        }
+        g_free (z);
+    }
+    g_byte_array_append (o, (const guint8 *) "\xFF\xD9", 2);
+    #undef SEG
+    return o;
 }
 
 static void test_preview_formats (void)
@@ -764,6 +844,25 @@ static void test_preview_formats (void)
     static const char pnm[] = "P3\n2 2\n255\n255 0 0 255 0 0 255 0 0 255 0 0\n";
     CHECK (!cached_preview (c, "5007", pnm, strlen (pnm)));
     CHECK (!cached_preview (c, "5008", "not a picture at all", 20));
+    /* Not shown is not enough: none of these may have reached the decoder
+     * gdk-pixbuf has for it. Left to find the format itself, it has run
+     * that decoder on the bytes before it can be asked what it found. */
+    CHECK (!loader_module_mapped ("svg"));
+    CHECK (!loader_module_mapped ("xpm"));
+    CHECK (!loader_module_mapped ("pnm"));
+    /* a JPEG is taken at any declared size because its decoder scales while
+     * it reads; a progressive one is held whole first (128 bytes per 8 x 8
+     * block and component). 400 bytes declaring 12000 x 12000: refused. A
+     * small progressive one is shown. */
+    GByteArray *pj = hand_jpeg (64, 48, 1, 0, FALSE);
+    CHECK (cached_preview (c, "5009", (const char *) pj->data, pj->len));
+    g_byte_array_unref (pj);
+    pj = hand_jpeg (12000, 12000, 1, 0, FALSE);
+    CHECK (!cached_preview (c, "5010", (const char *) pj->data, pj->len));
+    g_byte_array_unref (pj);
+    pj = hand_jpeg (65500, 65500, 3, 0, FALSE);
+    CHECK (!cached_preview (c, "5011", (const char *) pj->data, pj->len));
+    g_byte_array_unref (pj);
     g_free (png);
     g_free (jpg);
     g_free (bmp);

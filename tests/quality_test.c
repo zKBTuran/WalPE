@@ -979,6 +979,7 @@ int main (void)
     test_fxclass ();
 
     rm_tree (tmp);
+    g_free (dir);
     if (fails) {
         g_printerr ("%d check(s) failed\n", fails);
         return 1;

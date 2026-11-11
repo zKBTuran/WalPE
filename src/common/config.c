@@ -304,6 +304,12 @@ int walpe_preview_anim_parse (const char *s, int dflt)
 }
 
 static guint save_count;
+static char *save_error;    /* why the last save failed (NULL = it was written) */
+
+const char *walpe_config_save_error (void)
+{
+    return save_error;
+}
 
 guint walpe_config_save_count (void)
 {
@@ -584,7 +590,7 @@ WalpeConfig *walpe_config_load (void)
     return c;
 }
 
-void walpe_config_save (WalpeConfig *cfg)
+gboolean walpe_config_save (WalpeConfig *cfg)
 {
     save_count++;
     char *dir = g_build_filename (g_get_user_config_dir (), "walpe", NULL);
@@ -609,12 +615,19 @@ void walpe_config_save (WalpeConfig *cfg)
     char *data = json_generator_to_data (gen, NULL);
     GError *err = NULL;
     /* 0600 (see walpe_config_load), written next to the file and renamed */
-    if (!walpe_write_private (path, data, -1, &err))
+    gboolean ok = walpe_write_private (path, data, -1, &err);
+    if (!ok)
         g_warning ("config save failed: %s", err ? err->message : "?");
+    /* kept for whoever answers the request that made the change: the
+     * warning alone left `walpe-ctl set` and the settings window saying
+     * "ok" for a change that is gone at the next start */
+    g_free (save_error);
+    save_error = ok ? NULL : g_strdup (err ? err->message : "config.json could not be written");
     g_clear_error (&err);
     g_free (data);
     json_node_unref (root);
     g_free (path);
+    return ok;
 }
 
 void walpe_config_free (WalpeConfig *cfg)

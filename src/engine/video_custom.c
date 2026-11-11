@@ -289,7 +289,8 @@ struct _CvSource {
     /* src->lock: a viewer that has no picture yet asks a parked source
      * for one (cv_viewer_upload) */
     gboolean want_first;
-    guint passes;               /* decode thread: times the clip started over */
+    gint passes;                /* atomic: times the clip started over (counted by the decode
+                                 * thread, readable from any thread) */
     /* software decode threads: as many as the clip needs (cv_threads_for),
      * raised up to threads_max when the decoder falls behind */
     int threads, threads_max;
@@ -2176,7 +2177,7 @@ static gpointer cv_decode_thread (gpointer data)
         }
         if (!smp) {
             src->wrapped = TRUE; /* the next frame whose pts does not advance starts the new pass */
-            src->passes++;
+            g_atomic_int_inc (&src->passes);
             src->skip_until = -1;
             at_start = TRUE; /* loop wrap: re-inject SPS/PPS */
             smp = mp4_demux_next (src->demux);
@@ -2518,7 +2519,7 @@ receive:
                                             "not decoded, %u decoded and not shown", keep,
                                             src->lim_skipped, src->lim_unshown);
                 src->lim_skipped = src->lim_unshown = 0;
-                g_string_append_printf (ls, "; pass %u", src->passes + 1);
+                g_string_append_printf (ls, "; pass %u", (guint) g_atomic_int_get (&src->passes) + 1);
                 if (src->slipped > 0)
                     g_string_append_printf (ls, "; decoder behind by %.0f ms in total (too slow "
                                             "for this clip)", src->slipped * 1e3);

@@ -410,16 +410,62 @@ static void fx_dedupe_decls (char *src)
     g_hash_table_unref (seen);
 }
 
+/* strchr () / strstr () for a position that only moves forward through
+ * one text: the answer is kept for as long as it lies at or behind the
+ * position asked for, so the text is walked once however often it is
+ * asked. The annotation scans below look from every "[COMBO]" /
+ * "sampler2D" for the next '{', ';', line end and key: with plain
+ * strchr () a shader of such words without the character looked for was
+ * walked to its end once per word (1 MiB of "sampler2D g_Texture1" lines:
+ * 5 s per call of the scan, and it runs for every sampler unit of every
+ * pass; 4 MiB with includes: 80 s). */
+typedef struct { const char *at; gboolean none; } FxAhead;
+
+static const char *fx_ahead_chr (FxAhead *a, const char *p, char c)
+{
+    if (a->none)
+        return NULL;
+    if (!a->at || a->at < p) {
+        a->at = strchr (p, c);
+        a->none = !a->at;
+    }
+    return a->at;
+}
+
+static const char *fx_ahead_str (FxAhead *a, const char *p, const char *s)
+{
+    if (a->none)
+        return NULL;
+    if (!a->at || a->at < p) {
+        a->at = strstr (p, s);
+        a->none = !a->at;
+    }
+    return a->at;
+}
+
+/* an annotation is one short JSON object behind a declaration (the stock
+ * ones have under 300 bytes): longer text between the braces is not read */
+#define FX_MAX_ANNOTATION 4096
+
 /* the combos a shader declares: // [COMBO] {"combo":"NAME","default":N} */
 static void fx_collect_combo_defaults (const char *src, GHashTable *combos)
 {
+    FxAhead open = { NULL, FALSE }, nl = { NULL, FALSE };
+    const char *close_eol = NULL, *close = NULL;   /* the last '}' of the line that ends at close_eol */
+    gboolean close_known = FALSE;
     for (const char *p = src; (p = strstr (p, "[COMBO]")) != NULL; p += 7) {
-        const char *b1 = strchr (p, '{');
-        const char *eol = strchr (p, '\n');
+        const char *b1 = fx_ahead_chr (&open, p, '{');
+        const char *eol = fx_ahead_chr (&nl, p, '\n');
         if (!b1 || (eol && b1 > eol))
             continue;
-        const char *b2 = eol ? g_strrstr_len (b1, eol - b1, "}") : strrchr (b1, '}');
-        if (!b2)
+        /* the last '}' between b1 and the line end: found once per line */
+        if (!close_known || close_eol != eol) {
+            close = eol ? g_strrstr_len (b1, eol - b1, "}") : strrchr (b1, '}');
+            close_eol = eol;
+            close_known = TRUE;
+        }
+        const char *b2 = close && close >= b1 ? close : NULL;
+        if (!b2 || b2 - b1 >= FX_MAX_ANNOTATION)
             continue;
         char *json = g_strndup (b1, (gsize) (b2 - b1 + 1));
         JsonNode *root = wpj_parse_data (json, -1);
@@ -439,51 +485,45 @@ static void fx_collect_combo_defaults (const char *src, GHashTable *combos)
 
 /* the combo a sampler toggles when a texture is bound:
  * uniform sampler2D g_TextureN; // {..., "combo":"MASK", ...} */
-static char *fx_sampler_combo (const char *src, int unit)
+/* the string value of `key` ("\"combo\"") in the annotation behind the
+ * declaration of sampler g_Texture<unit>: the text between the next two
+ * quotes behind the key, all on the declaration's line */
+static char *fx_sampler_anno_str (const char *src, int unit, const char *key)
 {
     char uname[16];
     snprintf (uname, sizeof (uname), "g_Texture%d", unit);
+    const gsize ul = strlen (uname), kl = strlen (key);
+    FxAhead semi_a = { NULL, FALSE }, nl = { NULL, FALSE }, key_a = { NULL, FALSE },
+            q1_a = { NULL, FALSE }, q2_a = { NULL, FALSE };
     for (const char *p = src; (p = strstr (p, "sampler2D")) != NULL; p += 9) {
-        const char *semi = strchr (p, ';');
-        const char *eol = strchr (p, '\n');
+        const char *semi = fx_ahead_chr (&semi_a, p, ';');
+        const char *eol = fx_ahead_chr (&nl, p, '\n');
         if (!semi || (eol && semi > eol))
             continue;
         const char *nm = fx_skip_ws (p + 9, semi);
-        if (strncmp (nm, uname, strlen (uname)) || g_ascii_isalnum (nm[strlen (uname)]))
+        if (strncmp (nm, uname, ul) || g_ascii_isalnum (nm[ul]))
             continue;
-        const char *c = g_strstr_len (semi, eol ? eol - semi : -1, "\"combo\"");
-        if (!c)
+        /* the key between the ';' and the line end */
+        const char *c = fx_ahead_str (&key_a, semi, key);
+        if (!c || (eol && c + kl > eol))
             continue;
-        const char *q1 = strchr (c + 7, '"');
-        const char *q2 = q1 ? strchr (q1 + 1, '"') : NULL;
+        const char *q1 = fx_ahead_chr (&q1_a, c + kl, '"');
+        const char *q2 = q1 ? fx_ahead_chr (&q2_a, q1 + 1, '"') : NULL;
         if (q1 && q2 && (!eol || q2 < eol))
             return g_strndup (q1 + 1, (gsize) (q2 - q1 - 1));
     }
     return NULL;
 }
 
+static char *fx_sampler_combo (const char *src, int unit)
+{
+    return fx_sampler_anno_str (src, unit, "\"combo\"");
+}
+
 /* the default texture a sampler annotation names ("default":"util/noise") */
 static char *fx_sampler_default (const char *src, int unit)
 {
-    char uname[16];
-    snprintf (uname, sizeof (uname), "g_Texture%d", unit);
-    for (const char *p = src; (p = strstr (p, "sampler2D")) != NULL; p += 9) {
-        const char *semi = strchr (p, ';');
-        const char *eol = strchr (p, '\n');
-        if (!semi || (eol && semi > eol))
-            continue;
-        const char *nm = fx_skip_ws (p + 9, semi);
-        if (strncmp (nm, uname, strlen (uname)) || g_ascii_isalnum (nm[strlen (uname)]))
-            continue;
-        const char *c = g_strstr_len (semi, eol ? eol - semi : -1, "\"default\"");
-        if (!c)
-            continue;
-        const char *q1 = strchr (c + 9, '"');
-        const char *q2 = q1 ? strchr (q1 + 1, '"') : NULL;
-        if (q1 && q2 && (!eol || q2 < eol))
-            return g_strndup (q1 + 1, (gsize) (q2 - q1 - 1));
-    }
-    return NULL;
+    return fx_sampler_anno_str (src, unit, "\"default\"");
 }
 
 static void fx_combos_overlay (GHashTable *combos, JsonObject *src)
@@ -553,6 +593,23 @@ static const char *fx_prelude_common =
     "#define texSample3D texture\n"
     "#define texture2D texture\n";
 
+/* A combo is a macro of the shader: its name is an identifier. The names
+ * come from the wallpaper's JSON (a material's and an effect instance's
+ * "combos", the shader's own [COMBO] annotations) and are written into the
+ * source in front of the shader text. Anything else as a name is left out:
+ * a key with a line break in it was a way to put text of any length (a
+ * JSON file may have 32 MiB) into the source, past FX_MAX_SOURCE. */
+#define FX_MAX_COMBO_NAME 128
+static gboolean fx_combo_name_ok (const char *k)
+{
+    if (!g_ascii_isalpha (k[0]) && k[0] != '_')
+        return FALSE;
+    gsize n = 1;
+    while (n <= FX_MAX_COMBO_NAME && (g_ascii_isalnum (k[n]) || k[n] == '_'))
+        n++;
+    return n <= FX_MAX_COMBO_NAME && !k[n];
+}
+
 /* build the compiled source: version + combos + prelude + body */
 static char *fx_build_source (const char *body, GHashTable *combos, gboolean vertex)
 {
@@ -561,7 +618,8 @@ static char *fx_build_source (const char *body, GHashTable *combos, gboolean ver
     gpointer k, v;
     g_hash_table_iter_init (&it, combos);
     while (g_hash_table_iter_next (&it, &k, &v))
-        g_string_append_printf (s, "#define %s %d\n", (char *) k, GPOINTER_TO_INT (v));
+        if (fx_combo_name_ok (k))
+            g_string_append_printf (s, "#define %s %d\n", (char *) k, GPOINTER_TO_INT (v));
     g_string_append (s, fx_prelude_common);
     g_string_append (s, vertex
         ? "#define varying out\n#define attribute in\n"
@@ -2179,9 +2237,15 @@ static GLuint fx_build_program (char **vsrc, char **fsrc, const char *shader,
     GLuint prog = 0;
     /* HLSL-semantics repairs, decided from the sources (fx_srcrepair.h) */
     fx_prepass (vsrc, fsrc, shader);
-    if (!fx_expansion_ok (*vsrc) || !fx_expansion_ok (*fsrc)) {
+    gint64 vst = 0, fst = 0;
+    if (!fx_expansion_sizes_once (*vsrc, &vst) || !fx_expansion_sizes_once (*fsrc, &fst)) {
         g_warning ("fx: shader %s (%s): its macros expand to more than %d tokens, not compiled",
                    shader, dbgname, FX_MAX_EXPANSION);
+        return 0;
+    }
+    if (MAX (vst, fst) > FX_MAX_STATEMENT) {
+        g_warning ("fx: shader %s (%s): a statement of %" G_GINT64_FORMAT " tokens (more than %d), not compiled",
+                   shader, dbgname, MAX (vst, fst), FX_MAX_STATEMENT);
         return 0;
     }
     for (int round = 0; round < 2; round++) {

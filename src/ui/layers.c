@@ -1,6 +1,7 @@
 /* layers.c - "Adjust layers" section of the options pane (see layers.h) */
 #include "layers.h"
 #include "uiipc.h"
+#include "numfield.h"
 #include "common/util.h"
 #include <math.h>
 #include <string.h>
@@ -936,6 +937,7 @@ static GtkWidget *mk_spin (LP *P, double lo, double hi, double step, const char 
     GtkWidget *s = gtk_spin_button_new_with_range (lo, hi, step);
     gtk_spin_button_set_digits (GTK_SPIN_BUTTON (s), 2);
     gtk_spin_button_set_numeric (GTK_SPIN_BUTTON (s), TRUE);
+    walpe_num_field_keep_when_empty (s);
     gtk_editable_set_width_chars (GTK_EDITABLE (s), 7);
     gtk_widget_set_tooltip_text (s, tip);
     g_signal_connect (s, "output", G_CALLBACK (on_spin_output), NULL);

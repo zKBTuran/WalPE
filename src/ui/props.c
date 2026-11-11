@@ -1,6 +1,7 @@
 /* props.c - "Wallpaper options" editor (see props.h) */
 #include "props.h"
 #include "uiipc.h"
+#include "numfield.h"
 #include "common/util.h"
 #include "engine/content.h"   /* walpe_content_property_defs */
 #include "engine/propnotes.h" /* walpe_prop_notes */
@@ -724,8 +725,13 @@ static gboolean tag_is (const char *name, gsize n, const char *what)
 static void decode_entity (const char **pp, GString *out)
 {
     const char *p = *pp;   /* at '&' */
-    const char *semi = strchr (p, ';');
-    if (!semi || semi - p > 10) {
+    /* the ';' within ten characters, looked for there only (a search to
+     * the end of the text for every '&' is quadratic in a text of them) */
+    const char *semi = NULL;
+    for (int k = 1; k <= 10 && p[k] && !semi; k++)
+        if (p[k] == ';')
+            semi = p + k;
+    if (!semi) {
         g_string_append_c (out, '&');
         *pp = p + 1;
         return;
@@ -827,7 +833,24 @@ static const char *const bb_tags[] = {
     "quote", "code", "spoiler", "center", "hr", "strike", "noparse", "table", "tr", "td", NULL,
 };
 
-/* HTML/BBCode -> plain lines; flags for heading/rule styling */
+/* strstr (from, what) that remembers a miss: what is not found from one
+ * place is not found from any later place of the same text either */
+static const char *find_later (const char *from, const char *what, gboolean *none)
+{
+    if (*none)
+        return NULL;
+    const char *hit = strstr (from, what);
+    if (!hit)
+        *none = TRUE;
+    return hit;
+}
+
+/* HTML/BBCode -> plain lines; flags for heading/rule styling.
+ * The text is a wallpaper's and as long as its author likes: every search
+ * for the end of something (the '>' of a tag, a closing tag, the ']' of a
+ * BBCode tag) is made so that the whole pass stays linear - a megabyte of
+ * "&", "<x" or "[img]" used to be searched to its end once per character
+ * and held the window for minutes. */
 static void markup_to_lab (const char *t, Lab *out)
 {
     GString *s = g_string_new (NULL);
@@ -838,6 +861,8 @@ static void markup_to_lab (const char *t, Lab *out)
     if (!g_utf8_validate (t, -1, NULL))
         t = owned = g_utf8_make_valid (t, -1);
     const char *p = t;
+    const char *next_gt = NULL;     /* the first '>' at or after the last place asked from */
+    gboolean no_gt = FALSE, no_abbr = FALSE, no_script = FALSE, no_style = FALSE, no_bbclose = FALSE;
     while (*p) {
         if (*p == '<') {
             const char *q = p + 1;
@@ -851,7 +876,11 @@ static void markup_to_lab (const char *t, Lab *out)
             while (g_ascii_isalnum (*q))
                 q++;
             gsize nl = (gsize) (q - nm);
-            const char *gt = strchr (q, '>');
+            if (!no_gt && (!next_gt || next_gt < q)) {
+                next_gt = strchr (q, '>');
+                no_gt = next_gt == NULL;
+            }
+            const char *gt = no_gt ? NULL : next_gt;
             if (!nl && !closing && q[0] == '!' && q[1] == '-' && q[2] == '-') {
                 const char *ce = strstr (q, "-->");   /* <!-- comment --> */
                 p = ce ? ce + 3 : p + strlen (p);
@@ -892,7 +921,7 @@ static void markup_to_lab (const char *t, Lab *out)
                         if (!notes)
                             notes = g_string_new (NULL);
                         g_string_append_printf (notes, "\n%s", ti);
-                        const char *ce = strstr (gt, "</abbr");
+                        const char *ce = find_later (gt, "</abbr", &no_abbr);
                         if (ce) {
                             const char *cg = strchr (ce, '>');
                             g_free (ti);
@@ -907,7 +936,9 @@ static void markup_to_lab (const char *t, Lab *out)
                 g_string_append (s, "\n\342\200\242 ");
             if (tag_is (nm, nl, "script") || tag_is (nm, nl, "style")) {
                 /* never text: skip to the closing tag */
-                const char *ce = closing ? NULL : strstr (gt, tag_is (nm, nl, "script") ? "</script" : "</style");
+                const char *ce = closing ? NULL
+                               : tag_is (nm, nl, "script") ? find_later (gt, "</script", &no_script)
+                                                           : find_later (gt, "</style", &no_style);
                 if (ce) {
                     const char *cg = strchr (ce, '>');
                     p = cg ? cg + 1 : ce + strlen (ce);
@@ -939,16 +970,21 @@ static void markup_to_lab (const char *t, Lab *out)
             while (g_ascii_isalnum (*q) || *q == '*')
                 q++;
             gsize nl = (gsize) (q - nm);
-            const char *rb = strchr (q, ']');
+            /* the ']' of a tag is within 200 characters of its '[' */
+            const char *rb = NULL;
+            if (nl && (*q == ']' || *q == '='))
+                for (const char *c = q; *c && c - p < 200 && !rb; c++)
+                    if (*c == ']')
+                        rb = c;
             gboolean bb = FALSE;
-            if (nl && rb && (*q == ']' || *q == '=') && rb - p < 200)
+            if (rb)
                 for (int i = 0; bb_tags[i] && !bb; i++)
                     bb = tag_is (nm, nl, bb_tags[i]);
             if (bb) {
                 markup = TRUE;
                 if (tag_is (nm, nl, "img") && p[1] != '/') {
                     /* [img]url[/img]: the URL is not a label */
-                    const char *ce = strstr (rb, "[/");
+                    const char *ce = find_later (rb, "[/", &no_bbclose);
                     images++;
                     if (ce) {
                         const char *cg = strchr (ce, ']');
@@ -1909,6 +1945,7 @@ static PRow *build_row (Panel *P, const char *key, JsonObject *def, JsonNode *cu
         gtk_widget_set_hexpand (sc, FALSE);
         GtkWidget *sp = gtk_spin_button_new (r->adj, st, (guint) digits_for (st, r->is_int ? 0 : prec));
         gtk_spin_button_set_numeric (GTK_SPIN_BUTTON (sp), TRUE);
+        walpe_num_field_keep_when_empty (sp);   /* (it took the option's lowest value) */
         gtk_editable_set_width_chars (GTK_EDITABLE (sp), 6);
         gtk_accessible_update_property (GTK_ACCESSIBLE (sc), GTK_ACCESSIBLE_PROPERTY_LABEL,
                                         lab.title, -1);

@@ -11,6 +11,7 @@
 #include "engine/propnotes.h"
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 static int fails;
 
@@ -274,6 +275,46 @@ int main (int argc, char **argv)
     /* file options without a "value" are controls too */
     expect ("file", "image", "Custom picture", FALSE, "Custom picture");
     expect ("directory", "dir", "ui_img_dir", FALSE, "Img dir");
+
+    /* The end of a tag, an entity or a BBCode block that never comes: the
+     * search for it must not start over at every character. A megabyte of
+     * each of these used to take minutes (the time grew with the square of
+     * the length); the whole label is read in one pass now. The limit is
+     * processor time of this process, far above what one pass needs (the
+     * help texts of <abbr> become a line each: half the size for that one,
+     * a sanitizer build is slow with tens of thousands of lines). */
+    {
+        static const char *const unit[] = { "&", "<x", "[b=", "<abbr title=x>", "<script>",
+                                            "<style>", "[img]", "<", "[" };
+        for (guint i = 0; i < G_N_ELEMENTS (unit) && !fails; i++) {
+            gsize ul = strlen (unit[i]), n = ((i == 3 ? 1u << 19 : 1u << 20)) / ul;
+            char *text = g_malloc (n * ul + 1);
+            for (gsize k = 0; k < n; k++)
+                memcpy (text + k * ul, unit[i], ul);
+            text[n * ul] = 0;
+            JsonObject *d = mkdef ("bool", text, TRUE);
+            clock_t c0 = clock ();
+            char *got = walpe_props_label_preview (d, "a", NULL);
+            double cpu = (double) (clock () - c0) / CLOCKS_PER_SEC;
+            if (cpu > 5.0) {
+                fails++;
+                fprintf (stderr, "FAIL a label of %zu x \"%s\" took %.1f s of processor time\n",
+                         n, unit[i], cpu);
+            }
+            g_free (got);
+            json_object_unref (d);
+            g_free (text);
+        }
+        /* and the answers did not change with the way of searching */
+        expect ("bool", "a", "A &amp B; C &#65; &#x42; &bogus; &", TRUE, "A &amp B; C A B &bogus; &");
+        expect ("bool", "a", "[b]Bold[/b] [nope] [b" , TRUE, "Bold [nope] [b");
+        expect ("bool", "a", "x <abbr title=\"help\">[i]</abbr> y <abbr title=\"more\">z", TRUE,
+                "x y z\nhelp\nmore");
+        expect ("bool", "a", "a<script>var x = '<b>';</script>b<style>p{}</style>c<script>d", TRUE, "abcd");
+        expect ("bool", "a", "[img]http://example.org/a.png[/img]Label[img]http://example.org/b.png", TRUE,
+                "Labelhttp://example.org/b.png");
+        expect ("bool", "a", "a <unknown b> c <br d", TRUE, "a c");
+    }
 
     if (fails) {
         fprintf (stderr, "proplabel: %d case(s) failed\n", fails);

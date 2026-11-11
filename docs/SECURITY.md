@@ -26,12 +26,15 @@ What to include:
 | File | Limit |
 |---|---|
 | texture / picture | 16384 px per side and 8192 x 8192 px; all textures of a scene 1024 MiB (`WALPE_TEX_BUDGET_MB=<MiB>`, 0 = none), the largest are stored smaller beyond that |
-| picture inside a `.tex`, layer picture of the old scene format | PNG, JPEG, WebP (plain picture files also GIF, BMP, TIFF; old-format layers also TGA, AVIF, JXL), each read by its own decoder only |
+| picture inside a `.tex`, layer picture of the old scene format | PNG, JPEG, WebP (plain picture files also GIF, BMP, TIFF; old-format layers also TGA, AVIF, JXL), each read by its own decoder only, also when only its size is asked for |
+| GIF (wallpaper, preview, cover art) | checked before any of it is decoded: the picture and every frame at least 1 x 1 pixel, every frame inside the picture; a GIF that fails is refused like a damaged picture |
 | `.json` | 32 MiB, 512 levels of nesting |
-| `scene.pkg` | entries stay inside the cache copy, at most 32 path components, 32768 files + directories, 4 x the package's size + 16 MiB written; the cache holds 1 GiB (`WALPE_PKG_CACHE_MB`) |
+| `scene.pkg` | a regular file inside the wallpaper's folder (no pipe, no link that leads out); entries stay inside the cache copy, at most 32 path components, 32768 files + directories, 4 x the package's size + 16 MiB written; the cache holds 1 GiB (`WALPE_PKG_CACHE_MB`) |
 | puppet model `.mdl` | 256 MiB |
-| video (`.mp4`, video inside a `.tex`) | 4194304 frames (19 hours at 60 fps), timescale below 2^31 |
-| text layer | 16 KiB of text, 8192 px |
+| video (`.mp4`, video inside a `.tex`) | 4194304 frames (19 hours at 60 fps), timescale below 2^31; a sample size table that is repeated in the file costs nothing more |
+| font of a text layer | a TrueType / OpenType font file or a collection of them, at most 256 faces and named instances in all and 512 tables per face; anything else is not handed to fontconfig, and the layer is drawn with a system font |
+| text layer | 16 KiB of text, 8192 px, a font size of at most 15000 points; the text layers of a scene together 1024 MiB of texture (the same `WALPE_TEX_BUDGET_MB`, counted apart from the pictures), a layer beyond that is not drawn |
+| particles | 20000 per system, 128 systems per particle object, 400000 alive in all systems together; a system at a limit emits no more until particles end |
 | names of files a wallpaper refers to | below the wallpaper's own folder (or the Wallpaper Engine `assets/`): no absolute path, no `..`, no symbolic link that leads out, regular files only |
 
 A file beyond a limit is not loaded (the log says which); the rest of the wallpaper is.
@@ -59,6 +62,10 @@ Limits on what a wallpaper's scripts and shaders may cost (fixed, no switch):
 | "parent" chain of layers, also when a script re-parents at run time | 256 | the layer becomes a root |
 | one shader file (`.frag`, `.vert`, included header) | 1 MiB | not read: the effect fails like one whose shader is missing |
 | one shader with all its `#include`s | 4 MiB | further includes stay unexpanded (the effect then fails to compile) |
+| one statement of a shader, macros expanded | 8192 tokens | the shader is not handed to the driver (a driver's compiler can run out of stack on a longer statement); the effect fails like one that does not compile |
+| a shader the repairs look at | 256 KiB of source, 8192 bytes per line | a larger source, or a longer line, is compiled as written, without the repairs for Wallpaper Engine's dialect |
+| a combo name from a wallpaper's JSON or a `[COMBO]` annotation | an identifier of at most 128 characters | anything else is left out of the shader source |
+| a time zone name a script asks for | a zone of the system's zone directory | other names (files there that are no zones, `posix/`, `right/`) give no zone |
 
 A header is included once per file, whatever the `#include` line calls it (`"x.h"`, `"./x.h"`, a link).
 Tests: `meson test -C build script-hostile fx-hostile scene-hostile` (the last two need EGL
@@ -67,7 +74,12 @@ surfaceless; `fx-hostile-test gl 1500` and `fx-hostile-test text 6000` run more 
 ## What is trusted on the local machine
 
 - The control socket is for your own programs: mode 0600, a connection
-  from another account is dropped (root is accepted). Whoever can reach it
+  from another account is dropped (root is accepted). A request line may
+  have 1 MiB, 64 connections may be open at once and 8 of them may
+  subscribe to state changes; a reply the client does not take at once is
+  queued and sent when the socket takes more, and a client that reads
+  nothing for 3 seconds is dropped, so one that never reads cannot hold up
+  the daemon's other clients. Whoever can reach it
   can do what you can do with WalPE: open any wallpaper folder (scene
   scripts, web pages), point `we_assets` at other shaders, run an import
   through ffmpeg or a download through steamcmd. Do not hand the socket to
@@ -97,15 +109,32 @@ surfaceless; `fx-hostile-test gl 1500` and `fx-hostile-test text 6000` run more 
   and close every other descriptor.
 
 
+## Cover art of media integration
+
+A wallpaper with media integration is shown the cover picture the music player on the
+session bus names (a file, a `data:` URL or an http(s) address; any address a player names
+is fetched, also a local one). At most 16 MiB are read, counted after unpacking for a
+compressed http body; a picture of more than 8192 pixels per side is refused before any
+pixel exists, a JPEG that its decoder has to hold whole is not decoded beyond 256 MiB of
+that store, and a GIF is checked as in the table above. A known limit: the cover is decoded
+by whatever picture loader the system's gdk-pixbuf offers for it, not by a fixed list of
+formats (such a list is prepared and not part of this release).
+
 ## Workshop data
 
 What Steam's servers answer and
 what a wallpaper's `project.json` says is treated as data from strangers. Replies are read up
 to a size limit and at most 120 s, redirects are followed only to Steam's https hosts (never
-for calls that carry the Web API key), preview pictures go to a decoder only when they are
-JPEG, PNG, GIF or WebP (library previews also BMP and AVIF), and titles, tags, names and
-descriptions are cut to sane lengths and cleaned of control and text-direction characters
-before they are shown. The optional Steam Web API key lives in `~/.config/walpe/workshop.json`
+for calls that carry the Web API key), preview pictures go to a decoder only when their first
+bytes are those of a JPEG, PNG, GIF or WebP file (library previews also BMP and AVIF) and then
+to the decoder of that one format (gdk-pixbuf is never left to pick one of its other loaders -
+SVG, XPM, PNM, TGA, ICO ... - for them), a JPEG that its decoder has to hold whole (progressive,
+or a scan per component) is not decoded beyond 256 MiB of that store, and titles, tags, names
+and descriptions are cut to sane lengths and cleaned of control and text-direction characters
+before they are shown. `walpe-ctl` writes the texts it takes from a reply (a Workshop title, the
+layer and effect names of a scene, a text layer's text) with their control characters made
+visible (`\x1b`), so an escape sequence in them never reaches the terminal; a reply printed as
+JSON has them as `\u001b`. The optional Steam Web API key lives in `~/.config/walpe/workshop.json`
 (mode 0600), is sent to api.steampowered.com only and is never logged; WalPE never handles a
 Steam password. Tests: `meson test -C build wsnet uitext thumbs steamsub workshop`.
 

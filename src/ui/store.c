@@ -458,6 +458,21 @@ char *walpe_store_import_file (const char *src_abs, const char *dest_dir, GError
     char *abs = walpe_expand_path (src_abs);
     const char *base = strrchr (abs, '/');
     base = base ? base + 1 : abs;
+    {
+        /* A single file goes to <library>/imported/, where the library
+         * lists videos, GIFs and pictures by their file name (is_media)
+         * and nothing whose name starts with a dot. Any other file was
+         * copied all the same and reported as imported: it never showed
+         * up in the window and could not be removed from there either. */
+        struct stat fst;
+        if (stat (abs, &fst) == 0 && S_ISREG (fst.st_mode) && (base[0] == '.' || !is_media (base))) {
+            g_set_error (err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                         "%s is not a video, GIF or picture the library can show%s", base,
+                         base[0] == '.' ? " (its name starts with a dot)" : "");
+            g_free (abs);
+            return NULL;
+        }
+    }
     char *sub = g_build_filename (dest_dir, "imported", NULL);
     g_mkdir_with_parents (sub, 0755);
     char *dst = import_name (sub, base, abs);
@@ -501,6 +516,16 @@ char *walpe_store_import_dir (const char *src_abs, const char *dest_dir, GError 
         g_free (abs);
         return NULL;
     }
+    /* the library folder is made by the first thing that goes into it: on
+     * a new installation it is not there yet, and the link could not be
+     * made (the first "Add folder" ended with "symlink <path>") */
+    if (g_mkdir_with_parents (dest_dir, 0755) != 0) {
+        int e = errno;
+        g_set_error (err, G_IO_ERROR, g_io_error_from_errno (e),
+                     "cannot create the library folder %s: %s", dest_dir, g_strerror (e));
+        g_free (abs);
+        return NULL;
+    }
     char *link = g_build_filename (dest_dir, base, NULL);
     if (symlink (abs, link) < 0) {
         int e = errno;
@@ -516,7 +541,8 @@ char *walpe_store_import_dir (const char *src_abs, const char *dest_dir, GError 
                              "the library already has a folder named %s (another wallpaper); "
                              "rename one of them to add both", base);
             else
-                g_set_error (err, G_IO_ERROR, g_io_error_from_errno (e), "symlink %s", link);
+                g_set_error (err, G_IO_ERROR, g_io_error_from_errno (e),
+                             "cannot link %s into the library: %s", link, g_strerror (e));
             g_free (link);
             g_free (abs);
             return NULL;
@@ -524,6 +550,103 @@ char *walpe_store_import_dir (const char *src_abs, const char *dest_dir, GError 
     }
     g_free (abs);
     return link;
+}
+
+guint walpe_store_import_folder (const char *src, const char *dest_dir, guint *failed,
+                                 char **first_err)
+{
+    guint n = 0, bad = 0;
+    char *why = NULL;
+    char *pj = g_build_filename (src, "project.json", NULL);
+    if (g_file_test (pj, G_FILE_TEST_EXISTS)) {
+        GError *err = NULL;
+        char *dst = walpe_store_import_dir (src, dest_dir, &err);
+        if (dst)
+            n++;
+        else {
+            bad++;
+            why = g_strdup (err ? err->message : "import failed");
+        }
+        g_free (dst);
+        g_clear_error (&err);
+    } else {
+        GDir *d = g_dir_open (src, 0, NULL);
+        const char *name;
+        while (d && (name = g_dir_read_name (d))) {
+            char *sub = g_build_filename (src, name, NULL);
+            char *spj = g_build_filename (sub, "project.json", NULL);
+            if (g_file_test (spj, G_FILE_TEST_EXISTS)) {
+                GError *err = NULL;
+                char *dst = walpe_store_import_dir (sub, dest_dir, &err);
+                if (dst)
+                    n++;
+                else {
+                    bad++;
+                    if (!why)
+                        why = g_strdup (err ? err->message : "import failed");
+                }
+                g_free (dst);
+                g_clear_error (&err);
+            }
+            g_free (spj);
+            g_free (sub);
+        }
+        if (d)
+            g_dir_close (d);
+    }
+    g_free (pj);
+    if (failed)
+        *failed = bad;
+    if (first_err)
+        *first_err = why;
+    else
+        g_free (why);
+    return n;
+}
+
+char *walpe_store_load_error_text (JsonObject *state)
+{
+    JsonArray *ms = state ? wpj_arr (state, "monitors") : NULL;
+    guint n = wpj_arr_len (ms), with = 0;
+    const char *why = NULL, *back = NULL;
+    int first = -1;
+    for (guint i = 0; i < n; i++) {
+        JsonObject *m = wpj_arr_obj (ms, i);
+        const char *e = m ? wpj_str (m, "load_error", NULL) : NULL;
+        if (!e || !*e)
+            continue;
+        with++;
+        if (!why) {
+            why = e;
+            back = wpj_str (m, "load_restored", NULL);
+            first = (int) wpj_num (m, "index", i);
+        }
+    }
+    if (!why)
+        return NULL;
+    /* the engine's sentence is "<path of the wallpaper>: <reason>". The
+     * status line is one line, cut at its end: the name and what is shown
+     * now come first, the reason (it often repeats the path) last */
+    char *name = NULL;
+    const char *sep = *why == '/' ? strstr (why, ": ") : NULL;
+    if (sep && sep > why) {
+        char *path = g_strndup (why, (gsize) (sep - why));
+        name = g_path_get_basename (path);
+        g_free (path);
+        why = sep + 2;
+    }
+    GString *s = g_string_new (NULL);
+    if (with < n)   /* not every monitor: say which */
+        g_string_append_printf (s, "Monitor %d: ", first + 1);
+    g_string_append_printf (s, "%s could not be loaded", name ? name : "the wallpaper");
+    if (back && *back) {
+        char *base = g_path_get_basename (back);
+        g_string_append_printf (s, "; %s is shown again", base);
+        g_free (base);
+    }
+    g_string_append_printf (s, ": %s", why);
+    g_free (name);
+    return g_string_free (s, FALSE);
 }
 
 char *walpe_store_steam_dir (void)

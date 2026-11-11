@@ -10,6 +10,16 @@
  *    - #include expansion: a header that includes itself under 400
  *      spellings, a shader file of 64 MiB, includes 8 deep: the expanded
  *      source stays bounded;
+ *    - combo names that are no identifiers (line breaks, megabytes of
+ *      text) do not reach the source;
+ *    - the annotation scans (combos, sampler combos and defaults) walk a
+ *      source once and find what the scans they replace found;
+ *    - a source beyond the size limit of the source repairs is compiled
+ *      as written (megabytes of declarations cost minutes of repairs);
+ *    - the displacement recogniser of the fusing on a final statement
+ *      whose names come in two parts;
+ *    - the size of a statement with its macros expanded (a statement
+ *      beyond the limit is not handed to the driver: checked with GL);
  *    - seeded mutations of seven small effects written for this test,
  *      through every text stage
  *      (hoist, includes, combos, prelude, source inspection / repair, time
@@ -36,6 +46,7 @@
 #include <epoxy/egl.h>
 #include <glib/gstdio.h>
 #include <stdio.h>
+#include <time.h>
 
 static int fails, checks;
 
@@ -740,6 +751,447 @@ static void include_checks (void)
     g_free (sdir);
 }
 
+/* Combo names come from the wallpaper's JSON and go into the source as
+ * "#define <name> <value>" lines. A name with a line break carried any
+ * text into the source, of any length. */
+static void combo_checks (void)
+{
+    GHashTable *combos = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+    JsonNode *root = wpj_parse_data ("{\"MODE\":2,\"_x9\":\"3\",\"A B\":1,\"\":1,\"9LIVES\":1,"
+                                     "\"N 1\\nfloat injected_text;\\n#define M\":1,\"K\\u00e4\":1,\"ok\":true}", -1);
+    GString *big = g_string_new ("BIG 1\n");
+    while (big->len < 8 * 1024 * 1024)
+        g_string_append (big, "float filler_text_from_a_combo_name;\n");
+    GString *longname = g_string_new (NULL);
+    for (int i = 0; i < 4096; i++)
+        g_string_append_c (longname, 'L');
+    if (root && JSON_NODE_HOLDS_OBJECT (root)) {
+        json_object_set_int_member (json_node_get_object (root), big->str, 1);
+        json_object_set_int_member (json_node_get_object (root), longname->str, 1);
+        fx_combos_overlay (combos, json_node_get_object (root));
+    }
+    fx_collect_combo_defaults ("// [COMBO] {\"combo\":\"FROM_SHADER\",\"default\":4}\n"
+                               "// [COMBO] {\"combo\":\"X\\n#define Y\",\"default\":1}\n", combos);
+    const char *body = "void main() {}\n";
+    char *src = fx_build_source (body, combos, FALSE);
+    gsize len = strlen (src);
+    result (strstr (src, "#define MODE 2\n") && strstr (src, "#define _x9 3\n") &&
+            strstr (src, "#define ok 1\n") && strstr (src, "#define FROM_SHADER 4\n"),
+            "combos: names that are identifiers are defined");
+    result (!strstr (src, "injected_text") && !strstr (src, "filler_text") && !strstr (src, "#define A B") &&
+            !strstr (src, "9LIVES") && !strstr (src, "#define  1") && !strstr (src, "#define Y") &&
+            !strstr (src, "LLLL") && !strstr (src, "#define K"),
+            "combos: a name that is no identifier does not reach the source");
+    char *m = g_strdup_printf ("combos: the source does not grow with such names (%" G_GSIZE_FORMAT " bytes)", len);
+    result (len < 64 * 1024, m);
+    g_free (m);
+    g_free (src);
+    g_string_free (big, TRUE);
+    g_string_free (longname, TRUE);
+    if (root)
+        json_node_unref (root);
+    g_hash_table_unref (combos);
+}
+
+/* ---- annotation scans: the combos a shader declares, the combo and the
+ * default texture of a sampler (fx_collect_combo_defaults,
+ * fx_sampler_combo, fx_sampler_default). They used to look for the next
+ * '{' / ';' / line end with strchr () from every "[COMBO]" / "sampler2D"
+ * of the text: without that character the text was walked to its end once
+ * per word. The scans now walk the text once; what they find must be what
+ * the old code found, which is kept here as the reference. */
+static void ref_combo_defaults (const char *src, GHashTable *combos)
+{
+    for (const char *p = src; (p = strstr (p, "[COMBO]")) != NULL; p += 7) {
+        const char *b1 = strchr (p, '{');
+        const char *eol = strchr (p, '\n');
+        if (!b1 || (eol && b1 > eol))
+            continue;
+        const char *b2 = eol ? g_strrstr_len (b1, eol - b1, "}") : strrchr (b1, '}');
+        if (!b2)
+            continue;
+        char *json = g_strndup (b1, (gsize) (b2 - b1 + 1));
+        JsonNode *root = wpj_parse_data (json, -1);
+        g_free (json);
+        if (!root)
+            continue;
+        if (JSON_NODE_HOLDS_OBJECT (root)) {
+            JsonObject *o = json_node_get_object (root);
+            const char *name = wpj_str (o, "combo", NULL);
+            if (name && *name && !g_hash_table_contains (combos, name))
+                g_hash_table_insert (combos, g_strdup (name),
+                                     GINT_TO_POINTER (walpe_d2i (wpj_num (o, "default", 0))));
+        }
+        json_node_unref (root);
+    }
+}
+
+static char *ref_sampler_str (const char *src, int unit, const char *key)
+{
+    char uname[16];
+    snprintf (uname, sizeof (uname), "g_Texture%d", unit);
+    for (const char *p = src; (p = strstr (p, "sampler2D")) != NULL; p += 9) {
+        const char *semi = strchr (p, ';');
+        const char *eol = strchr (p, '\n');
+        if (!semi || (eol && semi > eol))
+            continue;
+        const char *nm = fx_skip_ws (p + 9, semi);
+        if (strncmp (nm, uname, strlen (uname)) || g_ascii_isalnum (nm[strlen (uname)]))
+            continue;
+        const char *c = g_strstr_len (semi, eol ? eol - semi : -1, key);
+        if (!c)
+            continue;
+        const char *q1 = strchr (c + strlen (key), '"');
+        const char *q2 = q1 ? strchr (q1 + 1, '"') : NULL;
+        if (q1 && q2 && (!eol || q2 < eol))
+            return g_strndup (q1 + 1, (gsize) (q2 - q1 - 1));
+    }
+    return NULL;
+}
+
+static gboolean same_combos (GHashTable *a, GHashTable *b)
+{
+    if (g_hash_table_size (a) != g_hash_table_size (b))
+        return FALSE;
+    GHashTableIter it;
+    gpointer k, v, v2;
+    g_hash_table_iter_init (&it, a);
+    while (g_hash_table_iter_next (&it, &k, &v))
+        if (!g_hash_table_lookup_extended (b, k, NULL, &v2) || v != v2)
+            return FALSE;
+    return TRUE;
+}
+
+/* TRUE when the scans and the reference agree on text */
+static gboolean anno_same (const char *text)
+{
+    gboolean same = TRUE;
+    GHashTable *a = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+    GHashTable *b = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+    fx_collect_combo_defaults (text, a);
+    ref_combo_defaults (text, b);
+    same &= same_combos (a, b);
+    g_hash_table_unref (a);
+    g_hash_table_unref (b);
+    for (int u = 0; u < FX_MAX_BINDS && same; u++) {
+        char *x = fx_sampler_combo (text, u), *y = ref_sampler_str (text, u, "\"combo\"");
+        same &= !g_strcmp0 (x, y);
+        g_free (x);
+        g_free (y);
+        x = fx_sampler_default (text, u);
+        y = ref_sampler_str (text, u, "\"default\"");
+        same &= !g_strcmp0 (x, y);
+        g_free (x);
+        g_free (y);
+    }
+    return same;
+}
+
+static double cpu_now (void)
+{
+    return (double) clock () / CLOCKS_PER_SEC;
+}
+
+static void annotation_checks (void)
+{
+    static const char *const tok[] = {
+        "sampler2D", "sampler2D ", "uniform sampler2D ", "g_Texture0", "g_Texture1", " g_Texture2", "g_Texture1x", "g_Texture7 ",
+        ";", "; ", ";;", "\n", "\n", "\r\n", " ", "\t", "//", "// ", "\"combo\"", "\"default\"", "\"combo\":", "\"default\":",
+        "\"", "\"\"", "\"A\"", "\"util/white\"", ":", ",", "{", "}", "{}", "}{", "[COMBO]", "// [COMBO] ", "[COMBO]{",
+        "{\"combo\":\"A\",\"default\":1}", "{\"combo\":\"B\",\"default\":2,\"o\":{\"x\":[1,2]}}", "{\"combo\":\"C\"}",
+        "{\"material\":\"m\",\"combo\":\"D\",\"default\":\"e\"}", "{\"combo\":7}", "{\"combo\":\"A\",\"default\":9}", "x", "combo", "default",
+    };
+    guint n_text = 0, bad = 0;
+    char *first_bad = NULL;
+    /* the seeds and mutations of them */
+    for (guint32 seed = 1; seed <= 300; seed++) {
+        rs = seed * 2246822519u + 77u;
+        const char *v, *f;
+        pick (&v, &f);
+        char *m = seed <= N_TPL * 2 ? g_strdup (seed & 1 ? f : v) : mutate (rnd (2) ? f : v, 1 + (int) rnd (5));
+        /* (the reference walks a long text once per word it finds) */
+        if (strlen (m) <= 32768) {
+            n_text++;
+            if (!anno_same (m) && !bad++)
+                first_bad = g_strndup (m, 200);
+        }
+        g_free (m);
+    }
+    /* lines made of the words the scans look for */
+    for (guint32 seed = 1; seed <= 4000; seed++) {
+        rs = seed * 2654435761u + 99991u;
+        GString *s = g_string_new (NULL);
+        guint nt = 1 + rnd (seed % 7 ? 40 : 400);
+        for (guint i = 0; i < nt; i++)
+            g_string_append (s, tok[rnd (G_N_ELEMENTS (tok))]);
+        n_text++;
+        if (!anno_same (s->str) && !bad++)
+            first_bad = g_strndup (s->str, 200);
+        g_string_free (s, TRUE);
+    }
+    char *m = g_strdup_printf ("annotation scans: the same answers as the scans they replace on %u texts (%u differ%s%s)",
+                               n_text, bad, first_bad ? ", first: " : "", first_bad ? first_bad : "");
+    result (bad == 0, m);
+    g_free (m);
+    g_free (first_bad);
+
+    /* texts of FX_MAX_SOURCE bytes that have the words and not what the
+     * scans look for behind them. (Under AddressSanitizer every strstr ()
+     * measures its whole argument, so any loop over the matches of a word
+     * is quadratic there: small texts in such builds.) */
+#if defined (__SANITIZE_ADDRESS__)
+    const gsize big = 64 * 1024;
+#else
+    const gsize big = FX_MAX_SOURCE;
+#endif
+    static const char *const unit[] = {
+        "sampler2D\n", "sampler2D g_Texture1\n", "uniform sampler2D g_Texture1; // \"combo\"\n",
+        "sampler2D g_Texture1;", "sampler2D g_Texture1;\"combo\"", "sampler2D ", "// [COMBO]\n", "[COMBO]", "[COMBO] {",
+        "// [COMBO] {\"combo\":\"A\"\n",
+    };
+    double t0 = cpu_now ();
+    for (guint k = 0; k < G_N_ELEMENTS (unit); k++) {
+        GString *s = g_string_new (NULL);
+        while (s->len < big)
+            g_string_append (s, unit[k]);
+        GHashTable *c = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+        fx_collect_combo_defaults (s->str, c);
+        g_hash_table_unref (c);
+        for (int u = 1; u < FX_MAX_BINDS; u++) {
+            g_free (fx_sampler_combo (s->str, u));
+            g_free (fx_sampler_default (s->str, u));
+        }
+        g_string_free (s, TRUE);
+    }
+    double dt = cpu_now () - t0;
+    m = g_strdup_printf ("annotation scans: %u texts of %" G_GSIZE_FORMAT " KiB without what is looked for, "
+                         "every sampler unit: %.2f s of CPU", (guint) G_N_ELEMENTS (unit), big >> 10, dt);
+    result (dt < 20.0, m);
+    g_free (m);
+
+    /* an annotation is short: megabytes between the braces are not parsed
+     * once per "[COMBO]" in front of them */
+    {
+        GString *s = g_string_new ("// ");
+        while (s->len < big / 4)
+            g_string_append (s, "[COMBO] {\"a\":1,");
+        g_string_append (s, "\"combo\":\"LATE\",\"default\":3}\n// [COMBO] {\"combo\":\"SHORT\",\"default\":5}\n");
+        GHashTable *c = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+        t0 = cpu_now ();
+        fx_collect_combo_defaults (s->str, c);
+        dt = cpu_now () - t0;
+        m = g_strdup_printf ("annotation scans: one line of %" G_GSIZE_FORMAT " KiB of \"[COMBO] {\": %.2f s of "
+                             "CPU, the short annotation behind it is read", big >> 12, dt);
+        result (dt < 20.0 && GPOINTER_TO_INT (g_hash_table_lookup (c, "SHORT")) == 5, m);
+        g_free (m);
+        g_hash_table_unref (c);
+        g_string_free (s, TRUE);
+    }
+}
+
+/* ---- the size limit of the source repairs (FX_MAX_REPAIR_SOURCE): a
+ * source beyond it is compiled as written. The repairs go through a source
+ * once per declaration they look at; megabytes of declarations took
+ * minutes of stage 1 for one pass. */
+static gboolean try_never (const char *src, char *log, gsize logsize, gpointer user)
+{
+    (void) src;
+    (*(int *) user)++;
+    g_strlcpy (log, "0:3(1): error: a\n0:4(1): error: b\n", logsize);
+    return FALSE;
+}
+
+static char *built_from (const char *head, const char *unit, gsize bytes, const char *tail, gboolean vertex)
+{
+    GString *b = g_string_new (head);
+    for (guint i = 0; b->len < bytes; i++)
+        g_string_append_printf (b, unit, i, i);
+    g_string_append (b, tail);
+    GHashTable *combos = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+    char *s = fx_build_source (b->str, combos, vertex);
+    g_hash_table_unref (combos);
+    g_string_free (b, TRUE);
+    return s;
+}
+
+static void repair_size_checks (void)
+{
+    static const char *VMAIN = "attribute vec3 a_Position;\nvoid main() {\n\tgl_Position = vec4(a_Position, 1.0);\n}\n";
+    static const char *FMAIN = "void main() {\n\tvec3 k = 1.0;\n\tgl_FragColor = vec4(k, 1.0);\n}\n";
+    /* a source of ordinary size is repaired as before */
+    char *v = built_from ("", "// %u %u\n", 1000, VMAIN, TRUE), *f = built_from ("", "// %u %u\n", 1000, FMAIN, FALSE);
+    fx_prepass (&v, &f, "small");
+    result (strstr (f, "vec3 k = vec3(1.0);") != NULL, "repair size: a source of ordinary size is repaired");
+    g_free (v);
+    g_free (f);
+    /* one beyond the limit is left as written, by stage 1 and by stage 2 */
+    v = built_from ("", "// %u %u\n", 1000, VMAIN, TRUE);
+    f = built_from ("", "// filler line %u %u\n", FX_MAX_REPAIR_SOURCE, FMAIN, FALSE);
+    char *before = g_strdup (f);
+    fx_prepass (&v, &f, "large");
+    int tries = 0, budget = 48;
+    gboolean changed = fx_repair_by_lines (&f, "0:3(1): error: a\n", try_never, &tries, &budget);
+    result (!strcmp (f, before) && !changed && tries == 0,
+            "repair size: a source beyond the limit is compiled as written");
+    g_free (before);
+    g_free (v);
+    g_free (f);
+    /* declarations by the megabyte, in both stages: every interface
+     * repair looked at each of them against all the others */
+    static const char *const unit[] = {
+        "varying vec4 v%u; // %u\n", "uniform float u%u; // %u\n", "varying vec2 w%u;\nuniform vec3 w%ux;\n",
+    };
+    double t0 = (double) clock () / CLOCKS_PER_SEC;
+    for (guint k = 0; k < G_N_ELEMENTS (unit); k++) {
+        v = built_from ("", unit[k], FX_MAX_SOURCE, VMAIN, TRUE);
+        f = built_from ("", unit[k], FX_MAX_SOURCE, "void main() {\n\tw0 = vec2(1.0);\n\tgl_FragColor = vec4(1.0);\n}\n", FALSE);
+        fx_prepass (&v, &f, "bomb");
+        tries = 0;
+        budget = 48;
+        char lg[256];
+        gboolean ok = try_never (f, lg, sizeof lg, &tries);
+        for (int round = 0; !ok && round < 16 && fx_repair_by_lines (&f, lg, try_never, &tries, &budget); round++)
+            ok = try_never (f, lg, sizeof lg, &tries);
+        fx_varying_repair (&v, &f, TRUE);
+        g_free (v);
+        g_free (f);
+    }
+    double dt = (double) clock () / CLOCKS_PER_SEC - t0;
+    char *m = g_strdup_printf ("repair size: %u pairs of %d MiB of declarations through both repair stages: %.2f s of CPU",
+                               (guint) G_N_ELEMENTS (unit), FX_MAX_SOURCE >> 20, dt);
+    result (dt < 30.0, m);
+    g_free (m);
+#if !defined (__SANITIZE_ADDRESS__)
+    /* ... and what such text costs right at the limit (not in sanitizer
+     * builds: every strstr () measures its whole argument there) */
+    t0 = (double) clock () / CLOCKS_PER_SEC;
+    v = built_from ("", unit[0], FX_MAX_REPAIR_SOURCE - 4096, VMAIN, TRUE);
+    f = built_from ("", unit[0], FX_MAX_REPAIR_SOURCE - 4096, "void main() {\n\tv0 = vec4(1.0);\n\tgl_FragColor = v1;\n}\n", FALSE);
+    fx_prepass (&v, &f, "limit");
+    dt = (double) clock () / CLOCKS_PER_SEC - t0;
+    m = g_strdup_printf ("repair size: two sources of declarations at the limit (%d KiB): %.2f s of CPU",
+                         FX_MAX_REPAIR_SOURCE >> 10, dt);
+    result (strlen (v) <= FX_MAX_REPAIR_SOURCE && dt < 30.0, m);
+    g_free (m);
+    g_free (v);
+    g_free (f);
+#endif
+}
+
+/* fx_fuse.h, the recogniser of a pure displacement: the final statement is
+ * compared without white space, the coordinate is then cut out of the text
+ * itself. A name of the statement in two parts (two macros, or a comment
+ * in between, blanked before the recogniser sees the text) passed the
+ * comparison; the name was then not found in the text. */
+static void fuse_checks (void)
+{
+    static const char *const head = "uniform sampler2D g_Texture0;\n"
+                                    "uniform vec4 g_Texture0Resolution;\n"
+                                    "varying vec4 v_TexCoord;\n";
+    static const char *const two = "#define g_Tex\n#define ture0 g_Texture0\n";
+    static const struct { const char *defs, *stmt, *expr; } c[] = {
+        /* as an effect writes it: a displacement */
+        { "", "gl_FragColor = texSample2D(g_Texture0, v_TexCoord.xy + vec2(0.01, 0.0));",
+          "return ( v_TexCoord__q.xy + vec2(0.01, 0.0));" },
+        { "", "gl_FragColor\n\t=\ttexSample2D (\n g_Texture0 ,v_TexCoord.xy) ;", "return (v_TexCoord__q.xy);" },
+        /* the name of the input in two parts: valid GLSL, not recognised */
+        { two, "gl_FragColor = texSample2D(g_Tex ture0, v_TexCoord.xy);", NULL },
+        { two, "gl_FragColor = texSample2D(g_Tex ture0, v_TexCoord.xy + g_Texture0Resolution.zw);", NULL },
+        { two, "gl_FragColor = texSample2D(g_Tex ture0, v_TexCoord.xy + min(g_Texture0Resolution.zw, vec2(1.0)));",
+          NULL },
+        { "", "gl_FragColor = texSample2D(g_Tex/* */ture0, v_TexCoord.xy);", NULL },
+        { "", "gl_FragColor = texSample2D(g_Tex\nture0, v_TexCoord.xy);", NULL },
+        /* other names in two parts */
+        { "", "gl_FragColor = tex Sample2D(g_Texture0, v_TexCoord.xy);", NULL },
+        { "", "gl_FragColor = texSample2D(g_Texture0 Resolution, v_TexCoord.xy);", NULL },
+    };
+    guint n_ok = 0, n_res = 0;
+    GString *bad = g_string_new (NULL);
+    for (guint i = 0; i < G_N_ELEMENTS (c); i++) {
+        char *body = g_strconcat (head, c[i].defs, "void main() {\n\t", c[i].stmt, "\n}\n", NULL);
+        GHashTable *combos = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+        char *fsrc = fx_build_source (body, combos, FALSE);
+        g_hash_table_unref (combos);
+        char *r = fxf_resolve (fsrc, FALSE);
+        if (r) {
+            n_res++;
+            GArray *g = fxf_globals (r);
+            char *fn = fxf_warp_function (r, g, 1);
+            gboolean ok = c[i].expr ? fn && strstr (fn, "vec2 _wf1(vec2 _wpx)") && strstr (fn, c[i].expr) : fn == NULL;
+            if (ok)
+                n_ok++;
+            else
+                g_string_append_printf (bad, " %u", i);
+            g_free (fn);
+            g_array_unref (g);
+            g_free (r);
+        }
+        g_free (fsrc);
+        g_free (body);
+    }
+    char *m = g_strdup_printf ("displacement recogniser: %u of %u final statements resolved, %u as expected "
+                               "(a name in two parts is no displacement)%s%s",
+                               n_res, (guint) G_N_ELEMENTS (c), n_ok, bad->len ? "; wrong:" : "", bad->str);
+    result (n_res == G_N_ELEMENTS (c) && n_ok == n_res, m);
+    g_free (m);
+    g_string_free (bad, TRUE);
+}
+
+/* The size of a statement, macros expanded (fx_srcrepair.h): the drivers'
+ * compilers walk an expression by recursion, and one statement may be as
+ * long as the source. */
+static char *long_sum (guint terms)
+{
+    GString *s = g_string_new ("uniform sampler2D g_Texture0;\nvarying vec4 v_TexCoord;\nvoid main() {\n"
+                               "\tvec4 c = texSample2D(g_Texture0, v_TexCoord.xy);\n\tc.r = c.g");
+    for (guint i = 1; i < terms; i++)
+        g_string_append (s, "+c.g");
+    g_string_append (s, ";\n\tgl_FragColor = c;\n}\n");
+    return g_string_free (s, FALSE);
+}
+
+static void statement_checks (void)
+{
+    gint64 st = -1;
+    gboolean ok = fx_expansion_sizes ("float a;\nvoid f() {\n\ta = a + 1.0;\n\ta = a\n\t\t* 2.0\n\t\t* a;\n}\n", &st);
+    char *m = g_strdup_printf ("statement size: the longest of a small text has %" G_GINT64_FORMAT " tokens (7)", st);
+    result (ok && st == 7, m);
+    g_free (m);
+
+    char *sum = long_sum (20000);
+    ok = fx_expansion_sizes (sum, &st);
+    m = g_strdup_printf ("statement size: a sum of 20000 terms is one statement of %" G_GINT64_FORMAT " tokens, "
+                         "beyond the limit of %d", st, FX_MAX_STATEMENT);
+    result (ok && st > FX_MAX_STATEMENT, m);
+    g_free (m);
+    g_free (sum);
+
+    /* the same out of 300 bytes of macros */
+    ok = fx_expansion_sizes ("#define A (x+x+x+x+x+x+x+x+x+x+x+x+x+x+x+x)\n"
+                             "#define B (A+A+A+A+A+A+A+A+A+A+A+A+A+A+A+A)\n"
+                             "#define C (B+B+B+B+B+B+B+B+B+B+B+B+B+B+B+B)\n"
+                             "float f(float x) {\n\treturn C + C;\n}\n", &st);
+    m = g_strdup_printf ("statement size: three levels of macros in one statement count %" G_GINT64_FORMAT " tokens, "
+                         "beyond the limit", st);
+    result (ok && st > FX_MAX_STATEMENT, m);
+    g_free (m);
+
+    /* long sources of short statements, and a table, stay below it */
+    GString *s = g_string_new ("void main() {\n\tvec4 c = vec4(0.0);\n");
+    for (int i = 0; i < 20000; i++)
+        g_string_append_printf (s, "\tc.r = c.r * 1.0001 + sin(c.g * %d.0);\n", i);
+    g_string_append (s, "\tfloat tab[1024] = float[1024](0.0");
+    for (int i = 1; i < 1024; i++)
+        g_string_append_printf (s, ", %d.5", i);
+    g_string_append (s, ");\n\tgl_FragColor = c * tab[3];\n}\n");
+    ok = fx_expansion_sizes (s->str, &st);
+    m = g_strdup_printf ("statement size: 20000 short statements and a table of 1024 numbers: the longest has %"
+                         G_GINT64_FORMAT " tokens, within the limit", st);
+    result (ok && st > 2000 && st <= FX_MAX_STATEMENT, m);
+    g_free (m);
+    g_string_free (s, TRUE);
+}
+
 /* every text stage of fx_build_pass and of the specialiser on one pair */
 static void text_pipeline (const char *vraw, const char *fraw)
 {
@@ -1124,6 +1576,39 @@ static void gl_seed_checks (GLuint in)
     g_free (m);
 }
 
+/* a statement beyond FX_MAX_STATEMENT does not reach the driver: Mesa's
+ * compiler ran out of stack on a sum of this kind (the process ended
+ * inside glCompileShader) */
+static void gl_statement_check (GLuint in)
+{
+    g_atomic_int_set (&fxs_share_on, 0);
+    g_atomic_int_set (&fxs_spec_on, 0);
+    g_atomic_int_set (&fxs_verify_on, 0);
+    g_atomic_int_set (&fxs_quality, 0);
+    char *sum = long_sum (20000);
+    put ("shaders/effects/s_0.vert", tpl_vert[0]);
+    put ("shaders/effects/s_0.frag", sum);
+    g_free (sum);
+    put ("materials/effects/s_0.json", "{\"passes\":[{\"shader\":\"effects/s_0\"}]}");
+    put ("effects/s/effect.json", "{\"passes\":[{\"material\":\"materials/effects/s_0.json\"}]}");
+    JsonNode *root = wpj_parse_data ("{\"effects\":[{\"file\":\"effects/s/effect.json\",\"name\":\"s\","
+                                     "\"visible\":true,\"passes\":[{}]}]}", -1);
+    JsonObject *up = json_object_new ();
+    struct FxSet *set = root ? fx_build_for_object (tmpdir, wpj_arr (json_node_get_object (root), "effects"),
+                                                    "statement", up) : NULL;
+    json_object_unref (up);
+    if (root)
+        json_node_unref (root);
+    int failed = set ? fx_failed_count (set) : -1;
+    if (set) {
+        fx_set_frame_info (W, H, 0.5f, 0.5f, 1.0f / 30);
+        fx_run_for_object (set, in, W, H, W, H, 0.0, 1.0f, FALSE);
+        fx_free_for_object (set);
+    }
+    clear_effect_files ();
+    result (!set || failed == 1, "a sum of 20000 terms in one statement: the effect is not compiled, the others go on");
+}
+
 static guint n_built, n_null, n_failed_chains, n_draws;
 
 static void gl_one (guint32 seed, GLuint in)
@@ -1189,6 +1674,7 @@ static void gl_fuzz (guint count, guint32 first)
 {
     GLuint in = input_tex ();
     gl_seed_checks (in);
+    gl_statement_check (in);
     gint64 t0 = g_get_monotonic_time ();
     guint leaks = 0;
     guint32 first_leak = 0;
@@ -1291,6 +1777,16 @@ int main (int argc, char **argv)
         time_scan_checks ();
     if (!only || !strcmp (only, "include"))
         include_checks ();
+    if (!only || !strcmp (only, "combos"))
+        combo_checks ();
+    if (!only || !strcmp (only, "annotations"))
+        annotation_checks ();
+    if (!only || !strcmp (only, "repairsize"))
+        repair_size_checks ();
+    if (!only || !strcmp (only, "fuse"))
+        fuse_checks ();
+    if (!only || !strcmp (only, "statement"))
+        statement_checks ();
     if (!only || !strcmp (only, "text")) {
         seed_checks ();
         text_fuzz (count ? count : 600, first);

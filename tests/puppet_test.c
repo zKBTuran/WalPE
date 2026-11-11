@@ -9,6 +9,8 @@
  *     to INT_MIN and indexed ~77 GB below the table
  *   - loop / mirror / single with a negative rate and absurd times
  *   - a sane animation still interpolates between its frames
+ *   - the vertex buffer is sent when the pose or the layer's size changed,
+ *     not with every draw, and always holds what a fresh upload would
  *
  * puppet.c is included so the test can see the pose it computes.
  * Run: meson test -C build puppet -v */
@@ -41,7 +43,17 @@ static void s_read (const void *d, GLsizeiptr sz)
         s += p[i];
 }
 static void s_bufdata (GLenum t, GLsizeiptr sz, const void *d, GLenum u) { (void) t; (void) u; s_read (d, sz); }
-static void s_bufsub (GLenum t, GLintptr o, GLsizeiptr sz, const void *d) { (void) t; (void) o; s_read (d, sz); }
+/* the vertex buffer "on the GPU" of the puppet being drawn, and how often it was written */
+static unsigned char *gpu_buf;
+static int sub_calls;
+static void s_bufsub (GLenum t, GLintptr o, GLsizeiptr sz, const void *d)
+{
+    (void) t;
+    s_read (d, sz);
+    sub_calls++;
+    if (gpu_buf && o == 0 && sz <= 64)
+        memcpy (gpu_buf, d, (size_t) sz);
+}
 static void s_en (GLuint a) { (void) a; }
 static void s_vap (GLuint i, GLint n, GLenum t, GLboolean no, GLsizei st, const void *p)
 { (void) i; (void) n; (void) t; (void) no; (void) st; (void) p; }
@@ -299,6 +311,68 @@ int main (int argc, char **argv)
         g_free (path);
     }
     mdat_mode = 0;
+
+    /* the vertex data goes to the GPU when it changed: p is drawn as a
+     * scene draws it, q gets a new buffer before every draw and so sends
+     * every time; both buffers must hold the same bytes after each step */
+    path = write_mdl (dir, "rest.mdl", "single", 30.0f, 3, 4);
+    p = walpe_puppet_load (path);
+    WalpePuppet *q = walpe_puppet_load (path);
+    CHECK (p && q && p->nanims == 1 && p->nverts == 4);
+    if (p && q && p->nanims == 1 && p->nverts == 4) {
+        static const struct { double t; float hw, hh; int sends; } steps[] = {
+            { 0.05, 100, 100, 1 },    /* the first draw */
+            { 0.05, 100, 100, 0 },    /* the same pose again */
+            { 0.06, 100, 100, 1 },    /* the animation moved on */
+            { 100.0, 100, 100, 1 },   /* its last frame ("single") */
+            { 250.0, 100, 100, 0 },   /* still its last frame */
+            { 250.0, 100, 50, 1 },    /* the layer has another size */
+            { 250.0, 100, 50, 0 },
+            { 0.05, 100, 50, 1 },     /* back to an earlier pose */
+        };
+        const float mvp[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 }, tint[3] = { 1, 1, 1 };
+        unsigned char buf_p[64], buf_q[64];
+        memset (buf_p, 0xaa, sizeof buf_p);
+        memset (buf_q, 0x55, sizeof buf_q);
+        p->layers = g_new0 (PLayer, 1);
+        p->layers[p->nlayers++] = (PLayer) { 0, 1.0f, 1.0f, TRUE, FALSE };
+        q->layers = g_new0 (PLayer, 1);
+        q->layers[q->nlayers++] = (PLayer) { 0, 1.0f, 1.0f, TRUE, FALSE };
+        for (guint i = 0; i < G_N_ELEMENTS (steps); i++) {
+            int n0 = sub_calls;
+            gpu_buf = buf_p;
+            walpe_puppet_draw (p, steps[i].t, steps[i].hw, steps[i].hh, 1, FALSE, 1, mvp, 0, tint);
+            if (sub_calls - n0 != steps[i].sends) {
+                g_printerr ("FAIL %s:%d: step %u sent the vertex buffer %d times, want %d\n", __FILE__,
+                            __LINE__, i, sub_calls - n0, steps[i].sends);
+                failures++;
+            }
+            gpu_buf = buf_q;
+            walpe_puppet_gl_free (q);
+            n0 = sub_calls;
+            walpe_puppet_draw (q, steps[i].t, steps[i].hw, steps[i].hh, 1, FALSE, 1, mvp, 0, tint);
+            CHECK (sub_calls - n0 == 1);
+            if (memcmp (buf_p, buf_q, sizeof buf_p)) {
+                g_printerr ("FAIL %s:%d: step %u: the buffer does not hold what a fresh upload holds\n",
+                            __FILE__, __LINE__, i);
+                failures++;
+            }
+        }
+        /* a new buffer (the wallpaper was paused and its GL objects given
+         * back) is filled whatever the pose */
+        int n0 = sub_calls;
+        gpu_buf = buf_p;
+        walpe_puppet_gl_free (p);
+        walpe_puppet_draw (p, 0.05, 100, 50, 1, FALSE, 1, mvp, 0, tint);
+        CHECK (sub_calls - n0 == 1);
+        gpu_buf = NULL;
+        walpe_puppet_gl_free (p);
+        walpe_puppet_gl_free (q);
+    }
+    walpe_puppet_free (p);
+    walpe_puppet_free (q);
+    g_unlink (path);
+    g_free (path);
 
     g_rmdir (dir);
     g_free (dir);

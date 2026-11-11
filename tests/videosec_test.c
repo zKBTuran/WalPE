@@ -523,7 +523,7 @@ static gboolean play (const char *path, double wait_s, int *w, int *h, gint64 *d
         }
         if (src->dec)
             *dec_max_pixels = src->dec->max_pixels;
-        play_passes = src->passes;      /* (decode thread's counter: a rough reading is enough) */
+        play_passes = (guint) g_atomic_int_get (&src->passes);  /* (the decode thread's counter) */
         g_mutex_unlock (&src->lock);
         if (!got)
             g_usleep (20000);

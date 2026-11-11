@@ -25,6 +25,18 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             it instead of being lost.
   stats     `walpe-ctl quality` gets the cost numbers of a scene that stands
             still, also when asked long after its load.
+  layout    the monitor layout changes while the daemon starts - after it
+            read the layout, before it listens for changes, so no event
+            tells it: it looks once more when it is up and follows.
+  busy      a setting that restarts the daemon (web hardware acceleration)
+            switched while a Workshop download runs: the restart waits for
+            the download instead of ending it (a stand-in steamcmd that
+            only sleeps is put in front of PATH). Skipped in a build
+            without the web module.
+  probe     the daemon ends (quit, and killed) while its WebKit start-up
+            test runs in a child process: the child ends with it instead of
+            staying behind as a second "walpe-daemon". Skipped in a build
+            without the web module.
   video     a video's load ends with its first picture: a clip the decoder
             cannot do anything with (its container reads well) is a failed
             load with a reason in status, and the wallpaper from before
@@ -37,7 +49,7 @@ runs another walpe-daemon binary with the tools of --build (a build without
 the fixes: the cases fail there). LIFECHECK_PATIENCE=N multiplies every
 wait (a software renderer on a busy machine: 3 or more). --tmp DIR: work in
 DIR (must not exist; removed afterwards)."""
-import json, os, re, shutil, signal, struct, subprocess, sys, time
+import json, os, re, shutil, signal, struct, subprocess, sys, threading, time
 
 sys.dont_write_bytecode = True   # no __pycache__ next to the scripts
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -716,8 +728,200 @@ def case_video(env, W):
     env.stop_daemon()
 
 
+# ------------------------------------------------------------------- layout
+def case_layout(env, W):
+    """A second monitor appears while the daemon starts. The daemon has read
+    the layout by the time its socket file exists and asks for the X events
+    of a change only later (after EGL, the windows, the first loads): the
+    change is made in between and nothing announces it."""
+    mf = os.path.join(env.tmp, "monitors-start")
+    one, two = "A=640x360+0+0@60", "A=640x360+0+0@60,B=640x360+640+0@60"
+
+    def layout(text):
+        with open(mf + ".new", "w") as f:
+            f.write(text)
+        os.replace(mf + ".new", mf)
+
+    layout(one)
+    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False})
+    if os.path.exists(env.sock):
+        os.unlink(env.sock)
+    changed = []
+
+    def change_when_read():
+        t0 = time.time()
+        while time.time() - t0 < 60 * PATIENCE and not changed:
+            if os.path.exists(env.sock):
+                layout(two)
+                changed.append(True)
+            else:
+                time.sleep(0.002)
+
+    th = threading.Thread(target=change_when_read, daemon=True)
+    th.start()
+    mark = env.mark()
+    ok = env.start_daemon([("A", 640, 360, 0, 0)], extra={"WALPE_MONITORS": "@" + mf})
+    th.join(timeout=60 * PATIENCE)
+    if not check(ok and bool(changed), "layout: daemon started, the layout changed while it did"):
+        return
+    pid = env.daemon.pid
+    env.open(W["red"])
+
+    def followed():
+        return "restarting to follow it" in env.since(mark) and len(env.monitors()) == 2
+    got = bool(wait_for(followed, 12, 0.3))
+    txt = env.since(mark)
+    # (what the test rests on: this start read the layout before the change)
+    check("monitor 1:" not in txt.split("restarting to follow it")[0], "layout: the daemon started on the old layout",
+          txt[:300])
+    check(got, "layout: the change made during start-up is followed without any event",
+          rc.brief(env.monitors()))
+    check(env.daemon.poll() is None and env.daemon.pid == pid, "layout: the same process went on")
+    check(loaded(env, W["red"]), "layout: both monitors show the wallpaper", rc.brief(env.monitors()))
+    env.stop_daemon()
+
+
+# --------------------------------------------------------------------- busy
+def case_busy(env, W):
+    """Web hardware acceleration is switched while a Workshop download runs:
+    the restart that applies it must not end the download."""
+    A = ("A", 640, 360, 0, 0)
+    bindir = os.path.join(env.tmp, "busy-bin")
+    pidfile = os.path.join(env.tmp, "steamcmd.pid")
+    os.makedirs(bindir, exist_ok=True)
+    with open(os.path.join(bindir, "steamcmd"), "w") as f:
+        f.write(f"#!/bin/sh\necho $$ > '{pidfile}'\nexec sleep 600\n")
+    os.chmod(os.path.join(bindir, "steamcmd"), 0o755)
+    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False,
+                          "steam_user": "tester"})
+    # WALPE_WEB_ACCEL=0: whatever the setting says, the restarted daemon does
+    # not try WebKit's accelerated start-up (the switch restarts all the same)
+    extra = {"PATH": bindir + os.pathsep + env.env.get("PATH", ""), "WALPE_WEB_ACCEL": "0"}
+    if not check(env.start_daemon([A], extra=extra), "busy: daemon started"):
+        return
+    st = env.state()
+    if "web_accel" not in st:
+        print("skip busy (no web module in this build: no web_accel setting)")
+        return
+    pid = env.daemon.pid
+    rep = env.ipc({"cmd": "install", "id": "123456789"})
+    if not check(bool(rep and rep.get("ok")), "busy: the download started", rep):
+        return
+    check(bool(wait_for(lambda: env.state().get("install_active") and os.path.exists(pidfile) and
+                        os.path.getsize(pidfile) > 0, 10)), "busy: the stand-in steamcmd runs")
+    try:
+        spid = int(open(pidfile).read())
+    except (OSError, ValueError):
+        spid = 0
+    mark = env.mark()
+    rep = env.ipc({"cmd": "set", "web_accel": not st.get("web_accel")})
+    check(bool(rep and rep.get("ok")), "busy: web_accel switched", rep)
+    time.sleep(3.0)     # the restart used to come 200 ms after that reply
+    check("restarting to apply it" not in env.since(mark), "busy: no restart while the download runs",
+          env.since(mark)[-400:])
+    check(bool(env.state().get("install_active")), "busy: the download is still running")
+    check(spid > 0 and os.path.exists(f"/proc/{spid}"), "busy: steamcmd was not ended")
+    check("waits for the running Workshop download" in env.since(mark), "busy: the log says what the restart waits for")
+    env.ipc({"cmd": "install_cancel"})
+
+    def restarted():
+        txt = env.since(mark)
+        return "restarting to apply it" in txt and " up (wm=" in txt and bool(env.state())
+    check(bool(wait_for(restarted, 40, 0.3)), "busy: the restart comes once the download is over",
+          env.since(mark)[-400:])
+    check(env.daemon.poll() is None and env.daemon.pid == pid, "busy: the same process went on")
+    check(env.state().get("web_accel") == (not st.get("web_accel")), "busy: the setting is the one asked for")
+    check(not (spid > 0 and os.path.exists(f"/proc/{spid}")), "busy: no steamcmd left behind")
+    env.stop_daemon()
+
+
+# -------------------------------------------------------------------- probe
+def running(pid):
+    """is the process there and not a zombie waiting to be collected?"""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            st = f.read()
+        return st[st.rindex(")") + 1:].split()[0] not in ("Z", "X")
+    except (OSError, ValueError, IndexError):
+        return False
+
+
+def probe_children(pid):
+    """the daemon's child processes that are its WebKit start-up test"""
+    out = []
+    for k in children(pid):
+        try:
+            with open(f"/proc/{k}/cmdline", "rb") as f:
+                if b"--web-probe" in f.read().split(b"\0"):
+                    out.append(k)
+        except OSError:
+            pass
+    return out
+
+
+def case_probe(env, W):
+    """The first web wallpaper of a daemon starts WebKit in a child first
+    (`walpe-daemon --web-probe`). A daemon that ends meanwhile must not leave
+    that child behind."""
+    A = ("A", 640, 360, 0, 0)
+    web = os.path.join(env.tmp, "wallpapers", "web")
+    os.makedirs(web, exist_ok=True)
+    with open(os.path.join(web, "index.html"), "w") as f:
+        f.write("<html><body style='background:#204060'>walpe</body></html>")
+    rc.jdump(os.path.join(web, "project.json"), {"file": "index.html", "title": "web", "type": "web"})
+    for how in ("quit", "killed"):
+        rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False})
+        if not check(env.start_daemon([A]), f"probe ({how}): daemon started"):
+            return
+        if "web_accel" not in env.state():
+            print("skip probe (no web module in this build)")
+            return
+        pid = env.daemon.pid
+        env.open(web)
+        kids = wait_for(lambda: probe_children(pid), 15, 0.02)
+        if not kids:
+            print(f"skip probe ({how}): the WebKit start-up test was not seen running")
+            env.stop_daemon()
+            continue
+        try:
+            if how == "quit":
+                env.ipc({"cmd": "quit"})
+            else:
+                env.daemon.kill()
+            env.daemon.wait(timeout=30 * PATIENCE)
+            env.daemon = None
+            # The kernel ends the child when its parent has gone. One that was
+            # only just started and had not asked for that yet ends itself
+            # when it gets there, before it starts anything: in neither case
+            # does it go on to run WebKit (processes of its own) without a
+            # daemon. The moment after the daemon's end is left out: WebKit
+            # processes it had started die with it a little later.
+            t0, started = time.time(), []
+            while any(running(k) for k in kids) and time.time() - t0 < 3 * PATIENCE:
+                if time.time() - t0 > 0.3:
+                    started += [c for k in kids if running(k) for c in children(k)]
+                time.sleep(0.02)
+            left = [k for k in kids if running(k)]
+            check(not left and not started, f"probe ({how}): the WebKit start-up test ended with the daemon",
+                  f"still running: {left}; ran on with {len(set(started))} process(es) of its own")
+        finally:
+            for k in kids:      # a build without the fix: do not leave them to the next case
+                if running(k):
+                    try:
+                        os.kill(k, signal.SIGKILL)
+                    except OSError:
+                        pass
+            if env.daemon is None and os.path.exists(env.sock):
+                os.unlink(env.sock)
+            for extra in (env.sock + ".loading", env.sock + ".lock"):
+                if env.daemon is None and how == "killed" and os.path.exists(extra):
+                    os.unlink(extra)
+    env.stop_daemon()
+
+
 CASES = [("pointer", case_pointer), ("reload", case_reload), ("restart", case_restart),
-         ("stats", case_stats), ("video", case_video)]
+         ("layout", case_layout), ("stats", case_stats), ("busy", case_busy), ("probe", case_probe),
+         ("video", case_video)]
 
 
 

@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #include "store.h"
+#include "numfield.h"
 #include "delete.h"
 #include "props.h"
 #include "layers.h"   /* "Adjust layers" section under the options */
@@ -193,6 +194,8 @@ static struct {
     GtkLabel *status;
     GtkWidget *restart_btn;
     guint status_clear_id;
+    char *load_err;             /* the engine's last word on a wallpaper that did not load */
+    gboolean status_load_err;   /* ... and the status line shows it */
     /* daemon state (from status polls) */
     DState dstate;
     char *current;
@@ -338,6 +341,7 @@ static void set_status (const char *msg, gboolean error)
 {
     if (!U.status)
         return;
+    U.status_load_err = FALSE;   /* (on_status_reply sets it for its own message) */
     /* one line of bounded length, whatever a wallpaper, steamcmd or the
      * engine put into the message (uitext.h) */
     char *line = walpe_ui_text (msg, 400, WALPE_UITEXT_LINE);
@@ -809,6 +813,28 @@ static void on_status_reply (JsonObject *reply, const char *err, gpointer u)
     gboolean mons_changed = parse_monitors (st);
     if (mons_changed)
         cur_changed = TRUE;
+    {
+        /* A wallpaper the engine could not load. It answers "open" before
+         * it loads, so "Set as wallpaper" on a broken wallpaper ended with
+         * "Wallpaper set: ..." here while the engine put the previous one
+         * back (or showed nothing): the reason was in its status and in
+         * its log only. Shown when it appears or changes; taken away when
+         * the wallpaper loads after all. */
+        char *le = walpe_store_load_error_text (st);
+        if (g_strcmp0 (le, U.load_err)) {
+            if (le) {
+                set_status (le, TRUE);
+                U.status_load_err = TRUE;
+            } else if (U.status_load_err) {
+                status_clear (NULL);
+                U.status_load_err = FALSE;
+            }
+            g_free (U.load_err);
+            U.load_err = le;
+        } else {
+            g_free (le);
+        }
+    }
     U.paused = wpj_bool (st, "paused", FALSE);
     U.by_path = wpj_bool (st, "props_by_path", FALSE);
     U.layer_adjust = wpj_bool (st, "layer_adjust", FALSE);
@@ -1392,6 +1418,8 @@ static void on_open_reply (JsonObject *reply, const char *err, gpointer user)
         g_free (base);
         walpe_props_panel_applied (U.props_panel, path);
         refresh_badges ();
+        /* the same wallpaper set again fails with the same words: say them again */
+        g_clear_pointer (&U.load_err, g_free);
         sup_poll_now ();
     } else if (!reply && ui_ipc_err_is_down (err) && U.dstate != D_GAVE_UP) {
         g_free (U.pending_apply);
@@ -1869,8 +1897,12 @@ static void on_set_reply (JsonObject *reply, const char *err, gpointer u)
 {
     char *what = u;
     if (ui_ipc_ok (reply)) {
-        char *m = g_strdup_printf ("%s applied.", what);
-        set_status (m, FALSE);
+        /* in effect, but the engine could not write config.json */
+        const char *se = wpj_str (reply, "save_error", NULL);
+        char *m = se ? g_strdup_printf ("%s applied, but not saved (%s): it is lost when the "
+                                        "engine restarts.", what, se)
+                     : g_strdup_printf ("%s applied.", what);
+        set_status (m, se != NULL);
         g_free (m);
         if (SW.err)
             gtk_label_set_text (GTK_LABEL (SW.err), "");
@@ -1975,6 +2007,7 @@ static GtkWidget *mk_num (const char *key, const char *what, int lo, int hi)
 {
     GtkWidget *s = gtk_spin_button_new_with_range (lo, hi, 1);
     gtk_spin_button_set_numeric (GTK_SPIN_BUTTON (s), TRUE);
+    walpe_num_field_keep_when_empty (s);
     g_object_set_data (G_OBJECT (s), "walpe-key", (gpointer) key);
     g_object_set_data (G_OBJECT (s), "walpe-what", (gpointer) what);
     g_signal_connect (s, "value-changed", G_CALLBACK (on_num), NULL);
@@ -2332,6 +2365,7 @@ static GtkWidget *settings_window (void)
     settings_group (g, r++, "Performance");
     SW.fps = gtk_spin_button_new_with_range (5, 200, 1);
     gtk_spin_button_set_numeric (GTK_SPIN_BUTTON (SW.fps), TRUE);
+    walpe_num_field_keep_when_empty (SW.fps);    /* (emptied and left, it set 5) */
     g_signal_connect (SW.fps, "value-changed", G_CALLBACK (on_fps), NULL);
     settings_row (g, r++, "Frame rate cap",
                   "Scenes and web wallpapers render at most this many frames per second "
@@ -2391,6 +2425,7 @@ static GtkWidget *settings_window (void)
                       "softer.", SW.plowres);
         SW.pdensity = gtk_spin_button_new_with_range (5, 100, 5);
         gtk_spin_button_set_numeric (GTK_SPIN_BUTTON (SW.pdensity), TRUE);
+        walpe_num_field_keep_when_empty (SW.pdensity);
         g_signal_connect (SW.pdensity, "value-changed", G_CALLBACK (on_pdensity), NULL);
         settings_row (g, r++, "Particle density (%)",
                       "How many of a wallpaper's particles are emitted. 100 = as its author "
@@ -2701,51 +2736,24 @@ static void on_folder_chosen (GObject *src, GAsyncResult *res, gpointer u)
     g_object_unref (f);
     if (!dir)
         return;
-    int n = 0;
-    char *pj = g_build_filename (dir, "project.json", NULL);
-    GString *errs = g_string_new (NULL);
-    if (g_file_test (pj, G_FILE_TEST_EXISTS)) {
-        GError *err = NULL;
-        char *dst = walpe_store_import_dir (dir, U.cfg->wallpapers_dir, &err);
-        if (dst)
-            n++;
-        else
-            g_string_append (errs, err ? err->message : "import failed");
-        g_free (dst);
-        g_clear_error (&err);
-    } else {
-        GDir *d = g_dir_open (dir, 0, NULL);
-        const char *name;
-        while (d && (name = g_dir_read_name (d))) {
-            char *sub = g_build_filename (dir, name, NULL);
-            char *spj = g_build_filename (sub, "project.json", NULL);
-            if (g_file_test (spj, G_FILE_TEST_EXISTS)) {
-                GError *err = NULL;
-                char *dst = walpe_store_import_dir (sub, U.cfg->wallpapers_dir, &err);
-                if (dst)
-                    n++;
-                else if (err && !errs->len)
-                    g_string_append (errs, err->message);
-                g_free (dst);
-                g_clear_error (&err);
-            }
-            g_free (spj);
-            g_free (sub);
-        }
-        if (d)
-            g_dir_close (d);
-    }
+    /* a folder of projects where some were added and some were not (a name
+     * the library already has for another wallpaper): only the count of the
+     * added ones was shown, the others were dropped without a word */
+    guint failed = 0;
+    char *why = NULL;
+    guint n = walpe_store_import_folder (dir, U.cfg->wallpapers_dir, &failed, &why);
     if (n) {
-        char *m = g_strdup_printf ("Added %d wallpaper folder(s).", n);
-        set_status (m, FALSE);
+        char *m = failed ? g_strdup_printf ("Added %u wallpaper folder(s); %u not added: %s", n,
+                                            failed, why ? why : "import failed")
+                         : g_strdup_printf ("Added %u wallpaper folder(s).", n);
+        set_status (m, failed > 0);
         g_free (m);
         refresh_model ();
     } else {
-        set_status (errs->len ? errs->str
+        set_status (why ? why
                     : "No Wallpaper Engine projects there (expected project.json subfolders).", TRUE);
     }
-    g_string_free (errs, TRUE);
-    g_free (pj);
+    g_free (why);
     g_free (dir);
 }
 
@@ -2812,9 +2820,19 @@ static void on_install_reply (JsonObject *reply, const char *err, gpointer u)
         if (!install_poll_id)
             install_poll_id = g_timeout_add (700, install_tick, NULL);
         gtk_window_destroy (GTK_WINDOW (dlg));
-    } else if (el) {
-        gtk_label_set_text (el, reply ? wpj_str (reply, "error", "install failed")
-                                      : (err ? err : "walpe-daemon not reachable"));
+    } else {
+        const char *e = reply ? wpj_str (reply, "error", "install failed")
+                              : (err ? err : "walpe-daemon not reachable");
+        if (el)
+            gtk_label_set_text (el, e);
+        if (!gtk_widget_get_visible (dlg)) {
+            /* closed before the engine answered (it had to be started
+             * first, or was busy): nobody reads the dialog's own line any
+             * more, and the refusal was shown nowhere */
+            char *m = g_strdup_printf ("Workshop install failed: %s", e);
+            set_status (m, TRUE);
+            g_free (m);
+        }
     }
     g_object_unref (dlg);
 }

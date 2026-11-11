@@ -1,4 +1,5 @@
 #include "tex.h"
+#include "gifcheck.h"
 #include "util.h"
 #include <lz4.h>
 #include <string.h>
@@ -153,11 +154,16 @@ static void tex_size_only (GdkPixbufLoader *ld, int w, int h, gpointer user)
     gdk_pixbuf_loader_set_size (ld, 0, 0);
 }
 
-static gboolean tex_picture_size_from_data (const guint8 *d, gsize len, int *w, int *h)
+/* type: the decoder of the signature found (tex_embedded_kind), as in
+ * tex_pixbuf_from_data - never one gdk-pixbuf picks from the bytes */
+static gboolean tex_picture_size_from_data (const guint8 *d, gsize len, const char *type, int *w,
+                                            int *h)
 {
     TexSizeOnly so = { 0, 0, FALSE };
     gboolean ok = TRUE;
-    GdkPixbufLoader *ld = gdk_pixbuf_loader_new ();
+    GdkPixbufLoader *ld = gdk_pixbuf_loader_new_with_type (type, NULL);
+    if (!ld)
+        return FALSE;
     g_signal_connect (ld, "size-prepared", G_CALLBACK (tex_size_only), &so);
     for (gsize off = 0; ok && !so.seen && off < len; off += 65536)
         ok = gdk_pixbuf_loader_write (ld, d + off, MIN ((gsize) 65536, len - off), NULL);
@@ -641,6 +647,11 @@ static WalpeTex *tex_load_mem (const guint8 *d, gsize len, const char *path, gui
         WalpeTex *t = NULL;
         const char *kind = !memcmp (d, "GIF8", 4) ? "gif" : !memcmp (d, "BM", 2) ? "bmp"
                          : !memcmp (d, "II*\0", 4) || !memcmp (d, "MM\0*", 4) ? "tiff" : NULL;
+        /* a GIF: only with every frame inside the picture its header
+         * declares (gifcheck.h) - the size check of the loader below is on
+         * that picture alone */
+        if (kind && !walpe_gif_layout_ok (d, len, NULL))
+            kind = NULL;
         if (kind) {
             GdkPixbuf *pb = tex_pixbuf_from_data (d, len, kind);
             if (pb)
@@ -1052,13 +1063,25 @@ gboolean walpe_tex_picture_size (const char *path, int *w, int *h)
     const guint8 *d = (const guint8 *) g_mapped_file_get_contents (map);
     gsize len = g_mapped_file_get_length (map);
     gboolean found = FALSE;
-    /* the scan of try_embedded_image: the first picture signature in the
-     * first 4 KiB that a loader accepts */
-    if (d && len >= 64 && !memcmp (d, "TEXV", 4))
-        for (gsize off = 0; !found && off + 4 < len && off < 4096; off++)
-            if (memcmp (d + off, "\x89PNG", 4) == 0 || memcmp (d + off, "\xff\xd8\xff", 3) == 0 ||
-                memcmp (d + off, "RIFF", 4) == 0)
-                found = tex_picture_size_from_data (d + off, len - off, w, h);
+    /* the scan of try_embedded_image, with its rules: the same signatures,
+     * each read by the decoder of its own format, and as few attempts. This
+     * used to look for "\x89PNG", a JPEG start or "RIFF" on its own and let
+     * gdk-pixbuf choose the decoder from the bytes that follow, as often as
+     * the first 4 KiB held such a start: a container whose level 0 began
+     * like a picture reached the Windows cursor decoders again through
+     * "RIFF", and 600 JPEG starts in front of 8 MiB of zeros took 10 s
+     * here before the texture was loaded at all. */
+    if (d && len >= 64 && !memcmp (d, "TEXV", 4)) {
+        int tries = 0;
+        for (gsize off = 0; !found && off + 4 < len && off < 4096 && tries < TEX_EMBEDDED_TRIES;
+             off++) {
+            const char *kind = tex_embedded_kind (d + off, len - off);
+            if (kind) {
+                tries++;
+                found = tex_picture_size_from_data (d + off, len - off, kind, w, h);
+            }
+        }
+    }
     g_mapped_file_unref (map);
     return found;
 }

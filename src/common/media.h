@@ -70,6 +70,11 @@ char *walpe_media_status (void);
  * *cached / *cached_bytes: the decoded covers the cache holds afterwards
  * and what they weigh. url NULL drops the cache. */
 gboolean walpe_media_art_probe (const char *url, int *w, int *h, guint *cached, gsize *cached_bytes);
+/* for tests: wait until the jobs of all decodes are gone. A job keeps its
+ * own reference to the picture it decoded until its worker thread has let
+ * go of it, which can be a moment after walpe_media_art_probe () returned.
+ * FALSE: that took longer than max_ms. */
+gboolean walpe_media_art_settled (guint max_ms);
 
 /* pure helpers, exposed for tests: WE thumbnail colours from straight RGBA */
 void walpe_media_colors (const guint8 *rgba, int w, int h, float primary[3], float secondary[3],

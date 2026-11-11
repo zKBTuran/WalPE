@@ -9,11 +9,16 @@
  *    default frame rate 200 becomes 60 exactly once, a rate the user set
  *    afterwards stays;
  *  - a file that is not a JSON object (cut short, "[]", a number) is kept
- *    under another name and the defaults apply. */
+ *    under another name and the defaults apply;
+ *  - a save that cannot be written (the disk full in the middle of the
+ *    file, no directory to write into) is reported, leaves the file on
+ *    disk whole and no temporary file behind. */
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <json-glib/json-glib.h>
+#include <signal.h>
 #include <string.h>
+#include <sys/resource.h>
 #include "common/config.h"
 #include "common/quality.h"
 #include "common/util.h"
@@ -322,6 +327,81 @@ static void test_broken (void)
     walpe_config_free (c);
 }
 
+/* files next to config.json that a save left behind ("config.json.XXXXXX") */
+static int temp_files (void)
+{
+    int n = 0;
+    GDir *d = g_dir_open (cfg_dir, 0, NULL);
+    const char *name;
+    while (d && (name = g_dir_read_name (d)))
+        if (g_str_has_prefix (name, "config.json.") && !g_str_has_prefix (name, "config.json.broken-"))
+            n++;
+    if (d)
+        g_dir_close (d);
+    return n;
+}
+
+/* A save that cannot be written: the caller is told (it was a warning in
+ * the log and nothing else, so `walpe-ctl set` answered ok for a change that
+ * was gone at the next start), the file on disk stays whole and no
+ * temporary file is left. */
+static void test_save_failure (void)
+{
+    put_config ("{\"config_version\":3,\"fps\":50,\"current\":\"/lib/1\",\"note_by_hand\":\"keep\"}");
+    WalpeConfig *c = walpe_config_load ();
+    CHECK (c->fps == 50);
+    CHECK (walpe_config_save (c) && walpe_config_save_error () == NULL);
+    guint count = walpe_config_save_count ();
+
+    /* 1. the disk is full in the middle of the file: no file may grow past
+     * 64 bytes for the time of the save */
+    struct rlimit old, lim;
+    CHECK (getrlimit (RLIMIT_FSIZE, &old) == 0);
+    lim = old;
+    lim.rlim_cur = 64;
+    void (*was) (int) = signal (SIGXFSZ, SIG_IGN);
+    CHECK (setrlimit (RLIMIT_FSIZE, &lim) == 0);
+    c->fps = 77;
+    gboolean ok = walpe_config_save (c);
+    CHECK (setrlimit (RLIMIT_FSIZE, &old) == 0);
+    signal (SIGXFSZ, was);
+    CHECK (!ok);
+    CHECK (walpe_config_save_error () != NULL && strstr (walpe_config_save_error (), "config.json"));
+    CHECK (walpe_config_save_count () == count + 1);    /* it still counts as a save that was tried */
+    CHECK (temp_files () == 0);
+    JsonNode *n = read_config ();
+    JsonObject *o = n && JSON_NODE_HOLDS_OBJECT (n) ? json_node_get_object (n) : NULL;
+    CHECK (o && wpj_num (o, "fps", 0) == 50 && !g_strcmp0 (wpj_str (o, "current", ""), "/lib/1") &&
+           !g_strcmp0 (wpj_str (o, "note_by_hand", ""), "keep"));
+    if (n)
+        json_node_unref (n);
+    CHECK (c->fps == 77);       /* what runs is what was set */
+
+    /* 2. the next save works: the value is written and the reason is gone */
+    CHECK (walpe_config_save (c) && walpe_config_save_error () == NULL);
+    n = read_config ();
+    o = n && JSON_NODE_HOLDS_OBJECT (n) ? json_node_get_object (n) : NULL;
+    CHECK (o && wpj_num (o, "fps", 0) == 77);
+    if (n)
+        json_node_unref (n);
+
+    /* 3. the directory is not there to write into (a file has its name) */
+    char *aside = g_strconcat (cfg_dir, ".aside", NULL);
+    CHECK (g_rename (cfg_dir, aside) == 0);
+    CHECK (g_file_set_contents (cfg_dir, "in the way", -1, NULL));
+    c->fps = 88;
+    CHECK (!walpe_config_save (c) && walpe_config_save_error () != NULL);
+    CHECK (g_unlink (cfg_dir) == 0 && g_rename (aside, cfg_dir) == 0);
+    g_free (aside);
+    n = read_config ();
+    o = n && JSON_NODE_HOLDS_OBJECT (n) ? json_node_get_object (n) : NULL;
+    CHECK (o && wpj_num (o, "fps", 0) == 77);
+    if (n)
+        json_node_unref (n);
+    CHECK (walpe_config_save (c) && walpe_config_save_error () == NULL && temp_files () == 0);
+    walpe_config_free (c);
+}
+
 int main (void)
 {
     /* before any GLib call that caches the config dir */
@@ -340,11 +420,13 @@ int main (void)
     test_unknown_keys ();
     test_round12 ();
     test_broken ();
+    test_save_failure ();
 
     broken_copies (TRUE);
     g_unlink (cfg_path);
     g_rmdir (cfg_dir);
     g_rmdir (tmp);
+    g_free (tmp);
     if (fails)
         g_printerr ("config-test: %d check(s) failed\n", fails);
     else

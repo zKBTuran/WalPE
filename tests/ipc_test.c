@@ -3,13 +3,17 @@
  * on a worker thread. Covers: replies larger than 64 KiB
  * arrive whole, a request without end is cut off, the socket file is
  * owner-only, a second server on the same path is refused while the first
- * runs (single-instance lock), a client that never reads does not stall
- * the server, and the place is free again after walpe_ipc_release. */
+ * runs (single-instance lock), a client that never reads does not hold
+ * the server up for other clients and is dropped, requests sent in one go
+ * are answered in order to a client that reads late, and the place is free
+ * again after walpe_ipc_release. */
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <errno.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -96,19 +100,71 @@ static gpointer client_thread (gpointer u)
         close (fd);
     }
 
-    /* a client that asks for large replies and never reads them must not
-     * block the server for good */
+    /* a client that asks for large replies and never reads them does not
+     * hold the server up: another client is answered at once (the reply
+     * used to be written with a blocking write of up to three seconds on
+     * the server's main loop), and the one that takes nothing for three
+     * seconds is dropped */
     fd = raw_connect ();
     CHECK (fd >= 0);
     if (fd >= 0) {
         for (int i = 0; i < 8; i++)
             if (send (fd, "{\"big\":200000}\n", 15, MSG_NOSIGNAL | MSG_DONTWAIT) <= 0)
                 break;
+        g_usleep (300 * 1000);          /* the server has the requests and a reply it cannot send */
         gint64 t0 = g_get_monotonic_time ();
         r = walpe_ipc_request (sock, "{\"cmd\":\"after noread\"}", 15000);
         CHECK (r != NULL);
-        CHECK (g_get_monotonic_time () - t0 < 12 * G_USEC_PER_SEC);
+        CHECK (g_get_monotonic_time () - t0 < 1500 * 1000);
         g_free (r);
+        g_usleep (5 * G_USEC_PER_SEC);
+        /* what the socket had taken is still there to read, then the end:
+         * far less than the eight replies */
+        struct timeval tv = { .tv_sec = 10 };
+        setsockopt (fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+        gsize got = 0;
+        ssize_t n;
+        char blk[65536];
+        while ((n = recv (fd, blk, sizeof blk, 0)) > 0)
+            got += (gsize) n;
+        CHECK (n == 0 || errno == ECONNRESET);      /* closed by the server, not our timeout */
+        CHECK (got < 8 * 200000);
+        close (fd);
+    }
+
+    /* requests sent in one go by a client that starts reading late: every
+     * reply arrives whole and in order (a reply waits for the socket, the
+     * requests behind it wait for the reply) */
+    fd = raw_connect ();
+    CHECK (fd >= 0);
+    if (fd >= 0) {
+        GString *reqs = g_string_new (NULL);
+        for (int i = 0; i < 40; i++)
+            g_string_append_printf (reqs, "{\"big\":%d}\n", 100000 + i);
+        g_string_append (reqs, "{\"cmd\":\"last\"}\n");
+        CHECK (send (fd, reqs->str, reqs->len, MSG_NOSIGNAL) == (ssize_t) reqs->len);
+        g_string_free (reqs, TRUE);
+        g_usleep (700 * 1000);
+        struct timeval tv = { .tv_sec = 20 };
+        setsockopt (fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+        GString *all = g_string_new (NULL);
+        int lines = 0;
+        char blk[65536];
+        ssize_t n;
+        while (lines < 41 && (n = recv (fd, blk, sizeof blk, 0)) > 0) {
+            for (ssize_t k = 0; k < n; k++)
+                lines += blk[k] == '\n';
+            g_string_append_len (all, blk, n);
+        }
+        CHECK (lines == 41);
+        const char *p = all->str;
+        for (int i = 0; i < 40 && lines == 41; i++) {
+            const char *e = strchr (p, '\n');
+            CHECK (e && (gsize) (e - p) == (gsize) (100000 + i) + strlen ("{\"ok\":true,\"data\":\"\"}"));
+            p = e ? e + 1 : p;
+        }
+        CHECK (lines != 41 || g_str_has_prefix (p, "{\"ok\":true,\"echo\":"));
+        g_string_free (all, TRUE);
         close (fd);
     }
 

@@ -270,7 +270,12 @@ static gboolean scan_pkg (Scan *sc, const char *pkg)
     return found_scene;
 }
 
-/* an unpacked scene: scene.json and the .json files next to it */
+/* an unpacked scene: scene.json and the .json files next to it. Only what
+ * is the wallpaper's own: a symbolic link in the folder that leads out of it
+ * was followed like any other entry - a link to a directory was searched
+ * three levels deep and every .json found there parsed, on the GUI thread
+ * (a link to "/" or to the home directory: thousands of files that are
+ * nobody's wallpaper). Links that stay inside the folder are followed. */
 static void scan_dir (Scan *sc, const char *dir, const char *scene_file, int depth, guint *budget)
 {
     GDir *d = g_dir_open (dir, 0, NULL);
@@ -280,7 +285,9 @@ static void scan_dir (Scan *sc, const char *dir, const char *scene_file, int dep
     while ((n = g_dir_read_name (d)) && *budget) {
         char *p = g_build_filename (dir, n, NULL);
         gsize l = strlen (n);
-        if (g_file_test (p, G_FILE_TEST_IS_DIR)) {
+        if (sc->root && g_file_test (p, G_FILE_TEST_IS_SYMLINK) && !walpe_path_is_inside (p, sc->root)) {
+            /* not the wallpaper's */
+        } else if (g_file_test (p, G_FILE_TEST_IS_DIR)) {
             if (depth < 3 && n[0] != '.')
                 scan_dir (sc, p, scene_file, depth + 1, budget);
         } else if (l > 5 && !g_ascii_strcasecmp (n + l - 5, ".json") && strcmp (n, "project.json")) {
@@ -321,6 +328,67 @@ static gboolean mentions (const char *text, const char *key, gboolean access)
     }
     return FALSE;
 }
+
+/* The two questions asked of every option - does a script read it, does
+ * another option's condition name it - were one search of all the script
+ * text and of every condition PER OPTION: options x text, both the
+ * wallpaper's to choose. 5000 options with a condition each (a project.json
+ * of half a megabyte) held the GUI thread for seconds, 20000 for minutes.
+ * The identifiers of the text are collected once instead: a key made of
+ * identifier characters is mentioned exactly where it is one of them (a
+ * longest run of letters, digits, '_' and '$'; for a script read: right
+ * behind . ' " or `). */
+typedef struct {
+    guint n;       /* texts it was found in */
+    guint last;    /* 1 + the last of them */
+} IdRef;
+
+static gboolean ident_char (char c)
+{
+    return g_ascii_isalnum (c) || c == '_' || c == '$';
+}
+
+static gboolean ident_only (const char *key)
+{
+    if (!*key)
+        return FALSE;
+    for (const char *p = key; *p; p++)
+        if (!ident_char (*p))
+            return FALSE;
+    return TRUE;
+}
+
+static void idents_add (GHashTable *ids, const char *text, gboolean access, guint owner)
+{
+    for (const char *p = text; *p;) {
+        if (!ident_char (*p)) {
+            p++;
+            continue;
+        }
+        const char *b = p;
+        while (ident_char (*p))
+            p++;
+        if (access && !(b > text && (b[-1] == '.' || b[-1] == '\'' || b[-1] == '"' || b[-1] == '`')))
+            continue;
+        char *id = g_strndup (b, (gsize) (p - b));
+        IdRef *r = g_hash_table_lookup (ids, id);
+        if (!r) {
+            r = g_new0 (IdRef, 1);
+            g_hash_table_insert (ids, id, r);
+            id = NULL;
+        }
+        if (r->last != owner + 1) {
+            r->last = owner + 1;
+            r->n++;
+        }
+        g_free (id);
+    }
+}
+
+/* a key with other characters in it ("my-option") is searched for as
+ * before, up to this much text for all such keys together; past it the
+ * answer is "mentioned" (no hint is given, never a wrong one) */
+#define NOTES_SCAN_MAX (G_GUINT64_CONSTANT (1) << 30)
 
 static gboolean is_option_type (const char *t)
 {
@@ -392,7 +460,7 @@ JsonObject *walpe_prop_notes (const char *path)
         const char *dir = base ? base : abs;
         if (g_file_test (dir, G_FILE_TEST_IS_DIR)) {
             char *pkg = g_build_filename (dir, "scene.pkg", NULL);
-            if (g_file_test (pkg, G_FILE_TEST_IS_REGULAR)) {
+            if (g_file_test (pkg, G_FILE_TEST_IS_REGULAR) && walpe_path_is_inside (pkg, dir)) {
                 scanned = scan_pkg (&sc, pkg);
             } else {
                 char *pjp = g_build_filename (dir, "project.json", NULL);
@@ -423,12 +491,28 @@ JsonObject *walpe_prop_notes (const char *path)
     if (scanned) {
         out = json_object_new ();
         GList *ks = json_object_get_members (dp);
+        GHashTable *script_ids = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
+        GHashTable *cond_ids = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
+        guint64 scan_work = 0, cond_len = 0;
+        guint owner = 0;
+        idents_add (script_ids, sc.scripts->str, TRUE, 0);
+        for (GList *k = ks; k; k = k->next, owner++) {
+            const char *c = wpj_str (wpj_obj (dp, k->data), "condition", NULL);
+            if (c) {
+                idents_add (cond_ids, c, FALSE, owner);
+                cond_len += strlen (c);
+            }
+            cond_len += 64;   /* (looking at one definition costs about that many bytes of search) */
+        }
         for (GList *k = ks; k; k = k->next) {
             const char *key = k->data;
             JsonObject *d = wpj_obj (dp, key);
             if (!d || !is_option_type (wpj_str (d, "type", "")) || g_str_has_prefix (key, "walpe_"))
                 continue;
-            if (mentions (sc.scripts->str, key, TRUE))
+            gboolean plain = ident_only (key);
+            if (plain ? g_hash_table_contains (script_ids, key)
+                      : (scan_work += sc.scripts->len + 64) > NOTES_SCAN_MAX ||
+                        mentions (sc.scripts->str, key, TRUE))
                 continue;
             if (g_hash_table_contains (sc.ok, key)) {
                 /* bound and resolved - but to nothing that can show it? */
@@ -449,14 +533,28 @@ JsonObject *walpe_prop_notes (const char *path)
             }
             /* a switch that shows / hides other options does its job */
             gboolean cond = FALSE;
-            for (GList *k2 = ks; k2 && !cond; k2 = k2->next) {
-                JsonObject *d2 = k2 != k ? wpj_obj (dp, k2->data) : NULL;
-                const char *c = d2 ? wpj_str (d2, "condition", NULL) : NULL;
-                cond = c && mentions (c, key, FALSE);
+            if (plain) {
+                /* named by the condition of an option other than itself */
+                const IdRef *r = g_hash_table_lookup (cond_ids, key);
+                const char *own = wpj_str (d, "condition", NULL);
+                guint n = r ? r->n : 0;
+                if (n && own && mentions (own, key, FALSE))
+                    n--;
+                cond = n > 0;
+            } else if ((scan_work += cond_len) > NOTES_SCAN_MAX) {
+                cond = TRUE;
+            } else {
+                for (GList *k2 = ks; k2 && !cond; k2 = k2->next) {
+                    JsonObject *d2 = k2 != k ? wpj_obj (dp, k2->data) : NULL;
+                    const char *c = d2 ? wpj_str (d2, "condition", NULL) : NULL;
+                    cond = c && mentions (c, key, FALSE);
+                }
             }
             if (!cond)
                 json_object_set_string_member (out, key, "unused");
         }
+        g_hash_table_unref (script_ids);
+        g_hash_table_unref (cond_ids);
         g_list_free (ks);
         if (!json_object_get_size (out))
             g_clear_pointer (&out, json_object_unref);

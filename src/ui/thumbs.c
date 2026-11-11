@@ -1,6 +1,8 @@
 /* thumbs.c - asynchronous, exact-size, cached thumbnails (see thumbs.h) */
 #include "thumbs.h"
 #include "common/config.h"   /* WALPE_PREVIEW_* */
+#include "common/gifcheck.h"
+#include "common/util.h"     /* walpe_picture_decode_file */
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <glib/gstdio.h>
 #include <malloc.h>
@@ -117,38 +119,30 @@ gboolean thumbs_format_allowed (const char *gdk_pixbuf_format_name)
     return FALSE;
 }
 
-static GdkPixbuf *decode (const Job *j)
+/* the declared size of a preview, before a pixel of it exists: what is not
+ * decoded at all, and the size the rest is decoded to */
+static gboolean thumb_size (const char *kind, int iw, int ih, int *sw, int *sh, gpointer user)
 {
-    int iw = 0, ih = 0;
-    GdkPixbufFormat *fmt = gdk_pixbuf_get_file_info (j->src, &iw, &ih);
-    if (!fmt || iw < 1 || ih < 1)
-        return NULL;
+    const Job *j = user;
     /* The preview is whatever the wallpaper's author shipped. Decompression
      * bombs: only JPEG is scaled while it is decoded; every other format is
      * decoded at full size first, and a PNG of a few KB can declare
      * gigabytes of pixels (20000 x 20000 cost 2.4 GB here, three at a
      * time). Such a picture gets the placeholder. Limits: SRC_MAX_SIDE per
-     * side for every format, SRC_MAX_PIXELS (8192 x 8192) for all but JPEG. */
-    if (iw > SRC_MAX_SIDE || ih > SRC_MAX_SIDE)
-        return NULL;
-    char *fname = gdk_pixbuf_format_get_name (fmt);
-    gboolean scales_on_load = !g_strcmp0 (fname, "jpeg");
-    /* Decoders: the picture formats the library lists (store.c) and
-     * nothing else. gdk-pixbuf picks a loader by the file's first bytes,
-     * whatever its name: a "preview.jpg" that is really SVG went to
-     * librsvg, others to the XPM, TGA, ICO, TIFF, PNM, QTIF, ANI ... loaders
-     * the system happens to have. Such a preview gets the placeholder. */
-    gboolean known = thumbs_format_allowed (fname);
-    g_free (fname);
-    if (!known)
-        return NULL;
-    if (!scales_on_load && (guint64) iw * (guint64) ih > SRC_MAX_PIXELS)
-        return NULL;
-    GError *err = NULL;
-    GdkPixbuf *out = NULL;
+     * side for every format, SRC_MAX_PIXELS (8192 x 8192) for all but JPEG.
+     * And not every JPEG is scaled while it is read: a progressive one, or
+     * one with a scan per component, is held whole first - 600 bytes of
+     * file took 530 MB that way. walpe_picture_decode_file refuses such a
+     * file beyond what the other formats may cost (util.h). */
+    if (iw < 1 || ih < 1 || iw > SRC_MAX_SIDE || ih > SRC_MAX_SIDE)
+        return FALSE;
+    if (strcmp (kind, "jpeg") && (guint64) iw * (guint64) ih > SRC_MAX_PIXELS)
+        return FALSE;
+    int lw, lh;
     if (j->mode == THUMB_COVER) {
         double s = MAX ((double) j->w / iw, (double) j->h / ih);
-        int lw = (int) ceil (iw * s), lh = (int) ceil (ih * s);
+        lw = (int) ceil (iw * s);
+        lh = (int) ceil (ih * s);
         if (lw > COVER_MAX_SIDE || lh > COVER_MAX_SIDE) {
             /* a very long or very tall picture (1 x 30000 asked for a
              * 160 x 4 800 000 intermediate): keep the shape, bound the size;
@@ -160,31 +154,51 @@ static GdkPixbuf *decode (const Job *j)
             lw = MAX (j->w, lw);
             lh = MAX (j->h, lh);
         }
-        GdkPixbuf *pb = gdk_pixbuf_new_from_file_at_scale (j->src, lw, lh, FALSE, &err);
-        if (pb) {
-            lw = gdk_pixbuf_get_width (pb);
-            lh = gdk_pixbuf_get_height (pb);
-            int cw = MIN (j->w, lw), ch = MIN (j->h, lh);
-            GdkPixbuf *sub = gdk_pixbuf_new_subpixbuf (pb, (lw - cw) / 2, (lh - ch) / 2, cw, ch);
-            out = gdk_pixbuf_copy (sub);   /* tight rows, parent freed */
-            g_object_unref (sub);
-            g_object_unref (pb);
-        }
     } else {
         double s = MIN (1.0, MIN ((double) j->w / iw, (double) j->h / ih));
-        int lw = MAX (1, (int) lround (iw * s)), lh = MAX (1, (int) lround (ih * s));
-        out = gdk_pixbuf_new_from_file_at_scale (j->src, lw, lh, FALSE, &err);
+        lw = MAX (1, (int) lround (iw * s));
+        lh = MAX (1, (int) lround (ih * s));
     }
-    g_clear_error (&err);
+    *sw = lw;
+    *sh = lh;
+    return TRUE;
+}
+
+static GdkPixbuf *decode (const Job *j)
+{
+    /* Decoders: the picture formats the library lists (store.c) and
+     * nothing else, each read by the decoder of its own signature
+     * (util.h). gdk-pixbuf left to choose picks a loader by the file's
+     * first bytes, whatever its name: a "preview.jpg" that is really SVG
+     * went to librsvg, others to the XPM, TGA, ICO, TIFF, PNM, QTIF, ANI ...
+     * loaders the system happens to have - and asking gdk-pixbuf for the
+     * format first (gdk_pixbuf_get_file_info) does not keep them away: the
+     * loader it chose has read the file by the time its name is known.
+     * Such a preview gets the placeholder. */
+    static const char *const kinds[] = { "jpeg", "png", "gif", "bmp", "webp", "avif", NULL };
+    GdkPixbuf *pb = walpe_picture_decode_file (j->src, kinds, thumb_size, (gpointer) j, NULL);
+    if (!pb || j->mode != THUMB_COVER)
+        return pb;
+    int lw = gdk_pixbuf_get_width (pb), lh = gdk_pixbuf_get_height (pb);
+    int cw = MIN (j->w, lw), ch = MIN (j->h, lh);
+    GdkPixbuf *sub = gdk_pixbuf_new_subpixbuf (pb, (lw - cw) / 2, (lh - ch) / 2, cw, ch);
+    GdkPixbuf *out = gdk_pixbuf_copy (sub);   /* tight rows, parent freed */
+    g_object_unref (sub);
+    g_object_unref (pb);
     return out;
 }
 
 /* Frames of a GIF and the time each is shown (ms, with gdk-pixbuf's own
  * rules: 0 -> 100, under 20 -> 20), read from the block structure alone:
- * no pixel is decoded. NULL: not a GIF, damaged, or too many frames. */
+ * no pixel is decoded. NULL: not a GIF, damaged, or too many frames.
+ * Damaged includes a frame that has no pixels or does not lie inside the
+ * picture (gifcheck.h): this walk reads a frame's flags only, and the
+ * animation decoder is given the data only when this returned frames. */
 static int *gif_frame_delays (const guint8 *d, gsize len, int *n_out, int *w_out, int *h_out)
 {
     if (len < 13 || (memcmp (d, "GIF87a", 6) && memcmp (d, "GIF89a", 6)))
+        return NULL;
+    if (!walpe_gif_layout_ok (d, len, NULL))
         return NULL;
     *w_out = d[6] | (d[7] << 8);
     *h_out = d[8] | (d[9] << 8);
@@ -306,9 +320,18 @@ static void decode_anim (Job *j)
     for (int i = 0; i < n; i++)
         delay[group[i] / step] += sd[i];
 
-    GInputStream *in = g_memory_input_stream_new_from_data (data, (gssize) len, NULL);
-    GdkPixbufAnimation *an = gdk_pixbuf_animation_new_from_stream (in, NULL, NULL);
-    g_object_unref (in);
+    /* the GIF decoder by name (the data has a GIF's signature:
+     * gif_frame_delays), not whichever loader gdk-pixbuf would choose */
+    GdkPixbufLoader *ld = gdk_pixbuf_loader_new_with_type ("gif", NULL);
+    GdkPixbufAnimation *an = NULL;
+    if (ld) {
+        gboolean fed = gdk_pixbuf_loader_write (ld, (const guchar *) data, len, NULL);
+        fed = gdk_pixbuf_loader_close (ld, NULL) && fed;
+        an = fed ? gdk_pixbuf_loader_get_animation (ld) : NULL;
+        if (an)
+            g_object_ref (an);
+        g_object_unref (ld);
+    }
     guint8 *buf = NULL;
     int got = 0;
     gboolean transparent = FALSE;

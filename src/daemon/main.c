@@ -5149,6 +5149,24 @@ static void ipc_status (JsonBuilder *b)
     jb_str (b, "focus_action", walpe_focus_action_name (D.cfg->focus_action));
     jb_bool (b, "on_battery", D.on_battery);
     jb_bool (b, "battery_pause", D.cfg->pause_battery && D.on_battery);
+    /* The saved settings themselves, under their config.json names. Status
+     * had what results from them at the moment ("fullscreen_pause" = the
+     * setting AND a fullscreen window) but not the settings: after
+     * `walpe-ctl set covered=off` nothing in status said so. */
+    jb_bool (b, "pause_fullscreen", D.cfg->pause_fullscreen);
+    jb_bool (b, "pause_dpms", D.cfg->pause_dpms);
+    jb_bool (b, "pause_covered", D.cfg->pause_covered);
+    jb_bool (b, "cover_transparent", D.cfg->cover_transparent);
+    jb_str (b, "transparent_windows", D.cfg->transparent_windows ? D.cfg->transparent_windows : "");
+    jb_int (b, "focus_fps", D.cfg->focus_fps);
+    jb_bool (b, "pause_battery", D.cfg->pause_battery);
+    jb_int (b, "battery_fps", D.cfg->battery_fps);
+    jb_str (b, "preview_anim", walpe_preview_anim_name (D.cfg->preview_anim));
+    jb_bool (b, "render_shared", D.cfg->render_shared);
+    jb_bool (b, "parallax", g_atomic_int_get (&D.cfg->parallax) != 0);
+    jb_bool (b, "tex_downscale", g_atomic_int_get (&D.cfg->tex_downscale) != 0);
+    /* ("software_threads" below is the count in use, 0 while a GPU renders) */
+    jb_int (b, "software_threads_saved", D.cfg->software_threads);
     {
         /* per monitor: covered, paused, following (render_shared) */
         GString *mons = g_string_new (NULL);
@@ -5172,11 +5190,12 @@ static void ipc_status (JsonBuilder *b)
         /* "Skip hidden areas": the setting, and whether it is at work
          * (auto: not under a compositing manager) */
         jb_str (b, "skip_hidden", walpe_skip_hidden_name (D.cfg->skip_hidden));
+        /* (also while the setting is off: they are saved settings) */
+        jb_int (b, "skip_hidden_margin", D.cfg->skip_hidden_margin);
+        jb_int (b, "skip_hidden_inset", D.cfg->skip_hidden_inset);
         if (D.vis) {
             WalpeVisStats vs;
             walpe_vistrack_stats (D.vis, &vs);
-            jb_int (b, "skip_hidden_margin", D.cfg->skip_hidden_margin);
-            jb_int (b, "skip_hidden_inset", D.cfg->skip_hidden_inset);
             jb_bool (b, "skip_hidden_active", walpe_vistrack_clipping (D.vis));
             char *t = g_strdup_printf ("%u windows, %" G_GUINT64_FORMAT " events, %"
                                        G_GUINT64_FORMAT " region passes, %" G_GUINT64_FORMAT
@@ -5383,6 +5402,8 @@ static void ipc_status (JsonBuilder *b)
     }
     if (D.cfg->broken_copy)   /* config.json was unreadable at start-up: defaults in use */
         jb_str (b, "config_broken_copy", D.cfg->broken_copy);
+    if (walpe_config_save_error ())   /* the last save of config.json failed: what runs is not saved */
+        jb_str (b, "config_save_error", walpe_config_save_error ());
 #if defined (__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33))
     {
         /* WALPE_MEM_STATS=1: the allocator's own numbers next to what the
@@ -6359,6 +6380,7 @@ static char *ipc_handler (const char *req, gpointer user)
     JsonBuilder *b = json_builder_new ();
     json_builder_begin_object (b);
     gboolean quit = FALSE;
+    guint saves_before = walpe_config_save_count ();
 
     if (!g_strcmp0 (cmd, "add")) {
         const char *path = wpj_str (o, "path", NULL);
@@ -6673,6 +6695,13 @@ static char *ipc_handler (const char *req, gpointer user)
     } else {
         jb_fail (b, "unknown cmd");
     }
+
+    /* What this request changed is in effect, but config.json could not be
+     * written (a full disk, a home that cannot be written to): the answer
+     * stays what it is and says so too. It said "ok" and nothing more; the
+     * log alone had the warning, and the change was gone at the next start. */
+    if (walpe_config_save_count () != saves_before && walpe_config_save_error ())
+        jb_str (b, "save_error", walpe_config_save_error ());
 
     json_builder_end_object (b);
     JsonNode *rn = json_builder_get_root (b);
@@ -7645,6 +7674,12 @@ static gboolean web_accel_probe (char **renderer, char **why)
     }
     char *argv[] = { exe, "--web-probe", NULL };
     char **envp = g_environ_setenv (g_get_environ (), "WALPE_WEB_PROBE_ACCEL", "1", TRUE);
+    {
+        /* the test ends with this process (web.c, walpe_web_probe_run) */
+        char self[24];
+        g_snprintf (self, sizeof self, "%ld", (long) getpid ());
+        envp = g_environ_setenv (envp, "WALPE_WEB_PROBE_PARENT", self, TRUE);
+    }
     GString *out = g_string_new (NULL);
     GPid pid = 0;
     int ofd = -1, status = 0;
@@ -7815,6 +7850,22 @@ static void web_env_setup (gboolean want_accel, int fps)
 static gboolean web_accel_restart (gpointer user)
 {
     (void) user;
+    /* The restart ends a running import and a running Workshop download
+     * with everything else (main: walpe_import_free, walpe_workshop_free
+     * kill the helper and remove what it had written so far). The switch
+     * used to do that to a download of several gigabytes without a word;
+     * the restart now waits for both, as the one for a new monitor layout
+     * does (layout_check). The setting is saved already. */
+    if (Imp.active || Ws.active) {
+        if (!GPOINTER_TO_INT (user))
+            g_message ("web hardware acceleration switched %s: the restart that applies it waits "
+                       "for the running %s", D.cfg->web_accel ? "on" : "off",
+                       Ws.active ? "Workshop download" : "import");
+        g_timeout_add_seconds (1, web_accel_restart, GINT_TO_POINTER (1));
+        return G_SOURCE_REMOVE;
+    }
+    if (D.restart)      /* (the switch was flipped more than once while it waited) */
+        return G_SOURCE_REMOVE;
     g_message ("web hardware acceleration switched %s: restarting to apply it",
                D.cfg->web_accel ? "on" : "off");
     D.restart = TRUE;
@@ -8125,6 +8176,17 @@ int main (int argc, char **argv)
     }
 #endif
     layout_watch = !windowed;
+    /* The layout this daemon runs with was read at the top of start-up
+     * (layout_detect), the events that announce a change were asked for
+     * only just now - after EGL, the windows, the render threads and the
+     * first loads. A change in between reached nobody: an xrandr call of
+     * the session's start-up running next to the daemon's, a monitor that
+     * came back while the daemon was restarting for its going (the events
+     * of that time went to the old image, which no longer read them). The
+     * daemon then kept the layout of that moment - a wallpaper window of
+     * the old size, none on a new monitor - until some later event. So one
+     * look now, through the usual check (seen twice, restarts apart). */
+    layout_schedule ();
 #ifdef HAVE_XI2
     xi2_init ();
 #endif

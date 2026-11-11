@@ -5,6 +5,7 @@
 #include "common/quality.h"
 #include "common/util.h"
 #include "uiipc.h"
+#include "numfield.h"
 
 typedef struct {
     gboolean per_wp;
@@ -476,6 +477,9 @@ GtkWidget *walpe_perf_panel_new (gboolean per_wallpaper, WalpePerfStatus status)
               P->post);
     P->scale = gtk_spin_button_new_with_range (WALPE_RENDER_SCALE_MIN, 100, 5);
     gtk_spin_button_set_numeric (GTK_SPIN_BUTTON (P->scale), TRUE);
+    /* (emptied and left, the field set its minimum, 25 %; the idle frame
+     * rate below is left as it is: its minimum, 0, means "none") */
+    walpe_num_field_keep_when_empty (P->scale);
     g_signal_connect (P->scale, "value-changed", G_CALLBACK (on_spin), P);
     perf_row (kg, r++, "Render scale (%)",
               "Scenes are drawn at this share of the monitor's resolution and scaled up: "

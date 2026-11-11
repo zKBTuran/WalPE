@@ -692,10 +692,104 @@ static void test_types (void)
     char *l3 = walpe_store_import_dir (db, ilib, &ierr);
     CHECK (!l3 && ierr);
     g_clear_error (&ierr);
+    /* "Add folder" as the first thing done on a new installation: the
+     * library folder does not exist yet and is made for the link (it
+     * failed with "symlink <path>") */
+    char *newlib = P ("imp/newlib/workshop");
+    CHECK (!g_file_test (newlib, G_FILE_TEST_EXISTS));
+    char *l4 = walpe_store_import_dir (da, newlib, &ierr);
+    CHECK (l4 && !ierr && g_file_test (l4, G_FILE_TEST_IS_SYMLINK));
+    char *l4pj = l4 ? g_build_filename (l4, "project.json", NULL) : NULL;
+    CHECK (l4pj && g_file_test (l4pj, G_FILE_TEST_IS_REGULAR));
+    g_clear_error (&ierr);
+    g_free (l4pj); g_free (l4); g_free (newlib);
+    /* a folder of project folders: what could not be added is counted and
+     * its reason kept (only the number of the added ones was reported) */
+    mkfile ("imp/many/one/project.json", "{\"title\":\"1\"}", -1);
+    mkfile ("imp/many/two/project.json", "{\"title\":\"2\"}", -1);
+    mkfile ("imp/many/wallpaper/project.json", "{\"title\":\"another wallpaper\"}", -1);
+    mkfile ("imp/many/no-project/readme.txt", "x", -1);
+    char *many = P ("imp/many");
+    guint nfail = 99;
+    char *why = NULL;
+    CHECK (walpe_store_import_folder (many, ilib, &nfail, &why) == 2);
+    CHECK (nfail == 1 && why && strstr (why, "already has a folder named wallpaper"));
+    g_free (why);
+    why = NULL;
+    CHECK (walpe_store_import_folder (many, ilib, &nfail, &why) == 2 && nfail == 1);   /* again: the same */
+    g_free (why);
+    why = NULL;
+    /* a single project folder, and a folder without any */
+    CHECK (walpe_store_import_folder (da, ilib, &nfail, &why) == 1 && nfail == 0 && !why);
+    char *none = P ("imp/many/no-project");
+    CHECK (walpe_store_import_folder (none, ilib, &nfail, &why) == 0 && nfail == 0 && !why);
+    CHECK (walpe_store_import_folder (db, ilib, &nfail, &why) == 0 && nfail == 1 && why);
+    g_free (why);
+    g_free (none); g_free (many);
     g_free (c1); g_free (c2);
     g_free (d1); g_free (d2); g_free (d3);
     g_free (l1); g_free (l2); g_free (l3);
     g_free (ilib); g_free (fa); g_free (fb); g_free (da); g_free (db);
+}
+
+/* Option notes (engine/propnotes.h) of a project.json with thousands of
+ * options. They are worked out in the window's main loop when a wallpaper
+ * is selected, and took options x options steps for options nothing uses
+ * (12000 of them: tens of seconds). The notes themselves must be what the
+ * slow way gave: used by a script, used by another option's condition,
+ * named only by its own condition, and keys that are not plain names. */
+static void test_notes_many (void)
+{
+    enum { N = 12000 };
+    GString *pj = g_string_new ("{\"file\":\"scene.json\",\"type\":\"scene\",\"general\":{\"properties\":{");
+    g_string_append (pj, "\"by_script\":{\"type\":\"bool\",\"value\":true,\"text\":\"a\"},"
+                         "\"by_cond\":{\"type\":\"bool\",\"value\":true,\"text\":\"b\"},"
+                         "\"asks\":{\"type\":\"bool\",\"value\":true,\"text\":\"c\",\"condition\":\"by_cond.value == true\"},"
+                         "\"own_cond\":{\"type\":\"bool\",\"value\":true,\"text\":\"d\",\"condition\":\"own_cond.value\"},"
+                         "\"odd-key\":{\"type\":\"bool\",\"value\":true,\"text\":\"e\"},"
+                         "\"asks2\":{\"type\":\"bool\",\"value\":true,\"text\":\"f\",\"condition\":\"odd-key.value\"},"
+                         "\"odd.unused\":{\"type\":\"bool\",\"value\":true,\"text\":\"g\"},"
+                         "\"by_cond_longer\":{\"type\":\"bool\",\"value\":true,\"text\":\"h\"},"
+                         "\"title\":{\"type\":\"text\",\"text\":\"not an option\"}");
+    for (int i = 0; i < N; i++)
+        g_string_append_printf (pj, ",\"filler%05d\":{\"type\":\"slider\",\"min\":0,\"max\":1,\"value\":0.5,"
+                                    "\"text\":\"x\"}", i);
+    g_string_append (pj, "}}}");
+    mkfile ("manyopts/wp/project.json", pj->str, (gssize) pj->len);
+    g_string_free (pj, TRUE);
+    /* the script names by_script as a property, and has filler00007 only
+     * inside a longer name and filler00008 as a bare word (neither counts) */
+    mkfile ("manyopts/wp/scene.json",
+            "{\"general\":{\"clearcolor\":\"0 0 0\",\"orthogonalprojection\":{\"height\":90,\"width\":160}},"
+            "\"objects\":[{\"id\":1,\"name\":\"o\",\"image\":\"models/x.json\",\"alpha\":{\"script\":"
+            "\"export function update(v) { var filler00008 = 1; return engine.userProperties.by_script + "
+            "engine.userProperties.filler00007x; }\",\"value\":1}}]}", -1);
+    char *wp = P ("manyopts/wp");
+    clock_t c0 = clock ();
+    JsonObject *n = walpe_prop_notes (wp);
+    double cpu = (double) (clock () - c0) / CLOCKS_PER_SEC;
+    CHECK (n != NULL);
+    if (n) {
+        CHECK (!json_object_has_member (n, "by_script"));
+        CHECK (!json_object_has_member (n, "by_cond"));
+        CHECK (!json_object_has_member (n, "odd-key"));
+        CHECK (!json_object_has_member (n, "title"));
+        CHECK (!g_strcmp0 (wpj_str (n, "own_cond", ""), "unused"));
+        CHECK (!g_strcmp0 (wpj_str (n, "odd.unused", ""), "unused"));
+        CHECK (!g_strcmp0 (wpj_str (n, "by_cond_longer", ""), "unused"));
+        CHECK (!g_strcmp0 (wpj_str (n, "asks", ""), "unused") && !g_strcmp0 (wpj_str (n, "asks2", ""), "unused"));
+        CHECK (!g_strcmp0 (wpj_str (n, "filler00000", ""), "unused") &&
+               !g_strcmp0 (wpj_str (n, "filler00007", ""), "unused") &&
+               !g_strcmp0 (wpj_str (n, "filler00008", ""), "unused") &&
+               !g_strcmp0 (wpj_str (n, "filler11999", ""), "unused"));
+        CHECK (json_object_get_size (n) == N + 5);
+        json_object_unref (n);
+    }
+    if (cpu > 10.0) {
+        g_printerr ("FAIL option notes of %d options: %.1f s of CPU\n", (int) N, cpu);
+        failures++;
+    }
+    g_free (wp);
 }
 
 int main (int argc, char **argv)
@@ -715,7 +809,7 @@ int main (int argc, char **argv)
     g_setenv ("WALPE_NO_MEDIA", "1", TRUE);
     g_mkdir_with_parents (home, 0755);
 
-    /* formats-test [preset|particles|pkg|tex|assets]: one group only */
+    /* formats-test [preset|particles|pkg|tex|assets|types|notes]: one group only */
     const char *only = argc > 1 ? argv[1] : NULL;
     if (!only || !strcmp (only, "assets"))
         test_assets ();
@@ -729,6 +823,8 @@ int main (int argc, char **argv)
         test_pkg ();
     if (!only || !strcmp (only, "tex"))
         test_tex ();
+    if (!only || !strcmp (only, "notes"))
+        test_notes_many ();
 
     g_printerr ("%s (%d failure%s)\n", failures ? "FAILED" : "OK", failures,
                 failures == 1 ? "" : "s");

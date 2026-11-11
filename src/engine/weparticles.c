@@ -36,9 +36,18 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 
 #define PT_HARD_CAP 20000   /* per system, after the count override */
+/* Live particles of all systems of the process. One system holds at most
+ * PT_HARD_CAP and one particle object at most MAX_SYSTEMS systems, but a
+ * scene has as many particle objects as its file lists: each could fill
+ * 2.56 million particles (400 MiB, and a ropetrail's history on top) from a
+ * few hundred bytes of JSON, a hundred objects more memory than the machine
+ * has. Past the total a system counts as full. The particle files of the 32
+ * Workshop scenes with particles allow 35900 at most in one scene. */
+#define PT_TOTAL_CAP (20 * PT_HARD_CAP)
 #define MAX_EMIT 4
 #define MAX_OPS 16
 #define MAX_CHILD 40
@@ -347,9 +356,12 @@ struct WeSys {
     int nframes;
     GLuint ftex;               /* sprite sheet: the frames' uv rectangles (frame_table) */
     int frow;                  /* ... frames per row of it */
-    float rbox[4];             /* refracting system, this frame: clip-space bounds of its
-                                * quads (x0 y0 x1 y1; x0 > x1: unknown, the whole view) */
-    float ramax;               /* ... and their largest alpha */
+    float rbox[4];             /* refracting system, this frame: clip-space bounds of what
+                                * its quads can read of the frame - each quad's own bounds
+                                * grown by how far its normal map can move a sample
+                                * (x0 y0 x1 y1; x0 > x1: unknown, the whole view) */
+    float dbox[4];             /* this frame: clip-space bounds of the quads it draws, while
+                                * a copy of the frame is kept track of (rc; x0 > x1: unknown) */
     SoftInfo soft;             /* how smooth the sprite is (reduced-resolution layer) */
     int lr_f;                  /* the layer factor it was drawn with last frame (0: directly) */
     gboolean tex_premult;
@@ -376,6 +388,12 @@ struct WeSys {
                                 * emission accumulator of that particle's instance;
                                 * < 0 = the particle has none ("probability") */
     double time;
+    /* One step (sys_update), while particles die in it and an attached
+     * eventfollow child has particles: rm_now[i] = where the particle that
+     * was number i when the step began is now (-1: gone), rm_who[k] = which
+     * of them sits in slot k. rm_n = how many there were; 0 = not kept. */
+    int *rm_now, *rm_who;
+    int rm_n, rm_cap;
     /* WALPE_PT_STATS=2: this system's totals, logged when it is freed */
     guint st_draws, st_lr;
     guint64 st_drawn, st_culled;
@@ -488,6 +506,12 @@ static gint pt_density_pct = 100;
 static gint pt_instancing = 1;
 static gint pt_env_read;
 static gint pt_env_lowres = -1, pt_env_density = -1, pt_env_inst = -1;
+/* How a refracting system gets its copy of the frame (the picture is the
+ * same in all three): 0 = what is missing of the part it can read, 1 = that
+ * part every time (WALPE_PT_REFRACT_COPY=each), 2 = the whole frame every
+ * time (=whole, walpe_weparticles_set_refract_whole: the reference) */
+enum { RC_MISSING = 0, RC_EACH = 1, RC_WHOLE = 2 };
+static gint pt_refract_copy;
 /* counts the changes of the three: what the systems draw changed without
  * anything in a scene having changed (walpe_weparticles_settings_serial) */
 static gint pt_settings_serial;
@@ -511,6 +535,9 @@ static void pt_env (void)
     e = g_getenv ("WALPE_PT_INSTANCED");
     if (e && *e)
         g_atomic_int_set (&pt_env_inst, *e != '0');
+    e = g_getenv ("WALPE_PT_REFRACT_COPY");
+    if (e && (!strcmp (e, "whole") || !strcmp (e, "each")))
+        g_atomic_int_set (&pt_refract_copy, *e == 'w' ? RC_WHOLE : RC_EACH);
     g_atomic_int_set (&pt_env_read, 1);
 }
 
@@ -537,6 +564,12 @@ void walpe_weparticles_set_density (int percent)
 void walpe_weparticles_set_instanced (gboolean on)
 {
     pt_setting (&pt_instancing, on ? 1 : 0);
+}
+
+void walpe_weparticles_set_refract_whole (gboolean on)
+{
+    pt_env ();
+    g_atomic_int_set (&pt_refract_copy, on ? RC_WHOLE : RC_MISSING);
 }
 
 guint walpe_weparticles_settings_serial (void)
@@ -1418,6 +1451,15 @@ static float rexp (WeSys *s, float a, float b, float ex)
     return a + (b - a) * r;
 }
 
+static gint pt_live;        /* particles alive in every system (atomic: several render threads) */
+
+/* n particles of some system are gone */
+static void pt_live_sub (int n)
+{
+    if (n > 0)
+        g_atomic_int_add (&pt_live, -n);
+}
+
 static Pt *spawn (WeSys *s)
 {
     /* the live cap, thinned by the particle density setting (never below
@@ -1428,6 +1470,14 @@ static Pt *spawn (WeSys *s)
         cap = MAX (1, (int) ceilf ((float) cap * dn));
     if (s->count >= cap)
         return NULL;
+    if (g_atomic_int_add (&pt_live, 1) >= PT_TOTAL_CAP) {
+        static gint said;
+        g_atomic_int_add (&pt_live, -1);
+        if (g_atomic_int_compare_and_exchange (&said, 0, 1))
+            g_warning ("weparticles: %d particles are alive, no more are emitted until some end "
+                       "(the limit for all particle systems together)", PT_TOTAL_CAP);
+        return NULL;
+    }
     if (s->count >= s->cap) {
         int nc = MIN (s->cap * 2, s->maxcount);
         s->pts = g_renew (Pt, s->pts, nc);
@@ -1601,10 +1651,26 @@ static void follow_start (WeSys *s, int pi)
 
 /* particle i of s is gone: the last one takes its place. Followers that
  * moved with it stay where they are and end on their own; those of the
- * particle that changes its index follow it there. */
+ * particle that changes its index follow it there.
+ * The followers are not touched here: every particle of every attached
+ * child was looked at for every particle that died, parent deaths x
+ * follower count in one step (20000 short-lived particles with 40 attached
+ * children of 20000 each: a step of minutes). The step keeps where each
+ * of its particles went (sys_follow_track) and re-points the followers
+ * once when all deaths are known (sys_follow_settle): the same indices as
+ * one death at a time gave. */
 static void sys_remove (WeSys *s, int i)
 {
     int last = --s->count;
+    pt_live_sub (1);
+    if (s->rm_n > 0) {
+        s->rm_now[s->rm_who[i]] = -1;
+        if (i != last) {
+            int b = s->rm_who[last];
+            s->rm_who[i] = b;
+            s->rm_now[b] = i;
+        }
+    }
     if (i != last) {
         s->pts[i] = s->pts[last];
         if (s->hist)
@@ -1614,18 +1680,45 @@ static void sys_remove (WeSys *s, int i)
             memcpy (s->fol + (gsize) i * s->nfol, s->fol + (gsize) last * s->nfol,
                     sizeof (float) * (gsize) s->nfol);
     }
+}
+
+/* does a particle of some child sit on a particle of s */
+static gboolean sys_has_followers (const WeSys *s)
+{
+    for (int c = 0; c < s->nchild; c++)
+        if (s->child[c].type == CH_FOLLOW && s->child[c].sys->attached && s->child[c].sys->count > 0)
+            return TRUE;
+    return FALSE;
+}
+
+/* before the first death of a step: from now on sys_remove keeps track */
+static void sys_follow_track (WeSys *s)
+{
+    int n = s->count;
+    if (n > s->rm_cap) {
+        s->rm_now = g_renew (int, s->rm_now, n);
+        s->rm_who = g_renew (int, s->rm_who, n);
+        s->rm_cap = n;
+    }
+    for (int k = 0; k < n; k++)
+        s->rm_now[k] = s->rm_who[k] = k;
+    s->rm_n = n;
+}
+
+/* after the last death of a step: the followers' particles by their new numbers */
+static void sys_follow_settle (WeSys *s)
+{
     for (int c = 0; c < s->nchild; c++) {
         WeSys *cs = s->child[c].sys;
         if (s->child[c].type != CH_FOLLOW || !cs->attached)
             continue;
         for (int k = 0; k < cs->count; k++) {
             Pt *q = &cs->pts[k];
-            if (q->owner == i)
-                q->owner = -1;
-            else if (q->owner == last)
-                q->owner = i;
+            if (q->owner >= 0 && q->owner < s->rm_n)
+                q->owner = s->rm_now[q->owner];
         }
     }
+    s->rm_n = 0;
 }
 
 static void sys_update (WeSys *s, double dt, float audio, const float *at_origin);
@@ -1664,8 +1757,11 @@ static void sys_emit (WeSys *s, double dt, float audio, const float *at)
             rate *= audio;
         m->acc += rate * dt;
         int guard = 0;
+        gboolean full = FALSE;
         while (m->acc >= need && guard++ < 10000) {
             m->acc -= need;
+            if (full)
+                continue;
             Pt *p = emit_one (s, m, at);
             /* The emitter releases one particle every 1 / rate seconds,
              * not all of a step's particles at its end: this one was due
@@ -1675,6 +1771,27 @@ static void sys_emit (WeSys *s, double dt, float audio, const float *at)
              * one below 10 fps instead of rings at every stage. */
             if (p && rate > 0)
                 p->first = (float) CLAMP (m->acc / rate, 1e-6, dt);
+            if (!p) {
+                /* Full: nothing ends inside this loop, so every further
+                 * round would be refused as well - and there were up to
+                 * 10000 of them per emitter and step, each a call that
+                 * comes back empty (a file with 128 full systems of four
+                 * emitters at a rate of 1e9 and a "starttime" spent a
+                 * minute on them before its first frame). What the rounds
+                 * leave in the accumulator is worked out instead, to the
+                 * same value: with the usual need of 1 each takes 1 off
+                 * (exact below 2^53; above it the backlog is dropped
+                 * below either way); other needs keep counting down,
+                 * without the calls. */
+                if (m->acc >= 9007199254740992.0)
+                    break;
+                if (need == 1.0) {
+                    double k = MIN ((double) (10000 - guard), floor (m->acc));
+                    m->acc -= k;
+                    break;
+                }
+                full = TRUE;
+            }
         }
         if (m->acc > need)
             m->acc = 0;  /* full: drop the backlog */
@@ -1714,6 +1831,9 @@ static void sys_update (WeSys *s, double dt, float audio, const float *at_origin
         if (s->ops[k].kind == OP_ANGMOVE)
             turns = TRUE;
     s->rot_fixed = !turns;
+    /* (no particle is given a follower while this loop runs: they come
+     * with the emission above and with the children's below) */
+    const gboolean followed = sys_has_followers (s);
     for (int i = 0; i < s->count; i++) {
         Pt *p = &s->pts[i];
         /* a particle born inside this step lives only the rest of it */
@@ -1725,6 +1845,8 @@ static void sys_update (WeSys *s, double dt, float audio, const float *at_origin
         p->age += fdt;
         if (p->age >= p->life) {
             child_event (s, CH_DEATH, p->p);
+            if (followed && s->rm_n == 0)
+                sys_follow_track (s);
             sys_remove (s, i);
             i--;
             continue;
@@ -1888,6 +2010,8 @@ static void sys_update (WeSys *s, double dt, float audio, const float *at_origin
             p->d_off[c] = off[c];
         }
     }
+    if (s->rm_n > 0)
+        sys_follow_settle (s);
     /* children: static ones run on their own; eventfollow ones emit at
      * their rate from every live parent particle */
     for (int c = 0; c < s->nchild; c++) {
@@ -2141,26 +2265,67 @@ static void thread_gl_init (void)
 
 static void frame_rect (const WeSys *s, int fi, float uv[6]);
 
+/* |a[i] - 2 * b[i] + c[i]| of n bytes, counted. Eight tables, one per
+ * byte of a word, summed by the caller: a count is a load, an add and a
+ * store on one table entry, and in a picture most neighbours give the
+ * same value, so with one table every count waited for the one before
+ * it. Words in which all three rows are zero (the transparent ground of
+ * a sprite, premultiplied) are counted at once into *zeros: they are
+ * that many differences of 0. The sums are the counts of the plain loop,
+ * byte for byte (tests/particle_sheet_test.c compares them). */
+static inline void soft_d2_run (const guint8 *a, const guint8 *b, const guint8 *c, gsize n,
+                                guint (*t)[511], guint64 *zeros)
+{
+#define SOFT_D2(j) abs ((int) a[i + (j)] - 2 * (int) b[i + (j)] + (int) c[i + (j)])
+    gsize i = 0;
+    guint64 z = 0;
+    for (; i + 8 <= n; i += 8) {
+        guint64 x, y, w;
+        memcpy (&x, a + i, 8);
+        memcpy (&y, b + i, 8);
+        memcpy (&w, c + i, 8);
+        if ((x | y | w) == 0) {
+            z += 8;
+            continue;
+        }
+        t[0][SOFT_D2 (0)]++;
+        t[1][SOFT_D2 (1)]++;
+        t[2][SOFT_D2 (2)]++;
+        t[3][SOFT_D2 (3)]++;
+        t[4][SOFT_D2 (4)]++;
+        t[5][SOFT_D2 (5)]++;
+        t[6][SOFT_D2 (6)]++;
+        t[7][SOFT_D2 (7)]++;
+    }
+    for (; i < n; i++)
+        t[0][SOFT_D2 (0)]++;
+    *zeros += z;
+#undef SOFT_D2
+}
+
 /* second differences along one axis of a w x h block of premultiplied
  * RGBA (px, `stride` bytes between rows) at step k texels, counted into
  * hist[0..510]: a straight ramp gives 0, noise and sharp edges are large */
 static void soft_d2 (const guint8 *px, gsize stride, int w, int h, int k, gboolean along_y,
                      guint *hist)
 {
+    guint t[8][511];
+    guint64 zeros = 0;
+    memset (t, 0, sizeof (t));
     if (along_y) {
-        for (int y = k; y < h - k; y++) {
-            const guint8 *a = px + (gsize) (y - k) * stride, *b = px + (gsize) y * stride;
-            const guint8 *c = px + (gsize) (y + k) * stride;
-            for (int i = 0; i < w * 4; i++)
-                hist[abs ((int) a[i] - 2 * (int) b[i] + (int) c[i])]++;
-        }
-    } else {
+        for (int y = k; y < h - k; y++)
+            soft_d2_run (px + (gsize) (y - k) * stride, px + (gsize) y * stride,
+                         px + (gsize) (y + k) * stride, (gsize) w * 4, t, &zeros);
+    } else if (w > 2 * k) {
         for (int y = 0; y < h; y++) {
             const guint8 *r = px + (gsize) y * stride;
-            for (int i = k * 4; i < (w - k) * 4; i++)
-                hist[abs ((int) r[i - k * 4] - 2 * (int) r[i] + (int) r[i + k * 4])]++;
+            soft_d2_run (r, r + (gsize) k * 4, r + (gsize) k * 8, (gsize) (w - 2 * k) * 4, t,
+                         &zeros);
         }
     }
+    for (int i = 0; i <= 510; i++)
+        hist[i] += t[0][i] + t[1][i] + t[2][i] + t[3][i] + t[4][i] + t[5][i] + t[6][i] + t[7][i];
+    hist[0] += (guint) zeros;
 }
 
 /* SOFT_PCT of the picture's second differences are at most this (0..2) */
@@ -2202,6 +2367,14 @@ static void soft_measure (guint (*hist)[511], float *edge, const guint8 *px, gsi
     *edge = MAX (*edge, (float) e / 255.0f);
 }
 
+/* the four counts of soft_measure () alone (no GL; the unit test's entry) */
+void walpe_weparticles_soft_hist (const guint8 *px, gsize stride, int w, int h, guint (*hist)[511])
+{
+    float edge = 0;
+    if (px && hist && w > 0 && h > 0 && stride >= (gsize) w * 4)
+        soft_measure (hist, &edge, px, stride, 0, 0, w, h);
+}
+
 static void soft_finish (SoftInfo *si, guint (*hist)[511])
 {
     for (int ax = 0; ax < 2; ax++) {
@@ -2210,16 +2383,25 @@ static void soft_finish (SoftInfo *si, guint (*hist)[511])
     }
 }
 
+static void soft_log (const WeSys *s)
+{
+    const SoftInfo *si = &s->soft;
+    g_debug ("weparticles: %s: detail x %.3f/%.3f y %.3f/%.3f edge %.3f (frame %dx%d)%s",
+             s->tex_path, si->d1[0], si->d2[0], si->d1[1], si->d2[1], si->edge, si->fw, si->fh,
+             si->ok ? "" : " - not measured");
+}
+
 /* the sprite picture as loaded (straight alpha, 4 bytes a pixel) -> how
- * smooth it is, over all its sheet frames */
-static void soft_analyze (WeSys *s, const WalpeTex *t)
+ * smooth it is, over all its sheet frames. FALSE: not a picture this
+ * looks at (nothing measured, nothing logged). */
+static gboolean soft_analyze (WeSys *s, const WalpeTex *t)
 {
     SoftInfo *si = &s->soft;
     memset (si, 0, sizeof (*si));
     if (s->refract || !t->data || t->format != WALPE_TEX_RGBA8 || t->channels != 0 ||
         t->width < 4 || t->height < 4 || (gint64) t->width * t->height > 4096 * 4096 ||
         t->len < (gsize) t->width * t->height * 4)
-        return;
+        return FALSE;
     gsize n = (gsize) t->width * t->height, stride = (gsize) t->width * 4;
     guint8 *pm = g_malloc (n * 4);
     for (gsize i = 0; i < n; i++) {
@@ -2263,9 +2445,105 @@ static void soft_analyze (WeSys *s, const WalpeTex *t)
     soft_finish (si, hist);
     g_free (hist);
     g_free (pm);
-    g_debug ("weparticles: %s: detail x %.3f/%.3f y %.3f/%.3f edge %.3f (frame %dx%d)%s",
-             s->tex_path, si->d1[0], si->d2[0], si->d1[1], si->d2[1], si->edge, si->fw, si->fh,
-             si->ok ? "" : " - not measured");
+    soft_log (s);
+    return TRUE;
+}
+
+/* The measurement of a sprite file, kept for the next system that draws
+ * with the same file: six systems of one object, the child systems of a
+ * burst, the other monitor's copy of the scene and the scene loaded again
+ * all measured the same picture again, each with a decode of its own.
+ * The result is a function of the file's bytes alone, so it is kept by
+ * path and given out only while the file is the one that was measured
+ * (device, inode, size, both times). Any thread (render threads, at
+ * load). */
+typedef struct {
+    dev_t dev;
+    ino_t ino;
+    goffset size;
+    struct timespec mtime, ctime;
+    SoftInfo soft;
+    gboolean looked;               /* soft_analyze () took the picture (and logged it) */
+} SoftKept;
+
+static GMutex soft_kept_lock;
+static GHashTable *soft_kept;      /* file path -> SoftKept */
+static gint soft_n_measured, soft_n_kept;
+#define SOFT_KEPT_MAX 512          /* files; all are dropped when it is reached */
+
+static gboolean soft_kept_stat (const char *path, SoftKept *k)
+{
+    struct stat st;
+    if (stat (path, &st) != 0 || !S_ISREG (st.st_mode))
+        return FALSE;
+    memset (k, 0, sizeof (*k));
+    k->dev = st.st_dev;
+    k->ino = st.st_ino;
+    k->size = st.st_size;
+    k->mtime = st.st_mtim;
+    k->ctime = st.st_ctim;
+    return TRUE;
+}
+
+static gboolean soft_kept_same (const SoftKept *a, const SoftKept *b)
+{
+    return a->dev == b->dev && a->ino == b->ino && a->size == b->size &&
+           a->mtime.tv_sec == b->mtime.tv_sec && a->mtime.tv_nsec == b->mtime.tv_nsec &&
+           a->ctime.tv_sec == b->ctime.tv_sec && a->ctime.tv_nsec == b->ctime.tv_nsec;
+}
+
+/* the system's sprite: measured (the file is decoded for it), or what an
+ * earlier measurement of the same file gave */
+static void soft_for_sprite (WeSys *s)
+{
+    SoftKept now;
+    gboolean have = soft_kept_stat (s->tex_path, &now);
+    if (have) {
+        g_mutex_lock (&soft_kept_lock);
+        SoftKept *k = soft_kept ? g_hash_table_lookup (soft_kept, s->tex_path) : NULL;
+        gboolean hit = k && soft_kept_same (k, &now), looked = FALSE;
+        if (hit) {
+            s->soft = k->soft;
+            looked = k->looked;
+        }
+        g_mutex_unlock (&soft_kept_lock);
+        if (hit) {
+            g_atomic_int_inc (&soft_n_kept);
+            if (looked)
+                soft_log (s);   /* its line, as when it was measured */
+            return;
+        }
+    }
+    /* the reduced-resolution layer's sprite analysis reads the decoded
+     * picture; the cached texture load hands out no pixels, so the file is
+     * decoded once more for it, at load time only */
+    WalpeTex *at = walpe_tex_load_ex (s->tex_path, WALPE_TEX_LOAD_WE_COLOR);
+    if (!at)
+        return;
+    gboolean looked = soft_analyze (s, at);
+    walpe_tex_free (at);
+    g_atomic_int_inc (&soft_n_measured);
+    /* kept only when the file did not change while it was read */
+    SoftKept after;
+    if (!have || !soft_kept_stat (s->tex_path, &after) || !soft_kept_same (&now, &after))
+        return;
+    now.soft = s->soft;
+    now.looked = looked;
+    g_mutex_lock (&soft_kept_lock);
+    if (!soft_kept)
+        soft_kept = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
+    if (g_hash_table_size (soft_kept) >= SOFT_KEPT_MAX)
+        g_hash_table_remove_all (soft_kept);
+    g_hash_table_replace (soft_kept, g_strdup (s->tex_path), g_memdup2 (&now, sizeof (now)));
+    g_mutex_unlock (&soft_kept_lock);
+}
+
+void walpe_weparticles_soft_stats (guint *measured, guint *kept)
+{
+    if (measured)
+        *measured = (guint) g_atomic_int_get (&soft_n_measured);
+    if (kept)
+        *kept = (guint) g_atomic_int_get (&soft_n_kept);
 }
 
 /* sprite sheet: the frames' uv rectangles as a float texture the vertex
@@ -2320,16 +2598,10 @@ static void sys_gl_init (WeSys *s)
          * texture, where each had its own. A DXT sprite stays block
          * compressed (straight alpha: the shader premultiplies, u_straight);
          * an R8/RG88 one takes one or two bytes per texel on the GPU. */
-        /* the reduced-resolution layer's sprite analysis reads the
-         * decoded picture; the cached load below hands out no pixels, so the file is decoded
-         * once more for it, at load time only */
-        if (!s->refract) {
-            WalpeTex *at = walpe_tex_load_ex (s->tex_path, WALPE_TEX_LOAD_WE_COLOR);
-            if (at) {
-                soft_analyze (s, at);
-                walpe_tex_free (at);
-            }
-        }
+        /* how smooth the sprite is (the reduced-resolution layer), once
+         * per file */
+        if (!s->refract)
+            soft_for_sprite (s);
         WalpeTexInfo ti;
         WalpeTexFrame *frames = NULL;
         s->tex = walpe_gl_tex_cached_frames (s->tex_path, WALPE_TEX_LOAD_WE_COLOR |
@@ -2686,6 +2958,8 @@ typedef struct {
 
 /* ---- the reduced-resolution layer (PtLayer) ---- */
 
+static void rc_forget (void);   /* (the copy of the frame refracting systems read: below) */
+
 static void lr_unbind (void)
 {
     if (!lr.bound)
@@ -2726,6 +3000,7 @@ static void lr_flush (DrawCtx *d)
     }
     if (o == v)
         return;
+    rc_forget ();   /* the layer goes onto the frame */
     glEnable (GL_BLEND);
     glBlendFunc (GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     glUseProgram (pt_blit.prog);
@@ -3052,6 +3327,210 @@ static int lr_decide (WeSys *s, LrProbe *pr)
 
 enum { SUB_QUADS, SUB_RIBBON, SUB_EXPANDED };
 
+/* ---- what the copy of the frame holds (refracting systems, pt_scene) ----
+ * Every refracting system used to copy the part of the frame it can read
+ * right before its draw, also when the system before it had just copied
+ * the same pixels: a row of splash or droplet systems, each reading a wide
+ * box around a few small sprites, copied most of the frame once per system.
+ * Within a frame the copy is now kept track of:
+ *   fresh  rectangles of the view copied since the last rc_forget ();
+ *   dirty  rectangles of the view drawn on since (by particle systems,
+ *          directly on the frame: the bounds of their quads).
+ * A pixel of pt_scene inside a fresh rectangle and outside every dirty one
+ * holds what the frame holds. A system that needs a rectangle copies what
+ * of it lies outside one fresh rectangle (when that is one strip) and what
+ * was drawn on inside, as one rectangle around both: one copy call or none
+ * where there was one, and never more pixels; the bytes it then reads are
+ * those a copy of the whole rectangle would have put there. Everything is
+ * forgotten when something else may have drawn on the frame: a new frame,
+ * the scene's other layers (walpe_weparticles_flush is called before each
+ * of them), the reduced-resolution layer going onto the frame, a draw whose
+ * bounds are not known (ribbons), another viewport, a new pt_scene. All in
+ * view pixels, x1 / y1 exclusive. */
+typedef struct { int x0, y0, x1, y1; } RcBox;
+#define RC_FRESH 6
+#define RC_DIRTY 12
+static __thread struct {
+    RcBox fresh[RC_FRESH], dirty[RC_DIRTY];
+    int nfresh, ndirty;
+    int vw, vh;         /* the view the rectangles are in */
+} rc;
+
+static void rc_forget (void)
+{
+    rc.nfresh = rc.ndirty = 0;
+}
+
+static inline gint64 rc_area (const RcBox *b)
+{
+    return b->x1 > b->x0 && b->y1 > b->y0 ? (gint64) (b->x1 - b->x0) * (b->y1 - b->y0) : 0;
+}
+
+static inline gboolean rc_inside (const RcBox *a, const RcBox *b)
+{
+    return a->x0 >= b->x0 && a->y0 >= b->y0 && a->x1 <= b->x1 && a->y1 <= b->y1;
+}
+
+static inline RcBox rc_common (const RcBox *a, const RcBox *b)
+{
+    RcBox r = { MAX (a->x0, b->x0), MAX (a->y0, b->y0), MIN (a->x1, b->x1), MIN (a->y1, b->y1) };
+    return r;
+}
+
+/* n without f, when that is nothing (TRUE, *rest empty) or one rectangle
+ * (TRUE, *rest); FALSE when it is more than one or all of n */
+static gboolean rc_minus (const RcBox *n, const RcBox *f, RcBox *rest)
+{
+    *rest = *n;
+    if (f->x0 <= n->x0 && f->x1 >= n->x1) {
+        if (f->y0 <= n->y0 && f->y1 > n->y0) {
+            rest->y0 = MIN (f->y1, n->y1);
+            return TRUE;
+        }
+        if (f->y1 >= n->y1 && f->y0 < n->y1) {
+            rest->y1 = MAX (f->y0, n->y0);
+            return TRUE;
+        }
+    }
+    if (f->y0 <= n->y0 && f->y1 >= n->y1) {
+        if (f->x0 <= n->x0 && f->x1 > n->x0) {
+            rest->x0 = MIN (f->x1, n->x1);
+            return TRUE;
+        }
+        if (f->x1 >= n->x1 && f->x0 < n->x1) {
+            rest->x1 = MAX (f->x0, n->x0);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/* one rectangle of the frame into pt_scene (bound on the active unit) */
+static void rc_copy (const RcBox *b, const GLint *vp)
+{
+    if (rc_area (b) <= 0)
+        return;
+    glCopyTexSubImage2D (GL_TEXTURE_2D, 0, b->x0, b->y0, vp[0] + b->x0, vp[1] + b->y0,
+                         b->x1 - b->x0, b->y1 - b->y0);
+    if (stats_on ()) {
+        pt_stats.copies++;
+        pt_stats.copied += (double) rc_area (b) / ((double) vp[2] * vp[3]);
+    }
+}
+
+/* pt_scene gets the frame's pixels in n, the part of the view a system is
+ * about to read; track = FALSE: all of n, nothing remembered */
+static void rc_fill (const RcBox *n, const GLint *vp, gboolean track)
+{
+    if (!track || vp[2] != rc.vw || vp[3] != rc.vh) {
+        rc_forget ();
+        rc.vw = vp[2];
+        rc.vh = vp[3];
+    }
+    if (!track) {
+        rc_copy (n, vp);
+        return;
+    }
+    /* the fresh rectangle that leaves the least to copy */
+    RcBox rest = *n;
+    gint64 todo = rc_area (n);
+    gboolean have = FALSE;
+    for (int i = 0; i < rc.nfresh; i++) {
+        RcBox r;
+        if (rc_minus (n, &rc.fresh[i], &r) && rc_area (&r) < todo) {
+            rest = r;
+            todo = rc_area (&r);
+            have = TRUE;
+        }
+    }
+    /* ... and what was drawn on in the part taken from it: one rectangle
+     * around all of that, so a system makes one copy at most, as it always
+     * did (pixels of it that the copy holds already are copied again: they
+     * are the frame's either way) */
+    if (have)
+        for (int j = 0; j < rc.ndirty; j++) {
+            RcBox q = rc_common (&rc.dirty[j], n);
+            if (rc_area (&q) <= 0)
+                continue;
+            if (rc_area (&rest) <= 0) {
+                rest = q;
+            } else {
+                rest.x0 = MIN (rest.x0, q.x0);
+                rest.y0 = MIN (rest.y0, q.y0);
+                rest.x1 = MAX (rest.x1, q.x1);
+                rest.y1 = MAX (rest.y1, q.y1);
+            }
+        }
+    rc_copy (&rest, vp);
+    /* all of n is the frame's now: nothing in it is dirty, and it is fresh */
+    int nd = 0;
+    for (int j = 0; j < rc.ndirty; j++)
+        if (!rc_inside (&rc.dirty[j], n))
+            rc.dirty[nd++] = rc.dirty[j];
+    rc.ndirty = nd;
+    int nf = 0, small = 0;
+    for (int i = 0; i < rc.nfresh; i++) {
+        if (rc_inside (n, &rc.fresh[i]))
+            return;                     /* (already known as part of a larger one) */
+        if (!rc_inside (&rc.fresh[i], n))
+            rc.fresh[nf++] = rc.fresh[i];
+    }
+    rc.nfresh = nf;
+    if (rc.nfresh < RC_FRESH) {
+        rc.fresh[rc.nfresh++] = *n;
+        return;
+    }
+    for (int i = 1; i < rc.nfresh; i++)
+        if (rc_area (&rc.fresh[i]) < rc_area (&rc.fresh[small]))
+            small = i;
+    if (rc_area (n) > rc_area (&rc.fresh[small]))
+        rc.fresh[small] = *n;
+}
+
+/* system s was drawn directly on the frame: the copy no longer holds the
+ * frame where its quads are (two pixels around their bounds for the
+ * rasterizer's and our own rounding); bounds not known: nothing is known */
+static void rc_drawn (const WeSys *s)
+{
+    if (!rc.nfresh)
+        return;
+    const float fx0 = (s->dbox[0] * 0.5f + 0.5f) * (float) rc.vw - 2.0f;
+    const float fy0 = (s->dbox[1] * 0.5f + 0.5f) * (float) rc.vh - 2.0f;
+    const float fx1 = (s->dbox[2] * 0.5f + 0.5f) * (float) rc.vw + 2.0f;
+    const float fy1 = (s->dbox[3] * 0.5f + 0.5f) * (float) rc.vh + 2.0f;
+    if (!(s->dbox[0] <= s->dbox[2] && s->dbox[1] <= s->dbox[3]) || !isfinite (fx0 + fx1 + fy0 + fy1) ||
+        rc.ndirty == RC_DIRTY) {
+        rc_forget ();
+        return;
+    }
+    /* (clamped as floats: any finite number fits afterwards) */
+    RcBox b = { (int) floorf (CLAMP (fx0, 0.0f, (float) rc.vw)),
+                (int) floorf (CLAMP (fy0, 0.0f, (float) rc.vh)),
+                (int) ceilf (CLAMP (fx1, 0.0f, (float) rc.vw)),
+                (int) ceilf (CLAMP (fy1, 0.0f, (float) rc.vh)) };
+    if (rc_area (&b) > 0)
+        rc.dirty[rc.ndirty++] = b;
+}
+
+/* How far a refracting quad reads the frame from where it is drawn. PT_FS
+ * samples the copy at the fragment's own place plus
+ *     off = (tan.xy * n.x + tan.zw * n.y) * amount * mask * alpha
+ * in units of the view (y negated), where tan = (right.x, up.x, right.y,
+ * up.y) is what screen_tangents gave the quad, the same at each of its
+ * corners; n is the decoded normal: both components within [-1, 1], or n.x
+ * within [-0.965, 1.035] for the block compressed layout (u_nfmt 0); mask
+ * is a texture channel, at most 1. So
+ *     |off.x| <= (|right.x| * NX + |right.y|) * |amount| * |alpha|
+ *     |off.y| <= (|up.x| * NX + |up.y|) * |amount| * |alpha|
+ * with NX = 1.035, and a quad without a normal map (u_nfmt 3) reads only
+ * where it is drawn. Returned: clip units (two per view) per unit of the
+ * bracket times alpha, a thousandth added for the shader's own rounding. */
+#define REFRACT_NX 1.035f
+static float refract_reach (const WeSys *s)
+{
+    return s->ntex ? 2.0f * 1.001f * fabsf (s->refract_amount) : 0.0f;
+}
+
 /* program, matrix, texture, refraction inputs and blend function of a
  * system; then its vertex data and the draw. count = instances
  * (SUB_QUADS, record layout `layout`) or vertices. pr = the system's
@@ -3193,18 +3672,19 @@ static void sys_submit (DrawCtx *d, WeSys *s, int kind, int layout, const float 
             glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, vp[2], vp[3], 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
             pt_scene_w = vp[2];
             pt_scene_h = vp[3];
+            rc_forget ();
         }
         glBindTexture (GL_TEXTURE_2D, pt_scene);
-        /* Only the part the system can read: its quads' bounds plus the
-         * farthest a normal map can shift a sample - off = (tangents .
-         * normal) * amount * mask * alpha in the shader, each tangent
-         * component and the mask at most 1, a decoded normal component at
-         * most 1.035 - and a pixel for the filter. Splashes on the ground
-         * or drops on an umbrella copied the whole frame for a strip. */
+        /* Only the part the system can read: what its quads cover plus,
+         * for each quad, the farthest its normal map can shift a sample
+         * (sys_draw keeps these bounds in rbox, see refract_reach) - and a
+         * pixel for the filter, one for the rounding. Splashes on the
+         * ground or drops on an umbrella copied the whole frame for a
+         * strip. Of that part, what the copy does not hold already (rc). */
+        const int rc_mode = g_atomic_int_get (&pt_refract_copy);
         int cx = 0, cy = 0, cw = vp[2], ch = vp[3];
-        if (s->rbox[0] <= s->rbox[2] && s->rbox[1] <= s->rbox[3]) {
-            float reach = 2.07f * fabsf (s->refract_amount) * MAX (s->ramax, 0.0f);
-            float mx = reach * (float) vp[2] + 2.0f, my = reach * (float) vp[3] + 2.0f;
+        if (s->rbox[0] <= s->rbox[2] && s->rbox[1] <= s->rbox[3] && rc_mode != RC_WHOLE) {
+            const float mx = 2.0f, my = 2.0f;
             float fx0 = (s->rbox[0] * 0.5f + 0.5f) * (float) vp[2] - mx;
             float fx1 = (s->rbox[2] * 0.5f + 0.5f) * (float) vp[2] + mx;
             float fy0 = (s->rbox[1] * 0.5f + 0.5f) * (float) vp[3] - my;
@@ -3220,10 +3700,12 @@ static void sys_submit (DrawCtx *d, WeSys *s, int kind, int layout, const float 
             cw = MAX (cw - cx, 1);
             ch = MAX (ch - cy, 1);
         }
-        glCopyTexSubImage2D (GL_TEXTURE_2D, 0, cx, cy, vp[0] + cx, vp[1] + cy, cw, ch);
-        if (st) {
-            pt_stats.copies++;
-            pt_stats.copied += (double) cw * ch / ((double) vp[2] * vp[3]);
+        {
+            const RcBox need = { cx, cy, cx + cw, cy + ch };
+            /* (kept track of only in the frame's own viewport: that is
+             * where the other systems' bounds are) */
+            rc_fill (&need, vp, rc_mode == RC_MISSING && vp[0] == 0 && vp[1] == 0 &&
+                                vp[2] == lr.tw && vp[3] == lr.th);
         }
         glActiveTexture (GL_TEXTURE1);
         glBindTexture (GL_TEXTURE_2D, s->ntex ? s->ntex : pt_dot);
@@ -3255,6 +3737,8 @@ static void sys_submit (DrawCtx *d, WeSys *s, int kind, int layout, const float 
         else
             glDrawArrays (GL_TRIANGLES, 0, count);
     }
+    if (!lf)
+        rc_drawn (s);   /* on the frame itself: a copy of it is stale there */
     if (st) {
         pt_stats.draws++;
         pt_stats.uploads++;
@@ -3354,7 +3838,8 @@ static void sys_draw (DrawCtx *d, WeSys *s)
     /* ribbons: a refracting one reads the whole frame (no bounds kept) */
     s->rbox[0] = 1.0f;
     s->rbox[2] = -1.0f;
-    s->ramax = 1.0f;
+    s->dbox[0] = 1.0f;
+    s->dbox[2] = -1.0f;
     if (s->renderer == RD_ROPE) {
         /* "all existing particles connected as a single rope, in order of
          * spawn time"; v = 1 at the oldest particle, 0 at the newest */
@@ -3487,9 +3972,18 @@ static void sys_draw (DrawCtx *d, WeSys *s)
         pr.edges = FALSE;
     }
     const float pxw = (float) lr.tw * 0.5f, pxh = (float) lr.th * 0.5f;
+    float rtan[4] = { 1.0f, 0.0f, 0.0f, 1.0f };   /* a refracting quad's screen tangents */
     s->rbox[0] = s->rbox[1] = G_MAXFLOAT;
     s->rbox[2] = s->rbox[3] = -G_MAXFLOAT;
-    s->ramax = 0.0f;
+    gboolean rbox_ok = TRUE;
+    /* where the quads are, while a copy of the frame is kept track of (rc:
+     * this system draws on the frame the copy was made of) */
+    const gboolean dbox_on = s->refract || rc.nfresh > 0;
+    s->dbox[0] = s->dbox[1] = G_MAXFLOAT;
+    s->dbox[2] = s->dbox[3] = -G_MAXFLOAT;
+    /* clip units a sample can move per unit of (tangent . normal) x alpha:
+     * nothing without a normal map (the shader adds no offset) */
+    const float reach_k = s->refract ? refract_reach (s) : 0.0f;
     /* the same for every particle of the system (each used to be asked
      * for again per particle, two of them behind a g_once): */
     const float size_attr = SIZE_ATTR;
@@ -3634,17 +4128,36 @@ static void sys_draw (DrawCtx *d, WeSys *s)
                 culled++;
                 continue;
             }
+            if (dbox_on) {
+                if (!isfinite (px + ex) || !isfinite (py + ey))
+                    rbox_ok = FALSE;
+                if (!(px - ex >= s->dbox[0]))
+                    s->dbox[0] = px - ex;
+                if (!(py - ey >= s->dbox[1]))
+                    s->dbox[1] = py - ey;
+                if (!(px + ex <= s->dbox[2]))
+                    s->dbox[2] = px + ex;
+                if (!(py + ey <= s->dbox[3]))
+                    s->dbox[3] = py + ey;
+            }
             if (s->refract) {
-                /* what the system can read of the frame (sys_submit) */
-                if (!(px - ex >= s->rbox[0]))
-                    s->rbox[0] = px - ex;
-                if (!(py - ey >= s->rbox[1]))
-                    s->rbox[1] = py - ey;
-                if (!(px + ex <= s->rbox[2]))
-                    s->rbox[2] = px + ex;
-                if (!(py + ey <= s->rbox[3]))
-                    s->rbox[3] = py + ey;
-                s->ramax = MAX (s->ramax, a);
+                /* what the quad can read of the frame (sys_submit): where
+                 * it is, and from there as far as its own tangents and
+                 * alpha let the normal map shift a sample */
+                screen_tangents (w, s, hx, hy, rtan);
+                const float ra = reach_k * fabsf (a);
+                const float gx = ex + (fabsf (rtan[0]) * REFRACT_NX + fabsf (rtan[2])) * ra;
+                const float gy = ey + (fabsf (rtan[1]) * REFRACT_NX + fabsf (rtan[3])) * ra;
+                if (!isfinite (px + gx) || !isfinite (py + gy))
+                    rbox_ok = FALSE;   /* a quad without numbers: the whole view */
+                if (!(px - gx >= s->rbox[0]))
+                    s->rbox[0] = px - gx;
+                if (!(py - gy >= s->rbox[1]))
+                    s->rbox[1] = py - gy;
+                if (!(px + gx <= s->rbox[2]))
+                    s->rbox[2] = px + gx;
+                if (!(py + gy <= s->rbox[3]))
+                    s->rbox[3] = py + gy;
             }
             if (pr.on) {
                 float lx2 = hxx * hxx * pxw * pxw + hxy * hxy * pxh * pxh;
@@ -3719,9 +4232,17 @@ static void sys_draw (DrawCtx *d, WeSys *s)
             o += 3;
         }
         if (s->refract) {
-            screen_tangents (w, s, hx, hy, o);
+            memcpy (o, rtan, sizeof (rtan));   /* (computed with the quad's bounds above) */
             o += 4;
         }
+    }
+    if (!rbox_ok) {
+        s->rbox[0] = 1.0f;
+        s->rbox[2] = -1.0f;
+    }
+    if (!rbox_ok || !dbox_on) {
+        s->dbox[0] = 1.0f;
+        s->dbox[2] = -1.0f;
     }
     int n = (int) ((o - v) / rf);
     if (st) {
@@ -3909,6 +4430,7 @@ void walpe_weparticles_render (WalpeWeParticles *w, const float *mvp, double dt,
 
 void walpe_weparticles_begin_frame (guint target_fbo, int w, int h)
 {
+    rc_forget ();
     lr.target = target_fbo;
     lr.tw = w;
     lr.th = h;
@@ -3925,6 +4447,9 @@ void walpe_weparticles_begin_frame (guint target_fbo, int w, int h)
 
 void walpe_weparticles_flush (void)
 {
+    /* the caller is about to draw on the frame (or the frame is over): a
+     * copy of it kept for refracting systems holds the frame no longer */
+    rc_forget ();
     if (!lr.pending)
         return;
     GLuint q = 0;
@@ -3950,9 +4475,22 @@ void walpe_weparticles_end_frame (void)
     lr.have_target = FALSE;
 }
 
+/* the copy of the frame that refracting systems read: a frame of RGBA8
+ * that used to stay for the life of the render thread once one such
+ * system had been drawn. Made again by the next one. */
+static void pt_scene_release (void)
+{
+    if (pt_scene)
+        glDeleteTextures (1, &pt_scene);
+    pt_scene = 0;
+    pt_scene_w = pt_scene_h = 0;
+}
+
 void walpe_weparticles_drop_targets (void)
 {
+    rc_forget ();
     lr_release ();
+    pt_scene_release ();
 }
 
 gboolean walpe_weparticles_follows_cursor (WalpeWeParticles *p)
@@ -4003,8 +4541,19 @@ void walpe_weparticles_set_cursor (WalpeWeParticles *p, float x, float y)
 static void sys_set_emit (WeSys *s, gboolean on, gboolean clear)
 {
     s->no_emit = !on;
-    if (clear)
+    if (clear) {
+        pt_live_sub (s->count);
         s->count = 0;
+        /* stopped: the emitters are at their start again. A burst that has
+         * fired stayed "done" and an emitter whose duration was over stayed
+         * over, so the play () after a stop () emitted nothing from them: a
+         * burst-only system (a click effect) was empty for good. */
+        for (int e = 0; e < s->nem; e++) {
+            s->em[e].t = 0;
+            s->em[e].acc = 0;
+            s->em[e].burst_done = FALSE;
+        }
+    }
     for (int c = 0; c < s->nchild; c++)
         sys_set_emit (s->child[c].sys, on, clear);
 }
@@ -4165,12 +4714,15 @@ static void sys_free (WeSys *s)
         walpe_gl_tex_release (s->ntex);
     if (s->ftex)
         glDeleteTextures (1, &s->ftex);
+    pt_live_sub (s->count);
     g_free (s->frames);
     g_free (s->tex_path);
     g_free (s->ntex_path);
     g_free (s->pts);
     g_free (s->hist);
     g_free (s->fol);
+    g_free (s->rm_now);
+    g_free (s->rm_who);
     g_rand_free (s->rng);
     g_free (s);
 }
@@ -4193,6 +4745,7 @@ void walpe_weparticles_free (WalpeWeParticles *p)
             glBufferData (GL_ARRAY_BUFFER, 0, NULL, GL_STREAM_DRAW);
         }
         lr_release ();
+        pt_scene_release ();
     }
     g_free (p);
 }

@@ -3,6 +3,7 @@
  * and descriptions of project.json (src/ui/store.c). No display.
  */
 #include "common/uitext.h"
+#include "common/util.h"
 #include "ui/store.h"
 #include <glib/gstdio.h>
 #include <string.h>
@@ -212,6 +213,38 @@ static void test_import (const char *root)
     CHECK (dst && g_file_test (dst, G_FILE_TEST_IS_REGULAR) && !g_file_test (dst, G_FILE_TEST_IS_SYMLINK));
     g_clear_error (&err);
     g_free (dst);
+    /* a file the library does not list (by its name: no video, GIF or
+     * picture, or a name that starts with a dot) is refused and not
+     * copied; it was copied, reported as imported and never shown */
+    char *lib3 = g_build_filename (root, "lib3", NULL);
+    static const char *const unlisted[] = { "notes.txt", ".hidden.png", "archive", "movie.mp4.part" };
+    for (guint i = 0; i < G_N_ELEMENTS (unlisted); i++) {
+        put (root, unlisted[i], "x");
+        char *f = g_build_filename (root, unlisted[i], NULL);
+        char *in = g_build_filename (lib3, "imported", unlisted[i], NULL);
+        dst = walpe_store_import_file (f, lib3, &err);
+        CHECK (!dst && err && strstr (err->message, "the library can show"));
+        CHECK (!g_file_test (in, G_FILE_TEST_EXISTS));
+        g_clear_error (&err);
+        g_free (dst);
+        g_free (in);
+        g_free (f);
+    }
+    /* what it lists is taken, whatever the case of the extension */
+    static const char *const listed[] = { "a.PNG", "b.jpeg", "c.gif", "d.webm", "e.tex" };
+    for (guint i = 0; i < G_N_ELEMENTS (listed); i++) {
+        put (root, listed[i], "x");
+        char *f = g_build_filename (root, listed[i], NULL);
+        dst = walpe_store_import_file (f, lib3, &err);
+        CHECK (dst && !err && g_file_test (dst, G_FILE_TEST_IS_REGULAR));
+        g_clear_error (&err);
+        g_free (dst);
+        g_free (f);
+    }
+    GList *shown = walpe_store_scan (lib3);
+    CHECK (g_list_length (shown) == G_N_ELEMENTS (listed));     /* everything imported is listed */
+    g_list_free_full (shown, g_object_unref);
+    g_free (lib3);
     /* a FIFO picked directly: an error, not a wait */
     dst = walpe_store_import_file (ff, lib, &err);
     CHECK (!dst && err);
@@ -230,6 +263,57 @@ static void test_import (const char *root)
     g_free (lib);
 }
 
+/* what the window says about a wallpaper the engine could not load: the
+ * engine's status is the only place that has it ("open" is answered before
+ * the load), and the window did not read it */
+static char *load_text (const char *status_json)
+{
+    JsonNode *n = wpj_parse_data (status_json, -1);
+    JsonObject *o = n && JSON_NODE_HOLDS_OBJECT (n) ? json_node_get_object (n) : NULL;
+    char *t = walpe_store_load_error_text (o ? wpj_obj (o, "state") : NULL);
+    if (n)
+        json_node_unref (n);
+    return t;
+}
+
+static void test_load_error (void)
+{
+    char *t = load_text ("{\"ok\":true,\"state\":{\"monitors\":[{\"index\":0,\"current\":\"/lib/a\","
+                         "\"type\":\"scene\"},{\"index\":1,\"current\":\"/lib/b\"}]}}");
+    CHECK (t == NULL);          /* everything loaded */
+    g_free (t);
+    CHECK (!(t = load_text ("{\"ok\":true,\"state\":{}}")));
+    CHECK (!(t = walpe_store_load_error_text (NULL)));
+    CHECK (!(t = load_text ("{\"state\":{\"monitors\":3}}")));      /* a daemon before per-monitor status */
+    CHECK (!(t = load_text ("{\"state\":{\"monitors\":[7,\"x\",{\"load_error\":\"\"},{\"load_error\":5}]}}")));
+    /* one monitor: the reason, and the wallpaper that came back */
+    t = load_text ("{\"state\":{\"monitors\":[{\"index\":0,\"current\":\"/lib/good\",\"type\":\"scene\","
+                   "\"load_error\":\"/lib/bad: bad scene json: /lib/bad/scene.json\","
+                   "\"load_restored\":\"/lib/good\"}]}}");
+    CHECK (!g_strcmp0 (t, "bad could not be loaded; good is shown again: bad scene json: /lib/bad/scene.json"));
+    g_free (t);
+    /* nothing to go back to */
+    t = load_text ("{\"state\":{\"monitors\":[{\"index\":0,\"current\":\"/lib/bad.png\",\"type\":\"none\","
+                   "\"load_error\":\"/lib/bad.png: failed to load image\"}]}}");
+    CHECK (!g_strcmp0 (t, "bad.png could not be loaded: failed to load image"));
+    g_free (t);
+    /* two monitors, one of them failed: it is named (counted from 1, as the window does) */
+    t = load_text ("{\"state\":{\"monitors\":[{\"index\":0,\"current\":\"/lib/a\"},"
+                   "{\"index\":1,\"current\":\"/lib/a\",\"load_error\":\"/lib/c: no such file\","
+                   "\"load_restored\":\"/lib/a\"}]}}");
+    CHECK (!g_strcmp0 (t, "Monitor 2: c could not be loaded; a is shown again: no such file"));
+    g_free (t);
+    /* both failed the same way: no monitor named */
+    t = load_text ("{\"state\":{\"monitors\":[{\"index\":0,\"load_error\":\"/lib/c: x\"},"
+                   "{\"index\":1,\"load_error\":\"/lib/c: x\"}]}}");
+    CHECK (!g_strcmp0 (t, "c could not be loaded: x"));
+    g_free (t);
+    /* a sentence of another shape is passed on whole */
+    t = load_text ("{\"state\":{\"monitors\":[{\"index\":0,\"load_error\":\"out of memory\"}]}}");
+    CHECK (!g_strcmp0 (t, "the wallpaper could not be loaded: out of memory"));
+    g_free (t);
+}
+
 int main (void)
 {
     char *tmp = g_dir_make_tmp ("walpe-uitext-XXXXXX", NULL);
@@ -241,6 +325,7 @@ int main (void)
     test_text ();
     test_scan (T);
     test_import (T);
+    test_load_error ();
     char *argv[] = { "/bin/rm", "-rf", "--", T, NULL };
     if (!failures && strstr (T, "walpe-uitext-"))
         g_spawn_sync (NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL, NULL, NULL, NULL, NULL);

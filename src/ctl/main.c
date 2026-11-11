@@ -11,6 +11,11 @@
 #include "common/setkeys.h"
 #include "common/util.h"
 #include "common/workshop.h"
+
+/* text from a reply on its way to the terminal (below) */
+static const char *tt (const char *s);
+static void print_json (const char *reply);
+
 #include "layers_ctl.h"   /* walpe-ctl layers ... */
 
 static void usage (void)
@@ -29,6 +34,8 @@ static void usage (void)
              "  walpe-ctl status               show daemon state (+ import progress)\n"
              "  walpe-ctl set fps=N volume=X parallax=on|off fs=on|off\n"
              "  walpe-ctl set covered=on|off   pause a monitor while windows cover it\n"
+             "  walpe-ctl set dpms=on|off      pause while the display is in power save or the\n"
+             "                                 screensaver runs\n"
              "  walpe-ctl set transparent=on|off  see-through windows (transparent_windows list,\n"
              "                                 _NET_WM_WINDOW_OPACITY) count as covering\n"
              "  walpe-ctl set focus_action=run|limit|pause focus_fps=N\n"
@@ -47,6 +54,8 @@ static void usage (void)
              "  walpe-ctl set skip_hidden=off|auto|always [skip_hidden_margin=PX skip_hidden_inset=PX]\n"
              "                         do not render what other windows hide (off; auto = only without a\n"
              "                         compositing manager, always = also under one: see README)\n"
+             "  walpe-ctl set present=vsync|limiter|auto  how frames are presented (NAME=mode for one\n"
+             "                                 monitor), for this run of the daemon: gpu.conf keeps it\n"
              "  walpe-ctl set frame_align=on|off  the frame clocks of all monitors run on one grid (off by\n"
              "                                 default; for this run of the daemon: `frame_align = on` in\n"
              "                                 ~/.config/walpe/gpu.conf keeps it)\n"
@@ -240,6 +249,134 @@ static gboolean target_arg (int argc, char **argv, int *i, GString *out)
     return TRUE;
 }
 
+/* Text in a reply is in part a stranger's: the title of a Workshop item,
+ * the layer and effect names of a scene, a line steamcmd printed. A
+ * terminal obeys the control characters in what is written to it (an
+ * escape sequence renames the window, clears or rewrites the screen, on
+ * some terminals fills the clipboard). So what walpe-ctl prints as text
+ * goes through tt (): the C0 controls except line feed and tab, DEL and the
+ * C1 controls come out as visible text (backslash, x, two hex digits),
+ * bytes that are not UTF-8 as '?'.
+ * The copies live until the program ends (a handful per run). */
+static gboolean term_control (gunichar c)
+{
+    return (c < 0x20 && c != '\n' && c != '\t') || (c >= 0x7f && c < 0xa0);
+}
+
+static const char *tt (const char *s)
+{
+    static GPtrArray *kept;
+    if (!s)
+        return NULL;
+    GString *o = g_string_new (NULL);
+    for (const char *p = s; *p;) {
+        gunichar c = g_utf8_get_char_validated (p, -1);
+        if (c == (gunichar) -1 || c == (gunichar) -2) {
+            g_string_append_c (o, '?');
+            p++;
+            continue;
+        }
+        const char *n = g_utf8_next_char (p);
+        if (term_control (c))
+            g_string_append_printf (o, "\\x%02x", (guint) c);
+        else
+            g_string_append_len (o, p, n - p);
+        p = n;
+    }
+    if (!kept)
+        kept = g_ptr_array_new ();
+    char *r = g_string_free (o, FALSE);
+    g_ptr_array_add (kept, r);
+    return r;
+}
+
+/* A reply printed as it came is JSON, and the daemon's JSON carries a few
+ * control characters as they are inside its strings (DEL, the C1 range,
+ * 0x1F). They are written as JSON's own escape (backslash, u, four hex
+ * digits) here - the same text to whatever reads the output, nothing to a
+ * terminal. */
+static void print_json (const char *reply)
+{
+    GString *o = g_string_new (NULL);
+    for (const char *p = reply; *p;) {
+        gunichar c = g_utf8_get_char_validated (p, -1);
+        if (c == (gunichar) -1 || c == (gunichar) -2) {
+            g_string_append_c (o, *p++);
+            continue;
+        }
+        const char *n = g_utf8_next_char (p);
+        if (term_control (c) && c != '\r')
+            g_string_append_printf (o, "\\u%04x", (guint) c);
+        else
+            g_string_append_len (o, p, n - p);
+        p = n;
+    }
+    g_print ("%s\n", o->str);
+    g_string_free (o, TRUE);
+}
+
+/* setprop: a bare word that is sent as a JSON boolean or number - what it
+ * is sent as ("true" / "false" / the number as typed); NULL = it is text */
+static const char *setprop_word (const char *v)
+{
+    if (!g_ascii_strcasecmp (v, "true") || !g_ascii_strcasecmp (v, "on"))
+        return "true";
+    if (!g_ascii_strcasecmp (v, "false") || !g_ascii_strcasecmp (v, "off"))
+        return "false";
+    return json_number_ok (v) ? v : NULL;
+}
+
+/* setprop: would the word, sent as that boolean or number, be stored as
+ * other text than was typed? ("true", "false" and a plain whole number are
+ * stored letter for letter; "on", "TRUE", "1.50", "1e3", "-0" are not.) */
+static gboolean setprop_word_changes (const char *v)
+{
+    const char *typed = setprop_word (v);
+    if (!typed)
+        return FALSE;
+    if (typed != v)
+        return strcmp (typed, v) != 0;
+    const char *p = v + (*v == '-');
+    gsize digits = strspn (p, "0123456789");
+    return p[digits] != 0 || digits > 18 || (*v == '-' && *p == '0');
+}
+
+/* setprop: the daemon's list of the target wallpaper's options (the reply
+ * to "props"), or NULL: no daemon, an old one, no wallpaper */
+static JsonNode *setprop_options (const char *target)
+{
+    char *sock = walpe_socket_path ();
+    char *req = g_strdup_printf ("{\"cmd\":\"props\"%s}", target);
+    char *reply = walpe_ipc_request (sock, req, 2000);
+    JsonNode *n = reply ? wpj_parse_data (reply, -1) : NULL;
+    g_free (reply);
+    g_free (req);
+    g_free (sock);
+    if (n && !(JSON_NODE_HOLDS_OBJECT (n) && wpj_obj (json_node_get_object (n), "props")))
+        g_clear_pointer (&n, json_node_unref);
+    return n;
+}
+
+/* setprop: option `key` of the wallpaper holds text - every type but a
+ * checkbox and a slider; a combo by its default value, which is how the
+ * scene reads what is stored for it. An option the wallpaper does not
+ * declare (or no list at all) is not text: the word decides, as before. */
+static gboolean setprop_is_text (JsonObject *opts, const char *key)
+{
+    JsonObject *o = opts ? wpj_obj (opts, key) : NULL;
+    if (!o)
+        return FALSE;
+    const char *type = wpj_str (o, "type", "");
+    if (!g_ascii_strcasecmp (type, "bool") || !g_ascii_strcasecmp (type, "checkbox") ||
+        !g_ascii_strcasecmp (type, "slider"))
+        return FALSE;
+    if (!g_ascii_strcasecmp (type, "combo")) {
+        JsonNode *d = json_object_get_member (o, "default");
+        return d && JSON_NODE_HOLDS_VALUE (d) && json_node_get_value_type (d) == G_TYPE_STRING;
+    }
+    return TRUE;
+}
+
 /* a daemon older than this walpe-ctl answers "unknown cmd" to a command
  * it does not have: say that instead of leaving the raw reply alone */
 static void note_old_daemon (const char *reply, const char *cmd)
@@ -264,7 +401,7 @@ static int install_and_wait (char *id)
     JsonNode *rn = reply ? wpj_parse_data (reply, -1) : NULL;
     JsonObject *ro = rn && JSON_NODE_HOLDS_OBJECT (rn) ? json_node_get_object (rn) : NULL;
     if (!ro || !wpj_bool (ro, "ok", FALSE)) {
-        g_printerr ("%s\n", ro ? wpj_str (ro, "error", "install failed")
+        g_printerr ("%s\n", ro ? tt (wpj_str (ro, "error", "install failed"))
                                 : "walpe-daemon is not running");
         rc = ro ? 3 : 2;
     } else {
@@ -284,7 +421,7 @@ static int install_and_wait (char *id)
             }
             const char *ph = wpj_str (so, "install_phase", "");
             if (g_strcmp0 (ph, last)) {
-                g_print ("%s\n", ph);
+                g_print ("%s\n", tt (ph));
                 g_free (last);
                 last = g_strdup (ph);
             }
@@ -292,11 +429,11 @@ static int install_and_wait (char *id)
             if (!active) {
                 const char *e = wpj_str (so, "install_error", NULL);
                 if (e) {
-                    g_printerr ("install failed: %s\n", e);
+                    g_printerr ("install failed: %s\n", tt (e));
                     rc = 3;
                 } else {
-                    g_print ("installed: %s (%s)\n", wpj_str (so, "install_dir", "?"),
-                             wpj_str (so, "install_title", ""));
+                    g_print ("installed: %s (%s)\n", tt (wpj_str (so, "install_dir", "?")),
+                             tt (wpj_str (so, "install_title", "")));
                 }
                 json_node_unref (sn);
                 break;
@@ -332,7 +469,7 @@ static int profile_and_wait (double seconds, gboolean json, gboolean sync)
         const char *e = ro ? wpj_str (ro, "error", "the profile could not be started") : NULL;
         if (e && !g_strcmp0 (e, "unknown cmd"))
             e = "the running walpe-daemon is older than this walpe-ctl and has no profiler";
-        g_printerr ("%s\n", e ? e : "walpe-daemon is not running");
+        g_printerr ("%s\n", e ? tt (e) : "walpe-daemon is not running");
         rc = ro ? 3 : 2;
     } else {
         double left = wpj_num (ro, "seconds", seconds);
@@ -353,12 +490,12 @@ static int profile_and_wait (double seconds, gboolean json, gboolean sync)
                 const char *tf = wpj_str (so, "text_file", NULL);
                 char *jtxt = NULL;
                 if (json && jf && g_file_get_contents (jf, &jtxt, NULL, NULL))
-                    g_print ("%s\n", jtxt);
+                    print_json (jtxt);
                 else
-                    g_print ("%s", wpj_str (so, "text", ""));
+                    g_print ("%s", tt (wpj_str (so, "text", "")));
                 g_free (jtxt);
                 if (tf || jf)
-                    g_printerr ("report files: %s  %s\n", tf ? tf : "", jf ? jf : "");
+                    g_printerr ("report files: %s  %s\n", tf ? tt (tf) : "", jf ? tt (jf) : "");
             } else if (g_get_monotonic_time () > deadline) {
                 g_printerr ("the daemon did not finish the profile\n");
                 rc = 3;
@@ -425,27 +562,27 @@ static void quality_print (JsonObject *q, gboolean effects)
         g_snprintf (fi, sizeof fi, "%d (fps_idle)", idle);
     else
         g_snprintf (fi, sizeof fi, "the fps setting");
-    g_print ("preset: %s    fps setting: %d\n", wpj_str (q, "quality_preset", "?"),
+    g_print ("preset: %s    fps setting: %d\n", tt (wpj_str (q, "quality_preset", "?")),
              (int) wpj_num (q, "fps_cap", 0));
     g_print ("  effect update rate   %s\n  effect resolution    %s\n  frame rate limit     %s\n"
              "  post-processing      %s\n  render scale         %d %%\n"
              "  texture resolution   %s\n  texture slack        %d %%\n",
-             q_rate_text (q, buf, sizeof buf), wpj_str (q, "fx_res", "?"), fi,
-             wpj_str (q, "post_processing", "?"),
-             (int) wpj_num (q, "render_scale", 100), wpj_str (q, "tex_res", "?"),
+             q_rate_text (q, buf, sizeof buf), tt (wpj_str (q, "fx_res", "?")), fi,
+             tt (wpj_str (q, "post_processing", "?")),
+             (int) wpj_num (q, "render_scale", 100), tt (wpj_str (q, "tex_res", "?")),
              (int) wpj_num (q, "texture_slack", 2));
     JsonObject *wq = wpj_obj (q, "wallpapers");
     GList *ws = wq ? json_object_get_members (wq) : NULL;
     for (GList *w = ws; w; w = w->next) {
         JsonObject *ov = wpj_obj (wq, w->data);
-        g_print ("own settings of %s:", (char *) w->data);
+        g_print ("own settings of %s:", tt (w->data));
         GList *ks = ov ? json_object_get_members (ov) : NULL;
         for (GList *k = ks; k; k = k->next) {
             JsonNode *vn = json_object_get_member (ov, k->data);
             if (JSON_NODE_HOLDS_VALUE (vn) && json_node_get_value_type (vn) == G_TYPE_STRING)
-                g_print (" %s=%s", (char *) k->data, json_node_get_string (vn));
+                g_print (" %s=%s", tt (k->data), tt (json_node_get_string (vn)));
             else
-                g_print (" %s=%d", (char *) k->data, (int) wpj_num (ov, k->data, 0));
+                g_print (" %s=%d", tt (k->data), (int) wpj_num (ov, k->data, 0));
         }
         g_list_free (ks);
         g_print ("\n");
@@ -457,19 +594,19 @@ static void quality_print (JsonObject *q, gboolean effects)
         JsonObject *m = wpj_arr_obj (ms, i);
         if (!m)
             continue;
-        g_print ("monitor %d (%s): %s [%s]", (int) wpj_num (m, "index", 0), wpj_str (m, "name", ""),
-                 wpj_str (m, "path", ""), wpj_str (m, "type", "?"));
+        g_print ("monitor %d (%s): %s [%s]", (int) wpj_num (m, "index", 0), tt (wpj_str (m, "name", "")),
+                 tt (wpj_str (m, "path", "")), tt (wpj_str (m, "type", "?")));
         if (json_object_has_member (m, "follows")) {
             g_print (" - shows what monitor %d renders\n", (int) wpj_num (m, "follows", 0));
             continue;
         }
         g_print ("\n  runs with: preset %s%s, %s, effect resolution %s, post-processing %s, "
                  "render scale %d %%, textures %s, texture slack %d %%, %d fps now\n",
-                 wpj_str (m, "quality_preset", "?"),
+                 tt (wpj_str (m, "quality_preset", "?")),
                  wpj_bool (m, "own_settings", FALSE) ? " (its own settings)" : "",
-                 q_rate_text (m, buf, sizeof buf), wpj_str (m, "fx_res", "?"),
-                 wpj_str (m, "post_processing", "?"),
-                 (int) wpj_num (m, "render_scale", 100), wpj_str (m, "tex_res", "?"),
+                 q_rate_text (m, buf, sizeof buf), tt (wpj_str (m, "fx_res", "?")),
+                 tt (wpj_str (m, "post_processing", "?")),
+                 (int) wpj_num (m, "render_scale", 100), tt (wpj_str (m, "tex_res", "?")),
                  (int) wpj_num (m, "texture_slack", 2), (int) wpj_num (m, "fps_now", 0));
         JsonObject *st = wpj_obj (m, "stats"), *es = wpj_obj (m, "estimate");
         if (st && es) {
@@ -495,7 +632,7 @@ static void quality_print (JsonObject *q, gboolean effects)
         }
         if (effects && json_object_has_member (m, "effects"))
             g_print ("  effects (layer | effect | kind, speed | update divisor it tolerates):\n%s",
-                     wpj_str (m, "effects", ""));
+                     tt (wpj_str (m, "effects", "")));
     }
     /* what each preset costs the viewer, and which knobs can change the
      * picture at all */
@@ -505,7 +642,7 @@ static void quality_print (JsonObject *q, gboolean effects)
         JsonObject *e = wpj_obj (ps, names[k]);
         if (!e)
             continue;
-        g_print ("  %-9s %s\n", names[k], wpj_str (e, "cost", ""));
+        g_print ("  %-9s %s\n", names[k], tt (wpj_str (e, "cost", "")));
         /* what the preset sets outside the quality knobs, in this build */
         JsonObject *al = wpj_obj (e, "also");
         GList *ks = al ? json_object_get_members (al) : NULL;
@@ -515,18 +652,18 @@ static void quality_print (JsonObject *q, gboolean effects)
             JsonNode *v = json_object_get_member (al, l->data);
             GType t = json_node_get_value_type (v);
             if (t == G_TYPE_BOOLEAN)
-                g_print (" %s=%s", (const char *) l->data, json_node_get_boolean (v) ? "on" : "off");
+                g_print (" %s=%s", tt (l->data), json_node_get_boolean (v) ? "on" : "off");
             else if (t == G_TYPE_STRING)
-                g_print (" %s=%s", (const char *) l->data, json_node_get_string (v));
+                g_print (" %s=%s", tt (l->data), tt (json_node_get_string (v)));
             else
-                g_print (" %s=%d", (const char *) l->data, (int) json_node_get_int (v));
+                g_print (" %s=%d", tt (l->data), (int) json_node_get_int (v));
         }
         if (ks)
             g_print ("\n");
         g_list_free (ks);
     }
     if (json_object_has_member (q, "picture_note"))
-        g_print ("%s\n", wpj_str (q, "picture_note", ""));
+        g_print ("%s\n", tt (wpj_str (q, "picture_note", "")));
 }
 
 /* walpe-ctl quality [--json] [--effects] [--monitor N | --path P] [key=value ... | reset] */
@@ -560,6 +697,9 @@ static int quality_cmd (int argc, char **argv)
                 g_printerr ("%s\n", qerr ? qerr : "quality: expected key=value (preset, fx_rate, "
                             "fx_rate_mode, fx_res, fps_idle, post, render_scale, tex_res, "
                             "texture_slack), reset, --monitor N, --path P, --json or --effects");
+                g_free (qerr);
+                g_strfreev (kv);
+                g_string_free (vals, TRUE);
                 return 1;
             }
             g_string_append_printf (vals, "%s%s", vals->len ? "," : "", frag);
@@ -574,6 +714,8 @@ static int quality_cmd (int argc, char **argv)
         if (mon < 0 && !path) {
             g_printerr ("quality: say which wallpaper (--monitor N or --path P); the global "
                         "setting is `walpe-ctl set key=value`\n");
+            g_free (sock);
+            g_string_free (vals, TRUE);
             return 1;
         }
         GString *r = g_string_new ("{\"cmd\":\"setquality\"");
@@ -591,7 +733,7 @@ static int quality_cmd (int argc, char **argv)
         req = g_string_free (r, FALSE);
         reply = walpe_ipc_request (sock, req, 2000);
         if (reply)
-            g_print ("%s\n", reply);
+            print_json (reply);
     } else {
         req = g_strdup_printf ("{\"cmd\":\"quality\"%s}", effects ? ",\"describe\":true" : "");
         reply = walpe_ipc_request (sock, req, 2000);
@@ -627,7 +769,7 @@ static int quality_cmd (int argc, char **argv)
                                                   : NULL;
         }
         if (reply && (json || !q))
-            g_print ("%s\n", reply);
+            print_json (reply);
         else if (q)
             quality_print (q, effects);
         if (rn)
@@ -762,6 +904,7 @@ int main (int argc, char **argv)
         if (argc < 3) {
             g_printerr ("set needs at least one <key>=<value> (walpe-ctl without arguments lists "
                         "them)\n");
+            g_string_free (s, TRUE);
             return 1;
         }
         for (int i = 2; i < argc; i++) {
@@ -771,6 +914,7 @@ int main (int argc, char **argv)
                  * set nothing, `set fps=30 covered` only the first */
                 g_printerr ("set: '%s' is not <key>=<value>; nothing was changed\n", argv[i]);
                 g_strfreev (kv);
+                g_string_free (s, TRUE);
                 return 1;
             }
             const char *k = kv[0], *v = kv[1];
@@ -783,6 +927,9 @@ int main (int argc, char **argv)
                 if (taken) {
                     if (!frag) {
                         g_printerr ("%s\n", qerr ? qerr : "not allowed");
+                        g_free (qerr);
+                        g_strfreev (kv);
+                        g_string_free (s, TRUE);
                         return 1;
                     }
                     g_string_append_printf (s, ",%s", frag);
@@ -814,6 +961,8 @@ int main (int argc, char **argv)
             if (!g_strcmp0 (k, "software_threads") && g_ascii_strcasecmp (v, "auto") &&
                 (!json_number_ok (v) || strchr (v, '.') || strchr (v, '-'))) {
                 g_printerr ("software_threads needs a number of threads or auto, not '%s'\n", v);
+                g_strfreev (kv);
+                g_string_free (s, TRUE);
                 return 1;
             }
             gboolean yes = !g_ascii_strcasecmp (v, "on") || !g_ascii_strcasecmp (v, "true") ||
@@ -837,6 +986,9 @@ int main (int argc, char **argv)
             } else if ((sk && sk->kind == WALPE_SET_NUM) || !g_strcmp0 (k, "particle_density")) {
                 if (!json_number_ok (v)) {
                     g_printerr ("%s needs a number, not '%s'\n", k, v);
+                    g_free (ek);
+                    g_strfreev (kv);
+                    g_string_free (s, TRUE);
                     return 1;
                 }
                 g_string_append_printf (s, ",\"%s\":%s", ek, v);
@@ -858,6 +1010,7 @@ int main (int argc, char **argv)
         for (int i = 2; i < argc; i++)
             if (!target_arg (argc, argv, &i, tgt)) {
                 g_printerr ("%s takes --monitor N or --path P, not '%s'\n", cmd, argv[i]);
+                g_string_free (tgt, TRUE);
                 return 1;
             }
         req = g_strdup_printf ("{\"cmd\":\"%s\"%s}", cmd, tgt->str);
@@ -865,12 +1018,20 @@ int main (int argc, char **argv)
     } else if (!g_strcmp0 (cmd, "setprop") && argc >= 3) {
         /* walpe-ctl setprop [--monitor N | --path P] <key>=<value> ... -
          * value: bare word -> JSON bool when on/off/true/false, number
-         * when numeric, else string; quoting in the shell controls strings
-         * ("4" vs 4). One pair goes as "setprop" (every daemon has it),
-         * several as one "setprops" = one reload. (Only the first pair
-         * was sent, the others were dropped without a word.) */
+         * when numeric, else string. One pair goes as "setprop" (every
+         * daemon has it), several as one "setprops" = one reload. (Only
+         * the first pair was sent, the others were dropped without a
+         * word.)
+         * An option whose values are text - a text field, a colour, a file,
+         * a combo of words - gets the word as it was typed: "on" stays
+         * "on", "1.50" stays "1.50" (as a boolean and a number they were
+         * stored as "true" and "1.5": a title read "true", a combo value
+         * "on" matched no choice). Only the daemon knows the options of a
+         * wallpaper, so it is asked (props) when a word would not be
+         * stored as typed. */
         GString *tgt = g_string_new (NULL), *vals = g_string_new (NULL), *one = g_string_new (NULL);
-        int n = 0;
+        GPtrArray *pairs = g_ptr_array_new_with_free_func ((GDestroyNotify) g_strfreev);
+        gboolean ask = FALSE;
         for (int i = 2; i < argc; i++) {
             if (target_arg (argc, argv, &i, tgt))
                 continue;
@@ -878,34 +1039,46 @@ int main (int argc, char **argv)
             if (!kv[0] || !*kv[0] || !kv[1]) {
                 g_printerr ("setprop: '%s' is not <key>=<value>; nothing was changed\n", argv[i]);
                 g_strfreev (kv);
+                g_ptr_array_unref (pairs);
+                g_string_free (tgt, TRUE);
+                g_string_free (vals, TRUE);
+                g_string_free (one, TRUE);
                 return 1;
             }
-            const char *v = kv[1];
+            ask |= setprop_word_changes (kv[1]);
+            g_ptr_array_add (pairs, kv);
+        }
+        if (!pairs->len) {
+            g_printerr ("setprop needs <key>=<value>\n");
+            g_ptr_array_unref (pairs);
+            g_string_free (tgt, TRUE);
+            g_string_free (vals, TRUE);
+            g_string_free (one, TRUE);
+            return 1;
+        }
+        JsonNode *defs = ask ? setprop_options (tgt->str) : NULL;
+        JsonObject *opts = defs ? wpj_obj (json_node_get_object (defs), "props") : NULL;
+        for (guint n = 0; n < pairs->len; n++) {
+            char **kv = g_ptr_array_index (pairs, n);
+            const char *v = kv[1], *typed = setprop_word (v);
             char *ek = walpe_json_escape (kv[0]), *jv;
-            if (!g_ascii_strcasecmp (v, "true") || !g_ascii_strcasecmp (v, "on"))
-                jv = g_strdup ("true");
-            else if (!g_ascii_strcasecmp (v, "false") || !g_ascii_strcasecmp (v, "off"))
-                jv = g_strdup ("false");
-            else if (json_number_ok (v))
-                jv = g_strdup (v);
-            else {
+            if (typed && !(setprop_word_changes (v) && setprop_is_text (opts, kv[0]))) {
+                jv = g_strdup (typed);
+            } else {
                 char *ev = walpe_json_escape (v);
                 jv = g_strdup_printf ("\"%s\"", ev);
                 g_free (ev);
             }
             g_string_append_printf (vals, "%s\"%s\":%s", n ? "," : "", ek, jv);
             g_string_printf (one, "\"key\":\"%s\",\"value\":%s", ek, jv);
-            n++;
             g_free (ek);
             g_free (jv);
-            g_strfreev (kv);
         }
-        if (!n) {
-            g_printerr ("setprop needs <key>=<value>\n");
-            return 1;
-        }
-        req = n == 1 ? g_strdup_printf ("{\"cmd\":\"setprop\",%s%s}", one->str, tgt->str)
-                     : g_strdup_printf ("{\"cmd\":\"setprops\",\"props\":{%s}%s}", vals->str, tgt->str);
+        req = pairs->len == 1 ? g_strdup_printf ("{\"cmd\":\"setprop\",%s%s}", one->str, tgt->str)
+                              : g_strdup_printf ("{\"cmd\":\"setprops\",\"props\":{%s}%s}", vals->str, tgt->str);
+        if (defs)
+            json_node_unref (defs);
+        g_ptr_array_unref (pairs);
         g_string_free (tgt, TRUE);
         g_string_free (vals, TRUE);
         g_string_free (one, TRUE);
@@ -917,12 +1090,18 @@ int main (int argc, char **argv)
     char *sock = walpe_socket_path ();
     char *reply = walpe_ipc_request (sock, req, 2000);
     if (reply) {
-        g_print ("%s\n", reply);
+        print_json (reply);
         /* exit status 3 when the daemon refused the command (as `install`
          * does), so scripts can tell */
         JsonNode *rn = wpj_parse_data (reply, -1);
         gboolean ok = rn && JSON_NODE_HOLDS_OBJECT (rn) &&
                       wpj_bool (json_node_get_object (rn), "ok", FALSE);
+        /* done, but config.json could not be written: the reply has the reason */
+        const char *se = rn && JSON_NODE_HOLDS_OBJECT (rn)
+                             ? wpj_str (json_node_get_object (rn), "save_error", NULL) : NULL;
+        if (se)
+            g_printerr ("the engine could not save its settings: %s - what was changed is in "
+                        "effect now and lost when the engine restarts\n", se);
         if (rn)
             json_node_unref (rn);
         if (!ok)

@@ -1,5 +1,5 @@
 project('walpe', 'c',
-  version: '0.12.1',
+  version: '0.12.2',
   meson_version: '>= 0.60.0',
   default_options: [
     'c_std=c11',
@@ -13,9 +13,9 @@ project('walpe', 'c',
 
 # The release's name, next to the version above (CHANGELOG.md says where the
 # names come from).
-# A point release keeps the name of its line. This is the one place that
+# Every release has a name of its own. This is the one place that
 # says it: the sources get it as WALPE_CODENAME, like WALPE_VERSION.
-walpe_codename = 'Absolutego'
+walpe_codename = 'Amplifier Worship'
 
 cc = meson.get_compiler('c')
 
@@ -192,6 +192,7 @@ endif
 # and Debian/Ubuntu install libquickjs.a under <libdir>/quickjs)
 have_quickjs = false
 quickjs_old = false
+quickjs_malloc_state = false
 deps_js = []
 if get_option('scenescript') != 'disabled'
   qjs = cc.find_library('quickjs', required: false,
@@ -212,6 +213,21 @@ if get_option('scenescript') != 'disabled'
               'the 2024-01-13 release. Wallpaper scripts run in it: install a current ' +
               'dev-lang/quickjs (or build with -Dscenescript=disabled).')
     endif
+    # scenescript.c gives each runtime an allocator that keeps track of the
+    # runtime's blocks (an abandoned runtime is freed through it). That
+    # needs the allocator interface with JSMallocState; a QuickJS with
+    # another one runs on its own allocator as before.
+    quickjs_malloc_state = cc.compiles('''
+      #include <quickjs/quickjs.h>
+      static void *m (JSMallocState *s, size_t n) { return s->malloc_size + n > s->malloc_limit ? 0 : s->opaque; }
+      static void f (JSMallocState *s, void *p) { s->malloc_count--; (void) p; }
+      static void *r (JSMallocState *s, void *p, size_t n) { (void) s; (void) n; return p; }
+      static size_t u (const void *p) { (void) p; return 0; }
+      static const JSMallocFunctions mf = { .js_malloc = m, .js_free = f, .js_realloc = r,
+                                            .js_malloc_usable_size = u };
+      int main (void) { return JS_NewRuntime2 (&mf, 0) != 0; }''',
+      args: ['-Werror=incompatible-pointer-types'],
+      name: 'QuickJS allocator interface with JSMallocState')
   elif get_option('scenescript') == 'enabled'
     error('scenescript=enabled but QuickJS (quickjs/quickjs.h + libquickjs) was not found')
   endif
@@ -227,6 +243,7 @@ conf = configuration_data()
 conf.set('HAVE_SOUP', have_soup)
 conf.set('HAVE_QUICKJS', have_quickjs)
 conf.set('WALPE_QUICKJS_OLD', have_quickjs and quickjs_old)
+conf.set('WALPE_QJS_MALLOC_STATE', have_quickjs and quickjs_malloc_state)
 conf.set('HAVE_XI2', xi.found())
 conf.set('HAVE_XRANDR', xrandr.found())
 conf.set('HAVE_PULSE', have_pulse)
@@ -252,6 +269,7 @@ core_srcs = files(
   'src/common/ipc.c',
   'src/common/ipcsub.c',
   'src/common/tex.c',
+  'src/common/gifcheck.c',
   'src/common/region.c',
   'src/common/premult.c',
   'src/common/import.c',
@@ -351,6 +369,16 @@ ctl = executable('walpe-ctl', 'src/ctl/main.c',
   dependencies: [core_dep],
   install: true)
 
+# Sanitizer builds (-Db_sanitize=address or address,undefined): the suites
+# run with LeakSanitizer, which AddressSanitizer turns on by itself, and
+# with the suppressions of tests/lsan.supp (library memory only; the file
+# says why for each). `meson test` uses this setup without being asked.
+if get_option('b_sanitize').contains('address')
+  add_test_setup('sanitize', is_default: true,
+    env: ['LSAN_OPTIONS=suppressions=' + meson.current_source_dir() / 'tests' / 'lsan.supp' +
+          ':print_suppressions=0'])
+endif
+
 # shader repair (fx_srcrepair.h): source inspection, the error-driven
 # fallback under Mesa / NVIDIA / glslang / unknown log wordings, varying
 # interface, transform effect (GL part: EGL device or surfaceless, skipped
@@ -408,6 +436,27 @@ test('idle-repaint', executable('idle-repaint-test', 'tests/idle_repaint_test.c'
   dependencies: [core_dep],
   install: false))
 
+# the scene clock around a pause: frames the daemon draws while a monitor is
+# paused (an exposed window, a first frame under a cover) stand at the
+# instant of the pause - engine.runtime never runs backwards, timers go on
+# at the resume, the paused picture does not move. A generated scene with a
+# script, the daemon's calls. EGL surfaceless, skipped when unavailable.
+test('scene-clock', executable('scene-clock-test', 'tests/scene_clock_test.c',
+  include_directories: inc,
+  dependencies: [core_dep],
+  install: false), timeout: 120)
+
+# what a wallpaper script sees of a real scene (a generated one, through the
+# content API): set-then-get of every layer / text / particle instance
+# property a script can write, engine.userProperties with the type of each
+# option (defaults and values the user stored), the order of init /
+# applyUserProperties / update across layers, the shared object, thisLayer.
+# EGL surfaceless, skipped when unavailable (and without QuickJS).
+test('scene-props', executable('scene-props-test', 'tests/scene_props_test.c',
+  include_directories: inc,
+  dependencies: [core_dep],
+  install: false), timeout: 120)
+
 # a generated scene whose scripts drive layers and effects with hostile
 # values (version 0.12.2 security pass): zero / huge / non-finite vectors on
 # every kind of layer, megabytes of text, re-parenting in circles, a parent
@@ -417,6 +466,17 @@ test('scene-hostile', executable('scene-hostile-test', 'tests/scene_hostile_test
   include_directories: inc,
   dependencies: [core_dep],
   install: false), timeout: 900)
+
+# the text files of a scene wallpaper and the entries of its folder
+# (tests/scene_files_test.c): a FIFO or an outside link as scene.pkg, the
+# options window's scan of the folder and links that leave it, the text
+# layers' share of the texture budget (surfaceless GL, else skipped),
+# particle files with many deaths under many followers.
+# Private temp HOME.
+test('scene-files', executable('scene-files-test', 'tests/scene_files_test.c',
+  include_directories: inc,
+  dependencies: [core_dep],
+  install: false), timeout: 600)
 
 # effect pass programs (fx_specialize.h, fx_verify.h, fx_rewrite.h,
 # fx_fuse.h): program sharing byte-identical to one program per pass, baked
@@ -577,13 +637,14 @@ test('video-threads', executable('video-threads-test', 'tests/video_threads_test
 # walpe-ctl's command line (bad input is named and exits with 1,
 # no daemon = 2, refused = 3), what it sends for `set` / `setprop` / `click`
 # (a stand-in daemon on a private socket records it), and the daemon's check
-# of a "set" request (common/setkeys.h; also read against ipc_set () in the
-# daemon's source). No daemon, no display.
+# of a "set" request (common/setkeys.h; also read against ipc_set () and
+# ipc_status () in the daemon's source and against the key tables of
+# docs/SETTINGS.md). No daemon, no display.
 test('ctl', executable('ctl-test', 'tests/ctl_test.c',
   include_directories: inc,
   dependencies: [core_dep],
   install: false),
-  args: [ctl, files('src/daemon/main.c')], timeout: 120)
+  args: [ctl, files('src/daemon/main.c'), files('docs/SETTINGS.md')], timeout: 120)
 
 # config.json: defaults as documented, every key through save +
 # load, members of other versions kept by a save, a version 0.12 file, files that
@@ -683,6 +744,16 @@ test('particle-sim', particle_sim_test)
 # the same checks with the other reading of alphafade's fade-out time
 test('particle-sim-fade-span', particle_sim_test, env: ['WALPE_PT_FADE=span'])
 
+# the particle simulation as a function of scene time: the same system
+# stepped at 30, 60, 144 and 200 Hz and with irregular steps holds the same
+# particles at the same scene time (rate emitters, bursts, deaths, the cap,
+# the instance's "rate", eventspawn children); frames of no length change
+# nothing; two systems do not see each other. No GL.
+test('particle-rate', executable('particle-rate-test', 'tests/particle_rate_test.c',
+  include_directories: inc,
+  dependencies: [core_dep],
+  install: false))
+
 # particle objects of a scene made by the test, through
 # the content API: the instance colour ("colorn" and the older "color" in
 # 0..255), options that feed "count" (default, undeclared option, text),
@@ -739,6 +810,15 @@ executable('scenecount', 'tests/scenecount.c',
 # and uploaded only where the old or the new string has ink; the texture
 # that results is the full render's, byte for byte (no GL)
 test('text-part', executable('text-part-test', 'tests/text_part_test.c',
+  include_directories: inc,
+  dependencies: [core_dep],
+  install: false), timeout: 120)
+
+# a text layer's ink lies inside its texture and at the side the layer
+# aligns it to: left / centre / right x no width limit / wrapped, for Latin,
+# right-to-left (Hebrew, Arabic), mixed and CJK strings, with the fonts this
+# machine has (no GL)
+test('text-layout', executable('text-layout-test', 'tests/text_layout_test.c',
   include_directories: inc,
   dependencies: [core_dep],
   install: false), timeout: 120)

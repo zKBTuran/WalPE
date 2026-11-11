@@ -5,7 +5,8 @@
  *     and the scripts after it keep running;
  *  2. a script that never comes back from a built-in (a regular expression
  *     that backtracks without end) does not hang the thread: the runtime
- *     is given up and later calls return at once;
+ *     is given up and later calls return at once; what it held is given
+ *     back when it is freed;
  *  3. engine.setTimeout(fn, 0) re-armed from its own callback runs once
  *     per frame;
  *  4. promise reactions / async functions run;
@@ -27,9 +28,15 @@
  * 12. registerAudioBuffers arrays hold the host's spectrum (written
  *     straight into the Float32Arrays), also when a script put an array
  *     of its own in their place.
+ * 13. a scene's scripts get 40 lines in the log.
+ * 14. clocks in other time zones (offsets, daylight saving changes), the
+ *     12-hour clock at midnight and noon, numeric dates and numbers.
+ * 15. a mirrored keyframe animation fires the events at its ends at every
+ *     turn and stays on its track after a step longer than the track.
  * `meson test -C build scenescript` */
 #include "walpe-build-config.h"
 #include <glib.h>
+#include <malloc.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -37,6 +44,18 @@
 #include "engine/scenescript.h"
 
 #define NLAYERS 4
+
+/* bytes the C library has handed out (0 where it cannot say: under
+ * AddressSanitizer, whose leak check covers the same ground) */
+static gsize heap_in_use (void)
+{
+#if defined (__GLIBC__) && defined (__GLIBC_PREREQ) && __GLIBC_PREREQ (2, 33)
+    struct mallinfo2 mi = mallinfo2 ();
+    return mi.uordblks + mi.hblkhd;
+#else
+    return 0;
+#endif
+}
 static char *layer_text[NLAYERS];
 static int layer_sets[NLAYERS];
 static double layer_scale[NLAYERS][3], layer_alpha[NLAYERS];
@@ -234,8 +253,22 @@ static void audio_fill (gpointer u, int res, float *l, float *r)
 static const char *COUNT_JS =
     "'use strict';\nlet n = 0;\nexport function update(value) { return 'n' + (++n); }\n";
 
+/* ---- 13: lines a script wrote with console.log that reached the log */
+static int log_lines;
+static GLogWriterOutput count_writer (GLogLevelFlags level, const GLogField *fields, gsize n, gpointer u)
+{
+    for (gsize i = 0; i < n; i++)
+        if (!strcmp (fields[i].key, "MESSAGE") && fields[i].value &&
+            strstr ((const char *) fields[i].value, "LOGLINE")) {
+            log_lines++;
+            return G_LOG_WRITER_HANDLED;
+        }
+    return g_log_writer_default (level, fields, n, u);
+}
+
 int main (void)
 {
+    g_log_set_writer_func (count_writer, NULL, NULL);
     WalpeSceneScript *ss = make ();
     if (!ss) {
         printf ("skip: built without QuickJS\n");
@@ -454,6 +487,31 @@ int main (void)
     CHECK (t6 < 0.2, "regular expression without end: later frames return at once (%.3f s)", t6);
     CHECK (before == 2, "scripts ran before it (%d)", before);
     walpe_ss_free (ss);
+    /* ... and what the runtime held comes back when it is freed: two more
+     * wallpapers whose script holds 16 MiB when it gets stuck leave no
+     * more on the heap than the first did */
+#ifdef WALPE_QJS_MALLOC_STATE
+    {
+        gsize first = 0;
+        for (int round = 0; round < 3; round++) {
+            ss = make ();
+            add (ss, 1, "'use strict';\nlet n = 0, keep = [];\n"
+                        "export function update(value) {\n"
+                        "  if (++n == 1) for (let i = 0; i < 16; i++) keep.push('x'.repeat(1 << 20) + i);\n"
+                        "  if (n == 2) /(a+)+$/.test('a'.repeat(64) + 'b');\n  return 'r' + n; }\n");
+            start (ss);
+            tick (ss, 1);
+            tick (ss, 2);
+            walpe_ss_free (ss);
+            if (round == 0)
+                first = heap_in_use ();
+        }
+        gsize last = heap_in_use ();
+        CHECK (last <= first + 4 * 1024 * 1024,
+               "a runtime that was given up returns its memory (two more left %.1f MiB)",
+               last > first ? (double) (last - first) / 1048576.0 : 0.0);
+    }
+#endif
 
     /* 11. Bezier keyframes: the formula's values, bit for bit; cheap */
     {
@@ -496,29 +554,33 @@ int main (void)
         /* cost: 24 animated channels for 300 frames against a script that
          * runs the same 24 * 300 bisections itself (what the animation
          * engine did before: both in the interpreter, the engine's the
-         * slower one). Thread CPU time, so a busy machine does not matter. */
-        ss = make ();
-        for (int k = 0; k < 24; k++)
-            walpe_ss_add_anim (ss, k % NLAYERS, -1, -1, "alpha", ANIM, "0.5");
-        start (ss);
-        double t0 = thread_cpu_s ();
-        for (int k = 1; k <= 300; k++)
-            walpe_ss_tick (ss, dt, k * dt, 0, 0, FALSE);
-        double t_anim = thread_cpu_s () - t0;
-        walpe_ss_free (ss);
-        ss = make ();
-        add (ss, 0, "'use strict';\nlet q = 0;\n"
-                    "export function update(value) { let s = 0; q += 1;\n"
-                    "  for (let c = 0; c < 24; c++) { const f0 = 0, x1 = 5.33, x2 = 18, f1 = 20, f = (q + c) % 20;\n"
-                    "    let lo = 0, hi = 1, u = 0.5; for (let it = 0; it < 30; it++) { u = (lo + hi) / 2; const m = 1 - u;\n"
-                    "      const x = m * m * m * f0 + 3 * m * m * u * x1 + 3 * m * u * u * x2 + u * u * u * f1; if (x < f) lo = u; else hi = u; }\n"
-                    "    s += u; }\n  return 's' + s; }\n");
-        start (ss);
-        t0 = thread_cpu_s ();
-        for (int k = 1; k <= 300; k++)
-            walpe_ss_tick (ss, dt, k * dt, 0, 0, FALSE);
-        double t_js = thread_cpu_s () - t0;
-        walpe_ss_free (ss);
+         * slower one). Thread CPU time, and the best of three runs each:
+         * on a busy machine one run alone varies by a third even so. */
+        double t_anim = 1e9, t_js = 1e9;
+        for (int rep = 0; rep < 3; rep++) {
+            ss = make ();
+            for (int k = 0; k < 24; k++)
+                walpe_ss_add_anim (ss, k % NLAYERS, -1, -1, "alpha", ANIM, "0.5");
+            start (ss);
+            double t0 = thread_cpu_s ();
+            for (int k = 1; k <= 300; k++)
+                walpe_ss_tick (ss, dt, k * dt, 0, 0, FALSE);
+            t_anim = MIN (t_anim, thread_cpu_s () - t0);
+            walpe_ss_free (ss);
+            ss = make ();
+            add (ss, 0, "'use strict';\nlet q = 0;\n"
+                        "export function update(value) { let s = 0; q += 1;\n"
+                        "  for (let c = 0; c < 24; c++) { const f0 = 0, x1 = 5.33, x2 = 18, f1 = 20, f = (q + c) % 20;\n"
+                        "    let lo = 0, hi = 1, u = 0.5; for (let it = 0; it < 30; it++) { u = (lo + hi) / 2; const m = 1 - u;\n"
+                        "      const x = m * m * m * f0 + 3 * m * m * u * x1 + 3 * m * u * u * x2 + u * u * u * f1; if (x < f) lo = u; else hi = u; }\n"
+                        "    s += u; }\n  return 's' + s; }\n");
+            start (ss);
+            t0 = thread_cpu_s ();
+            for (int k = 1; k <= 300; k++)
+                walpe_ss_tick (ss, dt, k * dt, 0, 0, FALSE);
+            t_js = MIN (t_js, thread_cpu_s () - t0);
+            walpe_ss_free (ss);
+        }
         CHECK (t_anim < 0.75 * t_js,
                "24 Bezier channels, 300 frames: %.1f ms of CPU; the bisections alone in a script: "
                "%.1f ms (wanted: under 75 %% of that)", t_anim * 1e3, t_js * 1e3);
@@ -557,6 +619,147 @@ int main (void)
         CHECK (layer_alpha[2] == want2, "audio buffers: another typed array in place of one is "
                "filled by value, not by bytes (%.9g, want %.9g)", layer_alpha[2], want2);
         walpe_ss_free (as);
+    }
+
+    /* 13. a scene's scripts get 40 lines in the log, however many they write */
+    {
+        WalpeSceneScript *ls = make ();
+        add (ls, 0, "'use strict';\nfor (let i = 0; i < 300; i++) console.log('LOGLINE ' + i);\n"
+                    "export function update(v) { for (let i = 0; i < 10; i++) console.log('LOGLINE again'); return v; }\n");
+        start (ls);
+        int at_load = log_lines;
+        for (int f = 1; f <= 20; f++)
+            tick (ls, f);
+        CHECK (at_load == 40 && log_lines == 40,
+               "console.log: 40 lines of a scene reach the log (%d of 300 at load, %d after 200 more)", at_load,
+               log_lines);
+        walpe_ss_free (ls);
+    }
+
+    /* 14. clocks in other time zones: the offset of the moment, daylight
+     * saving time and its two changes, zones off the hour, the date across
+     * midnight; the 12-hour clock at midnight and noon. Needs the system's
+     * time zone files (skipped without). */
+    {
+        GTimeZone *tz = g_time_zone_new_identifier ("Australia/Lord_Howe");
+        if (!tz) {
+            printf ("note: no time zone data on this machine, case 14 skipped\n");
+        } else {
+            g_time_zone_unref (tz);
+            WalpeSceneScript *zs = make ();
+            add (zs, 0, "'use strict';\n"
+                "const at = (y, mo, d, h, mi, s) => new Date(Date.UTC(y, mo - 1, d, h, mi, s || 0));\n"
+                "const tm = (d, z) => d.toLocaleTimeString('en-GB', { timeZone: z });\n"
+                "export function update(value) { return [\n"
+                "  tm(at(2026, 1, 15, 12, 0), 'Asia/Tokyo'), tm(at(2026, 1, 15, 12, 0), 'UTC'),\n"
+                "  tm(at(2026, 1, 15, 12, 0), 'America/New_York'), tm(at(2026, 7, 15, 12, 0), 'America/New_York'),\n"
+                "  tm(at(2026, 3, 8, 6, 59, 59), 'America/New_York'), tm(at(2026, 3, 8, 7, 0), 'America/New_York'),\n"
+                "  tm(at(2026, 11, 1, 5, 59, 59), 'America/New_York'), tm(at(2026, 11, 1, 6, 0), 'America/New_York'),\n"
+                "  tm(at(2026, 3, 29, 0, 59, 59), 'Europe/Berlin'), tm(at(2026, 3, 29, 1, 0), 'Europe/Berlin'),\n"
+                "  tm(at(2026, 10, 25, 0, 59, 59), 'Europe/Berlin'), tm(at(2026, 10, 25, 1, 0), 'Europe/Berlin'),\n"
+                "  tm(at(2026, 1, 15, 12, 0), 'Asia/Kolkata'), tm(at(2026, 1, 15, 12, 0), 'Asia/Kathmandu'),\n"
+                "  tm(at(2026, 1, 15, 12, 0), 'Australia/Lord_Howe'), tm(at(2026, 7, 15, 12, 0), 'Australia/Lord_Howe'),\n"
+                "  at(2026, 12, 31, 20, 0).toLocaleDateString('en-GB', { timeZone: 'Asia/Tokyo' }),\n"
+                "  at(2026, 12, 31, 20, 0).toLocaleDateString('en-GB', { timeZone: 'America/New_York' })].join('|'); }\n");
+            add (zs, 1, "'use strict';\n"
+                "const at = (h, mi, s) => new Date(Date.UTC(2026, 10, 10, h, mi, s));\n"
+                "const us = d => d.toLocaleTimeString('en-US', { timeZone: 'UTC' });\n"
+                "export function update(value) { const d = at(9, 5, 7); return [\n"
+                "  us(at(0, 5, 0)), us(at(12, 5, 0)), us(at(13, 5, 0)), us(at(23, 59, 59)),\n"
+                "  d.toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' }),\n"
+                "  d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' }),\n"
+                "  d.toLocaleDateString('de-DE', { timeZone: 'UTC' }), d.toLocaleTimeString('de-DE', { timeZone: 'UTC' }),\n"
+                "  d.toLocaleDateString('ja-JP', { timeZone: 'UTC' }),\n"
+                "  d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC' }),\n"
+                "  (1234567.891).toLocaleString('en-US'), (1234567.891).toLocaleString('de-DE'), (0.5).toLocaleString('en-US', { style: 'percent' })].join('|'); }\n");
+            start (zs);
+            tick (zs, 1);
+            CHECK (!g_strcmp0 (layer_text[0],
+                               "21:00:00|12:00:00|07:00:00|08:00:00|01:59:59|03:00:00|01:59:59|01:00:00|"
+                               "01:59:59|03:00:00|02:59:59|02:00:00|17:30:00|17:45:00|23:00:00|22:30:00|"
+                               "01/01/2027|31/12/2026"),
+                   "time zones: offsets, both daylight saving changes, zones off the hour, the date (%s)",
+                   layer_text[0] ? layer_text[0] : "?");
+            CHECK (!g_strcmp0 (layer_text[1],
+                               "12:05:00 AM|12:05:00 PM|1:05:00 PM|11:59:59 PM|Tuesday|November 10, 2026|"
+                               "10.11.2026|09:05:07|2026/11/10|09:05|1,234,567.891|1.234.567,891|50%"),
+                   "12-hour clock at midnight and noon, names, numeric dates, numbers (%s)",
+                   layer_text[1] ? layer_text[1] : "?");
+            walpe_ss_free (zs);
+        }
+    }
+
+    /* 15. a mirrored animation: the events at its two ends fire at every
+     * turn, the ones between on every pass; after a step longer than the
+     * track the playhead is where a back-and-forth run of that length ends */
+    {
+        static const char *LONG =
+            "{\"c0\":[{\"frame\":0,\"value\":0},{\"frame\":30,\"value\":1}],"
+            "\"options\":{\"fps\":30,\"length\":30,\"mode\":\"mirror\",\"events\":["
+            "{\"frame\":0,\"name\":\"first\"},{\"frame\":15,\"name\":\"middle\"},{\"frame\":30,\"name\":\"last\"}]}}";
+        static const char *SHORT =
+            "{\"c0\":[{\"frame\":0,\"value\":0},{\"frame\":10,\"value\":1}],"
+            "\"options\":{\"fps\":30,\"length\":10,\"mode\":\"mirror\"}}";
+        WalpeSceneScript *ms = make ();
+        add (ms, 0, "'use strict';\nlet first = 0, middle = 0, last = 0;\n"
+                    "export function animationEvent(event, value) { if (event.name === 'first') first++;\n"
+                    "  else if (event.name === 'middle') middle++; else if (event.name === 'last') last++; }\n"
+                    "export function update(value) { return first + ' ' + middle + ' ' + last; }\n");
+        gboolean added = walpe_ss_add_anim (ms, 0, -1, -1, "alpha", LONG, "0.5") &&
+                         walpe_ss_add_anim (ms, 1, -1, -1, "alpha", SHORT, "0.5");
+        start (ms);
+        /* 0.9 frames a tick: no tick lands on an event's frame. 390 ticks =
+         * 351 frames = 11 passes of the long track and 21 frames of the 12th */
+        const double dt = 0.03;
+        double run = 0, travelled = 0, worst = 0;
+        int k = 0;
+        for (; k < 390 && added; k++) {
+            run += dt;
+            walpe_ss_tick (ms, dt, run, 0, 0, FALSE);
+        }
+        travelled = 390 * dt * 30;
+        CHECK (added && !g_strcmp0 (layer_text[0], "6 12 6"),
+               "mirrored animation: events at the first frame, the middle and the last frame fired "
+               "\"%s\" times in 11 passes and a bit (want \"6 12 6\")", layer_text[0] ? layer_text[0] : "?");
+        /* one step of a second = three lengths of the short track, then
+         * ordinary frames: the value follows the triangle all the time */
+        for (k = 0; k < 12 && added; k++) {
+            const double step = k == 0 ? 1.0 : dt;
+            run += step;
+            travelled += step * 30;
+            walpe_ss_tick (ms, step, run, 0, 0, FALSE);
+            double x = fmod (travelled, 20.0), want = (x <= 10 ? x : 20 - x) / 10;
+            worst = MAX (worst, fabs (layer_alpha[1] - want));
+        }
+        CHECK (added && worst < 1e-6,
+               "mirrored animation after a step longer than the track: the value is at most %.6f off "
+               "the back-and-forth run (0 and 1 in turns when the playhead stands outside the track)", worst);
+        walpe_ss_free (ms);
+    }
+
+    /* 16. a script and a one-shot animation on one property: update () is
+     * given the animation's value, also after the animation has ended */
+    {
+        static const char *ONCE =
+            "{\"c0\":[{\"frame\":0,\"value\":0},{\"frame\":30,\"value\":1}],"
+            "\"options\":{\"fps\":30,\"length\":30,\"mode\":\"single\"}}";
+        WalpeSceneScript *os = make ();
+        add_prop (os, 0, "alpha", "'use strict';\nexport function update(value) { return value - 0.25; }\n");
+        gboolean added = walpe_ss_add_anim (os, 0, -1, -1, "alpha", ONCE, "0.5");
+        start (os);
+        double playing = 0, ended = 0;
+        for (int k = 1; k <= 90 && added; k++) {
+            walpe_ss_tick (os, 1.0 / 30, k / 30.0, 0, 0, FALSE);
+            double want = MIN (k / 30.0, 1.0) - 0.25, off = fabs (layer_alpha[0] - want);
+            if (k < 30)
+                playing = MAX (playing, off);
+            else
+                ended = MAX (ended, off);
+        }
+        CHECK (added && playing < 1e-9 && ended < 1e-9,
+               "script on an animated property: its result is at most %.6f off the animated value - 0.25 "
+               "while the one-shot plays and %.6f in the two seconds after its end", playing, ended);
+        walpe_ss_free (os);
     }
 
     printf (fails ? "%d check(s) failed\n" : "all checks passed\n", fails);

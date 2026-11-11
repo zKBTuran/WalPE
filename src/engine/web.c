@@ -63,6 +63,10 @@
 #include <math.h>
 #include <errno.h>
 #include <sys/random.h>
+#include <signal.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -2530,17 +2534,45 @@ static void probe_note_webgl (const char *out)
     g_mutex_unlock (&reg_lock);
 }
 
+/* The test process gives up by itself (20 s without a page, 8 s without
+ * WebGL), but not when it is stuck - inside a driver, or stopped. Then
+ * nothing ever answered here: the pages waiting for the result stayed
+ * black for good, with no reason in the log or in `status`. After
+ * WEB_PROBE_MAX_S it is killed and the test has failed. The wait for its
+ * output is given up as well: WebKit's helper processes may keep that pipe
+ * open after the process itself has gone. */
+#define WEB_PROBE_MAX_S 40
+static GCancellable *probe_cancel;
+static guint probe_child_timer;
+static gboolean probe_timed_out;
+
+static gboolean probe_child_overdue (gpointer user)
+{
+    probe_child_timer = 0;
+    probe_timed_out = TRUE;
+    g_subprocess_force_exit (G_SUBPROCESS (user));
+    g_cancellable_cancel (probe_cancel);
+    return G_SOURCE_REMOVE;
+}
+
 static void probe_done (GObject *src, GAsyncResult *res, gpointer user)
 {
     (void) user;
     GSubprocess *p = G_SUBPROCESS (src);
     GError *err = NULL;
     char *out = NULL;
+    if (probe_child_timer) {
+        g_source_remove (probe_child_timer);
+        probe_child_timer = 0;
+    }
     gboolean ok = g_subprocess_communicate_utf8_finish (p, res, &out, NULL, &err) &&
                   g_subprocess_get_successful (p);
+    g_clear_object (&probe_cancel);
     char *why = NULL;
     if (!ok)
-        why = err ? g_strdup (err->message)
+        why = probe_timed_out
+            ? g_strdup_printf ("the WebKit start-up test did not finish within %d s", WEB_PROBE_MAX_S)
+            : err ? g_strdup (err->message)
             : g_subprocess_get_if_signaled (p)
             ? g_strdup_printf ("WebKit start-up killed the test process with signal %d (%s)",
                                g_subprocess_get_term_sig (p), g_strsignal (g_subprocess_get_term_sig (p)))
@@ -2601,8 +2633,12 @@ static gboolean sh_create_main (gpointer user)
     GError *err = NULL;
     /* stderr inherited: WebKit's own abort message lands in our log;
      * stdout is the test's answer (probe_note_webgl) */
-    GSubprocess *p = exe ? g_subprocess_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE, &err, exe, "--web-probe", NULL)
-                         : NULL;
+    GSubprocessLauncher *pl = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE);
+    char self[24];
+    g_snprintf (self, sizeof self, "%ld", (long) getpid ());
+    g_subprocess_launcher_setenv (pl, "WALPE_WEB_PROBE_PARENT", self, TRUE);   /* walpe_web_probe_run */
+    GSubprocess *p = exe ? g_subprocess_launcher_spawn (pl, &err, exe, "--web-probe", NULL) : NULL;
+    g_object_unref (pl);
     g_free (exe);
     if (!p) {
         /* cannot test (no /proc?): keep the old in-process behaviour */
@@ -2617,7 +2653,9 @@ static gboolean sh_create_main (gpointer user)
         return G_SOURCE_REMOVE;
     }
     g_message ("web: testing WebKit start-up in a child process");
-    g_subprocess_communicate_utf8_async (p, NULL, NULL, probe_done, NULL);
+    probe_cancel = g_cancellable_new ();
+    probe_child_timer = g_timeout_add_seconds (WEB_PROBE_MAX_S, probe_child_overdue, p);
+    g_subprocess_communicate_utf8_async (p, NULL, probe_cancel, probe_done, NULL);
     return G_SOURCE_REMOVE;
 }
 
@@ -2823,6 +2861,24 @@ static gboolean probe_timeout (gpointer user)
 
 int walpe_web_probe_run (void)
 {
+#ifdef __linux__
+    /* This process is of use to the daemon that started it and to nobody
+     * else. A daemon that quit (or was killed, or crashed) while the test
+     * ran left it behind: a second "walpe-daemon" with WebKit's processes
+     * under it, for up to half a minute, writing into the log of a daemon
+     * that was gone. The kernel ends it with its parent now. (A restart in
+     * place is an exec of the same thread: no parent dies there, and that
+     * path ends the daemon's children itself.) */
+    prctl (PR_SET_PDEATHSIG, SIGKILL);
+    {
+        /* ... unless the parent was gone before the line above was reached
+         * (this process had only just been started): the daemon says who
+         * it is, and a different parent now means it went away */
+        const char *pp = g_getenv ("WALPE_WEB_PROBE_PARENT");
+        if (pp && *pp && g_ascii_strtoll (pp, NULL, 10) != (gint64) getppid ())
+            return 2;
+    }
+#endif
     if (!ensure_gtk ())
         return 2;
     probe_accel = g_getenv ("WALPE_WEB_PROBE_ACCEL") != NULL;

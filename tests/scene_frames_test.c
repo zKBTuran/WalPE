@@ -17,6 +17,9 @@
  *  3. the bake follows a resize (new size, same pixels as without it);
  *  4. render_scale 50: the frame still fills the window and is the
  *     scaled-up half-size picture (not identical, close).
+ *  5. a layer with a blend mode that reads the frame under it: the copy
+ *     of the frame it works on goes when the scene pauses and when it is
+ *     freed, and the picture after a pause is the one before it.
  * Skipped (exit 0, "skip") without EGL surfaceless / GL 3.3.
  * `meson test -C build scene-frames` */
 #include <glib.h>
@@ -366,6 +369,75 @@ static void scene_checks (void)
     g_free (adir);
 }
 
+/* two solid layers, the upper one with a blend mode no GL blend state
+ * gives (it is drawn by a shader that reads a copy of the frame under it) */
+static char *make_blend_scene (void)
+{
+    char *dir = g_dir_make_tmp ("walpe-scene-frames-XXXXXX", NULL);
+    if (!dir)
+        return NULL;
+    put (dir, "models/solid.json", "{\"solidlayer\":true}");
+    GString *s = g_string_new (
+        "{\"camera\":{\"center\":\"0 0 -1\",\"eye\":\"0 0 0\",\"up\":\"0 1 0\"},"
+        "\"general\":{\"ambientcolor\":\"0.3 0.3 0.3\",\"bloom\":false,\"cameraparallax\":false,"
+        "\"clearcolor\":\"0.10 0.20 0.30\",\"orthogonalprojection\":{\"height\":180,\"width\":320},"
+        "\"skylightcolor\":\"0.3 0.3 0.3\"},\"objects\":[");
+    layer (s, 1, "160 90 0", "320 180", "0.2 0.5 0.3", 1.0, "0 0 0", "");
+    layer (s, 2, "160 90 0", "300 160", "0.9 0.6 0.1", 0.7, "0 0 0", ",\"colorBlendMode\":9");
+    g_string_append (s, "]}");
+    put (dir, "scene.json", s->str);
+    g_string_free (s, TRUE);
+    put (dir, "project.json",
+         "{\"file\":\"scene.json\",\"title\":\"scene frames test\",\"type\":\"scene\","
+         "\"general\":{\"properties\":{}}}");
+    return dir;
+}
+
+static void tex_now (int *n, gint64 *bytes)
+{
+    gint64 compressed;
+    walpe_gl_tex_totals (n, bytes, &compressed);
+}
+
+/* ---- 5. The copy of the frame a blend-mode layer works on belongs to the
+ * render thread, not to a scene. It has to go with the scene's own targets
+ * (pause) and with the scene: left alone it is a frame of RGBA8 that every
+ * wallpaper shown afterwards carries along. */
+static void blend_copy_checks (void)
+{
+    gsize npx = (gsize) W * H * 4;
+    const gint64 copy = 300 * 160 * 4;   /* at least: the layer's rectangle */
+    char *dir = make_blend_scene ();
+    Run r = { 0 };
+    int n0 = 0, n1 = 0, n2 = 0, n3 = 0;
+    gint64 b0 = 0, b1 = 0, b2 = 0, b3 = 0;
+    tex_now (&n0, &b0);
+    if (!dir || !run_open (&r, dir, 0)) {
+        result (FALSE, "blend scene loads");
+        return;
+    }
+    gboolean drawn = run_frame (&r, FALSE);
+    guint8 *first = g_malloc (npx);
+    memcpy (first, r.px, npx);
+    tex_now (&n1, &b1);
+    result (drawn && b1 >= b0 + copy, "blend layer: drawn from a copy of the frame under it");
+    r.c->set_paused (r.c, TRUE);
+    tex_now (&n2, &b2);
+    printf ("   textures: %d / %" G_GINT64_FORMAT " bytes before the scene, %d / %" G_GINT64_FORMAT
+            " drawing, %d / %" G_GINT64_FORMAT " paused\n", n0, b0, n1, b1, n2, b2);
+    result (b2 < b0 + copy, "blend layer: a paused scene does not keep the copy");
+    r.c->set_paused (r.c, FALSE);
+    gboolean again = run_frame (&r, TRUE);
+    result (again && !memcmp (first, r.px, npx), "blend layer: same frame after pause / resume");
+    run_close (&r);
+    tex_now (&n3, &b3);
+    printf ("   textures: %d / %" G_GINT64_FORMAT " bytes after the scene\n", n3, b3);
+    result (n3 == n0 && b3 == b0, "blend layer: a freed scene leaves no texture behind");
+    g_free (first);
+    rm_rf (dir);
+    g_free (dir);
+}
+
 int main (void)
 {
     if (!epoxy_has_egl_extension (EGL_NO_DISPLAY, "EGL_MESA_platform_surfaceless")) {
@@ -404,6 +476,7 @@ int main (void)
     walpe_glutil_init ();
     fx_set_cache_enabled (TRUE);
     scene_checks ();
+    blend_copy_checks ();
     eglMakeCurrent (dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglDestroySurface (dpy, surf);
     eglDestroyContext (dpy, ctx);

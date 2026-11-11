@@ -4,14 +4,22 @@
 #include <fontconfig/fontconfig.h>
 #include <pango/pangocairo.h>
 #include <pango/pangofc-fontmap.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <glib/gstdio.h>
 #include <math.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /* WE lays text out at 300 dpi: every saved text box in the test scenes is
  * 2 * padding + (ascent + descent) * pointsize * 300 / 72 high
  * (Monofur 45 pt: 188 + 64 = 252; Comic Sans 32 pt: 186 + 64 = 250) */
 #define WE_TEXT_DPI 300.0
+/* the largest point size handed to Pango (text_layout_locked): 62500
+ * pixels, below the 65535 pixels per em FreeType takes */
+#define TEXT_MAX_POINTS 15000.0f
 
 static GMutex text_lock;
 static FcConfig *text_fc;
@@ -98,6 +106,111 @@ static void text_init_locked (void)
                                         (GDestroyNotify) pango_font_description_free);
 }
 
+/* ---- what a wallpaper may hand to fontconfig and FreeType as a font ----
+ * The file a text layer names goes to FcConfigAppFontAddFile, which opens
+ * it with whichever FreeType driver takes its bytes, reads every face of it
+ * and keeps a pattern for each face and for each named instance of a
+ * variable face. Nothing bounded that. A collection header that names one
+ * font 32000 times (1 MiB of file, nearly all zeros) was 32000 patterns:
+ * 2.9 s and 86 MiB. 4000 named instances in each of 16 faces (36 KiB of
+ * file) were 64000 patterns: 2.1 s and 152 MiB - four kilobytes of memory
+ * for a byte of file, as far as the file goes, with the text lock held.
+ * And a "font" could be a PCF or BDF bitmap font, a Type 1 or PFR file, a
+ * compressed WOFF: each with a parser of its own behind it.
+ * So the headers are read here first. Taken: a regular file that is a
+ * TrueType / OpenType font or a collection of them, with at most
+ * TEXT_FONT_MAX_FACES faces and named instances in all (what fontconfig
+ * will make patterns of). The fonts in 91 Workshop scenes and in Wallpaper
+ * Engine's assets are single TrueType / OpenType fonts, one pattern each.
+ * Anything else is not handed over: the layer is drawn with a system font,
+ * as for a file fontconfig cannot read. */
+#define TEXT_FONT_MAX_FACES 256
+#define TEXT_FONT_MAX_TABLES 512    /* directory entries of one face (real fonts: under 40) */
+
+static gboolean font_read (int fd, guint64 size, guint64 off, guint8 *buf, gsize n)
+{
+    if (off > size || n > size - off)
+        return FALSE;
+    for (gsize got = 0; got < n;) {
+        ssize_t r = pread (fd, buf + got, n - got, (off_t) (off + got));
+        if (r < 0 && errno == EINTR)
+            continue;
+        if (r <= 0)
+            return FALSE;
+        got += (gsize) r;
+    }
+    return TRUE;
+}
+
+static guint32 font_be32 (const guint8 *p)
+{
+    return (guint32) p[0] << 24 | (guint32) p[1] << 16 | (guint32) p[2] << 8 | p[3];
+}
+
+/* the patterns fontconfig makes of the face whose table directory is at
+ * off: the face, and for a variable one its named instances and the
+ * variable font itself. 0: not taken (must_be_font: no TrueType / OpenType
+ * table directory there; always: a directory of absurd length). */
+static guint font_face_patterns (int fd, guint64 size, guint64 off, gboolean must_be_font)
+{
+    guint8 h[12];
+    if (!font_read (fd, size, off, h, sizeof h))
+        return must_be_font ? 0 : 1;
+    guint32 tag = font_be32 (h);
+    if (must_be_font && tag != 0x00010000u && tag != 0x4F54544Fu /* OTTO */ &&
+        tag != 0x74727565u /* true */)
+        return 0;
+    guint ntab = (guint) h[4] << 8 | h[5], n = 1;
+    if (ntab > TEXT_FONT_MAX_TABLES)
+        return 0;
+    for (guint i = 0; i < ntab; i++) {
+        guint8 r[16], v[16];
+        if (!font_read (fd, size, off + 12 + 16 * (guint64) i, r, sizeof r))
+            break;      /* a directory that leaves the file: FreeType's to refuse */
+        if (font_be32 (r) != 0x66766172u /* fvar */)
+            continue;
+        /* the variations table: its instance count is at byte 12 */
+        guint inst = font_be32 (r + 12) >= sizeof v && font_read (fd, size, font_be32 (r + 8), v, sizeof v)
+                         ? (guint) v[12] << 8 | v[13] : 0;
+        n = MAX (n, inst + 2);
+    }
+    return n;
+}
+
+static gboolean text_font_file_ok (const char *path)
+{
+    gboolean ok = FALSE;
+    int fd = g_open (path, O_RDONLY | O_CLOEXEC | O_NONBLOCK, 0);
+    struct stat sb;
+    guint8 h[12];
+    if (fd >= 0 && fstat (fd, &sb) == 0 && S_ISREG (sb.st_mode) &&
+        font_read (fd, (guint64) sb.st_size, 0, h, sizeof h)) {
+        guint64 size = (guint64) sb.st_size;
+        if (font_be32 (h) == 0x74746366u /* ttcf: a collection */) {
+            guint32 faces = font_be32 (h + 8);
+            guint total = 0;
+            ok = faces >= 1 && faces <= TEXT_FONT_MAX_FACES;
+            for (guint32 i = 0; ok && i < faces; i++) {
+                guint8 o[4];
+                /* the first face is the one a text layer is drawn with */
+                guint n = font_read (fd, size, 12 + 4 * (guint64) i, o, sizeof o)
+                              ? font_face_patterns (fd, size, font_be32 (o), i == 0) : 0;
+                total += n;
+                ok = n > 0 && total <= TEXT_FONT_MAX_FACES;
+            }
+        } else {
+            guint n = font_face_patterns (fd, size, 0, TRUE);
+            ok = n > 0 && n <= TEXT_FONT_MAX_FACES;
+        }
+    }
+    if (fd >= 0)
+        close (fd);
+    if (!ok)
+        g_message ("scenetext: %s is not handed to the font library (not a TrueType / OpenType "
+                   "font, or more than %d faces and named instances)", path, TEXT_FONT_MAX_FACES);
+    return ok;
+}
+
 /* the description (family + the file's own weight/slant/stretch) that
  * selects exactly this font file; NULL if fontconfig can't read it */
 static PangoFontDescription *text_file_desc_locked (const char *path)
@@ -105,7 +218,8 @@ static PangoFontDescription *text_file_desc_locked (const char *path)
     PangoFontDescription *fd = g_hash_table_lookup (text_files, path);
     if (fd || g_hash_table_contains (text_files, path))
         return fd;
-    if (text_fc && FcConfigAppFontAddFile (text_fc, (const FcChar8 *) path)) {
+    if (text_fc && text_font_file_ok (path) &&
+        FcConfigAppFontAddFile (text_fc, (const FcChar8 *) path)) {
         FcFontSet *fs = FcConfigGetFonts (text_fc, FcSetApplication);
         for (int i = 0; fs && i < fs->nfont; i++) {
             FcChar8 *file = NULL;
@@ -144,6 +258,18 @@ static PangoLayout *text_layout_locked (PangoContext *ctx, const WalpeTextStyle 
         pango_font_description_set_weight (fd, PANGO_WEIGHT_NORMAL);
     }
     float pt = st->pointsize > 0 ? st->pointsize : 32.0f;
+    /* Pango keeps the size as an int of 1/1024 pixels: a "pointsize" above
+     * 503316 (1e9, 1e30, infinity from the scene file or from a user's
+     * option) did not fit, the size came out negative and went on into the
+     * font lookup (Pango-CRITICAL "size >= 0" when it was laid out; what was
+     * laid out then is undefined). Letters of 15000 points are 62500
+     * pixels high, far above what a texture holds: the layer is refused
+     * by its size, as every such layer was meant to be. The limit stays
+     * below 65535 pixels: FreeType refuses a larger size, and cairo then
+     * drops the font it had begun without freeing its glyph table (648
+     * bytes for every layout of such a layer). */
+    if (pt > TEXT_MAX_POINTS)
+        pt = TEXT_MAX_POINTS;
     pango_font_description_set_absolute_size (fd, pt * WE_TEXT_DPI / 72.0 * PANGO_SCALE);
 
     PangoLayout *pl = pango_layout_new (ctx);
@@ -286,7 +412,10 @@ cairo_surface_t *walpe_text_render_part (const WalpeTextStyle *st, const char *t
     double ix0 = MIN (0, ink.x - log.x), ix1 = MAX (lw, ink.x + ink.width - log.x);
     (void) ix0; (void) ix1;
     int W = walpe_d2i (ceil (tw)), H = walpe_d2i (ceil (th));
-    if (W > 8192 || H > 8192 || W < 1 || H < 1) {
+    if (W > 8192 || H > 8192 || W < 1 || H < 1 ||
+        (st->max_bytes > 0 && (gint64) W * H * 4 > st->max_bytes)) {
+        quad[2] = (float) MAX (W, 0);
+        quad[3] = (float) MAX (H, 0);
         g_object_unref (pl);
         g_object_unref (ctx);
         g_mutex_unlock (&text_lock);
@@ -314,10 +443,23 @@ cairo_surface_t *walpe_text_render_part (const WalpeTextStyle *st, const char *t
     case 2: ox = pad + inner_w - layout_w; break;
     default: ox = pad; break;
     }
-    if (pango_layout_get_width (pl) > 0)
-        ox -= 0;  /* lines already aligned within the wrap width */
-    else
+    if (pango_layout_get_width (pl) > 0) {
+        /* lines already aligned within the wrap width - at the end the
+         * layer asked for, unless Pango turned the alignment round: lines
+         * of a right-to-left script (Hebrew, Arabic) are aligned at the
+         * other end of the wrap width. The block then lay where the layer
+         * did not want it, and outside the texture when the wrap width is
+         * larger than the box (a left-aligned Hebrew title with "maxwidth"
+         * 4000 in a 2000 px box: nothing was drawn). It is moved to the
+         * end it belongs to. Text Pango aligns as asked sits within a
+         * pixel of that place (its extents are rounded) and is not
+         * touched. */
+        double want_x = st->halign == 1 ? (layout_w - lw) / 2 : st->halign == 2 ? layout_w - lw : 0;
+        if (fabs (want_x - log.x) > 1.5)
+            ox += want_x - log.x;
+    } else {
         ox -= log.x;
+    }
     switch (st->valign) {
     case 0: oy = pad; break;
     case 2: oy = pad + inner_h - lh; break;

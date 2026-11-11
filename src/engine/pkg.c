@@ -15,7 +15,9 @@
 #include <glib/gstdio.h>
 #include <string.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <utime.h>
 
 static guint32 rd32 (const guint8 *p)
@@ -42,6 +44,30 @@ static gboolean safe_rel_path (const char *p)
 #define PKG_MAX_OBJECTS 32768   /* files + directories of one package */
 #define PKG_STAMP ".walpe-pkg-stamp"
 #define PKG_SRC ".walpe-pkg-src"     /* the package the copy was made from */
+
+/* Is the first component of an entry's path one of the cache's own two
+ * names? Whatever lies under them is the cache's: as a file the stamp says
+ * that the copy is complete and which package it is of, and a directory of
+ * that name keeps the cache from ever writing its stamp - "./" in front of
+ * the name, or the name as a directory with an entry below it, used to get
+ * past the comparison of the whole path. With a directory for a stamp the
+ * package was extracted anew at every load, by every monitor; with one for
+ * the source note the copy was never recognised as that of a package that is
+ * gone. Letter case is ignored (a cache on a file system that folds it). */
+static gboolean pkg_reserved_path (const char *p)
+{
+    for (;;) {
+        while (*p == '/')
+            p++;
+        if (p[0] == '.' && (p[1] == '/' || !p[1]))
+            p++;
+        else
+            break;
+    }
+    gsize n = strcspn (p, "/");
+    return (n == strlen (PKG_STAMP) && !g_ascii_strncasecmp (p, PKG_STAMP, n)) ||
+           (n == strlen (PKG_SRC) && !g_ascii_strncasecmp (p, PKG_SRC, n));
+}
 
 /* number of components of a relative path ("a//b/" has two) */
 static int pkg_path_depth (const char *p)
@@ -88,8 +114,17 @@ static gboolean set_ioerr (GError **err, const char *fmt, ...)
 
 gboolean walpe_pkg_extract (const char *pkg_path, const char *dest_dir, GError **err)
 {
-    /* mmap instead of a heap copy: pkgs can be hundreds of MB */
-    GMappedFile *map = g_mapped_file_new (pkg_path, FALSE, NULL);
+    /* mmap instead of a heap copy: pkgs can be hundreds of MB.
+     * A regular file only (O_NONBLOCK, then fstat): the package is whatever
+     * "*.pkg" the wallpaper's folder holds, and opening a FIFO of that name
+     * never returned - with the lock of the package cache held, so no other
+     * packaged scene loaded after it either. */
+    int fd = g_open (pkg_path, O_RDONLY | O_CLOEXEC | O_NONBLOCK, 0);
+    struct stat sb;
+    GMappedFile *map = fd >= 0 && fstat (fd, &sb) == 0 && S_ISREG (sb.st_mode)
+                           ? g_mapped_file_new_from_fd (fd, FALSE, NULL) : NULL;
+    if (fd >= 0)
+        close (fd);     /* the mapping stays */
     if (!map) {
         set_ioerr (err, "pkg: cannot open %s", pkg_path);
         return FALSE;
@@ -170,7 +205,7 @@ gboolean walpe_pkg_extract (const char *pkg_path, const char *dest_dir, GError *
             }
             /* the cache's own bookkeeping files are not the package's to
              * write */
-            if (!strcmp (path, PKG_STAMP) || !strcmp (path, PKG_SRC)) {
+            if (pkg_reserved_path (path)) {
                 if (!writing)
                     g_debug ("pkg: skipping entry %s (reserved name)", path);
                 continue;

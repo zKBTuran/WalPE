@@ -20,6 +20,7 @@
 #include "image.h"
 #include "fit.h"
 #include "glutil.h"
+#include "common/gifcheck.h"
 #include "common/premult.h"
 #include "common/util.h"
 
@@ -116,6 +117,13 @@ static ImageTex *image_tex_load (const char *path, int side, GError **error)
         it->tex_w = it->img_w = t.width;
         it->tex_h = it->img_h = t.height;
         return it;
+    }
+    /* a GIF (its first frame is the picture): only with every frame inside
+     * the picture its header declares (gifcheck.h); the limit above is on
+     * that picture alone */
+    if (!walpe_gif_file_layout_ok (path, error)) {
+        g_free (it);
+        return NULL;
     }
     GError *err = NULL;
     GdkPixbuf *pb = side > 0 && side < MAX (fw, fh)

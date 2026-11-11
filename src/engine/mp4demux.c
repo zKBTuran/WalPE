@@ -39,6 +39,7 @@ typedef struct {
     guint32 nsync;
     guint32 *sync;
     guint32 nsamples;
+    guint32 fixed_size;     /* stsz with one size for every sample: sizes is NULL */
     guint32 timescale;
     gboolean too_many;      /* stsz names more than MP4_MAX_SAMPLES samples */
 } SampleTable;
@@ -278,18 +279,26 @@ static void parse_stsz (SampleTable *t, const guint8 *p, gsize len, gsize file_l
     g_free (t->sizes);
     t->sizes = NULL;
     t->nsamples = 0;
+    t->fixed_size = 0;
     t->too_many = n > MP4_MAX_SAMPLES;
     if (t->too_many)
         return;     /* refused by mp4_demux_open_range, with a message */
+    if (fixed != 0) {
+        /* one size for every sample: kept as that number. It used to be
+         * written out here as a table of n entries, and the box can be
+         * repeated (the last one wins): each 20-byte box cost up to 16 MiB
+         * of filling, so a 4 MiB file made of them kept the thread that
+         * opened it - the daemon's main loop, when a video wallpaper is
+         * chosen or restored at start - busy for minutes, a larger file
+         * for hours. */
+        t->fixed_size = fixed;
+        t->nsamples = n;
+        return;
+    }
     t->sizes = g_try_new0 (guint32, n ? n : 1);
     t->nsamples = t->sizes ? n : 0;
     if (!t->sizes)
         return;
-    if (fixed != 0) {
-        for (guint32 i = 0; i < n; i++)
-            t->sizes[i] = fixed;
-        return;
-    }
     gsize off = 12;
     for (guint32 i = 0; i < n; i++, off += 4)
         t->sizes[i] = rd32 (p + off);
@@ -584,7 +593,7 @@ Mp4Demux *mp4_demux_open_range (const char *path, guint64 off, guint64 len, GErr
     for (guint ch = 0; ch < c.t.nchunks && si < c.t.nsamples; ch++) {
         guint64 off = c.t.offsets[ch];
         for (guint k = 0; k < chunk_samples[ch] && si < c.t.nsamples; k++) {
-            guint32 sz = c.t.sizes[si];
+            guint32 sz = c.t.sizes ? c.t.sizes[si] : c.t.fixed_size;
             if (off > c.len || sz > c.len - off)
                 goto truncated;
             Mp4Sample *smp = &d->samples[si];

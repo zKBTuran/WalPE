@@ -20,6 +20,8 @@ typedef struct {
     int maxrows;         /* rows kept when limitrows */
     gboolean limitrows;
     gboolean ellipsis;   /* limituseellipsis */
+    gint64 max_bytes;    /* what the texture may take as RGBA8 (width x height x 4),
+                          * 0 = any size up to 8192 px a side: see walpe_text_render */
 } WalpeTextStyle;
 
 void walpe_text_style_clear (WalpeTextStyle *st);
@@ -27,7 +29,9 @@ void walpe_text_style_clear (WalpeTextStyle *st);
 /* Renders white text (premultiplied ARGB32). quad = {cx, cy, w, h}: the
  * texture's rectangle in the layer's local space (Y up, box centred on 0):
  * the box itself unless the text needs more room, then grown away from the
- * aligned edge. NULL for empty text. Thread-safe. */
+ * aligned edge. NULL for empty text, and for a texture above 8192 px a side
+ * or above st->max_bytes: nothing is rendered then, and quad[2], quad[3]
+ * hold the size it would have had. Thread-safe. */
 cairo_surface_t *walpe_text_render (const WalpeTextStyle *st, const char *text, float quad[4]);
 
 /* ---- a text layer whose string changes while it is shown (a clock, a

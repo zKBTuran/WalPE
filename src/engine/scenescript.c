@@ -90,6 +90,7 @@ gboolean walpe_ss_uses_cursor (WalpeSceneScript *ss) { (void) ss; return FALSE; 
 #include <quickjs/quickjs.h>
 #include <langinfo.h>
 #include <locale.h>
+#include <malloc.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <time.h>
@@ -97,23 +98,27 @@ gboolean walpe_ss_uses_cursor (WalpeSceneScript *ss) { (void) ss; return FALSE; 
 #include <sys/syscall.h>
 #include <ucontext.h>
 
+struct SsHeap;
+
 struct WalpeSceneScript {
     JSRuntime *rt;
     JSContext *ctx;
+    struct SsHeap *heap;      /* every block of the runtime (NULL: not tracked) */
     WalpeSsHost host;
     int count;
     gboolean uses_audio;
     gboolean uses_media;
     gboolean uses_cursor;     /* a script reads input.cursor* every frame */
-    int errors_logged;
+    int errors_logged;        /* lines logged for this scene, counted up to SS_LOG_LINES */
     gboolean dead;            /* scripts stopped: JS is not entered any more */
     gboolean lost;            /* the watchdog took the thread out of a built-in:
                                * the runtime is in an undefined state and is
-                               * neither used nor freed again */
+                               * never used again; its memory goes back block
+                               * by block (heap), not through QuickJS */
     int unblamed;             /* entries in a row that ran out of time with no
                                * script or timer to blame */
     JSValue fn[12];           /* the prelude's entry points (SsFn) */
-    JSValue f32_proto;        /* Float32Array.prototype (h_audio), JS_UNDEFINED = not looked up */
+    JSValue f32_proto;        /* Float32Array.prototype as the engine made it (h_audio) */
     GArray *collect;          /* walpe_ss_cursor_layers: layers reported so far */
     int n_layers;             /* layers of the scene, -1 = not counted yet */
 };
@@ -745,13 +750,30 @@ static const char *PRELUDE =
  * the direction it plays (the old "b <= 0" stop ended every forward
  * one-shot on its first, zero-length tick) */
 "function __animTick(dt) { dt = Math.min(Math.max(+dt || 0, 0), 1.0);\n"
-"  for (const t of __tracks) { if (t.leader || !t.playing) continue;\n"
+/* a track that stands (a one-shot at its end, a paused one) on a property
+ * that a script's update () computes as well: the script is given the
+ * track's value every frame, as it is while the track plays - not its own
+ * last result, which it would change again and again (a constant offset
+ * from the animated value ran away by that offset per frame once the
+ * one-shot had ended) */
+"  for (const t of __tracks) { const c = t.leader || t; if (!c.playing) {\n"
+"      if (t.held === undefined) t.held = __scripts.some(s => s.update && s.i === t.i && s.e === t.e && s.p === t.p && s.prop === t.prop);\n"
+"      if (t.held) __trackSet(t, c.frame); }\n"
+"    if (t.leader || !t.playing) continue;\n"
 "    const a = t.frame, L = t.length; let b = a + dt * t.fps * t.rate;\n"
 "    if (t.mode === 'loop') { if (b >= L || b < 0) { const fw = b >= L; __animEvents(t, a, fw ? L : 0); t.frame = ((b % L) + L) % L; __animApply(t);\n"
 /* ... and the part of the step after the wrap, the loop's first frame
  * included: an event at frame 0 fired once at load and never again */
 "        t.fresh = true; __animEvents(t, fw ? 0 : L, t.frame); continue; } }\n"
-"    else if (t.mode === 'mirror') { if (b > L) { b = 2 * L - b; t.rate = -t.rate; } else if (b < 0) { b = -b; t.rate = -t.rate; } }\n"
+/* a mirrored track turns round at the end it ran into: the events up to
+ * that end fire, its own included, then those on the way back (they were
+ * skipped: an event at the first or last frame fired only when a tick
+ * landed on it exactly). The fold holds for a step of any length; after a
+ * step longer than the track the playhead used to stand outside the track
+ * and came back end over end, one end value per frame. */
+"    else if (t.mode === 'mirror') { if (b > L || b < 0) { const e = b > L ? L : 0; __animEvents(t, a, e);\n"
+"        let p = b % (2 * L); if (p < 0) p += 2 * L; if (p > L) { p = 2 * L - p; t.rate = -t.rate; }\n"
+"        t.frame = p; __animApply(t); __animEvents(t, e, p); continue; } }\n"
 "    else if (b >= L && t.rate > 0) { b = L; t.playing = false; } else if (b <= 0 && t.rate < 0) { b = 0; t.playing = false; }\n"
 "    else b = Math.min(Math.max(b, 0), L);\n"
 "    t.frame = b; __animApply(t); __animEvents(t, a, b); } }\n"
@@ -879,6 +901,20 @@ static const char *PRELUDE =
 "  cursorLayers: __cursorLayers, interrupted: __interrupted, types: __types }; })\n";
 
 static WalpeSceneScript *ss_of (JSContext *ctx) { return JS_GetContextOpaque (ctx); }
+
+/* A scene's scripts get SS_LOG_LINES lines in the log (console.log, script
+ * errors), then they are silent. TRUE = this line may be written. The
+ * count stops at the limit: it used to go on counting every refused line,
+ * and a script that logs on every frame took it past INT_MAX after some
+ * weeks - from where the next two thousand million lines were written. */
+#define SS_LOG_LINES 40
+static gboolean ss_log_allowed (WalpeSceneScript *ss)
+{
+    if (ss->errors_logged >= SS_LOG_LINES)
+        return FALSE;
+    ss->errors_logged++;
+    return TRUE;
+}
 
 /* Host callbacks and the script watchdog (ss_wd_handler, below). While the
  * thread is in the scene's code or in GLib it may hold a lock, so the
@@ -1081,7 +1117,7 @@ static JSValue h_log (JSContext *ctx, JSValueConst t, int argc, JSValueConst *ar
     const char *s = argc > 0 ? JS_ToCString (ctx, argv[0]) : NULL;
     if (s) {
         ss_host_enter ();
-        if (ss->errors_logged++ < 40 || g_getenv ("WALPE_TRACE_ANIM")) {
+        if (ss_log_allowed (ss) || g_getenv ("WALPE_TRACE_ANIM")) {
             int n = ss_log_len (s);
             g_message ("scenescript: %.*s%s", n, s, s[n] ? " [...]" : "");
         }
@@ -1120,21 +1156,13 @@ static JSValue h_want_audio (JSContext *ctx, JSValueConst t, int argc, JSValueCo
     return JS_UNDEFINED;
 }
 
-/* v is a Float32Array (and not another typed array with 4-byte elements) */
+/* v is a Float32Array (and not another typed array with 4-byte elements):
+ * its prototype is the one the engine made (ss->f32_proto, taken in
+ * walpe_ss_new before any script ran). No script code runs here: h_audio
+ * asks while it holds pointers into the arrays' storage. */
 static gboolean ss_is_f32 (JSContext *ctx, JSValueConst v)
 {
     WalpeSceneScript *ss = ss_of (ctx);
-    if (JS_IsUndefined (ss->f32_proto)) {
-        JSValue g = JS_GetGlobalObject (ctx);
-        JSValue ctor = JS_GetPropertyStr (ctx, g, "Float32Array");
-        ss->f32_proto = JS_GetPropertyStr (ctx, ctor, "prototype");
-        JS_FreeValue (ctx, ctor);
-        JS_FreeValue (ctx, g);
-        if (JS_IsException (ss->f32_proto)) {
-            JS_FreeValue (ctx, JS_GetException (ctx));
-            ss->f32_proto = JS_NULL;
-        }
-    }
     JSValue p = JS_GetPrototype (ctx, v);
     gboolean same = JS_IsObject (p) && JS_IsObject (ss->f32_proto) &&
                     JS_VALUE_GET_PTR (p) == JS_VALUE_GET_PTR (ss->f32_proto);
@@ -1427,7 +1455,11 @@ static JSValue h_locale (JSContext *ctx, JSValueConst t, int argc, JSValueConst 
 
 /* __host.tzoff(zone, unix seconds) -> seconds east of UTC at that moment,
  * undefined for a zone the system does not know. Zone names only
- * ("Asia/Tokyo"): no paths, no POSIX rule strings. */
+ * ("Asia/Tokyo"): no paths, no POSIX rule strings. A zone name starts
+ * with a capital letter; what else lies in the zone directory does not
+ * ("leapseconds", a text file: GLib logs a critical warning for every
+ * attempt to read it as a zone - thousands per frame when a script asks
+ * in a loop - and "posix/...", "right/...", "localtime"). */
 static JSValue h_tzoff (JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv)
 {
     (void) t;
@@ -1438,7 +1470,7 @@ static JSValue h_tzoff (JSContext *ctx, JSValueConst t, int argc, JSValueConst *
     if (!zone)
         return JS_EXCEPTION;
     JSValue r = JS_UNDEFINED;
-    gboolean ok = g_ascii_isalpha (zone[0]) && strlen (zone) < 64 && !strstr (zone, "..");
+    gboolean ok = g_ascii_isupper (zone[0]) && strlen (zone) < 64 && !strstr (zone, "..");
     for (const char *p = zone; ok && *p; p++)
         ok = g_ascii_isalnum (*p) || strchr ("/_+-", *p) != NULL;
     if (ok) {
@@ -1509,9 +1541,10 @@ static char *ss_env_locale (const char *category, gboolean we_code)
  *    expression engine of older QuickJS backtracks for hours on a
  *    pattern like /(a+)+$/). A per-thread CPU timer, armed only while JS
  *    runs, signals this thread; the handler jumps back to ss_run. The
- *    runtime is abandoned after that (never entered, never freed): the
- *    wallpaper goes on without its scripts instead of freezing its
- *    monitor - and the daemon's quit, which waits for the thread. */
+ *    runtime is abandoned after that (never entered again; its memory is
+ *    given back without QuickJS's help, see SsHeap): the wallpaper goes
+ *    on without its scripts instead of freezing its monitor - and the
+ *    daemon's quit, which waits for the thread. */
 #define SS_SOFT_NS (250 * G_GINT64_CONSTANT (1000000))
 #define SS_BLAME_NS (50 * G_GINT64_CONSTANT (1000000))
 #define SS_HARD_NS (1500 * G_GINT64_CONSTANT (1000000))
@@ -1530,6 +1563,142 @@ static __thread struct {
 
 static void ss_host_enter (void) { ss_tls.busy++; }
 static void ss_host_leave (void) { ss_tls.busy--; }
+
+/* ---- a runtime's memory -------------------------------------------------
+ * A runtime the watchdog abandoned cannot be handed to JS_FreeRuntime (its
+ * data is half updated), so its heap used to stay allocated for good: up
+ * to the 64 MiB limit per wallpaper load that ended this way, again at
+ * every reload of such a wallpaper. QuickJS takes its allocator from the
+ * embedder: every block of a runtime is linked into a list of that runtime
+ * here, and an abandoned runtime is freed by walking the list - nothing of
+ * its own data is read. Sizes are counted as QuickJS's own allocator
+ * counts them (the usable size of the block the script sees + 8), so the
+ * memory limit and the collector's schedule stay what they were.
+ * The list is changed with the watchdog held off (ss_host_enter): its
+ * signal handler leaves through siglongjmp only from program text that is
+ * not marked that way, and these functions are program text. */
+#ifdef WALPE_QJS_MALLOC_STATE
+typedef struct SsBlock { struct SsBlock *prev, *next; } SsBlock;
+struct SsHeap { SsBlock head; };
+typedef struct SsHeap SsHeap;
+G_STATIC_ASSERT (sizeof (SsBlock) == 2 * sizeof (void *));   /* (keeps malloc's alignment) */
+#define SS_MALLOC_OVERHEAD 8
+
+static inline size_t ss_block_usable (const SsBlock *b)
+{
+    return malloc_usable_size ((void *) b) - sizeof (SsBlock);
+}
+
+static inline void ss_block_link (SsHeap *h, SsBlock *b)
+{
+    b->next = h->head.next;
+    b->prev = &h->head;
+    h->head.next->prev = b;
+    h->head.next = b;
+}
+
+static inline void ss_block_unlink (SsBlock *b)
+{
+    b->prev->next = b->next;
+    b->next->prev = b->prev;
+}
+
+static void *ss_js_malloc (JSMallocState *s, size_t size)
+{
+    if (size == 0 || s->malloc_size + size > s->malloc_limit)
+        return NULL;
+    ss_host_enter ();
+    SsBlock *b = malloc (sizeof (SsBlock) + size);
+    if (b) {
+        ss_block_link (s->opaque, b);
+        s->malloc_count++;
+        s->malloc_size += ss_block_usable (b) + SS_MALLOC_OVERHEAD;
+    }
+    ss_host_leave ();
+    return b ? b + 1 : NULL;
+}
+
+static void ss_js_free (JSMallocState *s, void *ptr)
+{
+    if (!ptr)
+        return;
+    SsBlock *b = (SsBlock *) ptr - 1;
+    ss_host_enter ();
+    ss_block_unlink (b);
+    s->malloc_count--;
+    s->malloc_size -= ss_block_usable (b) + SS_MALLOC_OVERHEAD;
+    free (b);
+    ss_host_leave ();
+}
+
+static void *ss_js_realloc (JSMallocState *s, void *ptr, size_t size)
+{
+    if (!ptr)
+        return size ? ss_js_malloc (s, size) : NULL;
+    if (size == 0) {
+        ss_js_free (s, ptr);
+        return NULL;
+    }
+    SsBlock *b = (SsBlock *) ptr - 1;
+    const size_t old = ss_block_usable (b);
+    if (s->malloc_size + size - old > s->malloc_limit)
+        return NULL;
+    ss_host_enter ();
+    ss_block_unlink (b);
+    SsBlock *nb = realloc (b, sizeof (SsBlock) + size);
+    ss_block_link (s->opaque, nb ? nb : b);
+    if (nb)
+        s->malloc_size += ss_block_usable (nb) - old;
+    ss_host_leave ();
+    return nb ? nb + 1 : NULL;
+}
+
+static size_t ss_js_usable (const void *ptr)
+{
+    return ptr ? ss_block_usable ((const SsBlock *) ptr - 1) : 0;
+}
+
+static const JSMallocFunctions ss_js_mf = {
+    .js_malloc = ss_js_malloc,
+    .js_free = ss_js_free,
+    .js_realloc = ss_js_realloc,
+    .js_malloc_usable_size = ss_js_usable,
+};
+
+static JSRuntime *ss_runtime_new (SsHeap **heap)
+{
+    SsHeap *h = g_new0 (SsHeap, 1);
+    h->head.prev = h->head.next = &h->head;
+    JSRuntime *rt = JS_NewRuntime2 (&ss_js_mf, h);
+    if (!rt)
+        g_clear_pointer (&h, g_free);
+    *heap = h;
+    return rt;
+}
+
+/* whatever the runtime still holds (all of an abandoned one; nothing of
+ * one that JS_FreeRuntime has taken apart) */
+static void ss_heap_free (SsHeap *h)
+{
+    if (!h)
+        return;
+    for (SsBlock *b = h->head.next, *n; b != &h->head; b = n) {
+        n = b->next;
+        free (b);
+    }
+    g_free (h);
+}
+#else
+/* a QuickJS with another allocator interface: its own allocator; an
+ * abandoned runtime's heap stays allocated, as it always did */
+typedef struct SsHeap SsHeap;
+static JSRuntime *ss_runtime_new (SsHeap **heap)
+{
+    *heap = NULL;
+    return JS_NewRuntime ();
+}
+static void ss_heap_free (SsHeap *h) { (void) h; }
+#endif
 
 static gint64 ss_cpu_ns (void)
 {
@@ -1663,7 +1832,7 @@ static void ss_log_exception (WalpeSceneScript *ss, JSContext *ctx, const char *
     if (!m)
         JS_FreeValue (ctx, JS_GetException (ctx));   /* ... which threw in turn */
     ss_host_enter ();
-    if (ss->errors_logged++ < 40) {
+    if (ss_log_allowed (ss)) {
         int n = m ? ss_log_len (m) : 1;
         g_message ("scenescript: %s: %.*s%s", what, n, m ? m : "?", m && m[n] ? " [...]" : "");
     }
@@ -1715,7 +1884,7 @@ static gboolean ss_json (WalpeSceneScript *ss, const char *what, const char *tex
         return TRUE;
     }
     JS_FreeValue (ss->ctx, JS_GetException (ss->ctx));
-    if (ss->errors_logged++ < 40)
+    if (ss_log_allowed (ss))
         g_message ("scenescript: %s: %s is not JSON the script engine reads", what, name);
     *out = JS_UNDEFINED;
     return FALSE;
@@ -1862,11 +2031,25 @@ WalpeSceneScript *walpe_ss_new (const WalpeSsHost *host, float canvas_w, float c
 #endif
     WalpeSceneScript *ss = g_new0 (WalpeSceneScript, 1);
     ss->host = *host;
-    ss->rt = JS_NewRuntime ();
+    ss->rt = ss_runtime_new (&ss->heap);
+    if (!ss->rt) {
+        /* no memory for the runtime itself: the scene goes on without
+         * its scripts (the calls below took the null pointer) */
+        g_message ("scenescript: no memory for the script runtime: scripts are off");
+        g_free (ss);
+        return NULL;
+    }
     JS_SetMemoryLimit (ss->rt, 64 * 1024 * 1024);
     JS_SetMaxStackSize (ss->rt, 512 * 1024);
     JS_SetInterruptHandler (ss->rt, interrupt_cb, NULL);
     ss->ctx = JS_NewContext (ss->rt);
+    if (!ss->ctx) {
+        g_message ("scenescript: no memory for the script context: scripts are off");
+        JS_FreeRuntime (ss->rt);
+        ss_heap_free (ss->heap);
+        g_free (ss);
+        return NULL;
+    }
     JS_SetContextOpaque (ss->ctx, ss);
     ss->n_layers = -1;
     ss->f32_proto = JS_UNDEFINED;
@@ -1878,6 +2061,23 @@ WalpeSceneScript *walpe_ss_new (const WalpeSsHost *host, float canvas_w, float c
                                JS_PROP_WRITABLE | JS_PROP_ENUMERABLE);
     JS_DefinePropertyValueStr (ss->ctx, g, "thisObject", JS_NULL,
                                JS_PROP_WRITABLE | JS_PROP_ENUMERABLE);
+    /* Float32Array.prototype, now: the global belongs to the scripts later.
+     * It used to be looked up at the first h_audio call, through whatever a
+     * script had put in the global's place by then - a getter there ran in
+     * the middle of that call, behind the fetch of the first array's storage
+     * pointer and before the copy into it, and "Float32Array = Uint32Array"
+     * had the spectrum copied into integer arrays as raw float bits. */
+    {
+        JSValue ctor = JS_GetPropertyStr (ss->ctx, g, "Float32Array");
+        ss->f32_proto = JS_GetPropertyStr (ss->ctx, ctor, "prototype");
+        JS_FreeValue (ss->ctx, ctor);
+        if (!JS_IsObject (ss->f32_proto)) {
+            if (JS_IsException (ss->f32_proto))
+                JS_FreeValue (ss->ctx, JS_GetException (ss->ctx));
+            JS_FreeValue (ss->ctx, ss->f32_proto);
+            ss->f32_proto = JS_NULL;
+        }
+    }
     JS_FreeValue (ss->ctx, g);
     JSValue a[8];
     a[0] = JS_NewObject (ss->ctx);
@@ -2450,8 +2650,10 @@ void walpe_ss_free (WalpeSceneScript *ss)
     if (!ss)
         return;
     if (ss->lost) {
-        /* abandoned in the middle of a built-in: freeing it would walk
-         * data that is half updated. Its heap (64 MiB at most) stays. */
+        /* abandoned in the middle of a built-in: freeing it through
+         * QuickJS would walk data that is half updated. Its blocks go
+         * back as they are (where they are tracked: see SsHeap). */
+        ss_heap_free (ss->heap);
         g_free (ss);
         return;
     }
@@ -2463,6 +2665,7 @@ void walpe_ss_free (WalpeSceneScript *ss)
         JS_FreeContext (ss->ctx);
     if (ss->rt)
         JS_FreeRuntime (ss->rt);
+    ss_heap_free (ss->heap);
     g_free (ss);
 }
 

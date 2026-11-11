@@ -8,6 +8,8 @@
 #include "engine/weparticles.h"
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 static int fails;
 #define CHECK(c, ...) do { if (!(c)) { fails++; printf ("FAIL %s:%d: ", __FILE__, __LINE__); \
@@ -37,10 +39,121 @@ static int pictures (int n, int mode, float mult, gboolean blend, double life_s,
     return count;
 }
 
+/* ---- how smooth a sprite is: the counts of second differences
+ * (walpe_weparticles_soft_hist) against the plain loop over every byte.
+ * The engine counts eight bytes at a time and takes a word of zeros in
+ * all three rows at once: the counts must not know. */
+static void plain_hist (const guint8 *px, gsize stride, int w, int h, guint (*hist)[511])
+{
+    for (int k = 1; k <= 2; k++) {
+        for (int y = 0; y < h; y++)
+            for (int i = k * 4; i < (w - k) * 4; i++) {
+                const guint8 *r = px + (gsize) y * stride;
+                hist[k - 1][abs ((int) r[i - k * 4] - 2 * (int) r[i] + (int) r[i + k * 4])]++;
+            }
+        for (int y = k; y < h - k; y++)
+            for (int i = 0; i < w * 4; i++)
+                hist[2 + k - 1][abs ((int) px[(gsize) (y - k) * stride + i] -
+                                     2 * (int) px[(gsize) y * stride + i] +
+                                     (int) px[(gsize) (y + k) * stride + i])]++;
+    }
+}
+
+static guint32 lcg (guint32 *st)
+{
+    *st = *st * 1664525u + 1013904223u;
+    return *st >> 8;
+}
+
+/* kind 0: nothing; 1: noise; 2: a soft dot on an empty ground; 3: a ramp
+ * everywhere; 4: single bytes set in an empty picture (zero runs of every
+ * length around them); 5: noise in every other 8-texel column */
+static void soft_picture (guint8 *px, gsize stride, int w, int h, int kind, guint32 seed)
+{
+    guint32 st = seed;
+    memset (px, 0, stride * (gsize) h);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            guint8 *q = px + (gsize) y * stride + (gsize) x * 4;
+            float dx = (x + 0.5f) / (float) w * 2 - 1, dy = (y + 0.5f) / (float) h * 2 - 1;
+            float r = sqrtf (dx * dx + dy * dy);
+            guint8 v = 0;
+            switch (kind) {
+            case 1: q[0] = (guint8) lcg (&st); q[1] = (guint8) lcg (&st); q[2] = (guint8) lcg (&st);
+                    q[3] = (guint8) lcg (&st); break;
+            case 2: v = r < 0.5f ? (guint8) ((1 - r * 2) * (1 - r * 2) * 255.0f + 0.5f) : 0;
+                    q[0] = q[3] = v; q[1] = (guint8) (v / 2); q[2] = (guint8) (v / 3); break;
+            case 3: q[0] = (guint8) (x * 255 / w); q[1] = (guint8) (y * 255 / h);
+                    q[2] = (guint8) ((x + y) & 255); q[3] = 255; break;
+            case 4: if (lcg (&st) % 23 == 0) q[lcg (&st) & 3] = (guint8) (1 + lcg (&st) % 255); break;
+            case 5: if ((x / 8) & 1) { q[0] = (guint8) lcg (&st); q[3] = (guint8) lcg (&st); } break;
+            default: break;
+            }
+        }
+}
+
+static void test_soft_hist (void)
+{
+    static const int sizes[][2] = { { 4, 4 }, { 5, 4 }, { 4, 9 }, { 7, 7 }, { 16, 16 }, { 33, 17 },
+                                    { 59, 57 }, { 64, 64 }, { 130, 35 }, { 257, 129 } };
+    guint cases = 0, zero_words = 0;
+    for (guint si = 0; si < G_N_ELEMENTS (sizes); si++)
+        for (int kind = 0; kind < 6; kind++)
+            for (int pad = 0; pad < 2; pad++) {
+                int w = sizes[si][0], h = sizes[si][1];
+                /* (rows further apart than the picture is wide: a frame of a sheet) */
+                gsize stride = (gsize) w * 4 + (pad ? 12 : 0);
+                guint8 *px = g_malloc (stride * (gsize) h);
+                soft_picture (px, stride, w, h, kind, 77u + si * 13u + (guint) kind);
+                guint (*want)[511] = g_malloc0 (sizeof (guint[4][511]));
+                guint (*got)[511] = g_malloc0 (sizeof (guint[4][511]));
+                plain_hist (px, stride, w, h, want);
+                walpe_weparticles_soft_hist (px, stride, w, h, got);
+                CHECK (!memcmp (want, got, sizeof (guint[4][511])),
+                       "second differences of a %dx%d picture (kind %d, stride %zu) differ from "
+                       "the plain count", w, h, kind, stride);
+                /* every difference is counted, the ones of an empty word too */
+                for (int a = 0; a < 4; a++) {
+                    guint64 n = 0;
+                    for (int i = 0; i <= 510; i++)
+                        n += got[a][i];
+                    int k = (a & 1) + 1;
+                    guint64 all = a < 2 ? (guint64) MAX (w - 2 * k, 0) * 4 * (guint64) h
+                                        : (guint64) w * 4 * (guint64) MAX (h - 2 * k, 0);
+                    CHECK (n == all, "%dx%d kind %d table %d: %" G_GUINT64_FORMAT " differences "
+                           "counted, the picture has %" G_GUINT64_FORMAT, w, h, kind, a, n, all);
+                }
+                if (kind == 0 || kind == 2)
+                    zero_words += got[0][0] >= 8;
+                g_free (px);
+                g_free (want);
+                g_free (got);
+                cases++;
+            }
+    /* counts are added to what the tables hold (one table set for all frames of a sheet) */
+    {
+        guint8 px[16 * 16 * 4];
+        soft_picture (px, 64, 16, 16, 1, 5);
+        guint (*a)[511] = g_malloc0 (sizeof (guint[4][511]));
+        guint (*b)[511] = g_malloc0 (sizeof (guint[4][511]));
+        walpe_weparticles_soft_hist (px, 64, 16, 16, a);
+        walpe_weparticles_soft_hist (px, 64, 16, 16, a);
+        plain_hist (px, 64, 16, 16, b);
+        plain_hist (px, 64, 16, 16, b);
+        CHECK (!memcmp (a, b, sizeof (guint[4][511])), "two frames into one set of tables");
+        g_free (a);
+        g_free (b);
+    }
+    CHECK (zero_words > 0, "no case with empty words was looked at");
+    printf ("sprite smoothness: %u pictures, counts equal to the plain loop\n", cases);
+}
+
 int main (void)
 {
     int f0, f1;
     float t;
+
+    test_soft_hist ();
 
     /* a 64-frame sheet over a 6 s life at 144 fps: 864 frames rendered */
     double step = 0;

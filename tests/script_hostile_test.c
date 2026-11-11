@@ -25,7 +25,15 @@
  *     C, inside a call into the scene) does not hang the thread;
  *  9. JSON the engine refuses (a number beyond the double range, written
  *     as inf.0) is reported without running Error.prototype.toString, and
- *     such numbers arrive as the largest double.
+ *     such numbers arrive as the largest double;
+ * 10. the spectrum arrays of registerAudioBuffers: filled in place only
+ *     when they are the engine's own Float32Array, whatever a script put
+ *     in the global of that name, and without running script code while
+ *     the storage of the arrays is held;
+ * 11. time zone names: only names of zones reach GLib (a file of the zone
+ *     directory that is no zone costs a critical warning per call);
+ * 12. the watchdog's signal arrives while a call into the scene holds a
+ *     lock: the call runs to its end.
  * `meson test -C build script-hostile` */
 #include "walpe-build-config.h"
 #include <glib.h>
@@ -33,6 +41,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include "engine/scenescript.h"
 
@@ -51,12 +60,38 @@ static void broke (const char *what)
         printf ("contract: %s\n", what);
 }
 
+/* 12: the layer "slow" takes longer to find than the hard time limit of a
+ * script entry, in CPU time of the thread as the limit counts it, with a
+ * lock held */
+static GMutex slow_lock;
+static int slow_calls;
+
+static double thread_cpu (void)
+{
+    struct timespec ts;
+    if (clock_gettime (CLOCK_THREAD_CPUTIME_ID, &ts) != 0)
+        return g_get_monotonic_time () / 1e6;
+    return (double) ts.tv_sec + (double) ts.tv_nsec / 1e9;
+}
+
 static int h_find (gpointer u, const char *name)
 {
     (void) u;
     if (!name) {
         broke ("find (NULL)");
         return -1;
+    }
+    if (!strcmp (name, "slow")) {
+        g_mutex_lock (&slow_lock);
+        /* (nearly all of the time in this function itself, not in the
+         * clock call: where the signal finds the thread is what counts) */
+        volatile guint work = 0;
+        for (double until = thread_cpu () + 1.8; thread_cpu () < until; )
+            for (int i = 0; i < 200000; i++)
+                work += (guint) i;
+        slow_calls++;
+        g_mutex_unlock (&slow_lock);
+        return 1;
     }
     for (int i = 0; i < NLAYERS; i++)
         if (!strcmp (layer_names[i], name))
@@ -744,6 +779,152 @@ static void json_checks (void)
            "such a number arrives as the largest double, text stays text (%s)", text[1] ? text[1] : "?");
 }
 
+/* ------------------------------------------------ 10. audio buffers */
+
+/* h_audio copies the spectrum straight into the storage of the three
+ * Float32Arrays. Which arrays qualify was decided by a prototype looked up
+ * at the first call from the global "Float32Array" - the scripts' to
+ * replace: with a getter there, script code ran between the fetch of the
+ * first array's storage pointer and the copy into it, and with another
+ * typed array class in its place the copy wrote raw float bits into
+ * integer arrays. The host of this test hands out i / resolution. */
+static void audio_buffers (void)
+{
+    WalpeSceneScript *ss = make ();
+    add (ss, 0, "text", "'use strict';\n"
+                        "const b = engine.registerAudioBuffers(64);\n"
+                        "export function update(v) { return b.left[32] + ' ' + b.right[16] + ' ' + b.average[48]; }\n");
+    start (ss);
+    for (int f = 1; f <= 3; f++)
+        tick (ss, f);
+    CHECK (text[0] && !strcmp (text[0], "0.5 0.25 0.75"), "audio buffers: Float32Arrays are filled (%s)",
+           text[0] ? text[0] : "?");
+    walpe_ss_free (ss);
+
+    ss = make ();
+    add (ss, 1, "text", "'use strict';\n"
+                        "let reads = 0;\n"
+                        "Object.defineProperty(globalThis, 'Float32Array', { configurable: true,\n"
+                        "  get() { reads++; return Uint32Array; } });\n"
+                        "const b = engine.registerAudioBuffers(64);\n"
+                        "const made = reads;\n"
+                        "export function update(v) { return b.left[32] + ' ' + b.average[48] + ' ' + (reads - made); }\n");
+    start (ss);
+    for (int f = 1; f <= 3; f++)
+        tick (ss, f);
+    CHECK (text[1] && !strcmp (text[1], "0 0 0"), "audio buffers: with the global Float32Array replaced, the "
+           "host does not read the global and copies no float bits into integer arrays (%s)",
+           text[1] ? text[1] : "?");
+    walpe_ss_free (ss);
+
+    /* arrays in other shapes: a view at an offset is filled where it
+     * stands and nowhere else, one that is too short takes what fits,
+     * anything else is written element by element or not at all */
+    ss = make ();
+    int before = contract_breaks;
+    add (ss, 2, "text", "'use strict';\n"
+                        "const F = Float32Array, b = engine.registerAudioBuffers(64);\n"
+                        "const store = new F(256);\n"
+                        "b.left = new F(store.buffer, 64 * 4, 64);\n"
+                        "b.right = new F(8);\n"
+                        "const c = engine.registerAudioBuffers(16);\n"
+                        "c.left = [0]; c.right = new Proxy([], {}); c.average = Object.freeze({});\n"
+                        "const d = engine.registerAudioBuffers(32);\n"
+                        "d.left = new Float64Array(32); d.right = new DataView(new ArrayBuffer(256)); d.average = null;\n"
+                        "const e = engine.registerAudioBuffers(64);\n"
+                        "e.resolution = { valueOf() { e.left = e.right = e.average = undefined; return 64; } };\n"
+                        "export function update(v) {\n"
+                        "  return [store[63], store[64 + 32], store[128], b.right[4], b.right.length, c.left[8], d.left[16]].join(' '); }\n");
+    start (ss);
+    for (int f = 1; f <= 3; f++)
+        tick (ss, f);
+    CHECK (text[2] && !strcmp (text[2], "0 0.5 0 0.0625 8 0.5 0.5"), "audio buffers: views, short arrays and "
+           "other objects in place of the arrays (%s)", text[2] ? text[2] : "?");
+    CHECK (contract_breaks == before, "audio buffers: the host contract held");
+    walpe_ss_free (ss);
+}
+
+/* ------------------------------------------------------ 11. time zones */
+
+/* toLocaleString (.., { timeZone }) asks the host for a zone's offset, and
+ * the host asks GLib, which reads <zone directory>/<name>. Names of files
+ * there that are no zones went through: "leapseconds" is a text file, and
+ * GLib logs a critical warning for every attempt - one per call, as often
+ * as a script calls. */
+static int n_glib_logs;
+
+static void glib_log_cb (const gchar *dom, GLogLevelFlags lvl, const gchar *msg, gpointer u)
+{
+    (void) dom; (void) lvl; (void) msg; (void) u;
+    n_glib_logs++;
+}
+
+static void time_zones (void)
+{
+    WalpeSceneScript *ss = make ();
+    n_glib_logs = 0;
+    guint h = g_log_set_handler ("GLib", G_LOG_LEVEL_MASK, glib_log_cb, NULL);
+    add (ss, 0, "text", "'use strict';\n"
+                        "const names = ['leapseconds', 'localtime', 'posixrules', 'posix/UTC', 'right/UTC', 'tzdata.zi',\n"
+                        "  'zone.tab', '../zoneinfo/UTC', '/etc/localtime', 'Europe', 'europe/berlin', '+VERSION', ''];\n"
+                        "export function update(v) {\n"
+                        "  let same = 0; const d = new Date(1700000000000);\n"
+                        "  for (let k = 0; k < 20; k++) for (const n of names) {\n"
+                        "    const t = new Date(1700000000000 + k * 3600000);\n"
+                        "    if (t.toLocaleString('en-US', { timeZone: n }) === t.toLocaleString('en-US')) same++; }\n"
+                        "  const tokyo = d.toLocaleString('en-GB', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit' });\n"
+                        "  const utc = d.toLocaleString('en-GB', { timeZone: 'UTC', hour: '2-digit', minute: '2-digit' });\n"
+                        "  return same + ' ' + tokyo + ' ' + utc; }\n");
+    start (ss);
+    for (int f = 1; f <= 3; f++)
+        tick (ss, f);
+    g_log_remove_handler ("GLib", h);
+    /* 22:13 UTC; Tokyo is nine hours ahead where the zone data is installed */
+    gboolean have_tokyo = g_file_test ("/usr/share/zoneinfo/Asia/Tokyo", G_FILE_TEST_EXISTS);
+    CHECK (text[0] && g_str_has_prefix (text[0], "260 ") && g_str_has_suffix (text[0], " 22:13") &&
+           (!have_tokyo || strstr (text[0], " 07:13 ")),
+           "time zones: names that are no zones give local time, zones their own (%s)", text[0] ? text[0] : "?");
+    CHECK (n_glib_logs == 0, "time zones: no file that is no zone is handed to GLib (%d warnings from GLib)",
+           n_glib_logs);
+    walpe_ss_free (ss);
+}
+
+/* ------------------- 12. the watchdog's signal and a call into the scene */
+
+/* The hard limit takes the thread out of a built-in function that does not
+ * return, from the handler of a timer signal. That is sound only while the
+ * thread is in the script engine's own code: in a call into the scene (or
+ * in the runtime's allocator, which is marked the same way) it may hold a
+ * lock, and whoever takes that lock next would wait for good. Here such a
+ * call takes longer than the limit, so the signal arrives in the middle of
+ * it several times: it has to be left alone until it returns. */
+static gpointer slow_thread (gpointer data)
+{
+    (void) data;
+    WalpeSceneScript *ss = make ();
+    add (ss, 0, "text", "'use strict';\n"
+                        "export function update(v) { return 'layer ' + thisScene.getLayer('slow').name; }\n");
+    start (ss);
+    tick (ss, 1);
+    walpe_ss_free (ss);
+    g_mutex_lock (&hang_lock);
+    hang_done = 1;
+    g_cond_signal (&hang_cond);
+    g_mutex_unlock (&hang_lock);
+    return NULL;
+}
+
+static void slow_call (void)
+{
+    slow_calls = 0;
+    back_in_time (slow_thread, NULL, "a call into the scene that takes longer than the hard limit");
+    gboolean unlocked = g_mutex_trylock (&slow_lock);
+    if (unlocked)
+        g_mutex_unlock (&slow_lock);
+    CHECK (unlocked && slow_calls >= 1, "the watchdog's signal leaves a call into the scene alone: it ran "
+           "to its end %d time(s), its lock is %s", slow_calls, unlocked ? "free" : "still held");
+}
+
 int main (int argc, char **argv)
 {
     WalpeSceneScript *ss = make ();
@@ -769,6 +950,12 @@ int main (int argc, char **argv)
         conversions ();
     if (!only || !strcmp (only, "json"))
         json_checks ();
+    if (!only || !strcmp (only, "audio"))
+        audio_buffers ();
+    if (!only || !strcmp (only, "timezones"))
+        time_zones ();
+    if (!only || !strcmp (only, "slowcall"))
+        slow_call ();
     if (!only || !strcmp (only, "driver")) {
         int before = contract_breaks;
         /* 6 seeds by default (each takes seconds: its scripts run into the

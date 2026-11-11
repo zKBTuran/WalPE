@@ -48,7 +48,13 @@ static inline int walpe_paced_fps (int cap, double hz)
 {
     if (cap < 1)
         cap = 1;
-    if (hz < 20.0)          /* unknown or implausible: do not trust it */
+    if (!(hz >= 20.0))      /* unknown or implausible (or no number): do not trust it */
+        return cap;
+    /* a rate at or above the limit never lowers it. Asked first: a mode
+     * with absurd timings (RandR hands on whatever dot clock and totals
+     * the driver reports) gives a rate no int holds, and the conversion
+     * below then gave the most negative int - a negative frame rate */
+    if (hz >= (double) cap)
         return cap;
     int r = (int) ceil (hz - 0.005);
     return MIN (cap, r);
@@ -100,9 +106,11 @@ static inline gint64 walpe_frame_grid_next (gint64 now_us, gint64 last_due_us, g
  * follower_hz unknown (< 20): FALSE, the caller has no slot to wait for. */
 static inline gboolean walpe_follow_free (int fps, double leader_hz, double follower_hz)
 {
-    if (follower_hz < 20.0)
+    if (!(follower_hz >= 20.0))
         return FALSE;
-    return walpe_paced_fps (fps, leader_hz) <= (int) ceil (follower_hz - 0.005);
+    /* compared as doubles: a follower rate beyond the range of int (see
+     * walpe_paced_fps) must not be converted */
+    return (double) walpe_paced_fps (fps, leader_hz) <= ceil (follower_hz - 0.005);
 }
 
 /* The frame rate limit a follower applies on its own (0 = none): its

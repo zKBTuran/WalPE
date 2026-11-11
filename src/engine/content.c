@@ -392,7 +392,11 @@ void walpe_content_fit (const char *origin, void *fitp)
     }
 }
 
-/* first *.pkg in a project dir (WE packaged wallpapers) */
+/* first *.pkg in a project dir (WE packaged wallpapers). Like every file a
+ * wallpaper brings it is a regular file of that folder (walpe_asset_path):
+ * the first entry of that name was taken whatever it was, so a FIFO called
+ * scene.pkg blocked the load in open () for good and a symbolic link was
+ * followed to a package anywhere on the disk. */
 static char *find_pkg (const char *dir)
 {
     GDir *d = g_dir_open (dir, 0, NULL);
@@ -400,12 +404,10 @@ static char *find_pkg (const char *dir)
         return NULL;
     const char *n;
     char *out = NULL;
-    while ((n = g_dir_read_name (d))) {
+    while (!out && (n = g_dir_read_name (d))) {
         gsize l = strlen (n);
-        if (l > 4 && !g_ascii_strcasecmp (n + l - 4, ".pkg")) {
-            out = g_build_filename (dir, n, NULL);
-            break;
-        }
+        if (l > 4 && !g_ascii_strcasecmp (n + l - 4, ".pkg"))
+            out = walpe_asset_path (dir, n);
     }
     g_dir_close (d);
     return out;

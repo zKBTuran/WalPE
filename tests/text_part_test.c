@@ -14,6 +14,7 @@
  * exactness. */
 #include <glib.h>
 #include <cairo.h>
+#include <malloc.h>
 #include <stdio.h>
 #include <string.h>
 #include "engine/scenetext.h"
@@ -109,6 +110,18 @@ static gboolean tex_matches_full (const Tex *t, const WalpeTextStyle *st, const 
     return ok && bad == 0 && out == 0;
 }
 
+/* bytes the C library has handed out (0 where it cannot say: under
+ * AddressSanitizer) */
+static gsize heap_in_use (void)
+{
+#if defined (__GLIBC__) && defined (__GLIBC_PREREQ) && __GLIBC_PREREQ (2, 33)
+    struct mallinfo2 mi = mallinfo2 ();
+    return mi.uordblks + mi.hblkhd;
+#else
+    return 0;
+#endif
+}
+
 static const char *const STRINGS[] = {
     "12:34:56", "12:34:57", "12:35:00", "9", "Wednesday, 10 November", "fjgpqy|/\\_W",
     "\xc3\x85\xc3\x89\xc3\x9c \xc3\xa7\xc3\xb1 \xe2\x80\x94 \xe2\x82\xac",   /* accents, dash, euro */
@@ -174,6 +187,30 @@ int main (void)
            "clock in a 1600x900 box: %" G_GSIZE_FORMAT " of %" G_GSIZE_FORMAT " pixels uploaded "
            "(expected under an eighth)", big_part, big_whole);
     walpe_text_release ();
+    /* The text code's own font configuration and font map go when the last
+     * holder lets go of them (walpe_text_release): setting text up and
+     * releasing it again does not make the heap grow. (LeakSanitizer cannot
+     * tell: tests/lsan.supp has to list fontconfig as a whole.) */
+    {
+        gsize after2 = 0, grown = 0;
+        for (int cyc = 0; cyc < 10; cyc++) {
+            WalpeTextStyle st = { 0 };
+            st.pointsize = 14;
+            st.halign = st.valign = 1;
+            Tex t = { 0 };
+            walpe_text_hold ();
+            tex_update (&t, &st, "12:34:56", NULL);
+            g_free (t.px);
+            walpe_text_release ();
+            if (cyc == 1)
+                after2 = heap_in_use ();
+        }
+        gsize now = heap_in_use ();
+        grown = now > after2 ? now - after2 : 0;
+        CHECK (grown <= 8 * 32 * 1024,
+               "8 more rounds of text set up and released: %" G_GSIZE_FORMAT " bytes more on the heap", grown);
+        printf ("text-part: 8 rounds of set-up and release leave %" G_GSIZE_FORMAT " bytes more on the heap\n", grown);
+    }
     printf ("text-part: %d steps (%d partial) compared with full renders, clock digit in a 1600x900 "
             "box: %" G_GSIZE_FORMAT " of %" G_GSIZE_FORMAT " pixels, %d failures\n", steps,
             partial_steps, big_part, big_whole, fails);

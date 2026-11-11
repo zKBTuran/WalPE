@@ -63,21 +63,21 @@ static void layers_print_list (JsonObject *ro)
     JsonArray *la = wpj_arr (ro, "layers"), *sz = wpj_arr (ro, "size");
     guint n = wpj_arr_len (la);
     if (!wpj_bool (ro, "scene", FALSE)) {
-        g_print ("%s is not a scene: only scenes have layers\n", wpj_str (ro, "path", "?"));
+        g_print ("%s is not a scene: only scenes have layers\n", tt (wpj_str (ro, "path", "?")));
         return;
     }
     if (!n && wpj_bool (ro, "loading", FALSE)) {
         g_print ("%s has not drawn a frame yet (still loading?): try again in a moment\n",
-                 wpj_str (ro, "path", "?"));
+                 tt (wpj_str (ro, "path", "?")));
     } else if (!wpj_bool (ro, "running", FALSE)) {
         g_print ("%s is not shown on a monitor: its layers are listed while it runs\n",
-                 wpj_str (ro, "path", "?"));
+                 tt (wpj_str (ro, "path", "?")));
     } else if (!n && !wpj_bool (ro, "fresh", FALSE)) {
         g_print ("%s did not draw a frame in time (still loading?): try again in a moment\n",
-                 wpj_str (ro, "path", "?"));
+                 tt (wpj_str (ro, "path", "?")));
     } else {
         g_print ("%s\nscene %g x %g, %u layers, back to front. Positions in scene pixels: "
-                 "x from the left, y from the BOTTOM.%s\n", wpj_str (ro, "path", "?"),
+                 "x from the left, y from the BOTTOM.%s\n", tt (wpj_str (ro, "path", "?")),
                  wpj_arr_len (sz) >= 2 ? json_array_get_double_element (sz, 0) : 0.0,
                  wpj_arr_len (sz) >= 2 ? json_array_get_double_element (sz, 1) : 0.0, n,
                  wpj_bool (ro, "fresh", FALSE) ? "" : " (not from the current frame)");
@@ -103,18 +103,18 @@ static void layers_print_list (JsonObject *ro)
         JsonObject *ao = wpj_obj (lo, "adjust");
         if (ao)
             layers_print_adjust (ao, adj);
-        g_print ("%-30s %-10s %-5s %-13s %-11s %-22s %s\n", wpj_str (lo, "key", "?"),
-                 wpj_str (lo, "type", "?"), wpj_bool (lo, "shown", FALSE) ? "yes" : "no", pos, size,
-                 pk, adj->len ? adj->str : "-");
+        g_print ("%-30s %-10s %-5s %-13s %-11s %-22s %s\n", tt (wpj_str (lo, "key", "?")),
+                 tt (wpj_str (lo, "type", "?")), wpj_bool (lo, "shown", FALSE) ? "yes" : "no", pos, size,
+                 tt (pk), adj->len ? tt (adj->str) : "-");
         g_string_free (adj, TRUE);
         const char *t = wpj_str (lo, "text", NULL), *f = wpj_str (lo, "file", NULL);
         if (t) {
             char *one = g_strdup (t);
             g_strdelimit (one, "\n\r\t", ' ');
-            g_print ("    text \"%s\"\n", one);
+            g_print ("    text \"%s\"\n", tt (one));
             g_free (one);
         } else if (f) {
-            g_print ("    file %s\n", f);
+            g_print ("    file %s\n", tt (f));
         }
     }
     JsonArray *aa = wpj_arr (ro, "adjustments");
@@ -127,7 +127,7 @@ static void layers_print_list (JsonObject *ro)
         g_print ("%s \"%s\": %s\n",
                  json_object_has_member (ao, "missing")
                      ? "saved, but no layer of this scene has the key (ignored)" : "saved",
-                 wpj_str (ao, "key", "?"), adj->str);
+                 tt (wpj_str (ao, "key", "?")), tt (adj->str));
         g_string_free (adj, TRUE);
     }
 }
@@ -305,9 +305,9 @@ static int layers_main (int argc, char **argv)
     JsonObject *ro = pn && JSON_NODE_HOLDS_OBJECT (pn) ? json_node_get_object (pn) : NULL;
     gboolean ok = ro && wpj_bool (ro, "ok", FALSE);
     if (json || !ro) {
-        g_print ("%s\n", reply);
+        print_json (reply);
     } else if (!ok) {
-        g_printerr ("%s\n", wpj_str (ro, "error", "refused"));
+        g_printerr ("%s\n", tt (wpj_str (ro, "error", "refused")));
     } else if (list) {
         layers_print_list (ro);
     } else {
@@ -320,7 +320,7 @@ static int layers_main (int argc, char **argv)
             JsonObject *ao = wpj_arr_obj (aa, i);
             GString *adj = g_string_new (NULL);
             layers_print_adjust (ao, adj);
-            g_print ("  %-30s %s%s\n", wpj_str (ao, "key", "?"), adj->str,
+            g_print ("  %-30s %s%s\n", tt (wpj_str (ao, "key", "?")), tt (adj->str),
                      wpj_bool (ao, "missing", FALSE) ? "   (no such layer in the scene: ignored)"
                                                      : "");
             g_string_free (adj, TRUE);

@@ -213,8 +213,13 @@ static void parse_layers (JsonArray *arr, GArray *out, const char *dir, SceneCon
 /* --------------------------------------------------------- text render */
 
 /* render the layer's text via pangocairo into a premultiplied BGRA
- * texture (cairo ARGB32 is exactly premultiplied BGRA on little-endian) */
-static void make_text_texture (SceneLayer *l)
+ * texture (cairo ARGB32 is exactly premultiplied BGRA on little-endian).
+ * *left: what the scene's text textures may still take (bytes of RGBA8;
+ * negative = no limit), as in the current scene format (scenenode.c,
+ * refresh_text): one layer is bounded, their number was not - ten layers of
+ * a few large letters were gigabytes. A layer that does not fit is not
+ * drawn. */
+static void make_text_texture (SceneLayer *l, gint64 *left)
 {
     if (!l->text || !*l->text)
         return;
@@ -237,6 +242,12 @@ static void make_text_texture (SceneLayer *l)
         if (tw > SCENE_TEXT_MAX_PX || th > SCENE_TEXT_MAX_PX)
             g_warning ("scene: a text layer of %d x %d pixels is not drawn (the limit is %d)",
                        tw, th, SCENE_TEXT_MAX_PX);
+        pango_font_description_free (fd);
+        return;
+    }
+    if (*left >= 0 && (gint64) tw * th * 4 > *left) {
+        g_warning ("scene: a text layer of %d x %d pixels is not drawn: the text layers of this "
+                   "scene are at their limit (WALPE_TEX_BUDGET_MB)", tw, th);
         pango_font_description_free (fd);
         return;
     }
@@ -275,24 +286,26 @@ static void make_text_texture (SceneLayer *l)
         l->tex_w = tw;
         l->tex_h = th;
         l->tex_ready = TRUE;
+        if (*left >= 0)
+            *left -= (gint64) tw * th * 4;
     }
 }
 
 /* ------------------------------------------------------------- gl init */
 
-static void layers_gl_init (GArray *layers)
+static void layers_gl_init (GArray *layers, gint64 *text_left)
 {
     for (guint i = 0; i < layers->len; i++) {
         SceneLayer *l = &g_array_index (layers, SceneLayer, i);
         if (l->children)
-            layers_gl_init (l->children);
+            layers_gl_init (l->children, text_left);
         if (l->parts) {
             walpe_particles_gl_init (l->parts);
             if (!walpe_particles_usable (l->parts))
                 g_clear_pointer (&l->parts, walpe_particles_free);
         }
         if (l->is_text) {
-            make_text_texture (l);
+            make_text_texture (l, text_left);
             continue;
         }
         if (!l->path || l->is_group)
@@ -333,8 +346,10 @@ static gboolean scene_gl_init (WalpeContent *c, GError **err)
          * This format had none: every layer picture was stored at file size */
         const char *tb = g_getenv ("WALPE_TEX_BUDGET_MB");
         double mb = tb && *tb ? g_ascii_strtod (tb, NULL) : 1024.0;
-        walpe_gl_tex_scope_begin (isfinite (mb) && mb > 0 ? (gint64) (mb * 1048576.0) : 0);
-        layers_gl_init (s->layers);
+        gint64 budget = isfinite (mb) && mb > 0 ? (gint64) (mb * 1048576.0) : 0;
+        gint64 text_left = budget > 0 ? budget : -1;   /* the text layers' own share */
+        walpe_gl_tex_scope_begin (budget);
+        layers_gl_init (s->layers, &text_left);
         walpe_gl_tex_scope_end ();
     }
     /* the daemon polls the pointer (and keeps one rendering per monitor)
@@ -502,6 +517,7 @@ static void scene_gl_free (WalpeContent *c)
         layers_free (s->layers);
         s->layers = NULL;
     }
+    walpe_glutil_blend_release ();
 }
 
 static void scene_set_paused (WalpeContent *c, gboolean p)

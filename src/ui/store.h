@@ -45,5 +45,17 @@ void    walpe_store_entry_free (WalpeEntry *e);
 char *walpe_store_import_file (const char *src, const char *dest_dir, GError **err);
 /* symlink a workshop project folder into dest_dir; returns new link path */
 char *walpe_store_import_dir (const char *src, const char *dest_dir, GError **err);
+/* "Add folder": src is a project folder (it has a project.json) or a folder
+ * of project folders; each is linked into dest_dir. Returns how many were
+ * added; *failed = how many were not, *first_err = why the first of those
+ * was not (g_free; NULL when none failed) */
+guint walpe_store_import_folder (const char *src, const char *dest_dir, guint *failed,
+                                 char **first_err);
+/* The engine answers "open" before it loads the wallpaper; a load that
+ * fails shows only in its status ("load_error" per monitor, "load_restored"
+ * when the wallpaper before it is back). state = the "state" object of a
+ * status reply. Returns one sentence for the first such monitor (g_free),
+ * NULL when every monitor loaded what it was given. */
+char *walpe_store_load_error_text (JsonObject *state);
 /* default Steam Workshop location for Wallpaper Engine (appid 431960) */
 char *walpe_store_steam_dir (void);

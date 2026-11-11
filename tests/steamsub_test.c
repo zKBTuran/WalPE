@@ -85,10 +85,10 @@ static void test_urls (void)
 
 static void test_marks (void)
 {
+    char *p = P ("cfg/walpe/workshop-subscribed"), *data = NULL;
     CHECK (!walpe_steam_sub_is_marked (ID));
     walpe_steam_sub_mark (ID, FALSE);            /* nothing to remove: no file */
-    CHECK (!g_file_test (g_build_filename (T, "cfg/walpe/workshop-subscribed", NULL),
-                         G_FILE_TEST_EXISTS));
+    CHECK (!g_file_test (p, G_FILE_TEST_EXISTS));
     walpe_steam_sub_mark (ID, TRUE);
     walpe_steam_sub_mark ("111222333", TRUE);
     walpe_steam_sub_mark (ID, TRUE);             /* once */
@@ -96,7 +96,6 @@ static void test_marks (void)
     CHECK (walpe_steam_sub_is_marked (ID));
     CHECK (walpe_steam_sub_is_marked ("111222333"));
     CHECK (!walpe_steam_sub_is_marked ("111"));
-    char *p = P ("cfg/walpe/workshop-subscribed"), *data = NULL;
     CHECK (g_file_get_contents (p, &data, NULL, NULL));
     CHECK (!g_strcmp0 (data, ID "\n111222333\n"));
     g_free (data);

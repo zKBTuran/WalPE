@@ -1575,6 +1575,126 @@ static void audit_checks (void)
     }
 }
 
+/* ---- the text work of a pass, kept for one scene load (fx_srcrepair.h:
+ * fx_text_memo_begin / _end). Between the two calls the second pass with
+ * a pair of texts takes the first one's repairs and prints the same
+ * messages; outside nothing is kept. Texts of this test's own. */
+static GPtrArray *memo_seen;
+
+static void memo_handler (const gchar *domain, GLogLevelFlags level, const gchar *msg, gpointer user)
+{
+    (void) domain; (void) user;
+    if (memo_seen)
+        g_ptr_array_add (memo_seen, g_strdup_printf ("%d %s", (int) (level & G_LOG_LEVEL_MASK), msg));
+}
+
+/* one fx_prepass () of the pair; the messages it printed, joined */
+static char *memo_prepass (const char *v, const char *f, const char *name, char **vout, char **fout)
+{
+    char *vs = g_strdup (v), *fs = g_strdup (f);
+    memo_seen = g_ptr_array_new_with_free_func (g_free);
+    fx_prepass (&vs, &fs, name);
+    g_ptr_array_add (memo_seen, NULL);
+    char *said = g_strjoinv ("\n", (char **) memo_seen->pdata);
+    g_ptr_array_unref (memo_seen);
+    memo_seen = NULL;
+    *vout = vs;
+    *fout = fs;
+    return said;
+}
+
+static void memo_checks (void)
+{
+    const char *v = VS_HEAD "varying vec4 v_Uv;\nvoid main() {\n    v_Uv = vec4(a_TexCoord, 0.0, 0.0);\n"
+                    "    gl_Position = vec4(a_Position, 1.0);\n}\n";
+    const char *f = FS_HEAD "uniform sampler2D g_Texture0;\nvarying vec2 v_Uv;\nvoid main() {\n"
+                    "    vec3 tone = 0.5;\n    vec2 at = v_Uv;\n"
+                    "    gl_FragColor = texSample2D(g_Texture0, at) * vec4(tone, 1.0);\n}\n";
+    const char *f2 = FS_HEAD "uniform sampler2D g_Texture0;\nvarying vec2 v_Uv;\nvoid main() {\n"
+                     "    gl_FragColor = texSample2D(g_Texture0, v_Uv);\n}\n";
+    GLogFunc old = g_log_set_default_handler (memo_handler, NULL);
+    guint c0, r0, c1, r1, c2, r2;
+    char *v0, *f0, *v1, *f1, *v2, *f2o;
+
+    /* as it always was: nothing kept */
+    fx_text_memo_stats (&c0, &r0);
+    char *said0 = memo_prepass (v, f, "first", &v0, &f0);
+    fx_text_memo_stats (&c1, &r1);
+    result (strcmp (f0, f) != 0 && strstr (said0, "shader first:") && strstr (said0, "varying v_Uv"),
+            "memo: the pair of texts needs repairs and they are announced", said0);
+    result (c1 == c0 && r1 == r0, "memo: outside a scene load nothing is counted or kept", NULL);
+
+    fx_text_memo_begin ();
+    char *said1 = memo_prepass (v, f, "first", &v1, &f1);
+    fx_text_memo_stats (&c1, &r1);
+    result (!strcmp (v1, v0) && !strcmp (f1, f0) && !strcmp (said1, said0),
+            "memo: the first pass of a load: the same sources and messages as without", said1);
+    char *said2 = memo_prepass (v, f, "second", &v2, &f2o);
+    fx_text_memo_stats (&c2, &r2);
+    char *want2 = g_strdup (said0);
+    {
+        /* the same lines, the summary with the other shader's name */
+        char *at = strstr (want2, "shader first:");
+        GString *w = g_string_new_len (want2, at ? at - want2 : 0);
+        if (at)
+            g_string_append_printf (w, "shader second:%s", at + strlen ("shader first:"));
+        g_free (want2);
+        want2 = g_string_free (w, FALSE);
+    }
+    result (!strcmp (v2, v0) && !strcmp (f2o, f0), "memo: the second pass of the pair gets the same sources",
+            f2o);
+    result (!strcmp (said2, want2), "memo: ... and prints the same messages under its own name", said2);
+    result (c2 == c1 && r2 > r1, "memo: ... without doing the work again", NULL);
+    g_free (v1); g_free (f1); g_free (v2); g_free (f2o); g_free (said1); g_free (said2); g_free (want2);
+
+    /* another fragment text with the same vertex text is another pair */
+    char *said3 = memo_prepass (v, f2, "third", &v1, &f1);
+    fx_text_memo_stats (&c1, &r1);
+    result (c1 > c2 && strstr (f1, "varying vec4 v_Uv;") && !strstr (f1, "tone"),
+            "memo: another fragment text is worked on for itself", f1);
+    g_free (v1); g_free (f1); g_free (said3);
+
+    /* the compiled code of a text, and whether it expands too far */
+    char *a_out = fx_active_code_of (f0);
+    fx_text_memo_stats (&c1, &r1);
+    char *a1 = fx_active_code (f0), *a2 = fx_active_code (f0);
+    gboolean e1 = fx_expansion_ok (f0), e2 = fx_expansion_ok (f0);
+    fx_text_memo_stats (&c2, &r2);
+    result (!strcmp (a1, a_out) && !strcmp (a2, a_out) && a1 != a2,
+            "memo: fx_active_code () of a text asked twice: the same text, a copy each", a2);
+    result (e1 == e2 && e1 == fx_expansion_sizes (f0, NULL) && r2 >= r1 + 2,
+            "memo: ... and both second answers were not computed", NULL);
+    {
+        GString *big = g_string_new (FS_HEAD "#define A0 1\n");
+        for (int i = 1; i <= 40; i++)
+            g_string_append_printf (big, "#define A%d (A%d + A%d + A%d)\n", i, i - 1, i - 1, i - 1);
+        g_string_append (big, "void main() {\n    gl_FragColor = vec4(float(A40));\n}\n");
+        gboolean b1 = fx_expansion_ok (big->str), b2 = fx_expansion_ok (big->str);
+        result (!b1 && !b2 && !fx_expansion_sizes (big->str, NULL),
+                "memo: a text that expands too far is refused both times", NULL);
+        g_string_free (big, TRUE);
+    }
+    g_free (a_out); g_free (a1); g_free (a2);
+
+    /* calls nest: an inner end keeps the memo, the outer one drops it */
+    fx_text_memo_begin ();
+    fx_text_memo_end ();
+    fx_text_memo_stats (&c1, &r1);
+    g_free (fx_active_code (f0));
+    fx_text_memo_stats (&c2, &r2);
+    result (r2 == r1 + 1 && c2 == c1, "memo: still kept after an inner begin / end", NULL);
+    fx_text_memo_end ();
+    char *said4 = memo_prepass (v, f, "first", &v1, &f1);
+    g_free (fx_active_code (f0));
+    fx_text_memo_stats (&c1, &r1);
+    result (c1 == c2 && r1 == r2 && !strcmp (v1, v0) && !strcmp (f1, f0) && !strcmp (said4, said0),
+            "memo: after the load nothing is kept: the work is done again, the same result", said4);
+    fx_text_memo_end ();   /* (one too many: ignored) */
+    g_free (v1); g_free (f1); g_free (said4);
+    g_free (v0); g_free (f0); g_free (said0);
+    g_log_set_default_handler (old, NULL);
+}
+
 int main (int argc, char **argv)
 {
     if (argc > 2 && !strcmp (argv[1], "--changes"))
@@ -1584,6 +1704,7 @@ int main (int argc, char **argv)
     audit_checks ();
     fallback_checks ();
     varying_checks ();
+    memo_checks ();
     transform_checks ();
     gl_checks (argc > 1 ? argv[1] : NULL);
     printf ("%s (%d check(s), %d failure(s))\n", fails ? "FAILED" : "PASSED", checks, fails);

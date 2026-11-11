@@ -1,7 +1,10 @@
 #include "util.h"
+#include "gifcheck.h"
 #include <glib/gstdio.h>
+#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <pwd.h>
@@ -187,6 +190,280 @@ char *walpe_dir_of (const char *path)
     return dir;
 }
 
+/* ------------------------------------------------------------------ jpeg */
+
+/* The header is walked the way libjpeg's own reader walks it (jdmarker.c):
+ * anything up to an FF and any number of FF before a marker, segments by
+ * their length, up to the first start-of-scan. Whether the decoder then
+ * keeps the whole picture is libjpeg's rule (jdinput.c: a progressive
+ * frame, or fewer components in the first scan than in the frame), the
+ * size of the store its coefficient controller's (jdcoefct.c). */
+guint64 walpe_jpeg_store_bytes (const guint8 *d, gsize len)
+{
+    if (!d || len < 4 || d[0] != 0xFF || d[1] != 0xD8)
+        return G_MAXUINT64;
+    gsize i = 2;
+    guint w = 0, h = 0, ncomp = 0, hs[10], vs[10];
+    gboolean progressive = FALSE, have_frame = FALSE;
+    for (;;) {
+        while (i < len && d[i] != 0xFF)
+            i++;
+        while (i < len && d[i] == 0xFF)
+            i++;
+        if (i >= len)
+            return G_MAXUINT64;
+        guint8 m = d[i++];
+        if (m == 0 || m == 0x01 || (m >= 0xD0 && m <= 0xD7))
+            continue;           /* a stuffed FF, TEM, RSTn: no segment follows */
+        if (i + 2 > len)
+            return G_MAXUINT64;
+        gsize seg = ((gsize) d[i] << 8) | d[i + 1];
+        if (seg < 2 || seg > len - i)
+            return G_MAXUINT64;
+        const guint8 *p = d + i + 2;
+        gsize pl = seg - 2;
+        if (m == 0xC0 || m == 0xC1 || m == 0xC2 || m == 0xC9 || m == 0xCA) {
+            /* frame header: precision, height, width, components (id, h/v, table) */
+            if (have_frame || pl < 6)
+                return G_MAXUINT64;
+            h = ((guint) p[1] << 8) | p[2];
+            w = ((guint) p[3] << 8) | p[4];
+            ncomp = p[5];
+            if (!w || !h || !ncomp || ncomp > G_N_ELEMENTS (hs) || pl != 6 + 3 * (gsize) ncomp)
+                return G_MAXUINT64;
+            for (guint c = 0; c < ncomp; c++) {
+                hs[c] = p[7 + 3 * c] >> 4;
+                vs[c] = p[7 + 3 * c] & 15;
+                if (hs[c] < 1 || hs[c] > 4 || vs[c] < 1 || vs[c] > 4)
+                    return G_MAXUINT64;
+            }
+            progressive = m == 0xC2 || m == 0xCA;
+            have_frame = TRUE;
+        } else if (m == 0xDA) {
+            if (!have_frame || pl < 1 || p[0] < 1 || p[0] > ncomp)
+                return G_MAXUINT64;
+            if (!progressive && p[0] == ncomp)
+                return 0;
+            break;
+        } else if (m != 0xC4 && m != 0xCC && m != 0xDB && m != 0xDC && m != 0xDD && m != 0xFE &&
+                   !(m >= 0xE0 && m <= 0xEF)) {
+            return G_MAXUINT64; /* not DHT, DAC, DQT, DNL, DRI, COM or APPn */
+        }
+        i += seg;
+    }
+    guint hmax = 1, vmax = 1;
+    for (guint c = 0; c < ncomp; c++) {
+        hmax = MAX (hmax, hs[c]);
+        vmax = MAX (vmax, vs[c]);
+    }
+    guint64 total = 0;
+    for (guint c = 0; c < ncomp; c++) {
+        guint64 wb = ((guint64) w * hs[c] + 8 * hmax - 1) / (8 * hmax);
+        guint64 hb = ((guint64) h * vs[c] + 8 * vmax - 1) / (8 * vmax);
+        wb = (wb + hs[c] - 1) / hs[c] * hs[c];
+        hb = (hb + vs[c] - 1) / vs[c] * vs[c];
+        total += wb * hb * 128;
+    }
+    return total;
+}
+
+guint64 walpe_jpeg_store_bytes_file (const char *path)
+{
+    /* the first scan comes after the tables and the application segments
+     * (colour profile, Exif, XMP): a few KB as a rule, megabytes at times.
+     * Read in growing steps until the walk has an answer. */
+    const gsize head_max = (gsize) 32 << 20;
+    FILE *f = path ? fopen (path, "rb") : NULL;
+    if (!f)
+        return G_MAXUINT64;
+    GByteArray *buf = g_byte_array_new ();
+    guint64 r = G_MAXUINT64;
+    gsize want = 64 * 1024;
+    for (;;) {
+        gsize old = buf->len;
+        g_byte_array_set_size (buf, (guint) want);
+        gsize got = fread (buf->data + old, 1, want - old, f);
+        g_byte_array_set_size (buf, (guint) (old + got));
+        r = walpe_jpeg_store_bytes (buf->data, buf->len);
+        if (r != G_MAXUINT64 || got < want - old || want >= head_max)
+            break;
+        want *= 2;
+    }
+    g_byte_array_unref (buf);
+    fclose (f);
+    return r;
+}
+
+/* -------------------------------------------------------------- pictures */
+
+const char *walpe_picture_kind (const guint8 *d, gsize len)
+{
+    if (!d)
+        return NULL;
+    if (len >= 3 && !memcmp (d, "\xff\xd8\xff", 3))
+        return "jpeg";
+    if (len >= 8 && !memcmp (d, "\x89PNG\r\n\x1a\n", 8))
+        return "png";
+    if (len >= 6 && (!memcmp (d, "GIF87a", 6) || !memcmp (d, "GIF89a", 6)))
+        return "gif";
+    if (len >= 12 && !memcmp (d, "RIFF", 4) && !memcmp (d + 8, "WEBP", 4))
+        return "webp";
+    if (len >= 16 && !memcmp (d + 4, "ftyp", 4)) {
+        /* the major brand, or one of the compatible brands after it */
+        gsize box = ((gsize) d[0] << 24) | ((gsize) d[1] << 16) | ((gsize) d[2] << 8) | d[3];
+        box = MIN (MIN (box, len), 128);
+        for (gsize o = 8; o + 4 <= box; o += o == 8 ? 8 : 4)
+            if (!memcmp (d + o, "avif", 4) || !memcmp (d + o, "avis", 4))
+                return "avif";
+        return NULL;
+    }
+    if (len >= 2 && d[0] == 'B' && d[1] == 'M')
+        return "bmp";
+    return NULL;
+}
+
+typedef struct {
+    const char *kind;
+    WalpePictureSizeFunc size;
+    gpointer user;
+    gboolean refused;
+} PictureLoad;
+
+static void picture_size_prepared (GdkPixbufLoader *ld, int w, int h, gpointer user)
+{
+    PictureLoad *pl = user;
+    int sw = 0, sh = 0;
+    if (pl->size && !pl->size (pl->kind, w, h, &sw, &sh, pl->user)) {
+        pl->refused = TRUE;
+        gdk_pixbuf_loader_set_size (ld, 0, 0);     /* the loaders stop before a pixel exists */
+        return;
+    }
+    if (sw > 0 && sh > 0)
+        gdk_pixbuf_loader_set_size (ld, sw, sh);
+}
+
+/* the loader for the format the first bytes name, when it is one of kinds */
+static GdkPixbufLoader *picture_loader (const guint8 *head, gsize n, const char *const *kinds,
+                                        PictureLoad *pl, GError **err)
+{
+    const char *kind = walpe_picture_kind (head, n);
+    gboolean accepted = FALSE;
+    for (int i = 0; kind && kinds && kinds[i]; i++)
+        accepted |= !strcmp (kind, kinds[i]);
+    if (!accepted) {
+        g_set_error_literal (err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                             "not a picture of an accepted format");
+        return NULL;
+    }
+    GdkPixbufLoader *ld = gdk_pixbuf_loader_new_with_type (kind, NULL);
+    if (!ld && !strcmp (kind, "avif"))
+        ld = gdk_pixbuf_loader_new_with_type ("heif/avif", NULL);   /* libheif's name for it */
+    if (!ld) {
+        g_set_error (err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                     "this gdk-pixbuf has no loader for %s pictures", kind);
+        return NULL;
+    }
+    pl->kind = kind;
+    g_signal_connect (ld, "size-prepared", G_CALLBACK (picture_size_prepared), pl);
+    return ld;
+}
+
+static GdkPixbuf *picture_finish (GdkPixbufLoader *ld, PictureLoad *pl, gboolean ok, GError *lerr,
+                                  GError **err)
+{
+    if (ok && !pl->refused)
+        ok = gdk_pixbuf_loader_close (ld, lerr ? NULL : &lerr);
+    else
+        gdk_pixbuf_loader_close (ld, NULL);
+    GdkPixbuf *pb = ok && !pl->refused ? gdk_pixbuf_loader_get_pixbuf (ld) : NULL;
+    if (pb)
+        g_object_ref (pb);
+    g_object_unref (ld);
+    if (!pb && pl->refused)
+        g_set_error_literal (err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                             "the picture's size is not accepted");
+    else if (!pb)
+        g_set_error (err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "the picture cannot be decoded (%s)",
+                     lerr ? lerr->message : "no picture in it");
+    g_clear_error (&lerr);
+    return pb;
+}
+
+static gboolean picture_jpeg_ok (const PictureLoad *pl, guint64 store, GError **err)
+{
+    if (strcmp (pl->kind, "jpeg") || store <= WALPE_JPEG_STORE_MAX)
+        return TRUE;
+    g_set_error_literal (err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                         "a JPEG that has to be held whole to be decoded, and too large for that");
+    return FALSE;
+}
+
+GdkPixbuf *walpe_picture_decode (const guint8 *d, gsize len, const char *const *kinds,
+                                 WalpePictureSizeFunc size, gpointer user, GError **err)
+{
+    PictureLoad pl = { NULL, size, user, FALSE };
+    GdkPixbufLoader *ld = picture_loader (d, len, kinds, &pl, err);
+    if (!ld)
+        return NULL;
+    if (!picture_jpeg_ok (&pl, !strcmp (pl.kind, "jpeg") ? walpe_jpeg_store_bytes (d, len) : 0, err)) {
+        gdk_pixbuf_loader_close (ld, NULL);
+        g_object_unref (ld);
+        return NULL;
+    }
+    /* a GIF whose frames are not all inside its picture, or have no pixels,
+     * is not given to the decoder (gifcheck.h) */
+    if (!strcmp (pl.kind, "gif") && !walpe_gif_layout_ok (d, len, err)) {
+        gdk_pixbuf_loader_close (ld, NULL);
+        g_object_unref (ld);
+        return NULL;
+    }
+    gboolean ok = TRUE;
+    GError *lerr = NULL;
+    for (gsize off = 0; ok && !pl.refused && off < len; off += 65536)
+        ok = gdk_pixbuf_loader_write (ld, d + off, MIN ((gsize) 65536, len - off), &lerr);
+    return picture_finish (ld, &pl, ok, lerr, err);
+}
+
+GdkPixbuf *walpe_picture_decode_file (const char *path, const char *const *kinds,
+                                      WalpePictureSizeFunc size, gpointer user, GError **err)
+{
+    /* regular files only (a FIFO under a picture's name would park the
+     * caller), read in pieces: the file is as large as its author likes */
+    GStatBuf st;
+    FILE *f = path && g_stat (path, &st) == 0 && S_ISREG (st.st_mode) ? fopen (path, "rb") : NULL;
+    if (!f) {
+        g_set_error (err, G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "%s: not a file that can be read",
+                     path ? path : "");
+        return NULL;
+    }
+    guint8 *buf = g_malloc (65536);
+    gsize n = fread (buf, 1, 65536, f);
+    PictureLoad pl = { NULL, size, user, FALSE };
+    GdkPixbufLoader *ld = picture_loader (buf, n, kinds, &pl, err);
+    if (ld && !picture_jpeg_ok (&pl, !strcmp (pl.kind, "jpeg") ? walpe_jpeg_store_bytes_file (path) : 0,
+                                err)) {
+        gdk_pixbuf_loader_close (ld, NULL);
+        g_clear_object (&ld);
+    }
+    if (ld && !strcmp (pl.kind, "gif") && !walpe_gif_file_layout_ok (path, err)) {   /* as above */
+        gdk_pixbuf_loader_close (ld, NULL);
+        g_clear_object (&ld);
+    }
+    GdkPixbuf *pb = NULL;
+    if (ld) {
+        gboolean ok = TRUE;
+        GError *lerr = NULL;
+        while (ok && !pl.refused && n > 0) {
+            ok = gdk_pixbuf_loader_write (ld, buf, n, &lerr);
+            n = ok && !pl.refused ? fread (buf, 1, 65536, f) : 0;
+        }
+        pb = picture_finish (ld, &pl, ok, lerr, err);
+    }
+    g_free (buf);
+    fclose (f);
+    return pb;
+}
+
 /* ------------------------------------------------------------------ json */
 
 const char *wpj_str (JsonObject *o, const char *k, const char *dflt)
@@ -341,10 +618,10 @@ static int json_depth_as (const char *d, gsize len, int sq, gboolean cc, int sla
     return deepest;
 }
 
-static gboolean json_depth_ok (const char *d, gsize len)
+gboolean wpj_depth_ok (const char *d, gsize len, int max_depth)
 {
     gboolean lax = FALSE;
-    if (json_depth_as (d, len, WPJ_SQ_NONE, FALSE, WPJ_SL_NONE, FALSE, &lax) > WPJ_MAX_DEPTH)
+    if (json_depth_as (d, len, WPJ_SQ_NONE, FALSE, WPJ_SL_NONE, FALSE, &lax) > max_depth)
         return FALSE;
     if (!lax)
         return TRUE;
@@ -352,34 +629,146 @@ static gboolean json_depth_ok (const char *d, gsize len)
         for (int cc = 0; cc < 2; cc++)
             for (int slash = WPJ_SL_NONE; slash <= WPJ_SL_LINE; slash++)
                 for (int hash = 0; hash < 2; hash++)
-                    if (json_depth_as (d, len, sq, cc, slash, hash, NULL) > WPJ_MAX_DEPTH)
+                    if (json_depth_as (d, len, sq, cc, slash, hash, NULL) > max_depth)
                         return FALSE;
     return TRUE;
 }
 
+/* One value per text. json-glib (seen with 1.8.0) reads on behind the
+ * first top-level value: a second array or object is parsed, never becomes
+ * the root and is never freed - its whole tree, about thirty times its
+ * text. A scene.json of an empty object followed by one of 30 MiB loaded
+ * as an empty scene and left some 900 MiB allocated at every load; the
+ * library scan reads every project.json the same way, the daemon its
+ * request lines.
+ *
+ * The parser reports where arrays and objects begin and end. One that
+ * begins at the top level when a value is already complete is such a
+ * second value. The text is then blanked under the parser, which reads the
+ * buffer it was given in place: the parse ends at once in an error the
+ * parser cleans up after, and the first value - the root, as before - is
+ * what the caller gets. (A parser that worked on a copy would read on to
+ * the end; the result is the same.)
+ *
+ * The handlers cost a fifth of the parse time, so only a text that can
+ * hold a second value gets them: json_single_plain() is the plain reading
+ * (see above) of "white space, one array or object, nothing that opens
+ * another", and no ', / or # outside a string that another reading could
+ * make something else of. Every file Wallpaper Engine writes is that. */
+typedef struct {
+    int depth;        /* arrays / objects open */
+    int closed;       /* top-level ones complete */
+    char *text;
+    gsize len;
+    JsonNode *first;  /* the root when a second value began */
+    gboolean extra;
+} WpjOne;
+
+static void wpj_one_start (JsonParser *p, gpointer user)
+{
+    WpjOne *o = user;
+    if (o->depth++ > 0 || o->extra)
+        return;
+    JsonNode *root = json_parser_get_root (p);
+    /* the first value, unless a plain value came before it (then the root
+     * is that value: no array, no object) */
+    if (!o->closed && (!root || JSON_NODE_HOLDS_OBJECT (root) || JSON_NODE_HOLDS_ARRAY (root)))
+        return;
+    o->extra = TRUE;
+    o->first = root ? json_node_copy (root) : NULL;
+    memset (o->text, ' ', o->len);
+}
+
+static void wpj_one_end (JsonParser *p, gpointer container, gpointer user)
+{
+    (void) p; (void) container;
+    WpjOne *o = user;
+    if (o->depth > 0 && --o->depth == 0)
+        o->closed++;
+}
+
+static gboolean json_single_plain (const char *d, gsize len)
+{
+    int depth = 0, tops = 0;
+    for (gsize i = 0; i < len; i++) {
+        char c = d[i];
+        if (c == '"') {
+            if (depth == 0 && tops == 0)
+                return FALSE;   /* a value in front of the first array / object */
+            for (i++; i < len && d[i] != '"'; i++)
+                if (d[i] == '\\')
+                    i++;
+        } else if (c == '[' || c == '{') {
+            if (depth++ == 0 && ++tops > 1)
+                return FALSE;
+        } else if (c == ']' || c == '}') {
+            if (depth > 0)
+                depth--;
+        } else if (c == '\'' || c == '/' || c == '#') {
+            return FALSE;
+        } else if (depth == 0 && tops == 0 && c != ' ' && c != '\t' && c != '\r' && c != '\n') {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+/* text: writable, len bytes; its content is undefined afterwards */
+JsonNode *wpj_parse_first (char *text, gsize len, GError **err)
+{
+    WpjOne one = { .text = text, .len = len };
+    g_autoptr (JsonParser) p = json_parser_new ();
+    g_signal_connect (p, "object-start", G_CALLBACK (wpj_one_start), &one);
+    g_signal_connect (p, "array-start", G_CALLBACK (wpj_one_start), &one);
+    g_signal_connect (p, "object-end", G_CALLBACK (wpj_one_end), &one);
+    g_signal_connect (p, "array-end", G_CALLBACK (wpj_one_end), &one);
+    GError *e = NULL;
+    gboolean ok = json_parser_load_from_data (p, text, (gssize) len, &e);
+    if (one.extra) {
+        g_clear_error (&e);   /* (of the blanked text, not of the file) */
+        return one.first;
+    }
+    if (!ok) {
+        g_propagate_error (err, e);
+        return NULL;
+    }
+    JsonNode *root = json_parser_get_root (p);
+    return root ? json_node_copy (root) : NULL;
+}
+
 /* the parse itself; *msg (if asked for) = why the text was refused, to be
  * freed by the caller; a text that parses but is no object gives NULL
- * without a message, as before */
-static JsonNode *wpj_parse_quiet (const char *data, gssize len, char **msg)
+ * without a message, as before. own: the same text, writable (it may be
+ * blanked: then nothing is returned in *msg), or NULL. */
+static JsonNode *wpj_parse_quiet (const char *data, gssize len, char **msg, char *own)
 {
     if (msg)
         *msg = NULL;
-    if (!json_depth_ok (data, (gsize) len)) {
+    if (!wpj_depth_ok (data, (gsize) len, WPJ_MAX_DEPTH)) {
         if (msg)
             *msg = g_strdup_printf ("nested deeper than %d levels", WPJ_MAX_DEPTH);
         return NULL;
     }
-    g_autoptr (JsonParser) p = json_parser_new ();
     g_autoptr (GError) err = NULL;
-    if (!json_parser_load_from_data (p, data, len, &err)) {
+    JsonNode *root = NULL;
+    if (json_single_plain (data, (gsize) len)) {
+        g_autoptr (JsonParser) p = json_parser_new ();
+        if (json_parser_load_from_data (p, data, len, &err)) {
+            JsonNode *r = json_parser_get_root (p);
+            root = r ? json_node_copy (r) : NULL;
+        }
+    } else {
+        g_autofree char *copy = own ? NULL : g_memdup2 (data, (gsize) len);
+        root = wpj_parse_first (own ? own : copy, (gsize) len, &err);
+    }
+    if (err) {
         if (msg)
-            *msg = g_strdup (err ? err->message : "?");
+            *msg = g_strdup (err->message);
         return NULL;
     }
-    JsonNode *root = json_parser_get_root (p);
-    if (!root || !JSON_NODE_HOLDS_OBJECT (root))
-        return NULL;
-    return json_node_copy (root);
+    if (root && !JSON_NODE_HOLDS_OBJECT (root))
+        g_clear_pointer (&root, json_node_unref);
+    return root;
 }
 
 JsonNode *wpj_parse_data (const char *data, gssize len)
@@ -388,7 +777,7 @@ JsonNode *wpj_parse_data (const char *data, gssize len)
     if (len < 0)
         len = (gssize) strlen (data);
     g_autofree char *msg = NULL;
-    JsonNode *n = wpj_parse_quiet (data, len, &msg);
+    JsonNode *n = wpj_parse_quiet (data, len, &msg, NULL);
     if (!n && msg)
         g_warning ("json parse failed: %s", msg);
     return n;
@@ -454,9 +843,9 @@ JsonNode *wpj_parse_file (const char *path)
     /* files only (IPC lines and shader annotations stay strict): a file
      * that fails as written is tried once more without trailing commas */
     g_autofree char *msg = NULL;
-    JsonNode *n = wpj_parse_quiet (data, (gssize) len, &msg);
+    JsonNode *n = wpj_parse_quiet (data, (gssize) len, &msg, data);
     if (!n && msg && json_blank_trailing_commas (data, len))
-        n = wpj_parse_quiet (data, (gssize) len, NULL);
+        n = wpj_parse_quiet (data, (gssize) len, NULL, data);
     if (!n && msg)
         g_warning ("json parse failed: %s", msg);
     g_free (data);

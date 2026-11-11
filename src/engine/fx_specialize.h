@@ -942,8 +942,13 @@ static GLuint fxs_build_program (EffPass *pass, char **vsrc, char **fsrc, const 
     JsonObject *cst = instpass ? wpj_obj (instpass, "constantshadervalues") : NULL;
     /* the repairs first: they read declarations as WE wrote them */
     fx_prepass (vsrc, fsrc, shader);
-    fxs_collect (sp, pass, *vsrc, *fsrc, cst);
-    fxs_hazards (sp, *vsrc, *fsrc);
+    /* (the scans read the whole source once per uniform it declares: a
+     * source the repairs leave alone for its size is not specialised
+     * either - no constants, so the generic program below) */
+    if (fx_repairable (*vsrc) && fx_repairable (*fsrc)) {
+        fxs_collect (sp, pass, *vsrc, *fsrc, cst);
+        fxs_hazards (sp, *vsrc, *fsrc);
+    }
     for (int i = 0; i < sp->n; i++) {
         sp->c[i].baked = fxs_bakeable (&sp->c[i]);
         sp->n_baked += sp->c[i].baked;

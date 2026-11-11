@@ -132,6 +132,15 @@ int walpe_weparticles_systems (WalpeWeParticles *p);
  * particle's frame), 2 = once; blend FALSE = "no frame blending". */
 float walpe_weparticles_sheet_frames (int n, int mode, float seqmult, float life,
                                       int random_frame, gboolean blend, int *f0, int *f1);
+/* how smooth a sprite picture is (no GL; the unit test's entry): the second
+ * differences of a w x h block of premultiplied RGBA (`stride` bytes between
+ * rows), counted by size into hist[0] (along x, 1 texel apart), hist[1]
+ * (x, 2 texels), hist[2] (y, 1) and hist[3] (y, 2), added to what is there */
+void walpe_weparticles_soft_hist (const guint8 *px, gsize stride, int w, int h, guint (*hist)[511]);
+/* ... and how often that was done since the process started: sprite files
+ * decoded and measured / systems that took the measurement an earlier
+ * system made of the same, unchanged file (walpe_weparticles_gl_init) */
+void walpe_weparticles_soft_stats (guint *measured, guint *kept);
 /* The reduced-resolution layer (render thread). Large soft sprites - fog,
  * smoke, glows, light shafts - can be drawn into a buffer of 1/2 or 1/4 of
  * the view and composited once: a fraction of the blending, the same
@@ -166,6 +175,14 @@ void walpe_weparticles_set_density (int percent);
 void walpe_weparticles_set_instanced (gboolean on);
 /* what is in force (the environment's overrides applied) */
 void walpe_weparticles_settings_get (int *lowres, int *density, gboolean *instanced);
+/* A refracting system reads a copy of the part of the frame it can reach
+ * (its quads' bounds grown by how far each one's normal map can move a
+ * sample); within a frame only what the copy does not hold yet, or what was
+ * drawn on since, is copied. TRUE: every such system copies the whole
+ * frame, the same picture from more pixels copied - a reference for tests;
+ * WALPE_PT_REFRACT_COPY=whole in the environment does the same (=each: the
+ * part it can reach, every time). */
+void walpe_weparticles_set_refract_whole (gboolean on);
 /* Counts the changes of the three settings above. They change what a
  * scene's particle objects draw while nothing in the scene changed: a
  * renderer that skips unchanged frames puts this number into what it

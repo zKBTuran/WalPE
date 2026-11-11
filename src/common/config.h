@@ -200,7 +200,12 @@ int          walpe_particle_lowres_from_name (const char *name, int fallback);
 const char  *walpe_particle_lowres_name (int mode);
 
 WalpeConfig *walpe_config_load  (void);
-void         walpe_config_save  (WalpeConfig *cfg);
+/* FALSE = config.json could not be written (a full disk, a directory that
+ * cannot be written to): the settings in memory stay as they are and the
+ * file as it was. walpe_config_save_error () then gives the reason, until
+ * a save succeeds (NULL = the last save was written). */
+gboolean     walpe_config_save  (WalpeConfig *cfg);
+const char  *walpe_config_save_error (void);
 void         walpe_config_free  (WalpeConfig *cfg);
 /* wallpaper user-property override access. get returns a g_free() string
  * or NULL when unset; set with value=NULL removes the override. get uses

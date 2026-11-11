@@ -443,6 +443,10 @@ int main (int argc, char **argv)
     if (strstr (T, "walpe-resmem-test-") && system (rm) != 0)
         g_printerr ("could not remove %s\n", T);
     g_free (rm);
+    g_free (home);
+    g_free (cfg);
+    g_free (cache);
+    g_free (data);
     if (failures)
         g_printerr ("%d check(s) failed\n", failures);
     else

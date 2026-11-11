@@ -3,7 +3,7 @@
 Animated desktop wallpapers for Linux/X11: **Wallpaper Engine scene, video and web
 projects, GIFs and still images**, rendered by a small GTK-free daemon (one EGL render
 thread per monitor), with a GTK4 library window, a tray icon and a command line client.
-Written in C; version 0.12.1.
+Written in C; version 0.12.2.
 
 > **WalPE is an independent project. It is not affiliated with or endorsed by Wallpaper
 > Engine, its developers or Valve, and it ships none of Wallpaper Engine's files.** The
@@ -253,8 +253,9 @@ releasing GPU memory while paused, frame clocks on one grid) are read from
 
 ## Pausing
 
-Per monitor, a wallpaper pauses while: you paused it; a focused fullscreen window is on the
-monitor (`pause_fullscreen`); the display is in power save or the screensaver runs
+Per monitor, a wallpaper pauses while: you paused it; a focused fullscreen window is on any
+monitor (`pause_fullscreen`: every monitor pauses, not only the one the window is on); the
+display is in power save or the screensaver runs
 (`pause_dpms`); or visible normal windows cover 85 % of the monitor or more
 (`pause_covered`; docks, desktop windows, menus, minimized windows and the windows of other
 dwm tags never count). See-through windows (WM_CLASSes in `transparent_windows`, or
@@ -262,8 +263,9 @@ dwm tags never count). See-through windows (WM_CLASSes in `transparent_windows`,
 
 A paused scene's clock stops (no jump on resume). A paused monitor does no decoding,
 rendering or capturing; a video decoder sleeps once every monitor showing it is paused, a
-web page is suspended once no monitor shows it, audio capture closes, and the daemon idles
-at about two wake-ups a second.
+web page is suspended once no monitor shows it, audio capture closes, and the daemon idles:
+no periodic wake-up was measured while every monitor is paused or covered, and about one
+every three seconds while a web page is loaded.
 
 ## Wallpaper Engine assets
 
@@ -350,8 +352,10 @@ a key), `--action=next|random|pause-toggle` runs a menu entry.
   only where the text says so; all other sizes, counts and timings are counts or
   software-rendering numbers, not the performance of a particular card. Version 0.12.1 was
   confirmed on that card as it stood before its last set of changes; that last set was
-  built and tested only on Mesa's software renderer (llvmpipe). Nothing has been run on AMD
-  or Intel graphics. Measure on your own card with `walpe-ctl profile`.
+  built and tested only on Mesa's software renderer (llvmpipe). The fixes of 0.12.2 were
+  built and tested only on that software renderer as well; nothing of 0.12.2 has been run
+  on the maintainer's card yet. Nothing has been run on AMD or Intel graphics. Measure on
+  your own card with `walpe-ctl profile`.
 - **X11 only.** The daemon draws into override-redirect X11 windows; there is no Wayland
   backend.
 - **No sound.** Scene sound objects are not played and the `volume` setting is stored only;
@@ -395,8 +399,8 @@ a key), `--action=next|random|pause-toggle` runs a menu entry.
 - **One scene's picture depends on reused effect targets.** In Workshop item 3465215190 a
   small area (about 66 x 40 pixels of a 960 x 540 frame, by up to 18 of 255) looks
   different depending on whether an effect target was just made or taken back from the
-  pool: one pass of a layer with an opacity below 100 % reads a target that was not written
-  in that frame, and which pass is not found yet. Unused targets are freed after 5 s
+  pool: a layer with an opacity below 100 % is drawn with or without its effects,
+  depending on that. Unused targets are freed after 5 s
   (`WALPE_FX_POOL_IDLE_MS`), so the other picture shows after the wallpaper was paused or
   hidden that long. `WALPE_FX_ALPHA=after` does not have it. It is the only one of the 91
   scenes of the test library that behaves so.
@@ -404,9 +408,8 @@ a key), `--action=next|random|pause-toggle` runs a menu entry.
   "application focused" limit to its own window; a scene that only follows the pointer
   still ticks (drawing nothing) while the pointer rests; a pointer moved by a program while
   it rests is noticed at the next real movement.
-- **Library window.** It does not show why a wallpaper could not be loaded
-  (`walpe-ctl status` does), and it still waits for the daemon in a few places ("Set as
-  wallpaper", Workshop downloads).
+- **Library window.** It still waits for the daemon in a few places ("Set as wallpaper",
+  Workshop downloads).
 - **Album art** is fetched from any address a music player names, including local ones.
 - `application` wallpapers are Windows programs and are not supported.
 
@@ -459,7 +462,9 @@ meson test -C build config ctl # single suites
 ```
 
 Tests that need a display start their own (`Xvfb`), tests that need OpenGL use EGL's
-surfaceless platform or a software device and skip (exit 77) without one. `fx-spec` and
+surfaceless platform or a software device and skip (exit 77) without one. In a build with
+`-Db_sanitize=address` (or `address,undefined`) `meson test` runs with leak detection and
+the suppressions of `tests/lsan.supp` without being asked. `fx-spec` and
 `fx-region` have an extra part on Wallpaper Engine's own effect shaders: it runs when an
 install is found the way the engine finds one ("Wallpaper Engine assets" above) and is
 skipped otherwise. `fx-rewrite-keys` checks its table of statement keys against an install

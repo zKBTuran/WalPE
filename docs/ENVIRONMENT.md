@@ -148,6 +148,7 @@ The other way round, `WALPE_MEM_STATS=1` switches memory numbers by kind in
 | `WALPE_PT_LOWRES_TOL=n` | 8 | the predicted resampling error of one sprite, in 1/255, that `auto` accepts (not a bound on the picture: overlapping sprites add up) |
 | `WALPE_PT_DENSITY=n` | config `particle_density` (100) | every system emits n per cent of its particles (5-100) |
 | `WALPE_PT_INSTANCED=0` / `=1` | config `particle_instancing` (on) | sprites as six full vertices each instead of one instanced record |
+| `WALPE_PT_REFRACT_COPY=whole` / `=each` | what is missing | a refracting particle system copies the whole frame before it draws / the part it can read (the bounds of its sprites, each grown by how far its normal map can move a sample; nothing without a normal map). Default: of that part only what the copy made for the systems before it in the same frame does not hold, or what was drawn on since; the same picture in all three |
 | `WALPE_PT_CAMERA=fixed` | follows the scene | perspective particle systems are seen from 1000 units in every scene instead of from the distance that follows the scene's height and field of view |
 | `WALPE_PT_SIZE=full` | half | sprites as wide as their `size` instead of half of it |
 | `WALPE_PT_WORLD=scaled` | own size | "world space" systems are drawn through their layer's scale and rotation instead of at their own size in scene units |
@@ -228,7 +229,7 @@ Not for daily use: test hooks, measuring aids and names the programs set for the
 | `WALPE_FX_PASS_DUMP=dir` / `WALPE_FX_SPEC_DUMP=dir` | engine | with `WALPE_FX_COST`: write what every pass of that frame drew / write the specialised shader sources as compiled |
 | `WALPE_CPU_PHASES=1` / `=2` | engine | CPU time of a scene frame by phase, read by `build/scenecpu`; `2` adds hashes of the particle state |
 | `WALPE_PROP_PROBE=dir` / `WALPE_PROP_PROBE_FRAME=n` | engine | scenes record which user-property values they consumed and write a digest of their state at frame `n` (default 6); used by the option-coverage tool |
-| `WALPE_IPC_FD`, `WALPE_LAYOUT_RESTARTED`, `WALPE_GL_HINTS_SET`, `WALPE_WEB_ENV_OURS`, `WALPE_WEB_PROBED`, `WALPE_WEB_PROBE_ACCEL` | daemon | set by the daemon for its own restart in place and for its web acceleration probe; never set them by hand |
+| `WALPE_IPC_FD`, `WALPE_LAYOUT_RESTARTED`, `WALPE_GL_HINTS_SET`, `WALPE_WEB_ENV_OURS`, `WALPE_WEB_PROBED`, `WALPE_WEB_PROBE_ACCEL`, `WALPE_WEB_PROBE_PARENT` | daemon | set by the daemon for its own restart in place and for its WebKit start-up test and web acceleration probe; never set them by hand |
 | `WALPE_UI_SET_GSK`, `WALPE_UI_SET_GDK` | GUI | set by the GUI to remember that a GTK renderer variable is its own choice, not yours |
 | `WALPE_WS_FIXTURES=dir`, `WALPE_WS_LIVE=1` | `workshop-test` | another fixture directory / also run the calls against Steam's servers |
 | `WALPE_FX_HOSTILE_CORPUS=dir`, `WALPE_FX_HOSTILE_VERBOSE=1`, `WALPE_SCENE_HOSTILE_VERBOSE=1`, `WALPE_TEST_VERBOSE=1` | test programs | extra shader corpus and verbose output |

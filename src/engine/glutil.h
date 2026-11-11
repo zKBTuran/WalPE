@@ -35,6 +35,9 @@ void walpe_glutil_draw_quad_tint (GLuint tex, gboolean premult, float opacity,
 void walpe_glutil_draw_mesh_tint (GLuint tex, gboolean premult, float opacity,
                                   const float *mvp, int blend, const float tint[3],
                                   GLuint vao, int index_count);
+/* render thread: free the copy of the frame the blend-mode draws work on
+ * (made again on demand) */
+void walpe_glutil_blend_release (void);
 
 /* draw planar I420 (three GL_R8 planes) as opaque RGB, BT.601 limited */
 void walpe_glutil_draw_yuv (GLuint ty, GLuint tu, GLuint tv, const float *mvp);

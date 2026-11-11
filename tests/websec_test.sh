@@ -18,7 +18,11 @@
 #  5. the page's token (the secret part of its address, which guards the
 #     loopback file server) does not appear in the log - it did, in the
 #     line for a refused download of one of the page's own files and in
-#     console lines.
+#     console lines;
+#  6. the WebKit start-up test that the daemon runs in a child process
+#     before its first page: a child that never finishes (stopped here) is
+#     ended after 40 s and the reason is in the log and in status - the
+#     pages used to wait for it for good, black, with nothing said.
 #
 # Skipped (exit 77) without Xvfb / python3 / the web module, or when WebKit
 # does not come up here. Run: meson test -C build websec -v
@@ -177,5 +181,37 @@ n=$(grep -c 'web timing: page requestAnimationFrame' "$T/daemon.log")
 [ "$n" -le 5 ] || bad "$n log lines from a message any page can post (raf:)"
 n=$(grep -c 'PermissionRequest refused' "$T/daemon.log")
 [ "$n" -le 10 ] || bad "$n log lines for permission requests of one page"
+
+# --- a daemon of its own for the start-up test that does not finish
+"$B/walpe-ctl" quit >/dev/null 2>&1
+i=0; while kill -0 "$DPID" 2>/dev/null && [ $i -lt 100 ]; do sleep 0.2; i=$((i+1)); done
+kill "$DPID" 2>/dev/null
+rm -f "$HOME/.config/walpe/config.json"
+"$B/walpe-daemon" > "$T/daemon2.log" 2>&1 &
+DPID=$!
+i=0; while [ ! -S "$XDG_RUNTIME_DIR/walpe.sock" ] && [ $i -lt 100 ]; do sleep 0.2; i=$((i+1)); done
+"$B/walpe-ctl" open "$T/wp" >/dev/null 2>&1
+# the test process: a child of the daemon started with --web-probe
+CH= i=0
+while [ -z "$CH" ] && [ $i -lt 400 ] && ! grep -q 'WebKit start-up test' "$T/daemon2.log"; do
+    for st in /proc/[0-9]*/stat; do
+        p=${st#/proc/}; p=${p%/stat}
+        pp=$(sed 's/.*) [A-Za-z] \([0-9]*\) .*/\1/' "$st" 2>/dev/null)
+        if [ "$pp" = "$DPID" ] && tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q -- '--web-probe'; then
+            CH=$p; break
+        fi
+    done
+    [ -n "$CH" ] || sleep 0.05
+    i=$((i+1))
+done
+[ -n "$CH" ] && kill -STOP "$CH" 2>/dev/null && sleep 1
+if [ -n "$CH" ] && ! grep -q 'WebKit start-up test' "$T/daemon2.log"; then
+    i=0; while ! grep -q 'did not finish within' "$T/daemon2.log" && [ $i -lt 140 ]; do sleep 0.5; i=$((i+1)); done
+    grep -q 'did not finish within' "$T/daemon2.log" || bad "a WebKit start-up test that never finishes was waited for without end"
+    "$B/walpe-ctl" status 2>/dev/null | grep -q 'web_error.*did not finish' || bad "status does not say that the WebKit start-up test did not finish (web_error)"
+    kill -KILL "$CH" 2>/dev/null
+else
+    echo "note: the WebKit start-up test was over before it could be stopped (its time limit not exercised)"
+fi
 [ $fail -eq 0 ] && echo "websec: ok"
 exit $fail

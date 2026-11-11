@@ -11,6 +11,9 @@
  *  3. MPRIS cover art (media.c): the decode refuses what is too large or
  *     not a regular file, and the cache of decoded covers holds at most
  *     two thumbnails of bounded size, never the input.
+ *     A cover named by an http URL is read up to 16 MiB as it comes out
+ *     of the content decoder: a small "Content-Encoding: gzip" body that
+ *     unpacks to hundreds of MiB is given up, not collected.
  *
  * Inputs: those of the other limit tests (tests/guard_test.c: a 43-byte GIF with a huge
  * canvas; tests/formats_test.c: a real PNG of 20000 x 4 pixels, a
@@ -23,14 +26,20 @@
  * Mesa's surfaceless platform the good paths run as well: a picture
  * really is stored at the size shown, and a file that became too large is
  * refused when it is decoded again. Private temp dir = HOME. */
+#include "walpe-build-config.h"
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <gio/gio.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <epoxy/gl.h>
 #include <epoxy/egl.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef HAVE_SOUP
+#include <libsoup/soup.h>
+#endif
 
 #include "common/media.h"
 #include "engine/content.h"
@@ -352,6 +361,60 @@ static void test_gl (void)
 
 /* --------------------------------------------------- 3. MPRIS cover art */
 
+/* A JPEG of w x h written by hand. kind 0: progressive, one AC scan per
+ * component in which every block lies inside an end-of-band run (15 zero
+ * bits cover 16384 blocks) - a few hundred bytes that a decoder has to
+ * hold whole at full size. kind 1: sequential with a scan per component
+ * (held whole as well). kind 2: sequential, one scan for all components
+ * (decoded as it is read). sub: the first component sampled 2 x 2. */
+static GByteArray *hand_jpeg (guint w, guint h, guint ncomp, int kind, gboolean sub)
+{
+    GByteArray *o = g_byte_array_new ();
+    #define SEG(m, body, n) do { guint8 hd_[4] = { 0xFF, (m), (guint8) (((n) + 2) >> 8), (guint8) ((n) + 2) }; \
+                                 g_byte_array_append (o, hd_, 4); g_byte_array_append (o, (body), (n)); } while (0)
+    g_byte_array_append (o, (const guint8 *) "\xFF\xD8", 2);
+    guint8 dqt[65];
+    memset (dqt, 1, sizeof dqt);
+    dqt[0] = 0;
+    SEG (0xDB, dqt, 65);
+    guint8 sof[6 + 3 * 4] = { 8, (guint8) (h >> 8), (guint8) h, (guint8) (w >> 8), (guint8) w, (guint8) ncomp };
+    for (guint c = 0; c < ncomp; c++) {
+        sof[6 + 3 * c] = (guint8) (c + 1);
+        sof[7 + 3 * c] = sub && c == 0 ? 0x22 : 0x11;
+        sof[8 + 3 * c] = 0;
+    }
+    SEG (kind == 0 ? 0xC2 : 0xC0, sof, 6 + 3 * ncomp);
+    /* AC table 0: one code, '0', for symbol 0xE0 (an end-of-band run of
+     * 2^14 blocks plus 14 more bits); DC table 0: one code for "no change" */
+    guint8 dht[18] = { 0x10, 1 };
+    dht[17] = kind == 0 ? 0xE0 : 0x00;
+    SEG (0xC4, dht, 18);
+    dht[0] = 0x00;
+    dht[17] = 0x00;
+    SEG (0xC4, dht, 18);
+    if (kind == 2) {
+        guint8 sos[1 + 2 * 4 + 3] = { (guint8) ncomp };
+        for (guint c = 0; c < ncomp; c++)
+            sos[1 + 2 * c] = (guint8) (c + 1);
+        sos[1 + 2 * ncomp + 1] = 63;
+        SEG (0xDA, sos, 1 + 2 * ncomp + 3);
+    } else {
+        guint64 blocks = (guint64) ((w + 7) / 8) * ((h + 7) / 8) * (sub ? 4 : 1);
+        guint zeros = (guint) (((blocks + 16383) / 16384 * 15 + 7) / 8 + 2);
+        guint8 *z = g_malloc0 (zeros);
+        for (guint c = 0; c < ncomp; c++) {
+            guint8 sos[6] = { 1, (guint8) (c + 1), 0, (guint8) (kind == 0 ? 1 : 0), 63, 0 };
+            SEG (0xDA, sos, 6);
+            if (kind == 0)
+                g_byte_array_append (o, z, zeros);
+        }
+        g_free (z);
+    }
+    g_byte_array_append (o, (const guint8 *) "\xFF\xD9", 2);
+    #undef SEG
+    return o;
+}
+
 /* one cover is at most the THUMB_MAX thumbnail: 640 x 640 RGBA, the same
  * picture as a data: URL (PNG of noise at worst: base64 of a little more
  * than the pixels) and its key */
@@ -424,6 +487,31 @@ static void test_art (void)
         g_free (raw);
     }
 
+    /* A JPEG is decoded at about the size shown only when it has one
+     * scan. A progressive one is held whole first by its decoder: a few
+     * hundred bytes declaring 8192 x 8192 in three components would cost
+     * 384 MiB. Refused; a small progressive cover is shown. */
+    {
+        GByteArray *pj = hand_jpeg (8192, 8192, 3, 0, FALSE);
+        CHECK (pj->len < 2000);
+        char *b64 = g_base64_encode (pj->data, pj->len);
+        char *du = g_strconcat ("data:image/jpeg;base64,", b64, NULL);
+        g_string_truncate (logged, 0);
+        CHECK (!walpe_media_art_probe (du, &w, &h, &n, &bytes));
+        CHECK (strstr (logged->str, "held whole") != NULL);
+        CHECK (n == 2 && bytes == before);
+        g_free (du);
+        g_free (b64);
+        g_byte_array_unref (pj);
+        pj = hand_jpeg (64, 48, 1, 0, FALSE);
+        b64 = g_base64_encode (pj->data, pj->len);
+        du = g_strconcat ("data:image/jpeg;base64,", b64, NULL);
+        CHECK (walpe_media_art_probe (du, &w, &h, &n, &bytes) && w == 64 && h == 48);
+        g_free (du);
+        g_free (b64);
+        g_byte_array_unref (pj);
+    }
+
     /* a cover whose file changed is not served from the cache */
     copy_over (c3, c1);
     struct stat st;
@@ -432,6 +520,49 @@ static void test_art (void)
 
     walpe_media_art_probe (NULL, NULL, NULL, &n, &bytes);
     CHECK (n == 0 && bytes == 0);
+
+    /* a cover asked for again while it is the one shown comes from the
+     * cache and is published a second time: the published state holds one
+     * reference to its pixels, not one per request. When three other
+     * covers have pushed it out of the published pair (thumbnail and
+     * previous thumbnail) and out of the cache, the reference taken here
+     * is the last one: GBytes then hands out the buffer itself, not a copy */
+    {
+        char *c4 = save_pic ("cover4.png", 320, 200, "png");
+        static const char *more[3] = { "cover5.png", "cover6.png", "cover7.png" };
+        CHECK (walpe_media_art_probe (c4, &w, &h, &n, &bytes) && w == 320 && h == 200);
+        CHECK (walpe_media_art_probe (c4, &w, &h, &n, &bytes) && w == 320 && h == 200);
+        WalpeNowPlaying np;
+        walpe_media_get (&np);
+        GBytes *pix = np.thumb ? g_bytes_ref (np.thumb) : NULL;
+        walpe_media_now_clear (&np);
+        CHECK (pix != NULL);
+        for (int i = 0; i < 3; i++) {
+            char *c = save_pic (more[i], 48 + 16 * i, 48, "png");
+            CHECK (walpe_media_art_probe (c, &w, &h, &n, &bytes) && w == 48 + 16 * i);
+            g_free (c);
+        }
+        walpe_media_art_probe (NULL, NULL, NULL, &n, &bytes);
+        /* The job of a decode holds the picture too, until the worker
+         * thread that ran it has let go of its task; that can be after the
+         * probe returned (it failed here on a busy machine: the first
+         * decode's job was still there, and the buffer came back as a
+         * copy). Wait for the jobs to be gone - what is checked below is
+         * what the published state and the cache hold. */
+        if (!walpe_media_art_settled (20000)) {
+            g_printerr ("FAIL %s:%d: a cover decode's job still exists 20 s after its result\n",
+                        __FILE__, __LINE__);
+            fails++;
+        }
+        if (pix) {
+            gsize len = 0;
+            gconstpointer was = g_bytes_get_data (pix, &len);
+            gpointer got = g_bytes_unref_to_data (pix, &len);
+            CHECK (got == was && len == 320 * 200 * 4);
+            g_free (got);
+        }
+        g_free (c4);
+    }
     g_free (c1);
     g_free (c2);
     g_free (c3);
@@ -441,6 +572,140 @@ static void test_art (void)
     g_free (fifo);
     g_free (dir);
 }
+
+#ifdef HAVE_SOUP
+/* ---- cover art over http: a server on loopback that answers with a small
+ * PNG, the same PNG gzip-packed, a gzip body of ART_PACKED_PLAIN zero
+ * bytes, and a plain body that is longer than cover art may be */
+#define ART_PACKED_PLAIN ((gsize) 256 << 20)
+#define ART_LONG_PLAIN ((gsize) 20 << 20)
+
+static struct { GBytes *png, *png_gz, *zeros_gz, *long_body; } ArtSrv;
+
+static GBytes *gzip_of (const guint8 *d, gsize len, gsize zeros_after)
+{
+    static const guint8 zero[65536];
+    GZlibCompressor *z = g_zlib_compressor_new (G_ZLIB_COMPRESSOR_FORMAT_GZIP, 6);
+    GOutputStream *mem = g_memory_output_stream_new_resizable ();
+    GOutputStream *out = g_converter_output_stream_new (mem, G_CONVERTER (z));
+    gboolean ok = len == 0 || g_output_stream_write_all (out, d, len, NULL, NULL, NULL);
+    for (gsize left = zeros_after; ok && left > 0; left -= MIN (left, sizeof zero))
+        ok = g_output_stream_write_all (out, zero, MIN (left, sizeof zero), NULL, NULL, NULL);
+    ok = g_output_stream_close (out, NULL, NULL) && ok;
+    GBytes *b = ok ? g_memory_output_stream_steal_as_bytes (G_MEMORY_OUTPUT_STREAM (mem)) : NULL;
+    g_object_unref (out);
+    g_object_unref (mem);
+    g_object_unref (z);
+    return b;
+}
+
+static void art_server (SoupServer *srv, SoupServerMessage *msg, const char *path, GHashTable *query,
+                        gpointer user)
+{
+    (void) srv; (void) query; (void) user;
+    SoupMessageHeaders *h = soup_server_message_get_response_headers (msg);
+    GBytes *body = NULL;
+    gboolean packed = FALSE;
+    if (!strcmp (path, "/cover.png")) {
+        body = ArtSrv.png;
+    } else if (!strcmp (path, "/cover-packed.png")) {
+        body = ArtSrv.png_gz;
+        packed = TRUE;
+    } else if (!strcmp (path, "/zeros-packed.png")) {
+        body = ArtSrv.zeros_gz;
+        packed = TRUE;
+    } else if (!strcmp (path, "/long.png")) {
+        body = ArtSrv.long_body;
+        /* no Content-Length: the length is found out by reading */
+        soup_message_headers_set_encoding (h, SOUP_ENCODING_CHUNKED);
+    }
+    if (!body) {
+        soup_server_message_set_status (msg, 404, NULL);
+        return;
+    }
+    soup_server_message_set_status (msg, 200, NULL);
+    soup_message_headers_replace (h, "Content-Type", "image/png");
+    if (packed)
+        soup_message_headers_replace (h, "Content-Encoding", "gzip");
+    soup_message_body_append_bytes (soup_server_message_get_response_body (msg), body);
+}
+
+static long max_rss_kb (void)
+{
+    struct rusage ru;
+    getrusage (RUSAGE_SELF, &ru);
+    return ru.ru_maxrss;
+}
+
+static void test_art_http (void)
+{
+    SoupServer *srv = soup_server_new (NULL, NULL);
+    soup_server_add_handler (srv, NULL, art_server, NULL, NULL);
+    GSList *uris = soup_server_listen_local (srv, 0, SOUP_SERVER_LISTEN_IPV4_ONLY, NULL)
+                   ? soup_server_get_uris (srv) : NULL;
+    if (!uris) {
+        g_print ("limits-test: no loopback listener here: cover art over http not exercised\n");
+        g_object_unref (srv);
+        return;
+    }
+    char *base = g_uri_to_string (uris->data);
+    g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+    if (g_str_has_suffix (base, "/"))
+        base[strlen (base) - 1] = 0;
+
+    char *file = save_pic ("httpcover.png", 200, 100, "png");
+    char *raw = NULL;
+    gsize len = 0;
+    CHECK (g_file_get_contents (file, &raw, &len, NULL));
+    ArtSrv.png = g_bytes_new_take (raw, len);
+    ArtSrv.png_gz = gzip_of ((const guint8 *) raw, len, 0);
+    ArtSrv.zeros_gz = gzip_of (NULL, 0, ART_PACKED_PLAIN);
+    ArtSrv.long_body = g_bytes_new_take (g_malloc0 (ART_LONG_PLAIN), ART_LONG_PLAIN);
+    CHECK (ArtSrv.png_gz && ArtSrv.zeros_gz && g_bytes_get_size (ArtSrv.zeros_gz) < 1024 * 1024);
+
+    int w = 0, h = 0;
+    guint n = 0;
+    gsize bytes = 0;
+    char *u = g_strconcat (base, "/cover.png", NULL);
+    CHECK (walpe_media_art_probe (u, &w, &h, &n, &bytes) && w == 200 && h == 100);
+    g_free (u);
+    /* packed on the way: unpacked by the client, decoded */
+    u = g_strconcat (base, "/cover-packed.png", NULL);
+    CHECK (walpe_media_art_probe (u, &w, &h, &n, &bytes) && w == 200 && h == 100);
+    g_free (u);
+    /* a quarter of a MiB on the wire, 256 MiB once unpacked: the limit is
+     * on what comes out of the unpacking, while it arrives */
+    long rss0 = max_rss_kb ();
+    u = g_strconcat (base, "/zeros-packed.png", NULL);
+    CHECK (!walpe_media_art_probe (u, &w, &h, &n, &bytes));
+    long grew = max_rss_kb () - rss0;
+    CHECK (grew < 128 * 1024);
+    g_print ("limits-test: packed cover of %" G_GSIZE_FORMAT " bytes (256 MiB unpacked): peak RSS "
+             "grew by %.1f MiB\n", g_bytes_get_size (ArtSrv.zeros_gz), (double) grew / 1024.0);
+    g_free (u);
+    /* a plain body beyond the limit, its length not announced */
+    u = g_strconcat (base, "/long.png", NULL);
+    CHECK (!walpe_media_art_probe (u, &w, &h, &n, &bytes));
+    g_free (u);
+    u = g_strconcat (base, "/none.png", NULL);
+    CHECK (!walpe_media_art_probe (u, &w, &h, &n, &bytes));
+    g_free (u);
+    /* and the next cover is shown as before */
+    u = g_strconcat (base, "/cover.png", NULL);
+    CHECK (walpe_media_art_probe (u, &w, &h, &n, &bytes) && w == 200 && h == 100);
+    g_free (u);
+
+    walpe_media_art_probe (NULL, NULL, NULL, &n, &bytes);
+    soup_server_disconnect (srv);
+    g_object_unref (srv);
+    g_bytes_unref (ArtSrv.png);
+    g_bytes_unref (ArtSrv.png_gz);
+    g_bytes_unref (ArtSrv.zeros_gz);
+    g_bytes_unref (ArtSrv.long_body);
+    g_free (file);
+    g_free (base);
+}
+#endif /* HAVE_SOUP */
 
 int main (void)
 {
@@ -452,6 +717,17 @@ int main (void)
     logged = g_string_new (NULL);
     g_log_set_writer_func (log_writer, NULL, NULL);
 
+#ifdef HAVE_SOUP
+    /* the server is on loopback: no proxy in between. First of all: the
+     * peak of memory use is measured, and nothing has raised it yet */
+    const char *px[] = { "http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy",
+                         "ALL_PROXY", NULL };
+    for (int i = 0; px[i]; i++)
+        g_unsetenv (px[i]);
+    g_setenv ("no_proxy", "127.0.0.1,localhost", TRUE);
+    g_setenv ("GSETTINGS_BACKEND", "memory", TRUE);
+    test_art_http ();
+#endif
     test_gif ();
     test_image ();
     test_art ();

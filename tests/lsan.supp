@@ -1,0 +1,17 @@
+# LeakSanitizer suppressions for the test suites of a sanitizer build
+# (meson.build: test setup "sanitize", which `meson test` uses by itself in
+# a build made with -Db_sanitize=address...). By hand:
+#   LSAN_OPTIONS=suppressions=tests/lsan.supp build/<name>-test
+#
+# Only memory of libraries that LeakSanitizer cannot follow is listed.
+# Nothing allocated by this tree's own code is.
+
+# fontconfig: a pattern keeps its element array, and a value list its next
+# entry, as an OFFSET from the object, not as a pointer (the same structures
+# live in its mmap()ed cache files). LeakSanitizer finds no pointer to them
+# and reports the elements of every pattern that is alive at exit - those
+# of the configuration FcInit () loads on Pango's start-up thread, those in
+# the caches of Pango's font map - as lost, with all that hangs off them.
+# (What the text code allocates through fontconfig itself is given back in
+# walpe_text_release (); a text-part check holds that against the heap.)
+leak:libfontconfig.so

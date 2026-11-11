@@ -144,6 +144,15 @@ static void test_o5_rules (void)
     CHECK (!walpe_follow_free (75, 144.0, 60.0));
     CHECK (!walpe_follow_free (120, 0.0, 60.0));      /* leader rate unknown: the setting alone */
     CHECK (!walpe_follow_free (60, 144.0, 0.0));      /* follower rate unknown */
+    {
+        /* a follower with an absurd rate shows every frame; no rate at all = unknown */
+        volatile double absurd = 4294967295.0, nan = NAN;
+        CHECK (walpe_follow_free (60, 144.0, absurd));
+        CHECK (walpe_follow_free (200, absurd, absurd));
+        CHECK (!walpe_follow_free (60, 144.0, nan));
+        CHECK (walpe_follow_free (60, nan, 60.0));    /* leader rate unknown: paced by the setting */
+        CHECK (!walpe_follow_free (120, nan, 60.0));
+    }
 
     /* a follower's own limit counts only below its leader's */
     CHECK (walpe_follow_cap (15, 60) == 15);
@@ -246,6 +255,19 @@ static void test_paced (void)
     CHECK (fabs (walpe_mode_refresh (346500000, 2080, 1157, FALSE, FALSE) - 143.981) < 0.01);
     CHECK (fabs (walpe_mode_refresh (74250000, 2200, 1125, TRUE, FALSE) - 60.0) < 0.001);  /* 1080i: fields */
     CHECK (walpe_mode_refresh (0, 0, 0, FALSE, FALSE) == 0.0);
+    /* a mode whose timings give an absurd rate (a dot clock of 4 GHz over
+     * totals of 1 x 1: more than an int holds), and values that are no
+     * rate at all: the limit alone, never a negative frame rate. volatile:
+     * the rate comes from the X server at run time, not from a constant */
+    volatile double absurd = walpe_mode_refresh (4294967295UL, 1, 1, FALSE, FALSE);
+    volatile double huge = 1e300, inf = INFINITY, nan = NAN;
+    CHECK (absurd > 2147483648.0);
+    CHECK (walpe_paced_fps (60, absurd) == 60);
+    CHECK (walpe_paced_fps (200, huge) == 200);
+    CHECK (walpe_paced_fps (60, inf) == 60);
+    CHECK (walpe_paced_fps (60, nan) == 60);
+    CHECK (walpe_paced_fps (60, -inf) == 60);
+    CHECK (walpe_paced_fps (200, 2147483647.5) == 200);
     /* WALPE_MONITORS "@HZ" */
     CHECK (walpe_monitor_spec_hz ("1920x1080+0+0@144") == 144.0);
     CHECK (fabs (walpe_monitor_spec_hz ("1920x1080+1920+0@59.94") - 59.94) < 1e-9);
@@ -381,6 +403,8 @@ int main (void)
     g_remove (cfg_path);
     g_rmdir (dir);
     g_rmdir (tmp);
+    g_free (dir);
+    g_free (tmp);
     if (fails) {
         g_printerr ("%d check(s) failed\n", fails);
         return 1;

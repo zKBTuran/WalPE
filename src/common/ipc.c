@@ -27,11 +27,130 @@ typedef struct {
     gpointer user;
 } IpcCtx;
 
-/* FALSE = the client did not take the reply (gone, or not reading): the
- * session is closed. The write is bounded: a client that asks and never
- * reads would otherwise block the daemon's main loop for good once the
- * socket buffer is full. */
-static gboolean send_reply (GSocketConnection *conn, const char *reply)
+typedef struct {
+    IpcCtx *ctx;
+    GSocketConnection *conn;
+    GString *acc;           /* bytes received, not yet a complete line */
+    GCancellable *cancel;   /* ends the pending read (eviction) */
+    gint64 active_us;       /* last data from the client */
+    gboolean subscribed;    /* gets walpe_ipc_broadcast lines */
+    gboolean reading;       /* a read is pending: session_read frees the session */
+    /* a reply the socket did not take at once (the client is slow, or does
+     * not read): kept here and sent when the socket takes more. Nothing is
+     * read from the client meanwhile, so at most one reply waits. */
+    GString *out;
+    gsize out_off;          /* bytes of out already sent */
+    GSource *out_src;       /* the socket can take more */
+    guint out_timer;        /* a client that does not read is dropped */
+    gint64 out_us;          /* the last time the socket took something */
+    gboolean close_when_sent;
+    char buf[4096];
+} IpcSession;
+
+static GList *sessions;      /* main loop only */
+static guint n_sessions;
+static guint n_subscribed;
+static IpcSession *current;  /* the session whose request the handler is working on */
+
+static void session_pump (IpcSession *s);
+
+static gsize session_unsent (IpcSession *s)
+{
+    return s->out->len - s->out_off;
+}
+
+static void session_out_stop (IpcSession *s)
+{
+    if (s->out_src) {
+        g_source_destroy (s->out_src);
+        g_source_unref (s->out_src);
+        s->out_src = NULL;
+    }
+    if (s->out_timer) {
+        g_source_remove (s->out_timer);
+        s->out_timer = 0;
+    }
+}
+
+/* never while its read is pending (reading): that read is cancelled
+ * instead and its callback, session_read, comes here */
+static void session_free (IpcSession *s)
+{
+    if (s->subscribed)
+        n_subscribed--;
+    if (current == s)
+        current = NULL;
+    n_sessions--;
+    sessions = g_list_remove (sessions, s);
+    session_out_stop (s);
+    g_object_unref (s->cancel);
+    g_io_stream_close (G_IO_STREAM (s->conn), NULL, NULL);
+    g_object_unref (s->conn);
+    g_string_free (s->acc, TRUE);
+    g_string_free (s->out, TRUE);
+    g_free (s);
+}
+
+/* hand the socket what it takes now, without waiting. FALSE = the
+ * connection is gone */
+static gboolean session_flush (IpcSession *s)
+{
+    GSocket *sk = g_socket_connection_get_socket (s->conn);
+    while (session_unsent (s)) {
+        GError *err = NULL;
+        gssize n = g_socket_send_with_blocking (sk, s->out->str + s->out_off, session_unsent (s),
+                                                FALSE, NULL, &err);
+        if (n > 0) {
+            s->out_off += (gsize) n;
+            s->out_us = g_get_monotonic_time ();
+            continue;
+        }
+        gboolean later = g_error_matches (err, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK);
+        g_clear_error (&err);
+        return later;
+    }
+    g_string_truncate (s->out, 0);
+    s->out_off = 0;
+    return TRUE;
+}
+
+static gboolean session_out_ready (GSocket *sk, GIOCondition cond, gpointer user)
+{
+    (void) sk; (void) cond;
+    IpcSession *s = user;
+    if (!session_flush (s)) {
+        session_free (s);
+        return G_SOURCE_REMOVE;
+    }
+    if (session_unsent (s))
+        return G_SOURCE_CONTINUE;
+    session_out_stop (s);
+    if (s->close_when_sent)
+        session_free (s);
+    else
+        session_pump (s);       /* the requests that waited behind this reply */
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean session_out_check (gpointer user)
+{
+    IpcSession *s = user;
+    if (g_get_monotonic_time () - s->out_us < IPC_REPLY_TIMEOUT_S * G_USEC_PER_SEC)
+        return G_SOURCE_CONTINUE;
+    s->out_timer = 0;
+    session_free (s);           /* it asked and does not read */
+    return G_SOURCE_REMOVE;
+}
+
+/* A reply for the client. It is never waited for: what the socket does not
+ * take at once is sent when it does (session_out_ready), and a client that
+ * takes nothing for IPC_REPLY_TIMEOUT_S is dropped. (The write used to
+ * block for up to that long on the daemon's main loop: one client that
+ * asked and did not read held up every other client, the X events and a
+ * web wallpaper's page for three seconds, and the next such connection
+ * for three more.) FALSE = the connection is gone: the caller frees the
+ * session. */
+static gboolean session_send (IpcSession *s, const char *reply)
 {
     if (!reply)
         reply = "{\"ok\":false,\"error\":\"internal\"}";
@@ -43,57 +162,40 @@ static gboolean send_reply (GSocketConnection *conn, const char *reply)
     g_autofree char *valid = NULL;
     if (!g_utf8_validate (reply, -1, NULL))
         reply = valid = g_utf8_make_valid (reply, -1);
-    GSocket *sk = g_socket_connection_get_socket (conn);
-    GOutputStream *os = g_io_stream_get_output_stream (G_IO_STREAM (conn));
-    g_socket_set_timeout (sk, IPC_REPLY_TIMEOUT_S);
-    gboolean ok = g_output_stream_write_all (os, reply, strlen (reply), NULL, NULL, NULL) &&
-                  g_output_stream_write_all (os, "\n", 1, NULL, NULL, NULL);
-    g_socket_set_timeout (sk, 0);   /* reads wait for the next request without a limit */
-    return ok;
-}
-
-typedef struct {
-    IpcCtx *ctx;
-    GSocketConnection *conn;
-    GString *acc;           /* bytes received, not yet a complete line */
-    GCancellable *cancel;   /* ends the pending read (eviction) */
-    gint64 active_us;       /* last data from the client */
-    gboolean subscribed;    /* gets walpe_ipc_broadcast lines */
-    char buf[4096];
-} IpcSession;
-
-static GList *sessions;      /* main loop only */
-static guint n_sessions;
-static guint n_subscribed;
-static IpcSession *current;  /* the session whose request the handler is working on */
-
-static void session_free (IpcSession *s)
-{
-    if (s->subscribed)
-        n_subscribed--;
-    if (current == s)
-        current = NULL;
-    n_sessions--;
-    sessions = g_list_remove (sessions, s);
-    g_object_unref (s->cancel);
-    g_io_stream_close (G_IO_STREAM (s->conn), NULL, NULL);
-    g_object_unref (s->conn);
-    g_string_free (s->acc, TRUE);
-    g_free (s);
+    g_string_append (s->out, reply);
+    g_string_append_c (s->out, '\n');
+    if (!session_flush (s))
+        return FALSE;
+    if (session_unsent (s) && !s->out_src) {
+        s->out_us = g_get_monotonic_time ();
+        s->out_src = g_socket_create_source (g_socket_connection_get_socket (s->conn), G_IO_OUT, NULL);
+        g_source_set_callback (s->out_src, G_SOURCE_FUNC (session_out_ready), s, NULL);
+        g_source_attach (s->out_src, NULL);
+        s->out_timer = g_timeout_add_seconds (1, session_out_check, s);
+    }
+    return TRUE;
 }
 
 static void session_read (GObject *src, GAsyncResult *res, gpointer user)
 {
     IpcSession *s = user;
     gssize n = g_input_stream_read_finish (G_INPUT_STREAM (src), res, NULL);
+    s->reading = FALSE;
     if (n <= 0) {
         session_free (s);   /* EOF or error: the client is gone */
         return;
     }
     g_string_append_len (s->acc, s->buf, n);
     s->active_us = g_get_monotonic_time ();
+    session_pump (s);
+}
+
+/* the complete request lines received so far, one at a time and only
+ * while the reply before is out; then the next read */
+static void session_pump (IpcSession *s)
+{
     char *nl;
-    while ((nl = memchr (s->acc->str, '\n', s->acc->len))) {
+    while (!session_unsent (s) && (nl = memchr (s->acc->str, '\n', s->acc->len))) {
         gsize ll = (gsize) (nl - s->acc->str);
         /* a NUL byte ends the C string the handler gets: what followed it
          * on the line was dropped without a word and the part before it
@@ -107,7 +209,7 @@ static void session_read (GObject *src, GAsyncResult *res, gpointer user)
                           ? s->ctx->handler (line, s->ctx->user)
                           : g_strdup ("{\"ok\":false,\"error\":\"bad json (not UTF-8)\"}");
         current = NULL;
-        gboolean ok = send_reply (s->conn, reply);
+        gboolean ok = session_send (s, reply);
         g_free (reply);
         g_free (line);
         if (!ok) {
@@ -115,15 +217,20 @@ static void session_read (GObject *src, GAsyncResult *res, gpointer user)
             return;
         }
     }
+    if (session_unsent (s))
+        return;     /* session_out_ready goes on from here */
     if (s->acc->len > IPC_MAX_REQUEST) {
         /* no request is anywhere near this long: a client that never sends
          * the newline must not grow the daemon without bound */
-        send_reply (s->conn, "{\"ok\":false,\"error\":\"request too long\"}");
-        session_free (s);
+        if (session_send (s, "{\"ok\":false,\"error\":\"request too long\"}") && session_unsent (s))
+            s->close_when_sent = TRUE;
+        else
+            session_free (s);
         return;
     }
-    g_input_stream_read_async (G_INPUT_STREAM (src), s->buf, sizeof (s->buf), G_PRIORITY_DEFAULT,
-                               s->cancel, session_read, s);
+    s->reading = TRUE;
+    g_input_stream_read_async (g_io_stream_get_input_stream (G_IO_STREAM (s->conn)), s->buf,
+                               sizeof (s->buf), G_PRIORITY_DEFAULT, s->cancel, session_read, s);
 }
 
 static gboolean on_incoming (GSocketService *svc, GSocketConnection *conn,
@@ -149,8 +256,9 @@ static gboolean on_incoming (GSocketService *svc, GSocketConnection *conn,
         IpcSession *old = NULL;
         for (GList *l = sessions; l; l = l->next) {
             IpcSession *o = l->data;
-            /* a subscriber (tray, GUI) is silent by design: not the one to drop */
-            if (!o->subscribed && !g_cancellable_is_cancelled (o->cancel) &&
+            /* a subscriber (tray, GUI) is silent by design: not the one to
+             * drop; nor the one whose request is being worked on */
+            if (!o->subscribed && o != current && !g_cancellable_is_cancelled (o->cancel) &&
                 (!old || o->active_us < old->active_us))
                 old = o;
         }
@@ -163,18 +271,21 @@ static gboolean on_incoming (GSocketService *svc, GSocketConnection *conn,
             }
             return TRUE;
         }
-        g_cancellable_cancel (old->cancel);     /* its read ends, session_read frees it */
+        if (old->reading)
+            g_cancellable_cancel (old->cancel);     /* its read ends, session_read frees it */
+        else
+            session_free (old);                     /* it has a reply to take and does not */
     }
     n_sessions++;
     IpcSession *s = g_new0 (IpcSession, 1);
     s->ctx = ctx;
     s->conn = g_object_ref (conn);
     s->acc = g_string_new (NULL);
+    s->out = g_string_new (NULL);
     s->cancel = g_cancellable_new ();
     s->active_us = g_get_monotonic_time ();
     sessions = g_list_prepend (sessions, s);
-    g_input_stream_read_async (g_io_stream_get_input_stream (G_IO_STREAM (conn)), s->buf,
-                               sizeof (s->buf), G_PRIORITY_DEFAULT, s->cancel, session_read, s);
+    session_pump (s);       /* nothing received yet: the first read */
     return TRUE;
 }
 
@@ -211,18 +322,26 @@ void walpe_ipc_broadcast (const char *line)
         line = valid = g_utf8_make_valid (line, -1);
     char *msg = g_strconcat (line, "\n", NULL);
     gsize len = strlen (msg);
+    GSList *gone = NULL;
     for (GList *l = sessions; l; l = l->next) {
         IpcSession *s = l->data;
         if (!s->subscribed || g_cancellable_is_cancelled (s->cancel))
             continue;
         GSocket *sk = g_socket_connection_get_socket (s->conn);
-        gssize n = g_socket_send_with_blocking (sk, msg, len, FALSE, NULL, NULL);
+        /* (behind a reply it has not taken yet the line would land in the
+         * middle of that reply: such a subscriber is not reading either) */
+        gssize n = session_unsent (s) ? -1
+                                      : g_socket_send_with_blocking (sk, msg, len, FALSE, NULL, NULL);
         if (n != (gssize) len) {
             s->subscribed = FALSE;
             n_subscribed--;
-            g_cancellable_cancel (s->cancel);   /* its read ends, session_read frees it */
+            if (s->reading || s == current)
+                g_cancellable_cancel (s->cancel);   /* its (next) read ends, session_read frees it */
+            else
+                gone = g_slist_prepend (gone, s);
         }
     }
+    g_slist_free_full (gone, (GDestroyNotify) session_free);
     g_free (msg);
 }
 

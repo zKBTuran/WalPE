@@ -15,6 +15,7 @@
 #include "fit.h"
 #include "image.h"   /* walpe_picture_size_ok */
 #include "glutil.h"
+#include "common/gifcheck.h"
 #include "common/premult.h"
 #include "common/util.h"
 #include <stdlib.h>
@@ -63,6 +64,16 @@ static GifSource *gif_source_get (const char *path, GError **err)
         src->refs++;
         g_mutex_unlock (&gif_reg_lock);
         return src;
+    }
+    /* Before gdk-pixbuf gets anything of the file: every frame of a GIF
+     * has pixels and lies inside the picture the header declares
+     * (gifcheck.h), as the format requires. The limits below are on the
+     * picture alone; with this check they hold for the frames as well.
+     * A GIF that is not so is refused here, as
+     * a damaged file. */
+    if (!walpe_gif_file_layout_ok (path, err)) {
+        g_mutex_unlock (&gif_reg_lock);
+        return NULL;
     }
     /* The one place a GIF is opened and decoded, for every monitor. The
      * size is in the file header: a picture above the limits of image.h
