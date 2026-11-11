@@ -29,8 +29,8 @@ usual `<source>/build` it is found by itself, and with a build directory elsewhe
 | Tool | Invocation | Does |
 |---|---|---|
 | `restorecheck.py` | `python3 -I restorecheck.py --build DIR [--daemon FILE] [--keep] [--tmp DIR]` | a wallpaper that fails to load brings the previous one back: two fake monitors, generated one-colour scenes, status / config / log / pixels read back. `--tmp` must be a short path that does not exist yet (a socket lives below it). `RESTORECHECK_PATIENCE=N` multiplies every wait |
-| `ctlcheck.py` | `python3 -I ctlcheck.py --build DIR [--keep] [--tmp DIR]` | every `walpe-ctl` command against a running daemon |
-| `guicheck.py` | `python3 -I guicheck.py --build DIR [--keep] [--tmp DIR] [--shots DIR]` | the library window and its settings window against a running daemon, with its own D-Bus session |
+| `ctlcheck.py` | `python3 -I ctlcheck.py --build DIR [--keep] [--tmp DIR]` | every `walpe-ctl` command against a running daemon: also that `status` shows every setting `set` takes with the value that was set, that mistyped values are refused, and that a change which cannot be saved (the configuration directory replaced by a file) is answered with its reason and shown in `status` until a save succeeds |
+| `guicheck.py` | `python3 -I guicheck.py --build DIR [--keep] [--tmp DIR] [--shots DIR]` | the library window and its settings window against a running daemon, with its own D-Bus session: also that a wallpaper the engine cannot load shows its error in the window's status line, that an emptied frame rate field keeps its value, and that an install the engine refuses after its dialog was closed is still shown (that case is left out where `steamcmd` is installed: the request would start a download) |
 | `webcheck.py` | `python3 -I webcheck.py --build DIR [--keep] [--tmp DIR]` | wallpaper options reaching web pages, also a page that starts listening late (needs a build with the web module) |
 | `layercheck.py` | `python3 -I layercheck.py --build DIR [--keep] [--display :N] [--tmp DIR]` | "Adjust layers" end to end on the scene `genlayers.py` writes |
 | `optcheck.py` | `WALPE_SCRATCH=DIR python3 -I optcheck.py --build DIR --out OUT [--ids a,b] [--jobs N]`; `optcheck.py --report OUT` | option coverage over a wallpaper library: changes every user property of every scene through the daemon and compares the engine's state digest (`WALPE_PROP_PROBE`). `WALPE_SCRATCH` is a directory with `wallpapers/items/<id>/` and, optionally, `we/install/assets` (your Wallpaper Engine assets); default: the current directory |
@@ -56,7 +56,7 @@ All of them: Python 3. The generators `gensyn.py`, `genlayers.py`, `genworkshopf
 |---|---|---|
 | `restorecheck.py` | `Xvfb`, Mesa with llvmpipe | none (`scripts/checkenv.py` of `main`, see above) |
 | `ctlcheck.py` | `Xvfb`, Mesa with llvmpipe, `ffmpeg` | none |
-| `guicheck.py` | `Xvfb`, Mesa with llvmpipe, `xdotool`, ImageMagick (`import`), `dbus-daemon`, `gdbus` (GLib) | Pillow |
+| `guicheck.py` | `Xvfb`, Mesa with llvmpipe, `xdotool`, ImageMagick (`import`), `dbus-daemon`, `gdbus` (GLib); libX11 (loaded through `ctypes`) for the case that closes a dialog | Pillow |
 | `webcheck.py` | `Xvfb`, Mesa with llvmpipe, ImageMagick (`import`); a build with `walpe-web.so` | Pillow |
 | `layercheck.py` | `Xvfb`, Mesa with llvmpipe, ImageMagick (`import`) | Pillow |
 | `optcheck.py` | `Xvfb`, Mesa with llvmpipe, ImageMagick (`convert`) | none |

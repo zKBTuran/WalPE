@@ -15,6 +15,9 @@ by their path), and runs the commands README.md documents:
   - open / open --monitor N / a path that does not exist / a monitor that does not exist
   - props, setprop (one and several), resetprops, with --monitor and --path
   - pause / resume, quality, quality --path, cancel-import with nothing running, steam-libraries
+  - status names every saved setting `set` takes; a change that cannot be saved (config.json's directory
+    is not there to write into) is answered ok with the reason, shows in status, and is gone again after
+    the next save that works
   - config.json keeps a member it does not know through all of that
   - quit: the engine ends; afterwards every command exits with 2
 
@@ -185,7 +188,11 @@ def main():
                 "quality_preset", "software_render", "software_active", "gl_renderer", "fx_cache",
                 "fx_specialize", "fx_quality", "video_hwdec", "particle_lowres", "particle_density",
                 "particle_instancing", "focus_action", "we_assets", "we_assets_source", "audio", "media",
-                "import_active", "import_percent", "config_serial", "modules"]
+                "import_active", "import_percent", "config_serial", "modules",
+                # the saved settings under their config.json names
+                "pause_fullscreen", "pause_dpms", "pause_covered", "cover_transparent", "transparent_windows",
+                "focus_fps", "pause_battery", "battery_fps", "preview_anim", "render_shared", "parallax",
+                "tex_downscale", "skip_hidden", "skip_hidden_margin", "skip_hidden_inset", "software_threads_saved"]
         missing = [k for k in want if k not in st]
         check(not missing, "status has the documented fields (missing: %s)" % missing)
         mons = st.get("monitors") or []
@@ -227,6 +234,12 @@ def main():
         check(st.get("fps") == 48 and st.get("video_hwdec") is True and st.get("particle_density") == 60 and
               st.get("fx_quality") == "fast" and st.get("focus_action") == "pause" and
               st.get("render_scale") == 50, "status shows the values that were set")
+        shown = {"parallax": False, "pause_fullscreen": True, "pause_covered": True, "pause_dpms": True,
+                 "cover_transparent": False, "transparent_windows": "st,foot", "focus_fps": 20, "pause_battery": True,
+                 "battery_fps": 24, "preview_anim": "off", "render_shared": False, "tex_downscale": False,
+                 "software_threads_saved": 0}
+        wrong = {k: st.get(k, "(missing)") for k, v in shown.items() if st.get(k, "(missing)") != v}
+        check(not wrong, "status shows every saved setting that was set, under its config.json name (wrong: %s)" % wrong)
         check("video_decoder" not in st or "software" in str(st.get("video_decoder")),
               "hardware decoding on with nothing to decode on: no decoder claimed in hardware")
         rc, r = env.reply("set", "fps=60", "volume=0", "covered=off", "fs=off", "dpms=off", "preset=high",
@@ -242,12 +255,36 @@ def main():
                            (["covered=maybe"], "switch"), (["focus=sideways"], "run, limit or pause"),
                            (["particle_density=3"], "5 to 100"), (["fx_quality=best"], "exact or fast"),
                            (["previews=sometimes"], "always, hover or off"),
-                           (["steam_user=no spaces allowed"], "steam_user")):
+                           (["steam_user=no spaces allowed"], "steam_user"),
+                           (["skip_hidden=alwys"], "off, auto or always"),
+                           (["skip_hidden_margin=-5"], "from 0 on"),
+                           (["video_backend=vlc", "fps=30"], "video_backend")):
             rc, out, err = env.ctl("set", *args)
             check(rc == 3 and text in out, "set %s is refused with a reason (exit %d: %s)" %
                   (" ".join(args), rc, out.strip()[:90]))
         check(env.cfg() == before, "nothing of the refused calls was applied")
         check(env.cfg().get("kept_by_hand") == {"a": [1, 2]}, "config.json still holds the member it does not know")
+
+        # ---- a change that cannot be saved: config.json's directory is not there to write into
+        cdir = os.path.dirname(env.config)
+        os.rename(cdir, cdir + ".aside")
+        open(cdir, "w").close()
+        rc, out, err = env.ctl("set", "fps=31")
+        try:
+            r = json.loads(out)
+        except ValueError:
+            r = {}
+        st = env.status() or {}
+        os.unlink(cdir)
+        os.rename(cdir + ".aside", cdir)
+        check(rc == 0 and r.get("ok") is True and r.get("save_error") and "could not save" in err,
+              "a change that could not be saved is answered ok with the reason (save_error) and a sentence on stderr")
+        check(st.get("fps") == 31 and st.get("config_save_error") and env.cfg().get("fps") == 60,
+              "it is in effect, status shows config_save_error, config.json is as it was")
+        rc, r = env.reply("set", "fps=60")
+        st = env.status() or {}
+        check(rc == 0 and "save_error" not in (r or {}) and "config_save_error" not in st and env.cfg().get("fps") == 60,
+              "the next save works and the reason is gone")
 
         # ---- open
         rc, r = env.reply("open", gif)

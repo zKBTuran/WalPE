@@ -8,6 +8,13 @@ temp dir, one 640x360 fake monitor) and the window, opens "Engine settings" thro
 application action, and looks at the settings window from outside (screenshots, no test hook in the GUI):
 
   - the window starts and the settings window opens while the engine runs
+  - a wallpaper that fails to load (walpe-ctl open on a scene whose scene.json is not JSON) is reported in
+    the window's status line, in the error colour
+  - the install dialog closed before the engine has answered its request (the engine is stopped for a
+    moment): the window keeps running and the refusal shows in its status line (not tried where
+    steamcmd is installed: the request would start a download)
+  - the frame rate field of the settings window keeps its value when it is emptied and left, and takes a
+    number typed into it
   - settings changed elsewhere while the settings window is open (walpe-ctl set shared=off fx_cache=off
     tex_downscale=off: what a terminal or the tray's menu do; three switches at the top of the window)
     show in the window: its picture changes in the column of switches, and it changes back when they
@@ -23,7 +30,7 @@ DIR (must not exist; removed afterwards) instead of a fresh directory under $TMP
 bus's sockets live below it and a socket path is limited to 107 bytes (the harness refuses a longer one:
 the engine would fall back to a socket shared with other sessions). --shots DIR keeps its looks at the
 settings window as PNG files."""
-import hashlib, io, json, os, shutil, subprocess, sys, tempfile, time
+import hashlib, io, json, os, shutil, signal, subprocess, sys, tempfile, time
 
 try:
     from PIL import Image, ImageChops
@@ -208,6 +215,64 @@ def wait_for(env, wid, base, differs, secs=40):
             return im
 
 
+def ask_to_close(display, wid):
+    """what the close button of a window manager's title bar does: WM_DELETE_WINDOW sent to the window (on a
+    display without a window manager a dialog has no title bar of its own). False without libX11."""
+    import ctypes, ctypes.util
+    try:
+        x = ctypes.CDLL(ctypes.util.find_library("X11") or "libX11.so.6")
+    except OSError:
+        return False
+
+    class ClientMessage(ctypes.Structure):
+        _fields_ = [("type", ctypes.c_int), ("serial", ctypes.c_ulong), ("send_event", ctypes.c_int),
+                    ("display", ctypes.c_void_p), ("window", ctypes.c_ulong), ("message_type", ctypes.c_ulong),
+                    ("format", ctypes.c_int), ("data", ctypes.c_long * 5)]
+
+    class Event(ctypes.Union):
+        _fields_ = [("xclient", ClientMessage), ("pad", ctypes.c_long * 24)]
+
+    x.XOpenDisplay.restype = ctypes.c_void_p
+    x.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    x.XInternAtom.restype = ctypes.c_ulong
+    x.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+    x.XSendEvent.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_long, ctypes.c_void_p]
+    x.XFlush.argtypes = [ctypes.c_void_p]
+    x.XCloseDisplay.argtypes = [ctypes.c_void_p]
+    dpy = x.XOpenDisplay(display.encode())
+    if not dpy:
+        return False
+    ev = Event()
+    ev.xclient.type = 33                # ClientMessage
+    ev.xclient.window = int(wid)
+    ev.xclient.message_type = x.XInternAtom(dpy, b"WM_PROTOCOLS", 0)
+    ev.xclient.format = 32
+    ev.xclient.data[0] = x.XInternAtom(dpy, b"WM_DELETE_WINDOW", 0)
+    x.XSendEvent(dpy, int(wid), 0, 0, ctypes.byref(ev))
+    x.XFlush(dpy)
+    x.XCloseDisplay(dpy)
+    return True
+
+
+def status_line(im):
+    """the lowest 40 rows of the window's picture: its status line (None without a picture)"""
+    if im is None:
+        return None
+    w, h = im.size
+    return im.crop((0, max(0, h - 40), w, h))
+
+
+def red_in_status_line(im):
+    """pixels of the error colour (red text) in the window's status line"""
+    if im is None:
+        return 0
+    n = 0
+    for r, g, b in status_line(im).getdata():
+        if r > 150 and g < 90 and b < 90:
+            n += 1
+    return n
+
+
 def changed(a, b):
     """bounding box of the pixels that differ, None = the same picture"""
     if a is None or b is None or a.size != b.size:
@@ -260,10 +325,111 @@ def main():
             return 1
         if not check(env.start_gui(), "the window opens"):
             return 1
+        # a wallpaper that does not load: the window says so (the engine answers "open" at once and
+        # reports the failure in its status; the status line stayed empty)
+        main_wid = env.window("WalPE", 10)
+        bad = os.path.join(lib, "broken")
+        os.makedirs(bad)
+        json.dump({"file": "scene.json", "title": "broken", "type": "scene"}, open(os.path.join(bad, "project.json"), "w"))
+        open(os.path.join(bad, "scene.json"), "w").write("{ \"camera\": this is not JSON\n")
+        before = red_in_status_line(env.shot(main_wid))
+        rc, _ = env.ctl("open", bad)
+        seen = 0
+        for _ in range(int(40 * PATIENCE)):
+            time.sleep(0.5)
+            seen = red_in_status_line(env.shot(main_wid))
+            if seen > before + 40:
+                break
+        keep_shot(env.shot(main_wid), "0-load-error")
+        check(rc == 0 and before < 20 and seen > before + 40,
+              "a wallpaper that fails to load is reported in the window's status line as an error "
+              "(error-coloured pixels in the line: %d before, %d after)" % (before, seen))
+
+        # the install dialog closed while its request is on the way (the engine has to be started first,
+        # or is busy): the engine's refusal was written into the closed dialog and shown nowhere. The
+        # engine is stopped for a moment, so that the answer arrives after the dialog is gone; without
+        # steamcmd the answer is a refusal, which now shows in the window's status line.
+        # (first a wallpaper that loads: the error line above goes away with it, and stays away)
+        good = os.path.join(lib, "plain.png")
+        Image.new("RGB", (64, 64), (40, 90, 160)).save(good)
+        env.ctl("open", good)
+        for _ in range(int(40 * PATIENCE)):
+            time.sleep(0.5)
+            if red_in_status_line(env.shot(main_wid)) < 20:
+                break
+        if shutil.which("steamcmd"):
+            print("     (the install dialog is not tried: steamcmd is installed and the request would start a download)")
+        elif check(env.action("install"), "the Install action is taken"):
+            title = "Install from Steam Workshop"
+            dlg = env.window(title, 30)
+            if check(dlg is not None, "the install dialog opens"):
+                env.xdo("mousemove", "--window", dlg, "200", "120")     # keys go to the window under the pointer
+                time.sleep(0.5 * PATIENCE)
+                env.xdo("type", "123456")
+                env.xdo("key", "Tab")
+                env.xdo("type", "nobody")
+                env.xdo("key", "shift+Tab")
+                time.sleep(0.5 * PATIENCE)
+                keep_shot(env.shot(dlg), "0-install-dialog")
+                line0 = status_line(env.shot(main_wid))
+                gone = False
+                # (kept short whatever the patience: the dialog's first request waits 2.5 s for an answer)
+                os.kill(env.daemon.pid, signal.SIGSTOP)
+                try:
+                    env.xdo("key", "Return")                            # Install (the button takes it 250 ms later)
+                    time.sleep(1.0)
+                    ask_to_close(env.env["DISPLAY"], dlg)               # what a title bar's close button does
+                    for _ in range(8):
+                        time.sleep(0.2)
+                        if not env.xdo("search", "--onlyvisible", "--name", "^" + title + "$"):
+                            gone = True
+                            break
+                finally:
+                    os.kill(env.daemon.pid, signal.SIGCONT)
+                check(gone, "the dialog is closed while the engine has not answered")
+                # the first answer ("Steam account applied.") is followed by the refusal, which stays
+                seen, new = 0, False
+                for _ in range(int(40 * PATIENCE)):
+                    time.sleep(0.5)
+                    if env.gui.poll() is not None:
+                        break
+                    im = env.shot(main_wid)
+                    seen, new = red_in_status_line(im), changed(line0, status_line(im)) is not None
+                    if seen > 40 and new:
+                        break
+                alive = env.gui.poll() is None
+                keep_shot(env.shot(main_wid) if alive else None, "0-install-closed")
+                check(alive and gone and seen > 40 and new,
+                      "the answer to an install request whose dialog was closed leaves the window running and "
+                      "shows in its status line (window running: %s, error-coloured pixels in a new line: %d)"
+                      % (alive, seen if new else 0))
+
         check(env.action("settings"), "the Settings action is taken")
         wid = env.window("Engine settings", 60)
         if not check(wid is not None, "the settings window opens"):
             return 1
+        # the number field that has the focus when the window opens is the frame rate limit: emptied and
+        # left, it keeps its value (GTK reads an empty field as 0, the range made that the minimum: 5
+        # frames a second); a number typed into it is taken
+        fps0 = json.load(open(env.config)).get("fps", 60)
+        env.xdo("mousemove", "--window", wid, "12", "12")
+        env.xdo("key", "ctrl+a", "BackSpace", "Tab")
+        time.sleep(2.0 * PATIENCE)
+        fps1 = json.load(open(env.config)).get("fps", 60)
+        check(fps1 == fps0, "an emptied frame rate field keeps the frame rate (%s, was %s)" % (fps1, fps0))
+        env.xdo("key", "shift+Tab")
+        env.xdo("key", "ctrl+a")
+        env.xdo("type", "48")
+        env.xdo("key", "Tab")
+        for _ in range(int(20 * PATIENCE)):
+            time.sleep(0.5)
+            if json.load(open(env.config)).get("fps") == 48:
+                break
+        check(json.load(open(env.config)).get("fps") == 48, "a number typed into it is taken (config.json fps %s)"
+              % json.load(open(env.config)).get("fps"))
+        env.ctl("set", "fps=%d" % fps0)
+        time.sleep(1.0 * PATIENCE)
+
         base = env.settled(wid)
         check(base is not None, "the settings window can be looked at")
         keep_shot(base, "1-base")
