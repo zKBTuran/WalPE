@@ -11,8 +11,10 @@ built and tested only on Mesa's software renderer (llvmpipe), a headless Wayland
 compositor (sway 1.9), a PulseAudio null sink and - the build for 64-bit ARM - under
 emulation. Nothing of it has been run on real AMD, Intel, NVIDIA or ARM hardware or on a
 real Wayland desktop.** On NVIDIA's driver under X11 with default settings it is meant
-to behave as 0.12.2 does, apart from the scene features and - with more than one
-monitor - the fullscreen pause rule below. What was compared, on the software renderer: the development
+to behave as 0.12.2 does, apart from the scene features, two fixes that change the
+picture of some scenes (layers with a tint and effects, rope trails; under Scenes) and -
+with more than one monitor - the fullscreen pause rule below. What was compared, on the
+software renderer: the development
 tree before the fixes of 0.12.2 were merged in with
 release 0.12.1, call by call (four scenes: the same OpenGL calls) and picture by picture
 (the 91 test scenes: the same frames with the new features off); then the pictures of
@@ -55,6 +57,10 @@ the final tree with those of that earlier tree.
   renderer every effect shader of the 91 test scenes compiles; pictures differ slightly
   from desktop OpenGL, because OpenGL ES has no texture LOD bias (minified textures are
   a little softer).
+- On OpenGL ES an effect shader with more than 256 KiB of source is not compiled: a
+  warning names it and its effect is not drawn. A source of that size is not translated
+  to GLSL ES, and was handed to the driver as it was written. Desktop OpenGL still
+  compiles such a source as written.
 - `walpe-ctl gpu-stats`, and the same figures in `walpe-gpu-report` and in a profile: GPU
   busy, memory, power and temperature from the kernel's statistics on AMD and Intel.
 - Driver hints of `gpu.conf` are handed to Mesa drivers where Mesa has a counterpart.
@@ -88,14 +94,28 @@ the final tree with those of that earlier tree.
   shake is an estimate; HDR bloom is not implemented. Limits: the sprite animations of
   one scene have at most 1048576 frames together (a layer beyond that shows its first
   frame), and a scene zoom that no float holds counts as zoom 1.
+- The switch `script_texanim` (scripts drive sprite-sheet animations) is read when a
+  wallpaper loads, as `sprite_sheets` is: changing it loads the wallpapers again.
+  Switched off on a running scene it left the animations as the scripts had last set
+  them, which is not the picture of a scene loaded with the switch off.
+- A layer with a tint and effects keeps its effects. Such a layer could be drawn without
+  them, depending on whether an effect target was new or taken back from the pool, so
+  its picture was not always the same. Two scenes of the test library draw another
+  picture now, whatever the feature switches say.
+- A rope trail of a particle system is as long in seconds as its scene says at every
+  frame rate. It was longer at low frame rates (a trail of 24 points over 0.2 seconds:
+  twice as long at 60 Hz, four times at 30 Hz). Scenes with rope trails can look
+  different at 60 Hz and below: the trails are shorter there.
 - The Fluid Simulation effect runs on the grid its file declares, at a fixed 60 steps a
   second whatever the frame rate (`fluid_sim`, `fluid_quality`).
 - Scene sound layers (WAV, MP3, FLAC, Ogg) through PulseAudio / PipeWire, **off by
   default**: `walpe-ctl set scene_sound=on volume=0.5`; `mute`; per wallpaper
   `walpe-ctl setprop walpe_sound=on|off`. The `volume` setting now has an effect.
-  A connection the sound server refuses, as happens when many layers start together, is
-  asked for again at once. Measured against a null sink by recording it; nobody has
-  heard it.
+  The sound layers of a scene open their streams one at a time, a few milliseconds
+  apart: asked for in the same instant, some were refused by the sound server. A
+  connection it still refuses is asked for again at once. A layer waits for its turn for
+  a quarter of a second at most; after that it plays into nothing and asks again 5
+  seconds later. Measured against a null sink by recording it; nobody has heard it.
 
 ### Video
 
@@ -133,6 +153,26 @@ the final tree with those of that earlier tree.
   least an ARM GPU must offer.
 - Test setups for AddressSanitizer / UndefinedBehaviorSanitizer and ThreadSanitizer,
   end-to-end tests on a headless Wayland compositor.
+- Library window: the wallpaper grid takes 64 % of the window's width by default (6
+  columns at 1920 pixels) and the details panel the rest, at least 460 pixels. The share
+  follows the window's size until you move the handle between the two; from then on
+  yours is kept. Before, the handle stood at a fixed 780 pixels, and in a window that a
+  window manager tiles or maximizes after showing it the grid could end up with two
+  columns. The position is not saved across starts.
+- Build: `./build.sh` builds the installed programs and modules only (the new ninja
+  target `programs`), which makes a fresh build much shorter. The test programs and the
+  developer tools are built by `meson test`, or one by name (`ninja -C build
+  sceneshot`); a plain `ninja -C build` builds them too. The installed binaries are the
+  same as before.
+- Two changes that are meant to change no picture: an effect takes memory for the passes
+  it has (the pass table of an effect with one or two passes took 44 kB and takes 1.4 or
+  2.8 kB now), and a control point's `flags` in a particle file is converted like the
+  other numbers of a wallpaper file, so a value that no integer holds gives the same
+  result on every machine.
+- Tests: in a build without QuickJS (`-Dscenescript=disabled`) `fx-alpha` and `layers`
+  leave out the checks that need a script instead of failing, and `sig-wl` no longer
+  waits for ever where `TMPDIR` is too long for a socket path (it makes its directory in
+  `/tmp` then).
 
 ### Known limitations
 
