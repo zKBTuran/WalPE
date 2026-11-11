@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=WalPE
+Comment=Live wallpapers for Linux (plays Wallpaper Engine content)
+Exec=walpe-daemon
+Terminal=false
+X-GNOME-Autostart-enabled=true
+Categories=Utility;

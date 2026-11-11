@@ -1,0 +1,14 @@
+option('video', type: 'combo', choices: ['auto', 'enabled', 'disabled'], value: 'auto',
+  description: 'Build the video backend (libavcodec H.264 software decode)')
+option('web', type: 'combo', choices: ['auto', 'enabled', 'disabled'], value: 'auto',
+  description: 'Build the WebKitGTK web-wallpaper backend (heavy dependency)')
+option('audio', type: 'combo', choices: ['auto', 'enabled', 'disabled'], value: 'auto',
+  description: 'Audio-reactive wallpapers: capture the default output monitor (libpulse-simple; PulseAudio or PipeWire-pulse)')
+option('scenescript', type: 'combo', choices: ['auto', 'enabled', 'disabled'], value: 'auto',
+  description: 'SceneScript (scene property scripts: clocks, toggles, ...) via QuickJS')
+option('native_tuning', type: 'combo', choices: ['generic', 'alderlake', 'native', 'auto', 'off'], value: 'generic',
+  description: 'CPU tuning: generic (default) = portable code, no -march / -mtune / cache parameters (off = the same, its earlier name); alderlake = the maintainer make.conf flags (binary runs on Alder Lake-class CPUs only; ./build.sh --tuning=alderlake); native = -march=native; auto = -march=native if supported')
+option('tray', type: 'combo', choices: ['auto', 'enabled', 'disabled'], value: 'auto',
+  description: 'walpe-tray: system tray icon (XEmbed via Xlib/XRender + StatusNotifierItem via GDBus)')
+option('hardening', type: 'boolean', value: true,
+  description: 'Build with stack protector, stack clash and control-flow protection, _FORTIFY_SOURCE, format-security errors, full RELRO + immediate binding (PIE is the b_pie default)')

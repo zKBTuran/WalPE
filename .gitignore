@@ -1,0 +1,35 @@
+# build directories (meson / ninja); their logs can hold environment values
+/build/
+/build-*/
+/builddir/
+/_build/
+meson-logs/
+meson-private/
+meson-info/
+compile_commands.json
+*.o
+*.so
+*.a
+# editors and tools
+*~
+*.swp
+*.swo
+.#*
+\#*#
+*.orig
+*.rej
+.vscode/
+.idea/
+.cache/
+.ccls-cache/
+.clangd/
+tags
+TAGS
+# Python tools
+__pycache__/
+*.pyc
+# local runs
+*.log
+core
+core.[0-9]*
+vgcore.*

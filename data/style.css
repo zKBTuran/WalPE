@@ -1,0 +1,129 @@
+/* WalPE GUI stylesheet.
+ * Compiled into the binary as a GResource (/io/github/walpe/ui/style.css);
+ * ~/.config/walpe/style.css, if present, is loaded on top of it.
+ * Sizes are relative (em) so the desktop font setting scales everything;
+ * colours derive from the theme (currentColor / theme colours) so dark and
+ * light themes both keep their contrast. No rounded clips on thumbnails:
+ * with the cairo renderer those cost per-frame work while scrolling. */
+
+/* ------------------------------------------------------------ library */
+.walpe-library-bar {
+  padding: 8px 10px;
+  border-bottom: 1px solid alpha(currentColor, 0.12);
+}
+.walpe-count { opacity: 0.8; }
+
+gridview.walpe-grid { background: transparent; padding: 6px; }
+gridview.walpe-grid > child {
+  padding: 6px;
+  margin: 2px;
+  border-radius: 8px;
+}
+gridview.walpe-grid > child:hover { background: alpha(currentColor, 0.06); }
+gridview.walpe-grid > child:selected {
+  /* the theme's selected text colour is meant for a solid fill: keep the
+   * normal text colour on this light tint (readable in light themes) */
+  color: @theme_fg_color;
+  background: alpha(@theme_selected_bg_color, 0.30);
+  box-shadow: inset 0 0 0 2px @theme_selected_bg_color;
+}
+gridview.walpe-grid > child:focus-visible {
+  outline: 2px solid @theme_selected_bg_color;
+  outline-offset: -2px;
+}
+
+.walpe-thumb { background: alpha(currentColor, 0.08); }
+.walpe-thumb-placeholder {
+  font-weight: 600;
+  opacity: 0.55;
+}
+.walpe-tile-title {
+  margin-top: 5px;
+  font-size: 1em;
+  line-height: 1.15;
+}
+
+/* type badges: dark saturated fills, white text (>= 4.5:1 in both themes) */
+.walpe-badge {
+  padding: 1px 7px;
+  border-radius: 5px;
+  font-size: 0.85em;
+  font-weight: 700;
+  color: #ffffff;
+  background: rgba(20, 20, 20, 0.78);
+}
+.walpe-badge.scene   { background: #1c5fb8; }
+.walpe-badge.video   { background: #7a2fbf; }
+.walpe-badge.web     { background: #a54b06; }
+.walpe-badge.image,
+.walpe-badge.gif     { background: #2f6b23; }
+.walpe-badge.unsupported { background: #a51d2d; }
+.walpe-badge.active  { background: #1d7f4f; }
+.walpe-badge.steam   { background: #2a475e; }
+.walpe-badge.neutral { background: alpha(currentColor, 0.16); color: inherit; }
+.walpe-tile-badges { margin: 5px; }
+
+/* ---------------------------------------------------------- selection */
+.walpe-details { padding: 14px 16px 10px 16px; }
+.walpe-preview { background: alpha(currentColor, 0.05); border-radius: 8px; }
+.walpe-title { font-size: 1.45em; font-weight: 700; }
+.walpe-desc { opacity: 0.85; }
+.walpe-dim { opacity: 0.78; }
+button.walpe-apply {
+  padding: 6px 22px;
+  font-weight: 700;
+  font-size: 1.05em;
+}
+
+/* ---------------------------------------------------- wallpaper options */
+.walpe-options-head { padding: 8px 16px 6px 16px; }
+.walpe-options-title { font-size: 1.2em; font-weight: 700; }
+.walpe-options-hint { opacity: 0.85; }
+/* mixed with the theme text colour: light on dark themes, dark on light */
+.walpe-options-hint.warning { color: mix(@theme_fg_color, #e5a50a, 0.65); opacity: 1; }
+
+list.walpe-options { background: transparent; padding: 0 8px 12px 8px; }
+list.walpe-options > row {
+  padding: 7px 10px;
+  border-radius: 6px;
+  min-height: 34px;
+}
+list.walpe-options > row:hover { background: alpha(currentColor, 0.04); }
+list.walpe-options > row:focus-within { background: alpha(@theme_selected_bg_color, 0.14); }
+list.walpe-options > row.walpe-section {
+  padding-top: 16px;
+  padding-bottom: 4px;
+}
+list.walpe-options > row.walpe-section.walpe-rule {
+  border-top: 1px solid alpha(currentColor, 0.15);
+  border-radius: 0;
+  margin-top: 6px;
+}
+list.walpe-options > row.walpe-section:hover { background: transparent; }
+.walpe-section-title { font-size: 1.08em; font-weight: 700; }
+.walpe-prop-title { font-size: 1em; }
+.walpe-prop-sub { opacity: 0.75; font-size: 0.93em; }
+.walpe-prop-note { opacity: 0.8; }
+.walpe-prop-modified { font-weight: 700; }
+/* an option the wallpaper cannot react to (its subtitle says why) */
+.walpe-prop-inert { opacity: 0.6; }
+.walpe-prop-unsupported { opacity: 0.6; font-style: italic; }
+button.walpe-reset { min-width: 28px; min-height: 28px; padding: 2px; }
+.walpe-empty { padding: 30px; opacity: 0.75; }
+
+/* ----------------------------------------------------------- statusbar */
+.walpe-statusbar {
+  padding: 5px 12px;
+  border-top: 1px solid alpha(currentColor, 0.12);
+}
+.walpe-statusbar label.error { color: mix(@theme_fg_color, #e01b24, 0.6); }
+.walpe-dot { min-width: 10px; min-height: 10px; border-radius: 5px; background: #888888; }
+.walpe-dot.up { background: #33d17a; }
+.walpe-dot.busy { background: #f6d32d; }
+.walpe-dot.down { background: #e01b24; }
+
+/* ------------------------------------------------------------ settings */
+.walpe-settings { padding: 18px 22px; }
+.walpe-settings-group { font-size: 1.1em; font-weight: 700; margin-top: 10px; }
+.walpe-settings-sub { opacity: 0.75; font-size: 0.93em; }
+.walpe-settings label.error { color: mix(@theme_fg_color, #e01b24, 0.6); }

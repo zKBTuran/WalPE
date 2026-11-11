@@ -1,0 +1,353 @@
+/* config_test - config.json (src/common/config.c)
+ *
+ * Private XDG_CONFIG_HOME, no daemon, no display:
+ *  - the defaults of a new install are the ones README.md states;
+ *  - every key survives save + load with a value that is not its default;
+ *  - members this build does not know (a newer version's, hand-written
+ *    ones) are still in the file after a save;
+ *  - a config.json as version 0.12 wrote it: its values are kept, the former
+ *    default frame rate 200 becomes 60 exactly once, a rate the user set
+ *    afterwards stays;
+ *  - a file that is not a JSON object (cut short, "[]", a number) is kept
+ *    under another name and the defaults apply. */
+#include <glib.h>
+#include <glib/gstdio.h>
+#include <json-glib/json-glib.h>
+#include <string.h>
+#include "common/config.h"
+#include "common/quality.h"
+#include "common/util.h"
+
+static int fails;
+#define CHECK(c) do { if (!(c)) { fails++; g_printerr ("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); } } while (0)
+
+static char *cfg_dir, *cfg_path;
+
+static void put_config (const char *json)
+{
+    g_assert (g_file_set_contents (cfg_path, json, -1, NULL));
+}
+
+static JsonNode *read_config (void)
+{
+    return wpj_parse_file (cfg_path);
+}
+
+/* files next to config.json whose name starts with "config.json.broken-" */
+static int broken_copies (gboolean remove)
+{
+    int n = 0;
+    GDir *d = g_dir_open (cfg_dir, 0, NULL);
+    const char *name;
+    while (d && (name = g_dir_read_name (d)))
+        if (g_str_has_prefix (name, "config.json.broken-")) {
+            n++;
+            if (remove) {
+                char *p = g_build_filename (cfg_dir, name, NULL);
+                g_unlink (p);
+                g_free (p);
+            }
+        }
+    if (d)
+        g_dir_close (d);
+    return n;
+}
+
+static void test_defaults (void)
+{
+    g_unlink (cfg_path);
+    WalpeConfig *c = walpe_config_load ();
+    /* README "Settings" */
+    CHECK (c->fps == 60 && WALPE_FPS_DEFAULT == 60);
+    CHECK (c->config_version == 3);
+    CHECK (!c->paused && c->pause_fullscreen && c->pause_dpms && c->pause_covered);
+    CHECK (c->cover_transparent && !g_strcmp0 (c->transparent_windows, "st"));
+    CHECK (c->render_shared && c->fx_cache && c->tex_downscale && c->parallax);
+    CHECK (!c->software_render && c->software_threads == 0);
+    CHECK (c->render_scale == 100 && c->texture_slack == 2);
+    CHECK (!c->web_accel && !c->video_hwdec);
+    CHECK (c->preview_anim == WALPE_PREVIEW_ALWAYS);
+    CHECK (c->focus_action == WALPE_FOCUS_RUN && !c->pause_battery && c->battery_fps == 0);
+    CHECK (c->particle_lowres == 1 && c->particle_density == 100 && c->particle_instancing);
+    CHECK (!c->fx_specialize && !g_strcmp0 (c->fx_quality, "exact"));
+    CHECK (walpe_quality_preset_of (&c->quality) == WALPE_PRESET_HIGH);
+    CHECK (!c->steam_user && !c->we_assets && !c->broken_copy && !c->fps_migrated && !c->extra);
+    CHECK (!g_strcmp0 (c->current, ""));
+    /* loading writes nothing */
+    CHECK (!g_file_test (cfg_path, G_FILE_TEST_EXISTS));
+    walpe_config_free (c);
+}
+
+static void test_round_trip (void)
+{
+    g_unlink (cfg_path);
+    WalpeConfig *c = walpe_config_load ();
+    g_free (c->wallpapers_dir);
+    c->wallpapers_dir = g_strdup ("/lib/walls");
+    g_free (c->current);
+    c->current = g_strdup ("/lib/walls/111");
+    walpe_config_set_monitor_path (c, "DP-0", "/lib/walls/222");
+    walpe_config_set_monitor_path (c, "HDMI-0", "/lib/walls/333");
+    c->fps = 144;
+    c->volume = 0.25;
+    c->paused = TRUE;
+    c->pause_fullscreen = c->pause_dpms = c->pause_covered = FALSE;
+    g_free (c->transparent_windows);
+    c->transparent_windows = g_strdup ("st,foot");
+    c->cover_transparent = c->render_shared = c->fx_cache = c->tex_downscale = c->parallax = FALSE;
+    c->fx_specialize = TRUE;
+    g_free (c->fx_quality);
+    c->fx_quality = g_strdup ("fast");
+    c->web_accel = c->video_hwdec = c->software_render = TRUE;
+    c->software_threads = 6;
+    c->particle_lowres = 2;
+    c->particle_density = 45;
+    c->particle_instancing = FALSE;
+    c->steam_user = g_strdup ("some_account");
+    c->we_assets = g_strdup ("/opt/we/assets");
+    c->focus_action = WALPE_FOCUS_LIMIT;
+    c->focus_fps = 20;
+    c->pause_battery = TRUE;
+    c->battery_fps = 24;
+    c->preview_anim = WALPE_PREVIEW_HOVER;
+    c->vsync = FALSE;
+    c->audio = TRUE;
+    walpe_quality_preset (WALPE_PRESET_LOW, &c->quality);
+    c->quality.fps_idle = 40;       /* a custom mix */
+    walpe_config_set_prop (c, "/lib/walls/111", "speed", "2");
+    walpe_config_set_prop (c, "/lib/walls/111/", "title", "a \"b\" \\ c");     /* any spelling of the path */
+    walpe_config_set_prop (c, "/lib/walls/222", "walpe_fit", "contain");
+    {
+        WalpeQualityOv ov = { 0 };
+        walpe_quality_preset (WALPE_PRESET_HIGH, &ov.q);
+        ov.q.tex_res = 1;
+        ov.mask = WALPE_Q_TEX_RES;
+        walpe_config_set_quality_ov (c, "/lib/walls/222", &ov);
+    }
+    walpe_config_save (c);
+    int low_scale = c->quality.render_scale, low_slack = c->quality.tex_slack;
+    walpe_config_free (c);
+
+    c = walpe_config_load ();
+    CHECK (!g_strcmp0 (c->wallpapers_dir, "/lib/walls") && !g_strcmp0 (c->current, "/lib/walls/111"));
+    CHECK (!g_strcmp0 (walpe_config_monitor_path (c, "DP-0"), "/lib/walls/222"));
+    CHECK (!g_strcmp0 (walpe_config_monitor_path (c, "HDMI-0"), "/lib/walls/333"));
+    CHECK (!g_strcmp0 (walpe_config_monitor_path (c, "eDP-1"), "/lib/walls/111"));
+    CHECK (c->fps == 144 && !c->fps_migrated && c->volume == 0.25 && c->paused);
+    CHECK (!c->pause_fullscreen && !c->pause_dpms && !c->pause_covered);
+    CHECK (!g_strcmp0 (c->transparent_windows, "st,foot"));
+    CHECK (!c->cover_transparent && !c->render_shared && !c->fx_cache && !c->tex_downscale && !c->parallax);
+    CHECK (c->fx_specialize && !g_strcmp0 (c->fx_quality, "fast"));
+    CHECK (c->web_accel && c->video_hwdec && c->software_render && c->software_threads == 6);
+    CHECK (c->particle_lowres == 2 && c->particle_density == 45 && !c->particle_instancing);
+    CHECK (!g_strcmp0 (c->steam_user, "some_account") && !g_strcmp0 (c->we_assets, "/opt/we/assets"));
+    CHECK (c->focus_action == WALPE_FOCUS_LIMIT && c->focus_fps == 20);
+    CHECK (c->pause_battery && c->battery_fps == 24 && c->preview_anim == WALPE_PREVIEW_HOVER);
+    CHECK (!c->vsync && c->audio);
+    CHECK (c->quality.fps_idle == 40 && c->quality.render_scale == low_scale &&
+           c->quality.tex_slack == low_slack);
+    CHECK (c->render_scale == low_scale && c->texture_slack == low_slack);     /* both sides agree */
+    CHECK (walpe_quality_preset_of (&c->quality) == WALPE_PRESET_CUSTOM);
+    char *v = walpe_config_get_prop ("/lib/walls/111", "speed");
+    CHECK (!g_strcmp0 (v, "2"));
+    g_free (v);
+    v = walpe_config_get_prop ("/lib/walls/111", "title");
+    CHECK (!g_strcmp0 (v, "a \"b\" \\ c"));
+    g_free (v);
+    v = walpe_config_get_prop ("/lib/walls/222", "walpe_fit");
+    CHECK (!g_strcmp0 (v, "contain"));
+    g_free (v);
+    CHECK (walpe_config_get_prop ("/lib/walls/333", "speed") == NULL);
+    const WalpeQualityOv *ov = walpe_config_quality_ov (c, "/lib/walls/222");
+    CHECK (ov && ov->mask == WALPE_Q_TEX_RES && ov->q.tex_res == 1);
+    CHECK (walpe_config_quality_ov (c, "/lib/walls/111") == NULL);
+    CHECK (!c->extra);      /* nothing of its own counts as unknown */
+    /* a second save of what was loaded writes the same file */
+    char *a = NULL, *b = NULL;
+    g_file_get_contents (cfg_path, &a, NULL, NULL);
+    walpe_config_save (c);
+    g_file_get_contents (cfg_path, &b, NULL, NULL);
+    CHECK (a && b && !strcmp (a, b));
+    g_free (a);
+    g_free (b);
+    /* clearing the two keys that are written only while set removes them */
+    g_clear_pointer (&c->steam_user, g_free);
+    g_clear_pointer (&c->we_assets, g_free);
+    walpe_config_save (c);
+    walpe_config_free (c);
+    c = walpe_config_load ();
+    CHECK (!c->steam_user && !c->we_assets && !c->extra);
+    walpe_config_free (c);
+}
+
+static void test_unknown_keys (void)
+{
+    put_config ("{\"config_version\":3,\"fps\":50,\"future_switch\":true,"
+                "\"future_table\":{\"a\":[1,2,{\"b\":null}],\"c\":\"d\"},\"note_by_hand\":\"keep me\","
+                "\"steam_user\":\"\",\"layers\":{}}");
+    WalpeConfig *c = walpe_config_load ();
+    CHECK (c->fps == 50);
+    CHECK (c->extra && json_object_get_size (c->extra) == 3);
+    /* they are not settings of this build (the presets ask) */
+    static const char *const keys[] = { "fps", "future_switch", "particle_density", "note_by_hand" };
+    CHECK (walpe_config_has_keys (c, keys, G_N_ELEMENTS (keys)) == (1u | 4u));
+    c->fps = 75;                /* what the daemon does on `walpe-ctl set fps=75` */
+    walpe_config_save (c);
+    walpe_config_free (c);
+
+    JsonNode *n = read_config ();
+    JsonObject *o = n && JSON_NODE_HOLDS_OBJECT (n) ? json_node_get_object (n) : NULL;
+    CHECK (o && wpj_num (o, "fps", 0) == 75);
+    CHECK (o && wpj_bool (o, "future_switch", FALSE));
+    CHECK (o && !g_strcmp0 (wpj_str (o, "note_by_hand", ""), "keep me"));
+    JsonObject *ft = o ? wpj_obj (o, "future_table") : NULL;
+    JsonArray *fa = ft ? wpj_arr (ft, "a") : NULL;
+    CHECK (ft && !g_strcmp0 (wpj_str (ft, "c", ""), "d") && fa && json_array_get_length (fa) == 3 &&
+           json_array_get_int_element (fa, 1) == 2 &&
+           JSON_NODE_HOLDS_OBJECT (json_array_get_element (fa, 2)));
+    CHECK (o && !json_object_has_member (o, "steam_user"));     /* empty: not a kept unknown */
+    if (n)
+        json_node_unref (n);
+
+    /* and a second round (load, change, save) keeps them again */
+    c = walpe_config_load ();
+    CHECK (c->fps == 75 && c->extra && json_object_get_size (c->extra) == 3);
+    c->steam_user = g_strdup ("me");
+    walpe_config_save (c);
+    walpe_config_free (c);
+    n = read_config ();
+    o = n && JSON_NODE_HOLDS_OBJECT (n) ? json_node_get_object (n) : NULL;
+    CHECK (o && wpj_bool (o, "future_switch", FALSE) && wpj_obj (o, "future_table") &&
+           !g_strcmp0 (wpj_str (o, "steam_user", ""), "me"));
+    if (n)
+        json_node_unref (n);
+}
+
+/* config.json as version 0.12 wrote it (every key of its config_to_json) */
+static const char r12_config[] =
+    "{\"config_version\":2,\"wallpapers_dir\":\"/home/u/.local/share/walpe/workshop\","
+    "\"current\":\"/lib/2901582518\",\"video_backend\":\"ffmpeg\",\"fps\":200,\"volume\":0.5,"
+    "\"paused\":false,\"monitor_current\":{\"DP-2\":\"/lib/3292662040\"},\"pause_fullscreen\":false,"
+    "\"transparent_windows\":\"st,kitty\",\"pause_covered\":false,\"pause_dpms\":true,"
+    "\"cover_transparent\":false,\"render_shared\":false,\"fx_cache\":true,\"tex_downscale\":false,"
+    "\"parallax\":false,\"steam_user\":\"acc\",\"we_assets\":\"/we/assets\",\"vsync\":true,\"audio\":false,"
+    "\"props\":{\"/lib/2901582518\\u001fclock\":\"true\",\"/lib/3292662040/\\u001fwalpe_fit\":\"contain\"}}";
+
+static void test_round12 (void)
+{
+    put_config (r12_config);
+    WalpeConfig *c = walpe_config_load ();
+    CHECK (c->fps_migrated && c->fps_migrated_from == 200 && c->fps == 60);
+    CHECK (!g_strcmp0 (c->current, "/lib/2901582518"));
+    CHECK (!g_strcmp0 (walpe_config_monitor_path (c, "DP-2"), "/lib/3292662040"));
+    CHECK (c->volume == 0.5 && !c->pause_fullscreen && !c->pause_covered && c->pause_dpms);
+    CHECK (!c->cover_transparent && !c->render_shared && c->fx_cache && !c->tex_downscale && !c->parallax);
+    CHECK (!g_strcmp0 (c->transparent_windows, "st,kitty") && !g_strcmp0 (c->steam_user, "acc") &&
+           !g_strcmp0 (c->we_assets, "/we/assets"));
+    /* what version 0.12 did not have: this version's defaults */
+    CHECK (!c->software_render && !c->web_accel && !c->video_hwdec && c->particle_lowres == 1 &&
+           c->particle_density == 100 && c->render_scale == 100 && c->texture_slack == 2 &&
+           walpe_quality_preset_of (&c->quality) == WALPE_PRESET_HIGH && !c->extra);
+    char *v = walpe_config_get_prop ("/lib/2901582518", "clock");
+    CHECK (!g_strcmp0 (v, "true"));
+    g_free (v);
+    v = walpe_config_get_prop ("/lib/3292662040", "walpe_fit");     /* saved with a trailing slash */
+    CHECK (!g_strcmp0 (v, "contain"));
+    g_free (v);
+    walpe_config_save (c);          /* the daemon saves a migrated config at once */
+    walpe_config_free (c);
+
+    c = walpe_config_load ();
+    CHECK (!c->fps_migrated && c->fps == 60 && c->config_version == 3);
+    c->fps = 200;                   /* the user's own choice from now on */
+    walpe_config_save (c);
+    walpe_config_free (c);
+    c = walpe_config_load ();
+    CHECK (!c->fps_migrated && c->fps == 200);
+    walpe_config_free (c);
+
+    /* a rate the user had set under version 0.12 is not touched */
+    put_config ("{\"config_version\":2,\"fps\":144,\"current\":\"/lib/1\"}");
+    c = walpe_config_load ();
+    CHECK (!c->fps_migrated && c->fps == 144);
+    walpe_config_free (c);
+}
+
+static void test_broken (void)
+{
+    static const char *const bad[] = {
+        "{\"fps\": 50, \"current\": \"/lib/1\",",      /* cut short */
+        "[1, 2, 3]",                                      /* JSON, not an object */
+        "50",
+        "\"text\"",
+        "not json at all",
+    };
+    for (guint i = 0; i < G_N_ELEMENTS (bad); i++) {
+        broken_copies (TRUE);
+        put_config (bad[i]);
+        WalpeConfig *c = walpe_config_load ();
+        CHECK (c->fps == 60 && !g_strcmp0 (c->current, ""));
+        CHECK (c->broken_copy != NULL);
+        if (c->broken_copy) {
+            char *kept = NULL;
+            CHECK (g_file_get_contents (c->broken_copy, &kept, NULL, NULL) && !strcmp (kept, bad[i]));
+            g_free (kept);
+        }
+        CHECK (broken_copies (FALSE) == 1);
+        CHECK (!g_file_test (cfg_path, G_FILE_TEST_EXISTS));
+        walpe_config_save (c);      /* the defaults go into a new file, the copy stays */
+        CHECK (broken_copies (FALSE) == 1);
+        walpe_config_free (c);
+        c = walpe_config_load ();
+        CHECK (!c->broken_copy && c->fps == 60);
+        walpe_config_free (c);
+    }
+    broken_copies (TRUE);
+    /* an empty file is not "damaged": nothing to keep */
+    put_config ("  \n");
+    WalpeConfig *c = walpe_config_load ();
+    CHECK (!c->broken_copy && broken_copies (FALSE) == 0 && c->fps == 60);
+    walpe_config_free (c);
+    /* members of the wrong type are skipped one by one, the rest is used */
+    put_config ("{\"config_version\":3,\"fps\":\"fast\",\"volume\":[1],\"paused\":\"yes\",\"current\":7,"
+                "\"monitor_current\":[],\"props\":5,\"wallpaper_quality\":\"x\",\"pause_covered\":false,"
+                "\"particle_density\":1e300,\"render_scale\":-5,\"software_threads\":99,"
+                "\"focus_action\":\"dance\",\"preview_anim\":3,\"fx_quality\":\"best\"}");
+    c = walpe_config_load ();
+    CHECK (!c->broken_copy && c->fps == 60 && c->volume == 0.0 && !c->paused);
+    CHECK (!g_strcmp0 (c->current, "") && !c->pause_covered);
+    CHECK (c->particle_density == 100 && c->render_scale == 25 && c->software_threads == 32);
+    CHECK (c->focus_action == WALPE_FOCUS_RUN && c->preview_anim == WALPE_PREVIEW_ALWAYS &&
+           !g_strcmp0 (c->fx_quality, "exact"));
+    walpe_config_free (c);
+}
+
+int main (void)
+{
+    /* before any GLib call that caches the config dir */
+    char *tmp = g_dir_make_tmp ("walpe-config-test-XXXXXX", NULL);
+    g_assert (tmp);
+    g_setenv ("XDG_CONFIG_HOME", tmp, TRUE);
+    g_setenv ("HOME", tmp, TRUE);
+    cfg_dir = g_build_filename (tmp, "walpe", NULL);
+    g_mkdir_with_parents (cfg_dir, 0700);
+    cfg_path = g_build_filename (cfg_dir, "config.json", NULL);
+    /* the "kept as ..." warnings of the damaged files are expected */
+    g_log_set_always_fatal (G_LOG_LEVEL_ERROR);
+
+    test_defaults ();
+    test_round_trip ();
+    test_unknown_keys ();
+    test_round12 ();
+    test_broken ();
+
+    broken_copies (TRUE);
+    g_unlink (cfg_path);
+    g_rmdir (cfg_dir);
+    g_rmdir (tmp);
+    if (fails)
+        g_printerr ("config-test: %d check(s) failed\n", fails);
+    else
+        g_print ("config-test: ok\n");
+    return fails ? 1 : 0;
+}

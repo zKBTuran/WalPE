@@ -1,0 +1,121 @@
+name: A wallpaper looks wrong or does not load
+description: One wallpaper differs from what Wallpaper Engine shows, misses parts, or is not shown at all
+body:
+  - type: markdown
+    attributes:
+      value: |
+        WalPE plays Wallpaper Engine's formats with its own renderer, so differences are bugs we want to know about. The README lists what is not implemented ("Known limitations") - a look there may save you the report.
+
+        **Before you post logs or command output, please remove your home path and your user name from them** (for example replace `/home/yourname` with `~`).
+  - type: input
+    id: wallpaper
+    attributes:
+      label: Wallpaper
+      description: The Workshop id (the number in the item's Steam address) or its link. For a wallpaper of your own, say so and describe what it consists of.
+      placeholder: "1234567890"
+    validations:
+      required: true
+  - type: dropdown
+    id: type
+    attributes:
+      label: Wallpaper type
+      description: "The `type` in the wallpaper's `project.json`."
+      options:
+        - Scene
+        - Video
+        - Web
+        - GIF or picture
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What Wallpaper Engine shows
+      description: What the wallpaper looks like in Wallpaper Engine (or in its Workshop preview), as far as you know.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What WalPE shows
+      description: What is different - a missing or misplaced layer, wrong colours, an effect that does not move, nothing at all. Say which part of the picture and whether it is there from the start or comes with time.
+    validations:
+      required: true
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots (optional)
+      description: Drag pictures here. One of WalPE and, if you can, one of Wallpaper Engine or the Workshop preview.
+  - type: textarea
+    id: options
+    attributes:
+      label: Wallpaper options you changed (optional)
+      description: "`walpe-ctl props` lists the options of the wallpaper that is showing, with their current values. Also say if you used \"Adjust layers\"."
+      render: text
+  - type: dropdown
+    id: preset
+    attributes:
+      label: Is it the same with the quality preset "max"?
+      description: "`walpe-ctl set preset=max` draws the exact picture; the other presets trade some of it for less GPU load."
+      options:
+        - Yes, it looks wrong with preset=max too
+        - No, with preset=max it is right
+        - Not tried
+    validations:
+      required: true
+  - type: input
+    id: assets
+    attributes:
+      label: Wallpaper Engine installation (scenes)
+      description: "Scenes take Wallpaper Engine's builtin effects from your own installation. `walpe-ctl status` shows whether one was found: the values of `we_assets` and `we_assets_source` (shorten your home path)."
+      placeholder: "found (steam) / not found / set with we_assets"
+  - type: input
+    id: version
+    attributes:
+      label: WalPE version
+      description: |
+        The daemon prints it when it starts: `grep 'walpe-daemon .* up' ~/.cache/walpe/daemon.log | tail -n 1` (that file exists when the library window started the daemon; otherwise look in the terminal or journal the daemon writes to). It is also the `version:` line of `meson.build`. If you built from git, add the commit: `git rev-parse --short HEAD`.
+      placeholder: "0.12.1, commit 1a2b3c4"
+    validations:
+      required: true
+  - type: input
+    id: distribution
+    attributes:
+      label: Distribution
+      description: Name and version, and how WalPE was installed (built from source, a package).
+    validations:
+      required: true
+  - type: dropdown
+    id: session
+    attributes:
+      label: Session type
+      description: "`echo $XDG_SESSION_TYPE` tells. WalPE draws on X11 only (README, \"Known limitations\")."
+      options:
+        - X11
+        - Wayland
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: wm
+    attributes:
+      label: Window manager or desktop, and compositor
+      description: For example dwm with picom, i3 without a compositor, KDE Plasma (KWin), Xfce (xfwm4 with compositing on).
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver
+      description: |
+        Model and driver version, for example from `glxinfo -B`. `walpe-ctl status` shows what the daemon renders with as `gl_vendor`, `gl_renderer` and `gl_version`. Say so if you use "Render on CPU" (`software=on`).
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log output
+      description: |
+        What the daemon printed while it loaded the wallpaper: the end of `~/.cache/walpe/daemon.log` when the library window started the daemon, otherwise its terminal or journal. Lines that start with `fx:` or `scenenode:` name effects and layers that could not be built. If the wallpaper was not shown at all, `walpe-ctl status` gives the reason as `load_error`. Please remove your home path and user name first.
+      render: text

@@ -1,0 +1,100 @@
+name: Bug report
+description: WalPE crashes, hangs, uses too much CPU or GPU, or does something it should not
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time. A few facts about your system save a round of questions.
+
+        **Before you post logs or command output, please remove your home path and your user name from them** (for example replace `/home/yourname` with `~`). `walpe-ctl status` and the log name the folders of your wallpapers.
+
+        If one wallpaper looks wrong or does not load, please use the form "A wallpaper looks wrong or does not load" instead.
+  - type: input
+    id: version
+    attributes:
+      label: WalPE version
+      description: |
+        The daemon prints it when it starts: `grep 'walpe-daemon .* up' ~/.cache/walpe/daemon.log | tail -n 1` (that file exists when the library window started the daemon; otherwise look in the terminal or journal the daemon writes to). It is also the `version:` line of `meson.build`. If you built from git, add the commit: `git rev-parse --short HEAD`.
+      placeholder: "0.12.1, commit 1a2b3c4"
+    validations:
+      required: true
+  - type: input
+    id: distribution
+    attributes:
+      label: Distribution
+      description: Name and version, and how WalPE was installed (built from source, a package).
+      placeholder: "Gentoo, built from source with meson"
+    validations:
+      required: true
+  - type: dropdown
+    id: session
+    attributes:
+      label: Session type
+      description: "`echo $XDG_SESSION_TYPE` tells. WalPE draws on X11 only (README, \"Known limitations\")."
+      options:
+        - X11
+        - Wayland
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: wm
+    attributes:
+      label: Window manager or desktop, and compositor
+      description: For example dwm with picom, i3 without a compositor, KDE Plasma (KWin), Xfce (xfwm4 with compositing on).
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver
+      description: |
+        Model and driver version, for example from `glxinfo -B`. `walpe-ctl status` shows what the daemon renders with as `gl_vendor`, `gl_renderer` and `gl_version`. Say so if you use "Render on CPU" (`software=on`).
+      placeholder: "NVIDIA GTX 1660, driver 550.x / AMD RX 6600, Mesa 24.x"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, and since when (a version or setting that still worked helps a lot).
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The commands or clicks, the wallpaper that was showing (Workshop id or type), the number of monitors and their sizes, and settings you changed (`walpe-ctl set ...`, `~/.config/walpe/gpu.conf`, environment switches).
+      placeholder: |
+        1. walpe-daemon
+        2. walpe-ctl open ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log output
+      description: |
+        The daemon's output around the problem: the end of `~/.cache/walpe/daemon.log` when the library window started the daemon, otherwise what it printed in its terminal or journal. For a crash, a backtrace helps (`coredumpctl gdb walpe-daemon`, then `bt`). Please remove your home path and user name first.
+      render: text
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of walpe-ctl status
+      description: One line of JSON with the monitors, what they show and why something is paused. It contains the paths of your wallpapers - please shorten your home path.
+      render: json
+  - type: textarea
+    id: gpu-report
+    attributes:
+      label: GPU report (for load, stutter or memory problems)
+      description: |
+        With the problem on screen, run `walpe-gpu-report 30` (installed with WalPE; in the source tree: `sh scripts/walpe-gpu-report.sh 30`) and paste what it prints. It samples for 30 seconds: with an NVIDIA card it reads `nvidia-smi`; with any card it reports the daemon's CPU, memory and threads and appends WalPE's own GPU profile (`walpe-ctl profile`). Its output holds no file paths; of your wallpapers it names Workshop ids and layer and effect names only, of other programs only the names of those that use the GPU.
+      render: text

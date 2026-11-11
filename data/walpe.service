@@ -1,0 +1,12 @@
+[Unit]
+Description=WalPE daemon: live wallpapers for Linux (plays Wallpaper Engine content)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/walpe-daemon
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,114 @@
+#!/bin/sh
+# Stand-in for nvidia-smi (tests/gpu_report_test.sh). It answers the calls
+# scripts/walpe-gpu-report.sh makes, in one of these ways (FAKE_SMI):
+#   full    every field has a number
+#   laptop  power.draw and the clocks are "[N/A]", pstate changes, the tool
+#           does not know clocks.max.gr, pmon has no per-process numbers
+#   old     "[Not Supported]" wording, no pmon at all (exit 1)
+#   gaps    as full, but pmon prints "-" for the daemon's GPU share every
+#           other second
+#   broken  the tool exists but cannot talk to the driver
+# FAKE_SMI_PID = the pid shown as walpe-daemon in the process lists.
+mode=${FAKE_SMI:-full}
+pid=${FAKE_SMI_PID:-4242}
+[ "$mode" = broken ] && { echo "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver." >&2; exit 9; }
+
+query=
+loop=0
+pmon=0
+count=1
+while [ $# -gt 0 ]; do
+    case "$1" in
+    --query-gpu=*) query=${1#--query-gpu=} ;;
+    --format=*) ;;
+    -l|-d|-s|-i) [ "$1" = -l ] && loop=1; [ "$1" = -c ] && count=$2; shift ;;
+    -c) count=$2; shift ;;
+    pmon) pmon=1 ;;
+    esac
+    shift
+done
+
+value () {   # field, sample number
+    case "$1" in
+    name) echo "NVIDIA GeForce RTX 4050 Laptop GPU" ;;
+    driver_version) echo "550.120" ;;
+    memory.total) echo "6141 MiB" ;;
+    utilization.gpu) echo $((20 + ($2 % 3) * 10)) ;;       # 20 30 40 ...
+    utilization.memory) echo $((5 + $2 % 2)) ;;
+    memory.used) echo $((900 + $2)) ;;
+    temperature.gpu) echo 51 ;;
+    power.draw)
+        case $mode in laptop) echo "[N/A]" ;; old) echo "[Not Supported]" ;; *) echo "12.5$2" ;; esac ;;
+    clocks.gr)
+        case $mode in laptop) echo "[N/A]" ;; old) echo "[Not Supported]" ;; *) echo 600 ;; esac ;;
+    clocks.mem)
+        case $mode in laptop) echo "[N/A]" ;; old) echo "[Not Supported]" ;; *) echo 810 ;; esac ;;
+    clocks.max.gr)
+        case $mode in full|gaps) echo 2400 ;; *) return 1 ;; esac ;;
+    pstate)
+        case $mode in laptop) [ $(($2 % 2)) = 0 ] && echo P8 || echo P0 ;; old) echo "[Not Supported]" ;; *) echo P5 ;; esac ;;
+    *) return 1 ;;
+    esac
+}
+
+line () {   # sample number
+    out=
+    oldifs=$IFS
+    IFS=,
+    for f in $query; do
+        IFS=$oldifs
+        v=$(value "$f" "$1") || { echo "Field \"$f\" is not a valid field to query." ; exit 2; }
+        out="${out:+$out, }$v"
+        IFS=,
+    done
+    IFS=$oldifs
+    echo "$out"
+}
+
+if [ "$pmon" = 1 ]; then
+    [ "$mode" = old ] && { echo "Invalid combination of input arguments." >&2; exit 1; }
+    n=0
+    while [ "$n" -lt "$count" ]; do
+        echo "# gpu         pid   type     sm    mem    enc    dec    jpg    ofa     fb   ccpm    command "
+        echo "# Idx           #    C/G      %      %      %      %      %      %     MB     MB    name "
+        echo "    0        811     G      3      1      -      -      -      -    180      0    Xorg"
+        echo "    0        902     G      8      1      -      -      -      -     60      0    picom"
+        if [ "$mode" = laptop ]; then
+            echo "    0      $pid     G      -      -      -      -      -      -      -      -    walpe-daemon"
+        elif [ "$mode" = gaps ] && [ $((n % 2)) = 1 ]; then
+            # the driver has no figure for this second
+            echo "    0      $pid     G      -      -      -      -      -      -    $((400 + n))      0    walpe-daemon"
+        else
+            echo "    0      $pid     G     $((10 + n % 2))      2      -      -      -      -    $((400 + n))      0    walpe-daemon"
+        fi
+        n=$((n + 1))
+        [ "$n" -lt "$count" ] && sleep 1
+    done
+    exit 0
+fi
+
+if [ -n "$query" ]; then
+    n=0
+    line $n
+    while [ "$loop" = 1 ]; do
+        sleep 1
+        n=$((n + 1))
+        line $n
+    done
+    exit 0
+fi
+
+# the plain table
+cat <<TABLE
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 550.120                Driver Version: 550.120        CUDA Version: 12.4     |
+|=========================================================================================|
+|   0  NVIDIA GeForce RTX 4050 ...    Off |   00000000:01:00.0  On |                  N/A |
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
+|=========================================================================================|
+|    0   N/A  N/A       811      G   /usr/bin/X                                    180MiB |
+|    0   N/A  N/A      $pid      G   walpe-daemon                                  377MiB |
++-----------------------------------------------------------------------------------------+
+TABLE

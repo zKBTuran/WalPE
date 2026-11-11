@@ -1,0 +1,27 @@
+<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;background:#102030;overflow:hidden}canvas{position:absolute;left:0;top:0}</style></head>
+<body><canvas id="bg"></canvas><canvas id="vis"></canvas>
+<script>
+// synthetic "visualizer" page: an animation driven by requestAnimationFrame and a
+// visualizer drawn inside the audio listener, as many workshop pages do.
+const bg=document.getElementById('bg'), vis=document.getElementById('vis');
+function fit(){ for(const c of [bg,vis]){ c.width=innerWidth; c.height=innerHeight; } }
+fit(); addEventListener('resize',fit);
+let raf=0, aud=0, audMs=0, t0=performance.now(), fpsProp=-1;
+window.wallpaperPropertyListener={ applyGeneralProperties(p){ if(p.fps!==undefined) fpsProp=p.fps; } };
+function frame(t){ raf++;
+  const g=bg.getContext('2d'); g.fillStyle='#102030'; g.fillRect(0,0,bg.width,bg.height);
+  g.fillStyle='#e0c040'; const x=(t/4)%bg.width; g.fillRect(x,bg.height*0.3,60,60);
+  requestAnimationFrame(frame); }
+requestAnimationFrame(frame);
+window.wallpaperRegisterAudioListener(function(a){ aud++; const s=performance.now();
+  const g=vis.getContext('2d'); g.clearRect(0,0,vis.width,vis.height);
+  // 128 bars with glow, twice (mirror), the usual look of an audio visualizer
+  g.shadowBlur=12; g.shadowColor='#40c0ff'; g.fillStyle='#40c0ff';
+  const bw=vis.width/128;
+  for(let k=0;k<2;k++) for(let i=0;i<128;i++){ const h=20+200*Math.min(1,a[i]||0)+40*Math.abs(Math.sin(i*0.3+s/300));
+    g.fillRect(i*bw+1, k?vis.height*0.55:vis.height*0.55-h, bw-2, h); }
+  audMs+=performance.now()-s; });
+setInterval(function(){ const now=performance.now(), dt=(now-t0)/1000;
+  console.log('SYN raf/s='+(raf/dt).toFixed(1)+' audio/s='+(aud/dt).toFixed(1)+' audio_ms='+(aud?audMs/aud:0).toFixed(2)+' fpsprop='+fpsProp);
+  raf=0; aud=0; audMs=0; t0=now; }, 2000);
+</script></body></html>

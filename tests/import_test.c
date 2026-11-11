@@ -1,0 +1,403 @@
+/* import_test - the video importer (src/common/import.c)
+ *
+ * Decisions without ffmpeg: the 1080p cap (never upscaled, even sizes,
+ * rotation and pixel aspect applied), which files are copied as they are,
+ * the argument vector. With ffmpeg and ffprobe in PATH (else that part is
+ * skipped) real runs in a private temp dir, clips generated here:
+ *  - a file that is already fine is copied (remux), a thumbnail is written;
+ *  - a file in another codec and larger than 1080p is encoded to exactly
+ *    1920x1080 H.264;
+ *  - a file that is no video fails with a reason, nothing is left behind;
+ *  - a file that qualifies for a copy but whose copy fails is encoded (an
+ *    "ffmpeg" put in front of the real one refuses every stream copy);
+ *  - a run that is cancelled leaves no output and no ".part" file, and its
+ *    callback is not called;
+ *  - the unfinished outputs of a killed daemon are removed
+ *    (walpe_import_tidy_parts), and only those. */
+#include <glib.h>
+#include <glib/gstdio.h>
+#include <string.h>
+#include "common/import.h"
+
+static int fails;
+#define CHECK(c) do { if (!(c)) { fails++; g_printerr ("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); } } while (0)
+
+static char *tmp;
+static GMainLoop *loop;
+
+static char *P (const char *rel)
+{
+    return g_build_filename (tmp, rel, NULL);
+}
+
+static gboolean have_arg (char **argv, const char *a, const char *next)
+{
+    for (int i = 0; argv[i]; i++)
+        if (!strcmp (argv[i], a) && (!next || (argv[i + 1] && !strcmp (argv[i + 1], next))))
+            return TRUE;
+    return FALSE;
+}
+
+static void test_decisions (void)
+{
+    WalpeMediaInfo mi = { .has_video = TRUE, .codec = (char *) "h264", .pix_fmt = (char *) "yuv420p",
+                          .width = 1920, .height = 1080, .sar_num = 1, .sar_den = 1 };
+    int w = 0, h = 0;
+    CHECK (walpe_import_can_remux (&mi));           /* already what the player reads */
+    walpe_import_target_size (&mi, &w, &h);
+    CHECK (w == 1920 && h == 1080);
+    mi.width = 640; mi.height = 360;                /* small: copied, never upscaled */
+    CHECK (walpe_import_can_remux (&mi));
+    walpe_import_target_size (&mi, &w, &h);
+    CHECK (w == 640 && h == 360);
+    mi.width = 3840; mi.height = 2160;              /* 4K: encoded down to the cap */
+    CHECK (!walpe_import_can_remux (&mi));
+    walpe_import_target_size (&mi, &w, &h);
+    CHECK (w == 1920 && h == 1080);
+    mi.width = 3440; mi.height = 1440;              /* ultrawide: width decides */
+    walpe_import_target_size (&mi, &w, &h);
+    CHECK (w == 1920 && h == 802);
+    mi.width = 1080; mi.height = 1920;              /* portrait: height decides */
+    walpe_import_target_size (&mi, &w, &h);
+    CHECK (w == 606 && h == 1080);
+    mi.width = 1920; mi.height = 1080; mi.rotation = 90;    /* stored sideways */
+    CHECK (!walpe_import_can_remux (&mi));
+    walpe_import_target_size (&mi, &w, &h);
+    CHECK (w == 606 && h == 1080);
+    mi.rotation = 0; mi.sar_num = 4; mi.sar_den = 3; mi.width = 1440;   /* anamorphic 1440x1080 */
+    CHECK (!walpe_import_can_remux (&mi));
+    walpe_import_target_size (&mi, &w, &h);
+    CHECK (w == 1920 && h == 1080);
+    mi.sar_num = mi.sar_den = 1; mi.width = 1279; mi.height = 719;      /* odd sizes */
+    CHECK (!walpe_import_can_remux (&mi));
+    walpe_import_target_size (&mi, &w, &h);
+    CHECK (w == 1278 && h == 718);
+    mi.width = 1280; mi.height = 720;
+    mi.pix_fmt = (char *) "yuv420p10le";
+    CHECK (!walpe_import_can_remux (&mi));
+    mi.pix_fmt = (char *) "yuvj420p";
+    CHECK (walpe_import_can_remux (&mi));
+    mi.codec = (char *) "hevc";
+    CHECK (!walpe_import_can_remux (&mi));
+    mi.width = mi.height = 0;                       /* unknown size: the cap, never 0 */
+    walpe_import_target_size (&mi, &w, &h);
+    CHECK (w >= 2 && h >= 2 && w <= 1920 && h <= 1080);
+
+    /* the argument vector: names can never be options or protocols, the
+     * source may only be a local container file, no audio, +faststart */
+    mi.width = 3840; mi.height = 2160; mi.codec = (char *) "vp9"; mi.pix_fmt = (char *) "yuv420p";
+    char **av = walpe_import_build_argv ("/in/-i evil.webm", "/out/x.mp4.part", &mi, "libx264", FALSE);
+    CHECK (have_arg (av, "-i", "file:/in/-i evil.webm") && have_arg (av, "file:/out/x.mp4.part", NULL));
+    CHECK (have_arg (av, "-protocol_whitelist", "file") && have_arg (av, "-an", NULL));
+    CHECK (have_arg (av, "-c:v", "libx264") && have_arg (av, "-movflags", "+faststart"));
+    CHECK (have_arg (av, "-vf", "scale=1920:1080:flags=bicubic,setsar=1,format=yuv420p"));
+    CHECK (have_arg (av, "-f", "mp4") && have_arg (av, "-nostdin", NULL));
+    g_strfreev (av);
+    av = walpe_import_build_argv ("/in/a.mp4", "/out/a.mp4.part", &mi, "libx264", TRUE);
+    CHECK (have_arg (av, "-c:v", "copy") && !have_arg (av, "-vf", NULL));
+    g_strfreev (av);
+
+    /* ffprobe's answer */
+    WalpeMediaInfo p;
+    CHECK (walpe_media_info_parse ("{\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"h264\","
+                                   "\"pix_fmt\":\"yuv420p\",\"width\":1920,\"height\":\"1080\","
+                                   "\"sample_aspect_ratio\":\"1:1\",\"side_data_list\":[{\"rotation\":-90}]}],"
+                                   "\"format\":{\"format_name\":\"mov,mp4\",\"duration\":\"12.5\"}}", &p));
+    CHECK (p.has_video && p.width == 1920 && p.height == 1080 && p.rotation == 270 && p.duration == 12.5);
+    walpe_media_info_clear (&p);
+    CHECK (!walpe_media_info_parse ("[1]", &p) && !walpe_media_info_parse ("{", &p));
+    CHECK (walpe_media_info_parse ("{\"streams\":[]}", &p) && !p.has_video);
+    walpe_media_info_clear (&p);
+}
+
+static void test_tidy (void)
+{
+    char *d = P ("tidy");
+    g_mkdir_with_parents (d, 0700);
+    char *keep1 = P ("tidy/a.mp4"), *keep2 = P ("tidy/a.jpg"), *keep3 = P ("tidy/notes.part");
+    char *gone1 = P ("tidy/a.mp4.part"), *gone2 = P ("tidy/b c.mp4.part");
+    char *dirp = P ("tidy/dir.mp4.part"), *link = P ("tidy/link.mp4.part");
+    g_file_set_contents (keep1, "v", -1, NULL);
+    g_file_set_contents (keep2, "j", -1, NULL);
+    g_file_set_contents (keep3, "n", -1, NULL);
+    g_file_set_contents (gone1, "p", -1, NULL);
+    g_file_set_contents (gone2, "p", -1, NULL);
+    g_mkdir (dirp, 0700);
+    CHECK (symlink (keep1, link) == 0);
+    CHECK (walpe_import_tidy_parts (d) == 2);
+    CHECK (!g_file_test (gone1, G_FILE_TEST_EXISTS) && !g_file_test (gone2, G_FILE_TEST_EXISTS));
+    CHECK (g_file_test (keep1, G_FILE_TEST_EXISTS) && g_file_test (keep2, G_FILE_TEST_EXISTS) &&
+           g_file_test (keep3, G_FILE_TEST_EXISTS) && g_file_test (dirp, G_FILE_TEST_IS_DIR) &&
+           g_file_test (link, G_FILE_TEST_IS_SYMLINK));
+    CHECK (walpe_import_tidy_parts (d) == 0);
+    CHECK (walpe_import_tidy_parts (NULL) == 0);
+    char *none = P ("no-such-dir");
+    CHECK (walpe_import_tidy_parts (none) == 0);
+    g_unlink (link);
+    g_rmdir (dirp);
+    g_unlink (keep1);
+    g_unlink (keep2);
+    g_unlink (keep3);
+    g_rmdir (d);
+    g_free (none); g_free (d); g_free (keep1); g_free (keep2); g_free (keep3);
+    g_free (gone1); g_free (gone2); g_free (dirp); g_free (link);
+}
+
+/* ---- real runs */
+
+typedef struct {
+    gboolean called, ok;
+    char *dst, *error, *mode;
+    int max_percent;
+} Result;
+
+static void done_cb (WalpeImport *imp, gboolean ok, const char *dst, const char *error, gpointer user)
+{
+    Result *r = user;
+    r->called = TRUE;
+    r->ok = ok;
+    r->dst = g_strdup (dst);
+    r->error = g_strdup (error);
+    r->mode = g_strdup (walpe_import_mode (imp));
+    g_main_loop_quit (loop);
+}
+
+static gboolean stop_loop (gpointer u)
+{
+    (void) u;
+    g_main_loop_quit (loop);
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean run_tool (const char *const *argv)
+{
+    int status = -1;
+    return g_spawn_sync (NULL, (char **) argv, NULL,
+                         G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL,
+                         NULL, NULL, NULL, NULL, &status, NULL) && status == 0;
+}
+
+/* "codec,width,height" of the first video stream, g_free */
+static char *probe (const char *file)
+{
+    const char *argv[] = { "ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                           "stream=codec_name,width,height", "-of", "csv=p=0", file, NULL };
+    char *out = NULL;
+    if (!g_spawn_sync (NULL, (char **) argv, NULL, G_SPAWN_SEARCH_PATH | G_SPAWN_STDERR_TO_DEV_NULL, NULL,
+                       NULL, &out, NULL, NULL, NULL))
+        return g_strdup ("");
+    return g_strstrip (out);
+}
+
+/* names in dir that end in suffix */
+static int count_suffix (const char *dir, const char *suffix)
+{
+    int n = 0;
+    GDir *d = g_dir_open (dir, 0, NULL);
+    const char *name;
+    while (d && (name = g_dir_read_name (d)))
+        n += g_str_has_suffix (name, suffix);
+    if (d)
+        g_dir_close (d);
+    return n;
+}
+
+static Result run_import (const char *src, const char *dest, int secs)
+{
+    Result r = { 0 };
+    GError *err = NULL;
+    WalpeImport *imp = walpe_import_start (src, dest, "libx264", done_cb, &r, &err);
+    if (!imp) {
+        r.error = g_strdup (err ? err->message : "?");
+        g_clear_error (&err);
+        return r;
+    }
+    guint t = g_timeout_add_seconds ((guint) secs, stop_loop, NULL);
+    g_main_loop_run (loop);
+    if (r.called)
+        g_source_remove (t);
+    r.max_percent = walpe_import_percent (imp);
+    walpe_import_free (imp);
+    return r;
+}
+
+static void result_clear (Result *r)
+{
+    g_free (r->dst);
+    g_free (r->error);
+    g_free (r->mode);
+}
+
+static void test_runs (void)
+{
+    char *ff = g_find_program_in_path ("ffmpeg"), *fp = g_find_program_in_path ("ffprobe");
+    if (!ff || !fp) {
+        g_print ("import-test: ffmpeg / ffprobe not in PATH, real runs skipped\n");
+        g_free (ff);
+        g_free (fp);
+        return;
+    }
+    g_free (ff);
+    g_free (fp);
+    char *in = P ("in"), *lib = P ("lib");
+    g_mkdir_with_parents (in, 0700);
+    char *fine = P ("in/fine.mp4"), *big = P ("in/big clip.avi"), *junk = P ("in/junk.mp4"),
+         *lng = P ("in/long.avi");
+    const char *mk_fine[] = { "ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                              "testsrc2=size=640x360:rate=30", "-t", "1", "-c:v", "libx264", "-preset",
+                              "ultrafast", "-pix_fmt", "yuv420p", fine, NULL };
+    const char *mk_big[] = { "ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                             "testsrc2=size=2560x1440:rate=10", "-t", "0.5", "-c:v", "mpeg4", "-q:v", "8",
+                             big, NULL };
+    const char *mk_long[] = { "ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                              "testsrc2=size=1280x720:rate=30", "-t", "40", "-c:v", "mpeg4", "-q:v", "12",
+                              lng, NULL };
+    if (!run_tool (mk_fine) || !run_tool (mk_big) || !run_tool (mk_long)) {
+        g_print ("import-test: this ffmpeg cannot make the test clips (libx264 / mpeg4), real runs skipped\n");
+        goto out;
+    }
+    g_file_set_contents (junk, "this is not a video\n", -1, NULL);
+
+    /* already fine: copied, thumbnail next to it */
+    Result r = run_import (fine, lib, 120);
+    CHECK (r.called && r.ok && r.dst && g_file_test (r.dst, G_FILE_TEST_IS_REGULAR));
+    CHECK (!g_strcmp0 (r.mode, "remux") && r.max_percent == 100);
+    if (r.dst) {
+        char *got = probe (r.dst);
+        CHECK (!g_strcmp0 (got, "h264,640,360"));
+        g_free (got);
+        char *want = g_build_filename (lib, "fine.mp4", NULL), *th = g_build_filename (lib, "fine.jpg", NULL);
+        CHECK (!g_strcmp0 (r.dst, want) && g_file_test (th, G_FILE_TEST_IS_REGULAR));
+        g_free (want);
+        g_free (th);
+    }
+    CHECK (count_suffix (lib, ".part") == 0);
+    result_clear (&r);
+
+    /* another codec, larger than the cap: encoded to exactly 1920x1080 */
+    r = run_import (big, lib, 240);
+    CHECK (r.called && r.ok && r.dst && r.mode && g_str_has_prefix (r.mode, "transcode:"));
+    if (r.dst) {
+        char *got = probe (r.dst);
+        CHECK (!g_strcmp0 (got, "h264,1920,1080"));
+        g_free (got);
+    }
+    CHECK (count_suffix (lib, ".part") == 0 && count_suffix (lib, ".mp4") == 2);
+    result_clear (&r);
+
+    /* importing the same source again replaces its output, another file
+     * of the same name gets a new one */
+    r = run_import (fine, lib, 120);
+    CHECK (r.called && r.ok && count_suffix (lib, ".mp4") == 3);    /* fine-2.mp4: fine.mp4 is another file */
+    result_clear (&r);
+
+    /* not a video: a reason, nothing left behind */
+    r = run_import (junk, lib, 120);
+    CHECK (r.called && !r.ok && !r.dst && r.error && *r.error);
+    CHECK (count_suffix (lib, ".part") == 0 && count_suffix (lib, ".mp4") == 3);
+    result_clear (&r);
+    char *missing = P ("in/missing.mp4");
+    r = run_import (missing, lib, 10);
+    CHECK (!r.called && r.error && strstr (r.error, "no such file"));
+    result_clear (&r);
+    g_free (missing);
+
+    /* a file that qualifies for a copy, but the copy fails: encoded instead
+     * of "ffmpeg failed". An "ffmpeg" in front of the real one in PATH
+     * refuses every run that asks for a stream copy and notes that it was
+     * asked. */
+    {
+        char *real = g_find_program_in_path ("ffmpeg"), *fake = P ("in/ffmpeg"), *mark = P ("in/copy-asked"),
+             *again = P ("in/again.mp4"), *data = NULL;
+        gsize len = 0;
+        char *q_real = g_shell_quote (real), *q_mark = g_shell_quote (mark);
+        char *sh = g_strdup_printf ("#!/bin/sh\nfor a in \"$@\"; do\n  if [ \"$a\" = copy ]; then : > %s; exit 1; fi\n"
+                                    "done\nexec %s \"$@\"\n", q_mark, q_real);
+        char *old_path = g_strdup (g_getenv ("PATH")), *path = g_strconcat (in, ":", old_path, NULL);
+        if (g_file_get_contents (fine, &data, &len, NULL) && g_file_set_contents (again, data, (gssize) len, NULL) &&
+            g_file_set_contents (fake, sh, -1, NULL) && !g_chmod (fake, 0700)) {
+            g_setenv ("PATH", path, TRUE);
+            r = run_import (again, lib, 240);
+            g_setenv ("PATH", old_path, TRUE);
+            CHECK (g_file_test (mark, G_FILE_TEST_EXISTS));     /* the copy was tried first */
+            CHECK (r.called && r.ok && r.dst && r.mode && g_str_has_prefix (r.mode, "transcode:"));
+            if (r.dst) {
+                char *got = probe (r.dst);
+                CHECK (!g_strcmp0 (got, "h264,640,360"));
+                g_free (got);
+            }
+            CHECK (count_suffix (lib, ".part") == 0 && count_suffix (lib, ".mp4") == 4);
+            result_clear (&r);
+        } else {
+            CHECK (!"the stand-in ffmpeg could not be written");
+        }
+        g_free (real); g_free (fake); g_free (mark); g_free (again); g_free (data);
+        g_free (q_real); g_free (q_mark); g_free (sh); g_free (old_path); g_free (path);
+    }
+
+    /* cancelled in the middle of the encode: no output, no ".part", no callback */
+    {
+        Result c = { 0 };
+        WalpeImport *imp = walpe_import_start (lng, lib, "libx264", done_cb, &c, NULL);
+        CHECK (imp != NULL);
+        char *part = g_build_filename (lib, "long.mp4.part", NULL), *dst = g_build_filename (lib, "long.mp4", NULL);
+        /* wait until ffmpeg writes (or the run ended, on a very fast machine) */
+        for (int i = 0; imp && i < 600 && !c.called && !g_file_test (part, G_FILE_TEST_EXISTS); i++) {
+            g_timeout_add (100, stop_loop, NULL);
+            g_main_loop_run (loop);
+        }
+        if (!c.called) {
+            CHECK (g_file_test (part, G_FILE_TEST_EXISTS));
+            walpe_import_cancel (imp);
+            g_timeout_add (1500, stop_loop, NULL);      /* let the child die and the callbacks run */
+            g_main_loop_run (loop);
+            CHECK (!c.called);
+            CHECK (!g_file_test (part, G_FILE_TEST_EXISTS) && !g_file_test (dst, G_FILE_TEST_EXISTS));
+            CHECK (count_suffix (lib, ".part") == 0);
+            CHECK (walpe_import_percent (imp) < 100);
+        } else {
+            g_print ("import-test: the long encode finished before it could be cancelled\n");
+        }
+        walpe_import_free (imp);
+        result_clear (&c);
+        g_free (part);
+        g_free (dst);
+    }
+out:
+    {
+        /* remove what the runs made */
+        const char *dirs[] = { lib, in };
+        for (guint i = 0; i < G_N_ELEMENTS (dirs); i++) {
+            GDir *d = g_dir_open (dirs[i], 0, NULL);
+            const char *name;
+            while (d && (name = g_dir_read_name (d))) {
+                char *p = g_build_filename (dirs[i], name, NULL);
+                g_unlink (p);
+                g_free (p);
+            }
+            if (d)
+                g_dir_close (d);
+            g_rmdir (dirs[i]);
+        }
+    }
+    g_free (fine); g_free (big); g_free (junk); g_free (lng); g_free (in); g_free (lib);
+}
+
+int main (void)
+{
+    tmp = g_dir_make_tmp ("walpe-import-test-XXXXXX", NULL);
+    g_assert (tmp);
+    g_setenv ("HOME", tmp, TRUE);
+    g_setenv ("XDG_CACHE_HOME", tmp, TRUE);
+    g_unsetenv ("WALPE_IMPORT_ENCODER");
+    loop = g_main_loop_new (NULL, FALSE);
+    test_decisions ();
+    test_tidy ();
+    test_runs ();
+    g_rmdir (tmp);
+    if (fails)
+        g_printerr ("import-test: %d check(s) failed\n", fails);
+    else
+        g_print ("import-test: ok\n");
+    return fails ? 1 : 0;
+}

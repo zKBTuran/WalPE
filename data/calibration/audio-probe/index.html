@@ -1,0 +1,32 @@
+<!doctype html>
+<!-- WalPE calibration page: run the SAME page in Wallpaper Engine (Windows)
+     and in WalPE while playing the same test signal, then compare the
+     numbers. Shows the 64+64 values of
+     wallpaperRegisterAudioListener: live, peak since reset (click), and the
+     time the value needs to fall below half after the signal stops. -->
+<html><head><meta charset="utf-8"><title>audio probe</title>
+<style>
+body{margin:0;background:#000;color:#ddd;font:14px/1.25 monospace}
+#bars{display:flex;align-items:flex-end;height:45vh;gap:2px;padding:8px}
+#bars div{flex:1;background:#4af;min-height:1px}
+table{border-collapse:collapse;margin:8px}td{padding:0 6px;text-align:right}
+</style></head><body>
+<div id="bars"></div><div id="info"></div><table id="t"></table>
+<script>
+var N=64,bars=[],peak=new Float64Array(128),live=new Float64Array(128),fall=new Float64Array(128),hi=new Float64Array(128),t0=performance.now();
+var B=document.getElementById('bars');for(var i=0;i<N;i++){var d=document.createElement('div');B.appendChild(d);bars.push(d);}
+document.body.onclick=function(){peak.fill(0);fall.fill(0);};
+window.wallpaperRegisterAudioListener(function(a){
+  var now=performance.now();
+  for(var i=0;i<128;i++){var v=a[i]||0;live[i]=v;if(v>peak[i])peak[i]=v;
+    if(v>=0.5*peak[i]&&v>0.05){hi[i]=now;} else if(hi[i]&&!fall[i]){fall[i]=now-hi[i];}}
+  for(var i=0;i<N;i++)bars[i].style.height=Math.min(100,live[i]*100)+'%';
+});
+setInterval(function(){
+  var r='<tr><td>band</td><td>live L</td><td>peak L</td><td>live R</td><td>peak R</td><td>fall ms</td></tr>';
+  for(var i=0;i<N;i+=1)r+='<tr><td>'+i+'</td><td>'+live[i].toFixed(3)+'</td><td>'+peak[i].toFixed(3)+'</td><td>'+
+    live[64+i].toFixed(3)+'</td><td>'+peak[64+i].toFixed(3)+'</td><td>'+(fall[i]?fall[i].toFixed(0):'-')+'</td></tr>';
+  document.getElementById('t').innerHTML=r;
+  document.getElementById('info').textContent='click = reset peaks; uptime '+((performance.now()-t0)/1000).toFixed(0)+' s';
+},250);
+</script></body></html>

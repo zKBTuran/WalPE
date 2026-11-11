@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=WalPE Tray
+GenericName=Live wallpaper tray icon
+Comment=Tray icon for WalPE: pause, mute, switch wallpapers, open the browser
+Exec=walpe-tray
+Icon=walpe
+Terminal=false
+Categories=Utility;
+Keywords=wallpaper;tray;walpe;
+StartupNotify=false

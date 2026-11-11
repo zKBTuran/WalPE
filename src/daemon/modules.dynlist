@@ -1,0 +1,19 @@
+/* core functions walpe-web.so / walpe-video.so call (WALPE_API, api.h) */
+{
+  walpe_audio_get; walpe_audio_ref; walpe_audio_unref;
+  walpe_config_get_prop;
+  walpe_glutil_init; walpe_glutil_draw_quad; walpe_glutil_draw_yuv_range;
+  walpe_gl_is_software; walpe_mat3_cover;
+  walpe_media_ref; walpe_media_unref; walpe_media_serial; walpe_media_get;
+  walpe_media_now_clear;
+  mp4_demux_open_range; mp4_demux_free; mp4_demux_next;
+  walpe_yuv420_bgra_ex; walpe_yuv420_bgra_half; walpe_yuv_coeffs;
+  walpe_video_hwdec; walpe_video_note_decoder; walpe_video_note_frame;
+  walpe_video_limit; walpe_video_frame_limit;
+  walpe_video_upload_mode; walpe_video_note_upload;
+  wpj_str; wpj_obj; wpj_num; wpj_bool; wpj_parse_file;
+  /* not called by the modules: defined by the daemon so that GTK / WebKit
+   * (loaded with walpe-web.so) reach this definition instead of libX11's
+   * - the daemon never owns an X selection (src/daemon/selguard.c) */
+  XSetSelectionOwner;
+};
