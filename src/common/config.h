@@ -83,6 +83,9 @@ typedef struct WalpeConfig_ {
                                * a softer picture (scaled up when shown). */
     gboolean web_accel;       /* web pages: WebKit hardware acceleration (off by
                                * default; read at daemon start, see main.c) */
+    gboolean web_unload;      /* when no monitor shows a web wallpaper any more the
+                               * daemon restarts in place, so WebKitGTK and GTK
+                               * leave its memory (on by default; main.c) */
     gboolean video_hwdec;     /* videos: decode with a hardware decoder when one works
                                * (engine/video.h); off = on the CPU, the default */
     char    *video_hwdec_api; /* the one decoding API to use ("vaapi", "cuda", "vdpau",

@@ -142,6 +142,19 @@ the final tree with those of that earlier tree.
 
 ### Other
 
+- A daemon that has shown a web wallpaper gives WebKit back. The web module (WebKitGTK,
+  JavaScriptCore, GTK) cannot be unloaded, so after the last web wallpaper had been
+  replaced it stayed in the daemon until the daemon was stopped: about 50 MB of its
+  resident memory on the machine this was measured on, three threads (one of them wakes
+  every five seconds) and GTK's connection to the display. Now the daemon restarts
+  itself in place at the wallpaper change that leaves no monitor with a web wallpaper,
+  the way it does when the monitor layout changes: same process, the control socket
+  stays open, wallpapers and settings come back from the configuration. Every monitor
+  loads its wallpaper again and shows nothing until it has, as at a start; a wallpaper
+  that then fails to load does not bring the web wallpaper back. At most once a minute,
+  never on a timer, not while an import or a Workshop download runs. `walpe-ctl set
+  web_unload=off` keeps the module loaded as before; `walpe-ctl status` shows `modules`.
+  The video module (FFmpeg) is small and stays loaded.
 - Pictures from outside go to fewer decoders. A picture or GIF file chosen as the
   wallpaper is shown only as PNG, JPEG, GIF, BMP, TIFF, WebP, TGA, AVIF or JPEG XL: a
   file of another kind (an SVG document, a Windows icon ...), which earlier versions

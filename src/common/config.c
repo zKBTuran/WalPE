@@ -200,6 +200,8 @@ static JsonNode *config_to_json (WalpeConfig *c)
      * knobs below (walpe_config_quality_sync keeps both sides equal) */
     json_builder_set_member_name (b, "web_accel");
     json_builder_add_boolean_value (b, c->web_accel);
+    json_builder_set_member_name (b, "web_unload");
+    json_builder_add_boolean_value (b, c->web_unload);
     /* off | auto stay the switch they were (a file written here is read by
      * an older build as before); one API by name is a word next to it */
     json_builder_set_member_name (b, "video_hwdec");
@@ -563,6 +565,7 @@ WalpeConfig *walpe_config_load (void)
     c->backend           = WALPE_BACKEND_AUTO;
     c->wayland_pointer   = 0;
     c->fx_cache          = TRUE;
+    c->web_unload        = TRUE;
     c->fx_specialize     = FALSE;
     c->fx_quality        = g_strdup ("exact");
     c->fluid_sim         = TRUE;
@@ -708,6 +711,7 @@ WalpeConfig *walpe_config_load (void)
         c->texture_slack = wpj_num (o, "texture_slack", c->texture_slack) > 0 ? 2 : 0;
         c->render_scale = (int) CLAMP (wpj_num (o, "render_scale", c->render_scale), 25.0, 100.0);
         c->web_accel = wpj_bool (o, "web_accel", c->web_accel);
+        c->web_unload = wpj_bool (o, "web_unload", c->web_unload);
         c->video_hwdec = wpj_bool (o, "video_hwdec", c->video_hwdec);
         {
             /* "video_hwdec": a switch, or one of the words off | auto | <api>

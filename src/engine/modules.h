@@ -52,7 +52,9 @@
  * changes.)
  *
  * NEVER UNLOADED. A module that was loaded stays loaded until the process
- * ends (modload.c closes a library only when it has no entry symbol).
+ * ends (modload.c closes a library only when it has no entry symbol). The
+ * daemon gets rid of the web module by starting itself again when its last
+ * web wallpaper is replaced (daemon/main.c, web_unload_due).
  * Scene sound depends on that: its player threads are detached, nobody
  * waits for them, and a thread may still be inside `sound.read` or
  * `sound.close` after its wallpaper, its scene and its group are gone

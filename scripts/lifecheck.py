@@ -39,6 +39,17 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             test runs in a child process: the child ends with it instead of
             staying behind as a second "walpe-daemon". Skipped in a build
             without the web module.
+  webunload the web module (WebKitGTK, GTK: it cannot be unloaded) leaves
+            the daemon with its last web wallpaper: at the change of
+            wallpapers that leaves no monitor with a web page the daemon
+            restarts in place - same process, requests sent meanwhile are
+            answered, no WebKit process stays behind, status says
+            `web=not loaded`, every monitor shows its wallpaper again and
+            the pause state is the one from before. Not while another
+            monitor still shows a page, not twice within the time between
+            two such restarts, not with `web_unload=off`; switched on
+            again it happens at the next change of wallpapers. Skipped in
+            a build without the web module.
   fullscreen  "Pause for fullscreen apps" per monitor (X11): two monitors,
             a window that says it is fullscreen and has the focus - the
             check plays the window manager and sets the EWMH properties
@@ -997,6 +1008,130 @@ def case_probe(env, W):
     env.stop_daemon()
 
 
+# ---------------------------------------------------------------- webunload
+def gen_web(path):
+    os.makedirs(path, exist_ok=True)
+    with open(os.path.join(path, "index.html"), "w") as f:
+        f.write("<html><body style='background:#204060'>walpe</body></html>")
+    rc.jdump(os.path.join(path, "project.json"), {"file": "index.html", "title": os.path.basename(path),
+                                                  "type": "web"})
+
+
+def case_webunload(env, W):
+    """The web module leaves the daemon with its last web wallpaper (a restart in place)."""
+    A, B = ("A", 640, 360, 0, 0), ("B", 640, 360, 640, 0)
+    web = os.path.join(env.tmp, "wallpapers", "page")
+    gen_web(web)
+    SAID = "restarting in place to unload the web module"
+
+    def modules():
+        return env.state().get("modules", "")
+
+    def web_shown(mon=None, timeout=120):
+        # (the first page of a daemon waits for the WebKit start-up test)
+        return loaded(env, web, mon, timeout) and "web=loaded" in modules()
+
+    def restarted(mark):
+        txt = env.since(mark)
+        return SAID in txt and '" up (' in txt[txt.index(SAID):] and bool(env.state())
+
+    # ---- 1. two monitors; a long time between two restarts
+    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False,
+                          "current": W["red"]})
+    if not check(env.start_daemon([A, B], extra={"WALPE_WEB_UNLOAD_GAP_S": "3600"}), "webunload: daemon started"):
+        return
+    st = env.state()
+    if "web_accel" not in st:
+        print("skip webunload (no web module in this build)")
+        return
+    A, B = env.mons
+    pid = env.daemon.pid
+    check(st.get("web_unload") is True, "webunload: the setting is there and on", st.get("web_unload"))
+    check(loaded(env, W["red"]) and "web=not loaded" in modules(), "webunload: two scenes, no web module",
+          modules())
+    env.open(web)
+    if not check(web_shown(), "webunload: a web wallpaper on both monitors, the module is loaded",
+                 (rc.brief(env.monitors()), modules())):
+        return
+    kids = children(pid)
+    check(len(kids) > 0, "webunload: WebKit's processes run", kids)
+    # one monitor leaves the page, the other still shows it: nothing restarts
+    mark = env.mark()
+    env.open(W["red"], 0)
+    check(loaded(env, W["red"], 0), "webunload: a scene on the first monitor", rc.brief(env.monitors()))
+    time.sleep(1.0)
+    check(SAID not in env.since(mark) and "web=loaded" in modules() and env.daemon.pid == pid,
+          "webunload: no restart while the other monitor shows a web wallpaper", env.since(mark)[-300:])
+    # the last one leaves, with the wallpapers paused
+    rep = env.ipc({"cmd": "pause"})
+    check(bool(rep and rep.get("ok")), "webunload: paused", rep)
+    mark = env.mark()
+    env.open(W["blue"], 1)
+    answers = []
+    for _ in range(5):      # requests while the daemon is taking itself apart and starting again
+        answers.append(bool(env.ipc({"cmd": "status"}, timeout=40)))
+        time.sleep(0.1)
+    check(bool(wait_for(lambda: restarted(mark), 60, 0.3)),
+          "webunload: the daemon restarts in place when the last web wallpaper is replaced", env.since(mark)[-400:])
+    check(all(answers), "webunload: requests sent during the restart were answered", answers)
+    check(env.daemon.poll() is None and env.daemon.pid == pid, "webunload: the same process went on")
+    check(bool(wait_for(lambda: "web=not loaded" in modules(), 20)), "webunload: status says web=not loaded",
+          modules())
+    ms = env.monitors()
+    check([m.get("current") for m in ms] == [W["red"], W["blue"]], "webunload: every monitor has its wallpaper",
+          rc.brief(ms))
+    check(env.state().get("paused") is True, "webunload: still paused after the restart")
+    env.ipc({"cmd": "resume"})
+    check(loaded(env, W["red"], 0) and loaded(env, W["blue"], 1), "webunload: both wallpapers are loaded again",
+          rc.brief(env.monitors()))
+    c0, c1 = colour_is(env, A, lambda c: rc.name_of(c) == "red"), colour_is(env, B, lambda c: rc.name_of(c) == "blue")
+    check(rc.name_of(c0) == "red" and rc.name_of(c1) == "blue", "webunload: and on screen", (c0, c1))
+    wait_for(lambda: not [k for k in kids if running(k)] and not children(pid), 15)
+    check(not [k for k in kids if running(k)] and not children(pid),
+          "webunload: no WebKit process is left", ([k for k in kids if running(k)], children(pid)))
+    # a second time within the time between two restarts: the module stays
+    env.open(web, 0)
+    check(web_shown(0), "webunload: a web wallpaper again", (rc.brief(env.monitors()), modules()))
+    mark = env.mark()
+    env.open(W["red"], 0)
+    check(loaded(env, W["red"], 0), "webunload: replaced by a scene", rc.brief(env.monitors()))
+    time.sleep(1.0)
+    check(SAID not in env.since(mark) and "web=loaded" in modules() and
+          "the web module stays loaded this time" in env.since(mark),
+          "webunload: no second restart so soon after the first (the log says why)", env.since(mark)[-300:])
+    env.stop_daemon()
+
+    # ---- 2. the switch
+    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False,
+                          "current": W["red"]})
+    if not check(env.start_daemon([A], extra={"WALPE_WEB_UNLOAD_GAP_S": "0"}), "webunload (off): daemon started"):
+        return
+    pid = env.daemon.pid
+    rep = env.ipc({"cmd": "set", "web_unload": False})
+    check(bool(rep and rep.get("ok")) and env.state().get("web_unload") is False, "webunload (off): switched off", rep)
+    env.open(web)
+    check(web_shown(), "webunload (off): a web wallpaper", (rc.brief(env.monitors()), modules()))
+    mark = env.mark()
+    env.open(W["red"])
+    check(loaded(env, W["red"]), "webunload (off): replaced by a scene", rc.brief(env.monitors()))
+    time.sleep(1.0)
+    check(SAID not in env.since(mark) and "web=loaded" in modules(),
+          "webunload (off): no restart, the module stays loaded", env.since(mark)[-300:])
+    rep = env.ipc({"cmd": "set", "web_unload": True})
+    time.sleep(1.0)
+    check(bool(rep and rep.get("ok")) and SAID not in env.since(mark),
+          "webunload (off): switching it on restarts nothing by itself", env.since(mark)[-300:])
+    env.open(W["blue"])
+    check(bool(wait_for(lambda: restarted(mark), 60, 0.3)),
+          "webunload (off): switched on again, the next change of wallpapers restarts", env.since(mark)[-400:])
+    check(env.daemon.poll() is None and env.daemon.pid == pid and
+          bool(wait_for(lambda: "web=not loaded" in modules(), 20)),
+          "webunload (off): the same process, web=not loaded", modules())
+    check(loaded(env, W["blue"]) and env.state().get("web_unload") is True,
+          "webunload (off): the wallpaper of that change is shown, the setting was kept", rc.brief(env.monitors()))
+    env.stop_daemon()
+
+
 # --------------------------------------------------------------- fullscreen
 class XClient:
     """a second X client that plays window manager and application: plain windows, the
@@ -1433,7 +1568,7 @@ def case_fullscreen(env, W):
 
 CASES = [("pointer", case_pointer), ("reload", case_reload), ("restart", case_restart),
          ("layout", case_layout), ("stats", case_stats), ("busy", case_busy), ("probe", case_probe),
-         ("fullscreen", case_fullscreen), ("video", case_video)]
+         ("fullscreen", case_fullscreen), ("video", case_video), ("webunload", case_webunload)]
 
 
 

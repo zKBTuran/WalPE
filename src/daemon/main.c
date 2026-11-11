@@ -373,6 +373,10 @@ static void request_redraw (gpointer user);
 static char *web_render_state;      /* status "web_render" (web_env_setup) */
 static gboolean web_accel_restart (gpointer user);
 #endif
+/* "web_unload": the web module leaves again (web_unload_due) */
+static gboolean web_unload_due (gboolean changed);
+static gboolean web_unload_restart;     /* main: the restart under way is that one */
+static gint64 web_unloaded_us;          /* monotonic time of the last one (main (), 0 = none) */
 static void pointer_update (void);
 static void pointer_repace (void);
 static void follow_pace_update (void);
@@ -2936,6 +2940,7 @@ static void apply_wallpapers (const char *force_path, Mon *force_mon, gboolean f
     Mon **lead = g_new0 (Mon *, n);   /* new leader of monitor i (NULL = leads/solo) */
     gboolean *load = g_new0 (gboolean, n);
     guint i = 0;
+    gboolean changed = FALSE;   /* a monitor was given another wallpaper */
     for (GList *l = D.mons; l; l = l->next, i++) {
         Mon *m = ms[i] = l->data;
         char *was = m->want_path;
@@ -2945,6 +2950,7 @@ static void apply_wallpapers (const char *force_path, Mon *force_mon, gboolean f
             g_free (m->want_path);
             m->want_path = g_strdup ("");   /* crash-loop guard: stays empty */
         }
+        changed = changed || g_strcmp0 (was, m->want_path) != 0;
         if (g_strcmp0 (was, m->want_path) && !restore_apply) {
             /* it was given another wallpaper (or none): how the load of the
              * one before ended is history, and so is a re-open */
@@ -2953,6 +2959,16 @@ static void apply_wallpapers (const char *force_path, Mon *force_mon, gboolean f
             g_clear_pointer (&m->restored, g_free);
         }
         g_free (was);
+    }
+    if (web_unload_due (changed)) {
+        /* the last web wallpaper is being replaced: the daemon starts again
+         * in place, and that image loads what the monitors are set to now
+         * (nothing is loaded here first: it would be loaded twice) */
+        g_free (ms);
+        g_free (lead);
+        g_free (load);
+        g_free (force_own);
+        return;
     }
     gboolean can = shared_render_possible ();
     gboolean *grouped = g_new0 (gboolean, n);   /* already in a group (its leader too) */
@@ -5330,6 +5346,8 @@ static void ipc_status (JsonBuilder *b)
     g_free (wh);
     /* how pages are rendered, and what WebGL runs on inside them */
     jb_bool (b, "web_accel", D.cfg->web_accel);
+    /* the daemon restarts in place when the last web wallpaper is replaced */
+    jb_bool (b, "web_unload", D.cfg->web_unload);
     if (web_render_state)
         jb_str (b, "web_render", web_render_state);
     char *wg = walpe_web_info ();
@@ -6463,6 +6481,11 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
         }
     }
 #endif
+    if (json_object_has_member (o, "web_unload")) {
+        /* (read at the next change of wallpapers: web_unload_due) */
+        D.cfg->web_unload = wpj_bool (o, "web_unload", D.cfg->web_unload);
+        changed = TRUE;
+    }
     if (json_object_has_member (o, "particle_lowres")) {
         /* off | auto | all (walpe-ctl sends on / off as booleans) */
         JsonNode *pn = json_object_get_member (o, "particle_lowres");
@@ -7842,6 +7865,12 @@ static void restart_exec (gboolean layout_stamp)
         g_snprintf (now, sizeof now, "%" G_GINT64_FORMAT, g_get_monotonic_time ());
         env = g_environ_setenv (env, "WALPE_LAYOUT_RESTARTED", now, TRUE);
     }
+    if (web_unload_restart) {
+        /* the web module was left behind: when (web_unload_due) */
+        char now[32];
+        g_snprintf (now, sizeof now, "%" G_GINT64_FORMAT, g_get_monotonic_time ());
+        env = g_environ_setenv (env, "WALPE_WEB_UNLOADED", now, TRUE);
+    }
     /* the display went away and this restart waits for it: the new image
      * goes back to the same window system instead of choosing anew while
      * nothing answers */
@@ -8440,6 +8469,107 @@ static gboolean web_accel_restart (gpointer user)
 }
 #endif
 
+/* ------------------------------------------- the web module leaves again
+ * walpe-web.so brings WebKitGTK, JavaScriptCore and GTK into the daemon and
+ * none of them can be unloaded (engine/modules.h). After the last web
+ * wallpaper had been replaced they stayed for the rest of the daemon's
+ * life: the pages of those libraries that were touched (about 50 MB of the
+ * resident size on the machine this was measured on), three threads - one
+ * of them WebKit's memory monitor, which wakes every five seconds -, GDK's
+ * connection to the display and its events, sixteen descriptors. A daemon
+ * that had shown one web wallpaper once paid for it until it was stopped.
+ * What gives all of it back is a new process image, and the daemon has
+ * one: the restart in place that follows a changed monitor layout
+ * (restart_exec: the same process id, the control socket stays open, the
+ * saved wallpapers and settings come back).
+ *
+ * When: at the change of wallpapers that leaves no monitor with a web
+ * wallpaper - none shown, none wanted, none being loaded -, in place of the
+ * loads of that change: the new image loads what the monitors are set to.
+ * Never on a timer and never later by itself. Not
+ *  - with the setting off ("web_unload", on by default);
+ *  - when the restart before this one, for the same reason, is less than
+ *    WEB_UNLOAD_GAP_S ago (wallpapers tried one after the other, a script
+ *    that alternates between a page and a scene): the module then stays
+ *    until a later change of wallpapers finds the time over;
+ *  - while an import, a video conversion or a Workshop download runs (the
+ *    restart would end it);
+ *  - when the wallpapers of this change are previous ones opened again
+ *    after a failed load (what failed is to stay in the status), or while a
+ *    wallpaper is held back by the crash-loop guard (only this image knows);
+ *  - in a window (--windowed).
+ * It costs what a start costs: every monitor loads its wallpaper again and
+ * shows nothing until it has, and should a wallpaper of this change fail to
+ * load, the web wallpaper it replaced is not opened again in its place.
+ * WALPE_WEB_UNLOADED carries the time of the restart across the exec, as
+ * WALPE_LAYOUT_RESTARTED does for the layout's. */
+#define WEB_UNLOAD_GAP_S 60
+
+#ifdef HAVE_WEB
+static gboolean web_unload_pending;     /* main: the restart was decided, its idle has not run */
+
+static gboolean web_unload_cb (gpointer user)
+{
+    (void) user;
+    web_unload_pending = FALSE;
+    if (D.restart)
+        return G_SOURCE_REMOVE;     /* another restart got there first: it loads them */
+    if (Imp.active || Ws.active) {
+        /* started by the same request, after the decision (a conversion
+         * that followed the one just finished): no restart then, and the
+         * wallpapers that were not loaded for it are loaded here */
+        apply_wallpapers (NULL, NULL, FALSE, FALSE);
+        return G_SOURCE_REMOVE;
+    }
+    web_unload_restart = TRUE;
+    D.restart = TRUE;
+    g_main_loop_quit (D.loop);
+    return G_SOURCE_REMOVE;
+}
+#endif
+
+/* main, apply_wallpapers: changed = a monitor was given another wallpaper.
+ * TRUE: the restart is on its way and the caller loads nothing */
+static gboolean web_unload_due (gboolean changed)
+{
+#ifdef HAVE_WEB
+    static gboolean said;
+    if (web_unload_pending)
+        return TRUE;        /* (a second change before the restart's idle has run) */
+    if (!changed || restore_apply || !D.cfg->web_unload || D.windowed || D.restart || !D.loop ||
+        !walpe_web_module (FALSE) || Imp.active || Ws.active ||
+        (load_skip && g_hash_table_size (load_skip) > 0))
+        return FALSE;
+    for (GList *l = D.mons; l; l = l->next) {
+        const Mon *m = l->data;
+        if (m->want_path && *m->want_path && walpe_detect_type (m->want_path, NULL) == WALPE_TYPE_WEB)
+            return FALSE;
+    }
+    const char *ge = g_getenv ("WALPE_WEB_UNLOAD_GAP_S");   /* (tests) */
+    gint64 gap = (ge && *ge ? CLAMP (g_ascii_strtoll (ge, NULL, 10), 0, 86400) : WEB_UNLOAD_GAP_S) *
+                 G_USEC_PER_SEC;
+    gint64 now = g_get_monotonic_time ();
+    if (web_unloaded_us > 0 && now >= web_unloaded_us && now - web_unloaded_us < gap) {
+        if (!said)
+            g_message ("no web wallpaper is shown any more; the web module stays loaded this time "
+                       "(the daemon restarted to unload it %d s ago: at most once in %d s)",
+                       (int) ((now - web_unloaded_us) / G_USEC_PER_SEC), (int) (gap / G_USEC_PER_SEC));
+        said = TRUE;
+        return FALSE;
+    }
+    g_message ("no web wallpaper is shown any more: restarting in place to unload the web module "
+               "(WebKitGTK, GTK); `walpe-ctl set web_unload=off` keeps it loaded instead");
+    walpe_config_save (D.cfg);      /* the new image reads the wallpapers from it */
+    web_unload_pending = TRUE;
+    /* after the reply to the request that changed the wallpaper went out */
+    g_idle_add (web_unload_cb, NULL);
+    return TRUE;
+#else
+    (void) changed;
+    return FALSE;
+#endif
+}
+
 /* ------------------------------------------------------ display backend
  * Which window system the daemon draws on (common/backend.h has the
  * rules and the wording): --backend, else WALPE_BACKEND, else the saved
@@ -8625,6 +8755,11 @@ int main (int argc, char **argv)
         if (dl && *dl)
             Bk.lost = g_strdup (dl);
         g_unsetenv ("WALPE_DISPLAY_LOST");
+        /* ... and when an image before this one restarted to unload the
+         * web module (web_unload_due; it stays in the environment the next
+         * restart hands on) */
+        const char *wu = g_getenv ("WALPE_WEB_UNLOADED");
+        web_unloaded_us = wu && *wu ? g_ascii_strtoll (wu, NULL, 10) : 0;
         if (Bk.lost && Bk.ipc_fd >= 0) {
             /* this image may wait a long time for its display: which file
              * the handed-over socket is now, for a start that fails later */

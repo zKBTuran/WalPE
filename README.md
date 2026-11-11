@@ -192,7 +192,11 @@ compiler that does not know one drops it. With LTO the flags also go on the link
 The web and video backends are separate modules, `walpe-web.so` and `walpe-video.so`, loaded
 the first time a wallpaper needs them: from `$WALPE_MODULE_DIR`, the daemon's own directory
 (build tree) or `<prefix>/<libdir>/walpe` (where `meson install` puts them). The daemon
-itself links neither WebKit, GTK, GStreamer nor FFmpeg.
+itself links neither WebKit, GTK, GStreamer nor FFmpeg. A loaded module cannot be unloaded
+again. For the web module, which is the large one, the daemon therefore restarts itself in
+place at the wallpaper change that leaves no monitor with a web wallpaper (`web_unload`, on
+by default; [SETTINGS.md](docs/SETTINGS.md)): WebKitGTK and GTK then leave its memory, and
+every monitor loads its wallpaper again as at a start. The video module stays loaded.
 
 ### 64-bit ARM (aarch64)
 
@@ -394,6 +398,7 @@ is [docs/SETTINGS.md](docs/SETTINGS.md); the most used:
 | `bloom`, `camera_shake`, `camera_parallax`, `sprite_sheets`, `script_camera`, `script_texanim`, `fluid_sim` `=on\|off` | on | scene features; `parallax_offset` is off |
 | `hwdec=off\|auto\|<api>`, `video_zerocopy=on\|off` | off | decode videos with a hardware decoder; keep its pictures in GPU memory |
 | `web_accel=on\|off` | off | web pages on the GPU |
+| `web_unload=on\|off` | on | restart in place when the last web wallpaper is replaced, so WebKit leaves the daemon's memory |
 | `we_assets=<dir>` | auto-detect | your Wallpaper Engine install |
 
 **Quality presets.** `max` is the exact picture; `high` (the default) is the same except

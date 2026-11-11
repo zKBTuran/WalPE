@@ -52,6 +52,7 @@ static const WalpeSetKey walpe_set_keys[] = {
     { "preview_anim", WALPE_SET_ANY },          /* a name, or false = off */
     { "fx_cache", WALPE_SET_BOOL },
     { "web_accel", WALPE_SET_BOOL },
+    { "web_unload", WALPE_SET_BOOL },
     { "particle_lowres", WALPE_SET_ANY },       /* a name, or a switch */
     { "particle_density", WALPE_SET_ANY },      /* a number, also as text */
     { "particle_instancing", WALPE_SET_BOOL },

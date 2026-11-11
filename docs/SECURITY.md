@@ -105,9 +105,9 @@ surfaceless; `fx-hostile-test gl 1500` and `fx-hostile-test text 6000` run more 
   loaded"), and `WALPE_MODULE_DIR` has to be an absolute path.
 - The environment the daemon is started with is trusted like the daemon
   itself (`LD_*`, `GST_*`, `WEBKIT_*`, `LIBGL_*`, `__EGL_VENDOR_LIBRARY_*`,
-  every `WALPE_*` switch): both restarts in place hand the start
-  environment on unchanged, plus `WALPE_IPC_FD` / `WALPE_LAYOUT_RESTARTED`,
-  and close every other descriptor.
+  every `WALPE_*` switch): the restarts in place hand the start
+  environment on unchanged, plus `WALPE_IPC_FD` / `WALPE_LAYOUT_RESTARTED` /
+  `WALPE_WEB_UNLOADED`, and close every other descriptor.
 
 
 ## Cover art of media integration

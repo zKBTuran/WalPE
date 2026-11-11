@@ -73,6 +73,8 @@ static void test_defaults (void)
     CHECK (!c->software_render && c->software_threads == 0);
     CHECK (c->render_scale == 100 && c->texture_slack == 2);
     CHECK (!c->web_accel && !c->video_hwdec);
+    /* the web module leaves the daemon with its last web wallpaper */
+    CHECK (c->web_unload);
     /* hardware decoding and its zero-copy path are opt-in */
     CHECK (!c->video_hwdec_api && !c->video_zerocopy && !strcmp (walpe_config_hwdec_word (c), "off"));
     /* wallpaper sound is off, not muted, and the volume is 0 until set */
@@ -111,6 +113,7 @@ static void test_round_trip (void)
     g_free (c->fx_quality);
     c->fx_quality = g_strdup ("fast");
     c->web_accel = c->video_hwdec = c->software_render = TRUE;
+    c->web_unload = FALSE;
     CHECK (walpe_config_set_hwdec (c, "VAAPI") && c->video_hwdec);  /* one decoding API by name */
     c->video_zerocopy = TRUE;
     c->software_threads = 6;
@@ -155,6 +158,7 @@ static void test_round_trip (void)
     CHECK (!c->cover_transparent && !c->render_shared && !c->fx_cache && !c->tex_downscale && !c->parallax);
     CHECK (c->fx_specialize && !g_strcmp0 (c->fx_quality, "fast"));
     CHECK (c->web_accel && c->video_hwdec && c->software_render && c->software_threads == 6);
+    CHECK (!c->web_unload);
     CHECK (!g_strcmp0 (c->video_hwdec_api, "vaapi") && c->video_zerocopy &&
            !strcmp (walpe_config_hwdec_word (c), "vaapi"));
     CHECK (c->particle_lowres == 2 && c->particle_density == 45 && !c->particle_instancing);
