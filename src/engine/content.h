@@ -147,6 +147,12 @@ struct WalpeContent {
      * layer is played from a smaller converted copy. */
     int video_box_w, video_box_h;
     gboolean video_box_live;
+    /* `walpe-ctl mem` (memreport.h), render thread, only when somebody
+     * asks: what the content holds - counts and bytes of its textures,
+     * targets, pools, scripts - as members of the object being built.
+     * NULL = it has nothing to add to the report's GL census. (module ABI
+     * 13) */
+    void (*mem_stats) (WalpeContent *c, JsonBuilder *b);
 };
 
 typedef struct {

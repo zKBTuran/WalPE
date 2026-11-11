@@ -59,6 +59,12 @@ void walpe_ss_cursor_event (WalpeSceneScript *ss, const char *kind, int idx, flo
     (void) ss; (void) kind; (void) idx; (void) wx; (void) wy; (void) lx; (void) ly;
 }
 int walpe_ss_count (WalpeSceneScript *ss) { (void) ss; return 0; }
+gboolean walpe_ss_mem (WalpeSceneScript *ss, WalpeSsMem *out)
+{
+    (void) ss;
+    memset (out, 0, sizeof (*out));
+    return FALSE;
+}
 gboolean walpe_ss_uses_audio (WalpeSceneScript *ss) { (void) ss; return FALSE; }
 void walpe_ss_free (WalpeSceneScript *ss) { (void) ss; }
 gboolean walpe_ss_add_fx (WalpeSceneScript *ss, int idx, int effect, int pass, const char *prop,
@@ -2646,6 +2652,32 @@ void walpe_ss_tick (WalpeSceneScript *ss, double frametime, double runtime,
 }
 
 int walpe_ss_count (WalpeSceneScript *ss) { return ss ? ss->count : 0; }
+
+gboolean walpe_ss_mem (WalpeSceneScript *ss, WalpeSsMem *out)
+{
+    memset (out, 0, sizeof (*out));
+    if (!ss)
+        return FALSE;
+    out->scripts = ss->count;
+    out->dead = ss->dead;
+    out->lost = ss->lost;
+    if (ss->lost || !ss->rt)
+        return FALSE;   /* its data is half updated: not walked */
+    JSMemoryUsage u;
+    memset (&u, 0, sizeof (u));
+    JS_ComputeMemoryUsage (ss->rt, &u);
+    out->malloc_bytes = u.malloc_size;
+    out->malloc_blocks = u.malloc_count;
+    out->limit_bytes = u.malloc_limit;
+    out->used_bytes = u.memory_used_size;
+    out->objects = u.obj_count;
+    out->strings = u.str_count;
+    out->atoms = u.atom_count;
+    out->shapes = u.shape_count;
+    out->functions = u.js_func_count;
+    out->arrays = u.array_count;
+    return TRUE;
+}
 gboolean walpe_ss_uses_audio (WalpeSceneScript *ss) { return ss && ss->uses_audio; }
 gboolean walpe_ss_uses_media (WalpeSceneScript *ss) { return ss && ss->uses_media; }
 gboolean walpe_ss_uses_cursor (WalpeSceneScript *ss) { return ss && ss->uses_cursor; }

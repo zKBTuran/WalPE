@@ -6780,3 +6780,65 @@ void fx_probe_dump (gpointer fxset, JsonBuilder *b)
     }
     json_builder_end_array (b);
 }
+
+/* ---- `walpe-ctl mem` (memreport.h): walked when asked, render thread */
+void fx_mem_stats (FxMemStats *o)
+{
+    memset (o, 0, sizeof (*o));
+    o->targets = fx_rt_count;
+    o->target_bytes = fx_rt_bytes;
+    for (guint i = 0; fx_pool && i < fx_pool->len; i++) {
+        FxPoolRt *e = &g_array_index (fx_pool, FxPoolRt, i);
+        if (!e->tex)
+            continue;
+        o->pool++;
+        o->pool_lent += e->busy || e->pinned;
+        o->pool_bytes += (gint64) e->w * e->h * fx_rt_bytes_per_pixel (e->fmt);
+    }
+    o->pool_peak = fx_pool_peak_n;
+    o->pool_peak_bytes = fx_pool_peak_bytes;
+    o->programs = fxs_progs ? (int) g_hash_table_size (fxs_progs) : 0;
+    if (fxs_srcs) {
+        GHashTableIter it;
+        gpointer v;
+        g_hash_table_iter_init (&it, fxs_srcs);
+        while (g_hash_table_iter_next (&it, NULL, &v)) {
+            FxsSrc *s = v;
+            o->sources++;
+            o->source_bytes += (s->vsrc ? strlen (s->vsrc) : 0) + (s->fsrc ? strlen (s->fsrc) : 0);
+        }
+    }
+    o->prog_users = fx_prog_user ? (int) g_hash_table_size (fx_prog_user) : 0;
+    o->rt_formats = fx_rt_fmt ? (int) g_hash_table_size (fx_rt_fmt) : 0;
+}
+
+void fx_set_mem_stats (gpointer fxset, FxMemStats *o)
+{
+    struct FxSet *set = fxset;
+    if (!set)
+        return;
+    o->sets++;
+    for (int i = 0; i < set->n; i++) {
+        EffectChain *ch = set->chains[i];
+        if (!ch)
+            continue;
+        o->chains++;
+        o->sims += ch->sim != NULL;
+        for (int t = 0; t < ch->n_targets; t++)
+            o->own_targets += ch->targets[t].tex && !ch->targets[t].pool;
+        o->own_targets += ch->out_tex && !ch->out_pool;
+        for (int p = 0; p < ch->n_passes; p++) {
+            EffPass *ep = &ch->passes[p];
+            o->passes++;
+            o->pass_programs += ep->program != 0;
+            o->pass_text_bytes += (ep->frag_body ? strlen (ep->frag_body) : 0) +
+                                  (ep->vert_body ? strlen (ep->vert_body) : 0);
+            if (ep->spec) {
+                o->generic_kept += ep->spec->gen != NULL && ep->spec->gen != ep->spec->prog;
+                o->candidates += ep->spec->cand != NULL;
+                o->pass_text_bytes += (ep->spec->vsrc_final ? strlen (ep->spec->vsrc_final) : 0) +
+                                      (ep->spec->fsrc_final ? strlen (ep->spec->fsrc_final) : 0);
+            }
+        }
+    }
+}

@@ -457,6 +457,7 @@ static const char *cv_up_name (int base);
 
 static GMutex registry_lock;
 static GHashTable *registry;    /* path -> CvSource* */
+static gint cv_opened;          /* decoders opened so far (walpe-ctl mem) */
 
 /* ------------------------------------------------------------ helpers */
 
@@ -2709,6 +2710,7 @@ static gboolean cv_decoder_open (CvSource *src, gboolean first, GError **err)
                                ? ", deblocking SKIPPED for non-reference pictures" : "");
             }
             opened = TRUE;
+            g_atomic_int_inc (&cv_opened);   /* walpe-ctl mem */
             break;
         }
         avcodec_free_context (&src->dec);
@@ -5572,6 +5574,54 @@ void walpe_video_tex_free (WalpeVideoTex *v)
     g_free (v);
 }
 
+/* `walpe-ctl mem` (video.h WalpeVideoMemStats): what the clips hold, read
+ * when asked. Sizes are read as they stand (the decode thread fills a
+ * spare slot without the lock): a report, not an invariant. */
+static void cv_mem_stats (WalpeVideoMemStats *o)
+{
+    memset (o, 0, sizeof (*o));
+    o->opened = (guint) g_atomic_int_get (&cv_opened);
+    g_mutex_lock (&registry_lock);
+    GHashTableIter it;
+    gpointer v;
+    if (registry)
+        g_hash_table_iter_init (&it, registry);
+    while (registry && g_hash_table_iter_next (&it, NULL, &v)) {
+        CvSource *src = v;
+        g_mutex_lock (&src->lock);
+        const int w = src->demux ? (int) src->demux->width : 0;
+        const int h = src->demux ? (int) src->demux->height : 0;
+        const gint64 pic = (gint64) w * h * 3 / 2;
+        o->sources++;
+        o->viewers += (int) src->viewers->len;
+        o->parked += src->parked != 0;
+        o->paused += src->paused_all != 0;
+        if (!src->parked) {
+            o->decoders++;
+            o->hardware += src->hw_on != 0;
+            if (!src->hw_on) {
+                o->threads += src->threads;
+                o->pool_estimate_bytes += pic * (16 + MAX (src->threads, 1));
+            }
+        }
+        o->queued += src->nq;
+        o->queue_slots += CV_AHEAD;
+        for (int i = 0; i <= CV_AHEAD; i++)
+            o->frame_bytes += (gint64) src->buf[i].cap + (src->buf[i].av && src->buf[i].pl[0] ? pic : 0);
+        o->scratch_bytes += (gint64) src->half_cap + (gint64) src->norm_cap +
+                            (src->annexb ? (gint64) src->annexb->allocated_len : 0);
+        o->stage_buffers += src->stage_n;
+        o->stage_bytes += (gint64) src->stage_n * (gint64) src->stage_cap;
+        o->decoded += src->seq;
+        if ((gint64) w * h > (gint64) o->width * o->height) {
+            o->width = w;
+            o->height = h;
+        }
+        g_mutex_unlock (&src->lock);
+    }
+    g_mutex_unlock (&registry_lock);
+}
+
 /* walpe-video.so entry point (modules.h): everything above is module-local */
 WALPE_API const WalpeVideoModule *walpe_video_module_entry (void)
 {
@@ -5581,6 +5631,7 @@ WALPE_API const WalpeVideoModule *walpe_video_module_entry (void)
         walpe_video_tex_free,
         { walpe_sounddec_open, walpe_sounddec_read, walpe_sounddec_close },   /* sounddec.c */
         cv_tex_new_copy, cv_tex_set_copy, cv_tex_info, cv_scene_note,
+        cv_mem_stats,
     };
     return &m;
 }

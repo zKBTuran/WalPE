@@ -4779,6 +4779,35 @@ int walpe_weparticles_systems (WalpeWeParticles *p)
     return p ? sys_systems (p->root) : 0;
 }
 
+/* `walpe-ctl mem`: walked when asked (render thread) */
+static void sys_mem (WeSys *s, WalpeWeParticleMem *o)
+{
+    o->systems++;
+    o->live += s->count;
+    o->allocated += s->cap;
+    o->maxcount += s->maxcount;
+    o->pool_bytes += (gint64) s->cap * (gint64) sizeof (Pt) +
+                     (s->fol ? (gint64) s->cap * s->nfol * (gint64) sizeof (float) : 0) +
+                     (gint64) s->rm_cap * 2 * (gint64) sizeof (int);
+    if (s->hist) {
+        o->trail_bytes += (gint64) s->cap * s->rope_seg * 3 * (gint64) sizeof (float);
+        o->trail_points += (gint64) s->count * s->rope_seg;
+    }
+    for (int c = 0; c < s->nchild; c++)
+        sys_mem (s->child[c].sys, o);
+}
+
+void walpe_weparticles_mem (WalpeWeParticles *p, WalpeWeParticleMem *out)
+{
+    if (p && p->root)
+        sys_mem (p->root, out);
+}
+
+gint64 walpe_weparticles_thread_mem (void)
+{
+    return (gint64) pt_scratch_cap * (gint64) sizeof (float) + (gint64) pt_tmp_cap;
+}
+
 static void sys_free (WeSys *s)
 {
     for (int c = 0; c < s->nchild; c++)

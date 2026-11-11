@@ -45,6 +45,7 @@
 #include "gpuprof.h"   /* GPUPROF hooks: WALPE_PROF_* in scenenode_gl_render */
 #include "features.h"  /* run-time switches of renderer features */
 #include "scenesound.h" /* sound layers: scenenode_sound.h below */
+#include "memreport.h"  /* walpe-ctl mem: counters, scenenode_mem_stats */
 
 typedef enum { NK_EMPTY, NK_IMAGE, NK_PARTICLE, NK_TEXT } NodeKind;
 
@@ -1610,6 +1611,7 @@ static void make_text_texture (NodeObj *nv)
         return;
     float q[4];
     WALPE_CPH_COUNT (text_renders, 1);
+    walpe_memc_inc (WALPE_MEMC_TEXT_RENDER);
     /* A layer that has its texture gets only the part that can differ from
      * it recoloured and uploaded: where the old or the new string has ink
      * (scenetext.h). A clock in a 2500 x 1900 box used to recolour and
@@ -5053,6 +5055,7 @@ static void scenenode_drop_targets (SceneNodeContent *s)
     walpe_glutil_blend_release ();
     fx_targets_release ();
     s->trim_heap = TRUE;
+    walpe_memc_inc (WALPE_MEMC_TARGET_DROP);
     if (g_getenv ("WALPE_GPU_MEM"))
         walpe_gl_mem_report ("paused");
 }
@@ -6646,6 +6649,191 @@ static void scenenode_set_render_scale (WalpeContent *c, int percent)
     s->render_scale = percent > 0 ? CLAMP (percent, 25, 100) : 100;
 }
 
+/* `walpe-ctl mem` (memreport.h), render thread, only when asked: what this
+ * scene holds, by kind - one walk over its layers. The GL census of the
+ * report counts every texture the context can see; these are the scene's
+ * own books, to tell what a texture or a megabyte of the heap belongs to. */
+static void scenenode_mem_stats (WalpeContent *c, JsonBuilder *b)
+{
+    SceneNodeContent *s = (SceneNodeContent *) c;
+    int n_vis = 0, n_img = 0, n_text = 0, n_part = 0, n_legacy = 0, n_cap = 0, n_filetex = 0,
+        n_texttex = 0, n_puppet = 0, n_sprite = 0, n_lazy = 0, n_jobs = 0, n_sound = 0;
+    gint64 b_file = 0, b_cap = 0, b_names = 0;
+    FxMemStats fx;
+    WalpeWeParticleMem pm;
+    memset (&pm, 0, sizeof (pm));
+    fx_mem_stats (&fx);
+    GHashTable *seen = g_hash_table_new (NULL, NULL);
+    for (guint i = 0; i < s->nodes->len; i++) {
+        NodeObj *nv = &g_array_index (s->nodes, NodeObj, i);
+        n_vis += nv->visible != 0;
+        n_img += nv->kind == NK_IMAGE;
+        n_text += nv->kind == NK_TEXT;
+        n_puppet += nv->puppet != NULL;
+        n_sprite += nv->sprite != NULL;
+        n_lazy += nv->tex_lazy != 0;
+        n_jobs += nv->tex_job != 0;
+        n_sound += nv->sound != NULL;
+        b_names += (nv->name ? strlen (nv->name) : 0) + (nv->text_value ? strlen (nv->text_value) : 0) +
+                   (nv->tex_src ? strlen (nv->tex_src) : 0);
+        if (nv->ctex) {
+            n_cap++;
+            b_cap += (gint64) nv->cw * nv->ch * 4;
+        }
+        fx_set_mem_stats (nv->fxset, &fx);
+        if (nv->weparts) {
+            n_part++;
+            walpe_weparticles_mem (nv->weparts, &pm);
+        }
+        n_legacy += nv->parts != NULL;
+        if (nv->kind == NK_TEXT) {
+            n_texttex += nv->tex != 0;
+            continue;
+        }
+        if (nv->tex && nv->video < 0 && !nv->systex &&
+            g_hash_table_add (seen, GUINT_TO_POINTER (nv->tex))) {
+            n_filetex++;
+            b_file += nv->tex_bytes;
+        }
+    }
+    g_hash_table_destroy (seen);
+
+    walpe_mem_jint (b, "layers", s->nodes->len);
+    walpe_mem_jint (b, "layers_visible", n_vis);
+    walpe_mem_jint (b, "image_layers", n_img);
+    walpe_mem_jint (b, "frames_drawn", s->frame_no);
+    json_builder_set_member_name (b, "paused");
+    json_builder_add_boolean_value (b, s->paused);
+    walpe_mem_jint (b, "layer_node_bytes", (gint64) s->nodes->len * (gint64) sizeof (NodeObj) + b_names);
+
+    json_builder_set_member_name (b, "layer_textures");     /* file textures the layers show */
+    json_builder_begin_object (b);
+    walpe_mem_jint (b, "count", n_filetex);
+    walpe_mem_jint (b, "bytes", b_file);
+    walpe_mem_jint (b, "not_loaded_yet", n_lazy);
+    walpe_mem_jint (b, "decodes_pending", n_jobs);
+    json_builder_end_object (b);
+
+    json_builder_set_member_name (b, "text");
+    json_builder_begin_object (b);
+    walpe_mem_jint (b, "layers", n_text);
+    walpe_mem_jint (b, "textures", n_texttex);
+    walpe_mem_jint (b, "bytes", s->text_bytes);
+    json_builder_end_object (b);
+
+    json_builder_set_member_name (b, "targets");            /* the scene's own render targets */
+    json_builder_begin_object (b);
+    walpe_mem_jint (b, "captures", n_cap);
+    walpe_mem_jint (b, "capture_bytes", b_cap);
+    walpe_mem_jint (b, "bake_bytes", s->bake.tex ? (gint64) s->bake.w * s->bake.h * 4 : 0);
+    walpe_mem_jint (b, "scaled_frame_bytes", s->rs.tex ? (gint64) s->rs.w * s->rs.h * 4 : 0);
+    json_builder_end_object (b);
+
+    json_builder_set_member_name (b, "effects");
+    json_builder_begin_object (b);
+    walpe_mem_jint (b, "layers_with_effects", fx.sets);
+    walpe_mem_jint (b, "chains", fx.chains);
+    walpe_mem_jint (b, "chains_failed", s->fx_failed);
+    walpe_mem_jint (b, "passes", fx.passes);
+    walpe_mem_jint (b, "pass_programs", fx.pass_programs);
+    walpe_mem_jint (b, "generic_programs_kept", fx.generic_kept);
+    walpe_mem_jint (b, "candidate_programs", fx.candidates);
+    walpe_mem_jint (b, "pass_text_bytes", fx.pass_text_bytes);
+    walpe_mem_jint (b, "simulations", fx.sims);
+    walpe_mem_jint (b, "targets_owned_by_chains", fx.own_targets);
+    /* this render thread (every scene it ever drew uses the same tables) */
+    walpe_mem_jint (b, "thread_targets", fx.targets);
+    walpe_mem_jint (b, "thread_target_bytes", fx.target_bytes);
+    walpe_mem_jint (b, "pool_targets", fx.pool);
+    walpe_mem_jint (b, "pool_lent", fx.pool_lent);
+    walpe_mem_jint (b, "pool_bytes", fx.pool_bytes);
+    walpe_mem_jint (b, "pool_peak_targets", fx.pool_peak);
+    walpe_mem_jint (b, "pool_peak_bytes", fx.pool_peak_bytes);
+    walpe_mem_jint (b, "shared_programs", fx.programs);
+    walpe_mem_jint (b, "cached_sources", fx.sources);
+    walpe_mem_jint (b, "cached_source_bytes", fx.source_bytes);
+    walpe_mem_jint (b, "program_user_entries", fx.prog_users);
+    walpe_mem_jint (b, "target_format_entries", fx.rt_formats);
+    json_builder_end_object (b);
+
+    json_builder_set_member_name (b, "particles");
+    json_builder_begin_object (b);
+    walpe_mem_jint (b, "objects", n_part);
+    walpe_mem_jint (b, "systems", pm.systems);
+    walpe_mem_jint (b, "live", pm.live);
+    walpe_mem_jint (b, "allocated", pm.allocated);
+    walpe_mem_jint (b, "max", pm.maxcount);
+    walpe_mem_jint (b, "pool_bytes", pm.pool_bytes);
+    walpe_mem_jint (b, "trail_points", pm.trail_points);
+    walpe_mem_jint (b, "trail_bytes", pm.trail_bytes);
+    walpe_mem_jint (b, "thread_scratch_bytes", walpe_weparticles_thread_mem ());
+    walpe_mem_jint (b, "legacy_objects", n_legacy);   /* fixed pools of 4096 */
+    json_builder_end_object (b);
+
+    {
+        WalpeSsMem sm;
+        gboolean ok = walpe_ss_mem (s->ss, &sm);
+        json_builder_set_member_name (b, "script");
+        json_builder_begin_object (b);
+        walpe_mem_jint (b, "scripts", sm.scripts);
+        json_builder_set_member_name (b, "measured");
+        json_builder_add_boolean_value (b, ok);
+        if (sm.dead || sm.lost)
+            walpe_mem_jstr (b, "state", sm.lost ? "abandoned by the watchdog" : "stopped");
+        if (ok) {
+            walpe_mem_jint (b, "heap_bytes", sm.malloc_bytes);
+            walpe_mem_jint (b, "heap_blocks", sm.malloc_blocks);
+            walpe_mem_jint (b, "heap_limit_bytes", sm.limit_bytes);
+            walpe_mem_jint (b, "live_bytes", sm.used_bytes);
+            walpe_mem_jint (b, "objects", sm.objects);
+            walpe_mem_jint (b, "strings", sm.strings);
+            walpe_mem_jint (b, "atoms", sm.atoms);
+            walpe_mem_jint (b, "shapes", sm.shapes);
+            walpe_mem_jint (b, "functions", sm.functions);
+            walpe_mem_jint (b, "arrays", sm.arrays);
+        }
+        json_builder_end_object (b);
+    }
+
+    json_builder_set_member_name (b, "videos");             /* video textures (videotex.h) */
+    json_builder_begin_array (b);
+    for (guint i = 0; i < s->videos->len; i++) {
+        SceneVideo *sv = &g_array_index (s->videos, SceneVideo, i);
+        json_builder_begin_object (b);
+        json_builder_set_member_name (b, "open");
+        json_builder_add_boolean_value (b, sv->v != NULL);
+        walpe_mem_jint (b, "width", sv->full_w);
+        walpe_mem_jint (b, "height", sv->full_h);
+        walpe_mem_jint (b, "texture_width", sv->w);
+        walpe_mem_jint (b, "texture_height", sv->h);
+        walpe_mem_jint (b, "frames_shown", sv->serial);
+        json_builder_end_object (b);
+    }
+    json_builder_end_array (b);
+
+    walpe_mem_jint (b, "puppets", n_puppet);
+    walpe_mem_jint (b, "sprite_sheets", n_sprite);
+    walpe_mem_jint (b, "sound_layers", n_sound);
+    walpe_mem_jint (b, "pointer_events_queued", s->ptr_q ? s->ptr_q->len : 0);
+    {
+        /* the file-texture cache and the decoder workers (one per process /
+         * share group, not per scene) */
+        gint64 live = 0, peak = 0;
+        WalpeTexDecodeStats ds;
+        walpe_gl_tex_live_stats (&live, &peak, FALSE);
+        walpe_gl_tex_predecode_stats (&ds);
+        json_builder_set_member_name (b, "file_texture_loader");
+        json_builder_begin_object (b);
+        walpe_mem_jint (b, "gl_bytes_now", live);
+        walpe_mem_jint (b, "gl_bytes_peak", peak);
+        walpe_mem_jint (b, "decodes_pending", ds.pending);
+        walpe_mem_jint (b, "decoded_bytes_held", ds.bytes);
+        walpe_mem_jint (b, "decoded_bytes_peak", ds.peak_bytes);
+        walpe_mem_jint (b, "decodes_started", ds.started);
+        json_builder_end_object (b);
+    }
+}
+
 static void scenenode_set_paused (WalpeContent *c, gboolean p)
 {
     SceneNodeContent *s = (SceneNodeContent *) c;
@@ -6811,6 +6999,7 @@ WalpeContent *walpe_scenenode_new_from_root (JsonNode *root, const char *project
     s->base.set_quality = scenenode_set_quality;
     s->base.quality_stats = scenenode_quality_stats;
     s->base.quality_describe = scenenode_quality_describe;
+    s->base.mem_stats = scenenode_mem_stats;
 
     JsonObject *gen0 = wpj_obj (ro, "general");
     JsonObject *orth = wpj_obj (gen0, "orthogonalprojection");

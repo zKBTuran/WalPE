@@ -484,6 +484,7 @@ core_srcs = files(
   'src/engine/glfeat.c',
   'src/engine/clip.c',
   'src/engine/gpuprof.c',
+  'src/engine/memreport.c',
   'src/engine/cpuphase.c',
   'src/engine/content.c',
   'src/engine/image.c',
@@ -808,6 +809,15 @@ test('gles-scene', executable('gles-scene-test', 'tests/gles_scene_test.c',
   include_directories: inc,
   dependencies: [core_dep],
   install: false, build_by_default: false), timeout: 180)
+
+# `walpe-ctl mem` (engine/memreport.h): mappings by kind from a smaps text,
+# the process part of the report (resident memory, descriptors, allocator),
+# the counters, and the census of GL objects with their sizes (EGL device or
+# Mesa surfaceless; that part skips itself without).
+test('memreport', executable('memreport-test', 'tests/memreport_test.c',
+  include_directories: inc,
+  dependencies: [core_dep],
+  install: false, build_by_default: false))
 
 # shared file-texture cache (engine/glutil.c): 1/2-channel storage of RGBA8
 # data, one texture for identical pixels, stored mip levels, DXT kept

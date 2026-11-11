@@ -12,6 +12,7 @@
 #include "common/config.h"
 #include "common/util.h"
 #include <dlfcn.h>
+#include <string.h>
 #include <gio/gio.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -122,6 +123,28 @@ static gpointer mod_load (const char *name, const char *entry, char **why)
 
 static G_GNUC_UNUSED GMutex mod_lock;   /* (unused without web and video) */
 
+/* `walpe-ctl mem` (memreport.h): when a module was loaded first and what
+ * asked for it, and how often its entries were used since. A module stays
+ * loaded for good (modules.h), so "why is it there" is a question about
+ * the past: the first caller says who it is in mod_why / mod_why_path
+ * (this thread's, set around its walpe_*_module (TRUE) call). */
+typedef struct {
+    gint64 loaded_us;       /* mod_lock: monotonic time of the load, 0 = not loaded */
+    char why[256];          /* mod_lock */
+    gint uses;              /* atomic: calls that went into the module to make something */
+} ModNote;
+static G_GNUC_UNUSED ModNote web_note, video_note;
+static G_GNUC_UNUSED __thread const char *mod_why, *mod_why_path;
+
+static G_GNUC_UNUSED void mod_note_loaded (ModNote *n, const char *fallback)
+{
+    const char *p = mod_why_path;
+    gsize pl = p ? strlen (p) : 0;
+    n->loaded_us = g_get_monotonic_time ();
+    g_snprintf (n->why, sizeof (n->why), "%s%s%s%s", mod_why ? mod_why : fallback, p ? ": " : "",
+                pl > 180 ? "..." : "", p ? (pl > 180 ? p + pl - 180 : p) : "");
+}
+
 #ifdef HAVE_WEB
 static const WalpeWebModule *web_mod;
 static gboolean web_tried;
@@ -136,8 +159,10 @@ const WalpeWebModule *walpe_web_module (gboolean load)
             (const WalpeWebModule *(*) (void)) mod_load ("walpe-web", "walpe_web_module_entry",
                                                          &web_err);
         const WalpeWebModule *m = entry ? entry () : NULL;
-        if (m && m->abi == WALPE_MODULE_ABI)
+        if (m && m->abi == WALPE_MODULE_ABI) {
             web_mod = m;
+            mod_note_loaded (&web_note, "the WebKit start-up test");
+        }
         else if (m)
             web_err = g_strdup ("walpe-web.so: ABI mismatch (rebuild)");
         if (!web_mod)
@@ -150,12 +175,16 @@ const WalpeWebModule *walpe_web_module (gboolean load)
 
 WalpeContent *walpe_web_new (const char *path, const WalpeLoadOpts *opts, GError **err)
 {
+    mod_why = "a web wallpaper was opened";
+    mod_why_path = path;
     const WalpeWebModule *m = walpe_web_module (TRUE);
+    mod_why = mod_why_path = NULL;
     if (!m) {
         g_set_error (err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, "web backend: %s",
                      web_err ? web_err : "not loaded");
         return NULL;
     }
+    g_atomic_int_inc (&web_note.uses);
     return m->web_new (path, opts, err);
 }
 
@@ -234,8 +263,10 @@ const WalpeVideoModule *walpe_video_module (gboolean load)
                                                            "walpe_video_module_entry",
                                                            &video_err);
         const WalpeVideoModule *m = entry ? entry () : NULL;
-        if (m && m->abi == WALPE_MODULE_ABI)
+        if (m && m->abi == WALPE_MODULE_ABI) {
             video_mod = m;
+            mod_note_loaded (&video_note, "a scene's compressed sound file (its decoder)");
+        }
         else if (m)
             video_err = g_strdup ("walpe-video.so: ABI mismatch (rebuild)");
         if (!video_mod)
@@ -248,23 +279,31 @@ const WalpeVideoModule *walpe_video_module (gboolean load)
 
 WalpeVideo *walpe_video_custom_new (const char *path, GError **err)
 {
+    mod_why = "a video wallpaper was opened";
+    mod_why_path = path;
     const WalpeVideoModule *m = walpe_video_module (TRUE);
+    mod_why = mod_why_path = NULL;
     if (!m) {
         g_set_error (err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, "video backend: %s",
                      video_err ? video_err : "not loaded");
         return NULL;
     }
+    g_atomic_int_inc (&video_note.uses);
     return m->custom_new (path, err);
 }
 
 WalpeVideoTex *walpe_video_tex_new (const char *path, guint64 off, guint64 len, GError **err)
 {
+    mod_why = "a scene with a video texture was opened";
+    mod_why_path = path;
     const WalpeVideoModule *m = walpe_video_module (TRUE);
+    mod_why = mod_why_path = NULL;
     if (!m) {
         g_set_error (err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, "video backend: %s",
                      video_err ? video_err : "not loaded");
         return NULL;
     }
+    g_atomic_int_inc (&video_note.uses);
     return m->tex_new (path, off, len, err);
 }
 
@@ -330,6 +369,83 @@ const WalpeVideoModule *walpe_video_module (gboolean load)
     return NULL;
 }
 #endif
+
+gboolean walpe_video_mem_stats (WalpeVideoMemStats *out)
+{
+    memset (out, 0, sizeof (*out));
+#ifdef HAVE_FFMPEG
+    const WalpeVideoModule *m = walpe_video_module (FALSE);
+    if (m && m->mem_stats) {
+        m->mem_stats (out);
+        return TRUE;
+    }
+#endif
+    return FALSE;
+}
+
+#if defined(HAVE_WEB) || defined(HAVE_FFMPEG)
+static void mod_note_json (JsonBuilder *b, const char *name, ModNote *n, gint64 start_us)
+{
+    g_mutex_lock (&mod_lock);
+    gint64 at = n->loaded_us;
+    char *why = g_strdup (n->why);
+    g_mutex_unlock (&mod_lock);
+    json_builder_set_member_name (b, name);
+    json_builder_begin_object (b);
+    json_builder_set_member_name (b, "loaded");
+    json_builder_add_boolean_value (b, at != 0);
+    if (at) {
+        json_builder_set_member_name (b, "loaded_after_s");
+        json_builder_add_double_value (b, (double) (at - start_us) / 1e6);
+        json_builder_set_member_name (b, "loaded_for");
+        json_builder_add_string_value (b, why);
+        json_builder_set_member_name (b, "uses");
+        json_builder_add_int_value (b, g_atomic_int_get (&n->uses));
+    }
+    json_builder_end_object (b);
+    g_free (why);
+}
+#endif
+
+void walpe_modules_mem_json (JsonBuilder *b, gint64 start_us)
+{
+    (void) start_us;
+    json_builder_set_member_name (b, "modules");
+    json_builder_begin_object (b);
+#ifdef HAVE_WEB
+    mod_note_json (b, "web", &web_note, start_us);
+#endif
+#ifdef HAVE_FFMPEG
+    mod_note_json (b, "video", &video_note, start_us);
+#endif
+    json_builder_end_object (b);
+    WalpeVideoMemStats v;
+    if (walpe_video_mem_stats (&v)) {
+        json_builder_set_member_name (b, "video_module");
+        json_builder_begin_object (b);
+#define VI(k, x) json_builder_set_member_name (b, k); json_builder_add_int_value (b, (gint64) (x))
+        VI ("clips", v.sources);
+        VI ("viewers", v.viewers);
+        VI ("decoders_open", v.decoders);
+        VI ("parked", v.parked);
+        VI ("paused", v.paused);
+        VI ("hardware_decoders", v.hardware);
+        VI ("decode_threads", v.threads);
+        VI ("frames_queued", v.queued);
+        VI ("queue_slots", v.queue_slots);
+        VI ("frame_bytes", v.frame_bytes);
+        VI ("scratch_bytes", v.scratch_bytes);
+        VI ("upload_buffers", v.stage_buffers);
+        VI ("upload_buffer_bytes", v.stage_bytes);
+        VI ("frames_decoded", v.decoded);
+        VI ("decoders_opened", v.opened);
+        VI ("largest_width", v.width);
+        VI ("largest_height", v.height);
+        VI ("decoder_pool_estimate_bytes", v.pool_estimate_bytes);
+#undef VI
+        json_builder_end_object (b);
+    }
+}
 
 char *walpe_modules_status (void)
 {

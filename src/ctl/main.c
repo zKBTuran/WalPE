@@ -21,6 +21,8 @@ static void print_json (const char *reply);
 #include "layers_ctl.h"   /* walpe-ctl layers ... */
 #include "gpu_ctl.h"      /* walpe-ctl gpu */
 #include "gpustat_ctl.h"  /* walpe-ctl gpu-stats ... */
+static void note_old_daemon (const char *reply, const char *cmd);
+#include "mem_ctl.h"      /* walpe-ctl mem ... */
 
 static void usage (void)
 {
@@ -275,6 +277,15 @@ static void usage (void)
              "                                 \"not available\". Works without a running daemon (then\n"
              "                                 the GPU alone). SECONDS default 2; DEV = card1, renderD129\n"
              "                                 or a PCI address when the machine has two GPUs\n"
+             "  walpe-ctl mem [--json] [--deep] [--wait SECONDS]\n"
+             "                                 where the daemon's memory is, computed when asked: the\n"
+             "                                 process (resident memory by kind of mapping, the\n"
+             "                                 allocator, descriptors), counters since the start, and per\n"
+             "                                 monitor the GL objects of its context (textures by size,\n"
+             "                                 buffers, programs ...) and what its wallpaper holds.\n"
+             "                                 --deep also asks the driver for every program's binary\n"             "                                 size; --wait: how long a monitor may take to answer (3)\n"
+             "  walpe-ctl mem --diff FILE1 FILE2\n"
+             "                                 what changed between two reports saved with --json\n"
              "  walpe-ctl quit                 stop the daemon\n"
              "exit status: 0 done, 1 usage, 2 no daemon, 3 the daemon refused the command\n");
 }
@@ -1187,6 +1198,8 @@ int main (int argc, char **argv)
         return gpu_ctl_main (argc, argv);
     if (!g_strcmp0 (cmd, "gpu-stats"))
         return gpustat_main (argc, argv);
+    if (!g_strcmp0 (cmd, "mem"))
+        return mem_main (argc, argv);
     if (!g_strcmp0 (cmd, "backend") && argc == 2)
         return backend_show ();
     if (!g_strcmp0 (cmd, "backend") && argc == 3) {

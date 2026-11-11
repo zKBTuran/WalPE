@@ -128,6 +128,21 @@ gboolean walpe_weparticles_follows_cursor (WalpeWeParticles *p);
 void walpe_weparticles_set_cursor (WalpeWeParticles *p, float x, float y);
 gboolean walpe_weparticles_uses_audio (WalpeWeParticles *p);
 int walpe_weparticles_count (WalpeWeParticles *p); /* live particles (diagnostics) */
+/* `walpe-ctl mem` (engine/memreport.h), when asked: ADDS what the object's
+ * systems hold to *out - systems, particles alive, particles there is room
+ * for (the pools grow by doubling up to the file's maxcount and are never
+ * shrunk), the sum of the maxcounts, the main memory of the pools (with
+ * the rope history and the per-particle child accumulators) and the rope
+ * history points in use. walpe_weparticles_thread_mem: the scratch memory
+ * this render thread keeps for building vertex data (bytes). */
+typedef struct {
+    int systems, live, allocated, maxcount;
+    gint64 pool_bytes;
+    gint64 trail_points;      /* history points of live rope particles */
+    gint64 trail_bytes;       /* ... the history buffers as allocated */
+} WalpeWeParticleMem;
+void walpe_weparticles_mem (WalpeWeParticles *p, WalpeWeParticleMem *out);
+gint64 walpe_weparticles_thread_mem (void);
 /* systems of the object, child systems included (at most 128) */
 int walpe_weparticles_systems (WalpeWeParticles *p);
 /* sprite sheets (no GL; also the unit test's entry): which two frames of

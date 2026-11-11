@@ -51,7 +51,9 @@
  * daemon. (Comments elsewhere that say "module ABI 11" name one of these
  * changes.)
  * 13: WalpeVideoModule ends with tex_new_copy, tex_set_copy, tex_info and
- * scene_note (videotex.h: a scene's video played from a converted copy).
+ * scene_note (videotex.h: a scene's video played from a converted copy)
+ * and, after them, `mem_stats`; WalpeContent ends with `mem_stats`
+ * (`walpe-ctl mem`, memreport.h).
  *
  * NEVER UNLOADED. A module that was loaded stays loaded until the process
  * ends (modload.c closes a library only when it has no entry symbol). The
@@ -94,6 +96,7 @@ typedef struct {
     void (*tex_set_copy) (WalpeVideoTex *v, const WalpeVideoTexCopy *copy);
     void (*tex_info) (WalpeVideoTex *v, WalpeVideoTexInfo *info);
     char *(*scene_note) (WalpeVideoJobText job, gpointer user);
+    void (*mem_stats) (WalpeVideoMemStats *out);   /* ABI 13: walpe-ctl mem */
 } WalpeVideoModule;
 
 /* module entry points (defined in web.c / video_custom.c) */
@@ -106,6 +109,13 @@ const WalpeWebModule *walpe_web_module (gboolean load);
 const WalpeVideoModule *walpe_video_module (gboolean load);
 /* "web=loaded video=not loaded" style summary for status (g_free) */
 char *walpe_modules_status (void);
+/* `walpe-ctl mem` (memreport.h): "modules": {"web": {...}, "video": {...}}
+ * as a member of the object being built - loaded or not, how long after
+ * the process started the first load was and what asked for it, how often
+ * each entry was used since; "video_module": what the video module holds
+ * (video.h WalpeVideoMemStats) when it is loaded. start_us = the monotonic
+ * time the process started at. */
+void walpe_modules_mem_json (JsonBuilder *b, gint64 start_us);
 /* A module is code that runs inside the daemon. path is taken as one only
  * when nobody but this user or root can have put it there: the file and
  * its directory belong to this user or root, the file is not writable by

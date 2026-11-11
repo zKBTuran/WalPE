@@ -162,6 +162,33 @@ guint walpe_video_frames_noted (void);
 /* backend constructors: open the file, spawn threads if any.
  * GL stuff happens in gl_init() so backends can be swapped until then. */
 WalpeVideo *walpe_video_custom_new (const char *path, GError **err); /* HAVE_FFMPEG only */
+/* `walpe-ctl mem` (memreport.h): what the video module holds, summed over
+ * the clips it plays (a clip = one demuxer + decoder, shared by everything
+ * that shows it: video wallpapers and the video textures of scenes). Read
+ * when asked, any thread. The decoder's own pictures (libavcodec's frame
+ * pool: reference pictures and one set per decoding thread) are not in
+ * these numbers: `pool_estimate_bytes` says what the stream allows them to
+ * be - (16 reference pictures at most + the threads) times one picture. */
+typedef struct {
+    int sources;              /* clips open */
+    int viewers;              /* monitors / scene layers showing them */
+    int decoders;             /* ... whose decoder is open (not parked) */
+    int parked;               /* ... parked: every viewer paused for a while */
+    int paused;               /* ... with every viewer paused */
+    int hardware;             /* decoders that decode on the GPU */
+    int threads;              /* software decode threads, summed */
+    int queued, queue_slots;  /* pictures decoded ahead / room for them */
+    gint64 frame_bytes;       /* main memory of the pictures in those slots */
+    gint64 scratch_bytes;     /* conversion and packet buffers */
+    int stage_buffers;        /* persistently mapped upload buffers */
+    gint64 stage_bytes;
+    guint64 decoded;          /* pictures queued since the clips were opened */
+    guint64 opened;           /* decoders opened since the module was loaded */
+    int width, height;        /* the largest clip */
+    gint64 pool_estimate_bytes;
+} WalpeVideoMemStats;
+/* FALSE = the module is not loaded (nothing to report) */
+gboolean walpe_video_mem_stats (WalpeVideoMemStats *out);
 
 /* WalpeContent wrapper with backend selection + automatic fallback */
 WalpeContent *walpe_video_content_new (const char *path, const WalpeLoadOpts *opts, GError **err);

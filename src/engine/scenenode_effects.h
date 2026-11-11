@@ -227,6 +227,31 @@ void fx_text_memo_end (void);
 void fx_text_memo_stats (guint *computed, guint *reused);
 /* effect chains built / failed since the last reset (diagnostics) */
 void fx_stats (int *ok, int *failed, gboolean reset);
+/* `walpe-ctl mem` (memreport.h), render thread, when asked: what the effects
+ * of this thread hold. fx_mem_stats fills the thread's own tables (targets,
+ * the target pool, the program and source caches of fx_specialize.h);
+ * fx_set_mem_stats ADDS one layer's set to the chain / pass fields. */
+typedef struct {
+    int targets;              /* effect render targets alive in this thread ... */
+    gint64 target_bytes;
+    int pool, pool_lent;      /* ... of them in the pool: entries, lent right now */
+    gint64 pool_bytes;
+    int pool_peak;            /* the most the pool ever held */
+    gint64 pool_peak_bytes;
+    int programs, sources;    /* shared pass programs / generic source texts kept */
+    gint64 source_bytes;
+    int prog_users, rt_formats; /* entries of the two per-thread lookup tables */
+    /* per set (fx_set_mem_stats) */
+    int sets, chains, passes;
+    int pass_programs;        /* passes that hold a GL program */
+    int generic_kept;         /* specialised passes that also keep their generic program */
+    int candidates;           /* specialised programs waiting to be compared */
+    gint64 pass_text_bytes;   /* shader texts the passes keep in main memory */
+    int own_targets;          /* targets a chain owns (feedback, kept passes, cached outputs) */
+    int sims;                 /* chains that carry a simulation */
+} FxMemStats;
+void fx_mem_stats (FxMemStats *out);
+void fx_set_mem_stats (gpointer fxset, FxMemStats *out);
 /* any pass reads g_AudioSpectrum* (the scene then captures audio) */
 gboolean fx_uses_audio (gpointer fxset);
 /* render thread: spectrum for the passes of the current frame (NULL = 0) */

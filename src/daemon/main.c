@@ -47,6 +47,7 @@
 #include "engine/gpuprof.h"           /* GPUPROF: walpe-ctl profile */
 #include "engine/weparticles.h"       /* particle settings */
 #include "engine/modules.h"           /* walpe_modules_status */
+#include "engine/memreport.h"         /* walpe-ctl mem */
 #include "engine/features.h"          /* renderer feature switches */
 #include "engine/scenesound.h"        /* wallpaper sound: allowed in this program only */
 #include "engine/mp4demux.h"          /* open: can this video be played? */
@@ -300,6 +301,16 @@ typedef struct Mon {
     WalpeVideoBox rt_box;
     WalpeVideoBox rt_vbox;
     char *res_note;          /* main: why the chosen size is not used (NULL = it is) */
+    /* `walpe-ctl mem` (engine/memreport.h). Asked for by the main thread,
+     * written by the render thread between two frames (its GL objects are
+     * its context's, its content is its own): mem_req = the number of the
+     * report wanted (0 = none), mem_done = the number mem_json answers */
+    guint mem_req, mem_done; /* lock */
+    gboolean mem_deep;       /* lock */
+    char *mem_json;          /* lock: thread -> main */
+    GCond mem_cond;          /* mem_done changed */
+    /* render thread: what happened to this monitor since the daemon started */
+    guint n_loads, n_pauses, n_resumes, n_paused_frames, n_idle_releases, n_roles;
 } Mon;
 
 typedef struct { int kind; float x, y; } PtrMsg;
@@ -1129,6 +1140,12 @@ static void mon_apply_pause (Mon *m, gboolean p)
 {
     if (m->content && m->content->set_paused && p != m->pause_applied)
         m->content->set_paused (m->content, p);
+    if (p != m->pause_applied) {
+        if (p)
+            m->n_pauses++;
+        else
+            m->n_resumes++;
+    }
     m->pause_applied = p;
     if (p && m->content)
         m->content->next_frame_us = 0; /* paused: no frame clock */
@@ -1149,6 +1166,8 @@ static void mon_idle_release (Mon *m)
                m->content_path ? m->content_path : "?");
     mon_free_content (m);
     g_atomic_int_set (&m->idle_released, 1);
+    m->n_idle_releases++;
+    walpe_memc_inc (WALPE_MEMC_IDLE_RELEASE);
     malloc_trim (0);
     g_idle_add (content_note_cb, NULL);   /* status changed without a command: subscribers */
 }
@@ -1311,6 +1330,8 @@ static void mon_do_load_ex (Mon *m, const char *path, gboolean paused, int fps,
                             const WalpeQuality *quality, gboolean keep, guint tag)
 {
     GError *err = NULL;
+    m->n_loads++;
+    walpe_memc_inc (WALPE_MEMC_LOAD);
     if (!*path) {
         /* "" = no wallpaper any more (its folder is being deleted: IPC
          * "forget"): free the content and leave the window black */
@@ -1398,6 +1419,7 @@ static void mon_do_load_ex (Mon *m, const char *path, gboolean paused, int fps,
          * monitors showed before, opens the previous wallpapers again -
          * once, and until then (keep) the windows are left alone. */
         g_free (restore);
+        walpe_memc_inc (WALPE_MEMC_LOAD_FAILED);
         mon_load_failed_frame (m, keep);
         /* the note goes last (as below): the main thread acts on it at once */
         mon_load_note (m, path, why, keep, tag);
@@ -1425,6 +1447,7 @@ static void mon_do_load_ex (Mon *m, const char *path, gboolean paused, int fps,
         if (c->gl_free)
             c->gl_free (c);
         c->free (c);
+        walpe_memc_inc (WALPE_MEMC_LOAD_FAILED);
         mon_load_failed_frame (m, keep);
         mon_load_note (m, path, why, keep, tag);
         return;
@@ -1533,6 +1556,10 @@ static void mon_do_render_frame (Mon *m, gboolean paused, gboolean force, gboole
     m->content->frame_unchanged = FALSE;
     walpe_pixstat_begin ();     /* WALPE_PIX_STATS (engine/clip.h); nothing when unset */
     gboolean drew = m->content->gl_render (m->content, w, h, px, py);
+    if (paused) {   /* a forced frame (first frame, Expose, uncovered pixels) */
+        m->n_paused_frames++;
+        walpe_memc_inc (WALPE_MEMC_PAUSED_FRAME);
+    }
     if (m->first_path && !m->content->first_frame_pending)
         mon_first_note_send (m);   /* the video has a picture: its load is over */
     walpe_pixstat_end (m->name, w, h);
@@ -1868,6 +1895,73 @@ static void mon_check_shareable (Mon *m, const char *path)
 
 #define MON_SETTLE_US (3 * G_USEC_PER_SEC)
 
+/* `walpe-ctl mem` (engine/memreport.h), render thread, between two frames
+ * and only when the main thread asked: this monitor's part of the report
+ * as JSON text (g_free) - what happened to it, the GL objects its context
+ * can see and what its wallpaper says it holds. Nothing is drawn and no
+ * GL state is changed. */
+static char *mon_mem_report (Mon *m, gboolean deep)
+{
+    JsonBuilder *b = json_builder_new ();
+    json_builder_begin_object (b);
+    walpe_mem_jint (b, "index", m->index);
+    walpe_mem_jstr (b, "name", m->name);
+    walpe_mem_jstr (b, "type", walpe_type_name (m->content ? m->content->type
+                                                : (WalpeType) g_atomic_int_get (&m->content_type)));
+    walpe_mem_jstr (b, "path", m->content_path);
+    json_builder_set_member_name (b, "paused");
+    json_builder_add_boolean_value (b, m->pause_applied);
+    walpe_mem_jstr (b, "role", m->follow_sf ? "follows" : m->lead_sf ? "leads" : "own");
+    walpe_mem_jint (b, "width", m->geom.width);
+    walpe_mem_jint (b, "height", m->geom.height);
+    walpe_mem_jint (b, "frames", (guint) g_atomic_int_get (&m->render_count));
+    walpe_mem_jint (b, "wakeups", (guint) g_atomic_int_get (&m->wakeups));
+    walpe_mem_jint (b, "loads", m->n_loads);
+    walpe_mem_jint (b, "pauses", m->n_pauses);
+    walpe_mem_jint (b, "resumes", m->n_resumes);
+    walpe_mem_jint (b, "frames_drawn_while_paused", m->n_paused_frames);
+    walpe_mem_jint (b, "idle_releases", m->n_idle_releases);
+    walpe_mem_jint (b, "shared_role_changes", m->n_roles);
+    if (g_atomic_int_get (&m->idle_released))
+        walpe_mem_jstr (b, "note", "unloaded while paused (idle_release)");
+    {
+        /* shared rendering: the slot textures a leader made, the
+         * framebuffers this thread keeps on the slots */
+        int slots = 0, fbos = 0;
+        gint64 bytes = 0;
+        if (m->lead_sf)
+            for (int i = 0; i < m->lead_sf->nslots; i++)
+                if (m->lead_sf->tex[i]) {
+                    slots++;
+                    bytes += (gint64) m->lead_sf->w * m->lead_sf->h * 4;
+                }
+        for (int i = 0; i < 8; i++)
+            fbos += m->sf_fbo[i] != 0;
+        json_builder_set_member_name (b, "shared_frames");
+        json_builder_begin_object (b);
+        walpe_mem_jint (b, "slot_textures", slots);
+        walpe_mem_jint (b, "slot_bytes", bytes);
+        walpe_mem_jint (b, "framebuffers", fbos);
+        json_builder_end_object (b);
+    }
+    walpe_mem_gl_json (b, deep);
+    if (m->content && m->content->mem_stats) {
+        json_builder_set_member_name (b, "content");
+        json_builder_begin_object (b);
+        m->content->mem_stats (m->content, b);
+        json_builder_end_object (b);
+    }
+    json_builder_end_object (b);
+    JsonNode *rn = json_builder_get_root (b);
+    JsonGenerator *g = json_generator_new ();
+    json_generator_set_root (g, rn);
+    char *out = json_generator_to_data (g, NULL);
+    g_object_unref (g);
+    json_node_unref (rn);
+    g_object_unref (b);
+    return out;
+}
+
 static gpointer mon_thread (gpointer data)
 {
     Mon *m = data;
@@ -1932,6 +2026,9 @@ static gpointer mon_thread (gpointer data)
         gboolean stats_req = m->stats_req;
         m->stats_req = FALSE;
         gboolean have_stats = m->qstats_ok;
+        const guint mem_req = m->mem_req;   /* walpe-ctl mem: mon_mem_report below */
+        const gboolean mem_deep = m->mem_deep;
+        m->mem_req = 0;
         GArray *ptr = NULL;
         gboolean role = m->role_change;
         SharedFrame *rsf = m->role_sf;
@@ -2005,7 +2102,8 @@ static gpointer mon_thread (gpointer data)
         const gint64 first_due = m->first_path ? m->first_tick_us + FIRST_TICK_US : 0;
         const gboolean first_tick = first_due && g_get_monotonic_time () >= first_due;
         if (!load && !render && !role && !fps_changed && !settle && !prof_sync && !blank &&
-            !quality_changed && !describe_req && !stats_req && !first_tick && !res_changed) {
+            !quality_changed && !describe_req && !stats_req && !first_tick && !res_changed &&
+            !mem_req) {
             /* sleep until woken, or until the content's next frame is due */
             gint64 due = (m->content && !paused && m->pause_applied == paused)
                              ? m->content->next_frame_us : 0;
@@ -2070,6 +2168,8 @@ static gpointer mon_thread (gpointer data)
         if (idle_release)
             mon_idle_release (m);
         if (role) {
+            m->n_roles++;
+            walpe_memc_inc (WALPE_MEMC_ROLE);
             mon_drop_role (m);
             if (rsf && ridx >= 0) {
                 /* follower: no scene of its own, presents the leader's */
@@ -2256,7 +2356,14 @@ static gpointer mon_thread (gpointer data)
                          m->content->quality_stats (m->content, &qs);
         char *qd = describe_req && m->content && m->content->quality_describe
                        ? m->content->quality_describe (m->content) : NULL;
+        char *mem = mem_req ? mon_mem_report (m, mem_deep) : NULL;
         g_mutex_lock (&m->lock);
+        if (mem_req) {
+            g_free (m->mem_json);
+            m->mem_json = mem;
+            m->mem_done = mem_req;
+            g_cond_broadcast (&m->mem_cond);
+        }
         if (shown)
             m->frames_done++;
         if (clip_owed && !m->clip_owed && m->grew_us && !m->clip_grew) {
@@ -3384,6 +3491,8 @@ static void apply_pause_state (void)
         if (p != m->pause_wanted || self != m->self_paused) {
             if ((!p && p != m->pause_wanted) || (!self && self != m->self_paused))
                 m->render_req = TRUE; /* resume: present the current state */
+            if (p != m->pause_wanted)
+                walpe_memc_inc (p ? WALPE_MEMC_PAUSE : WALPE_MEMC_RESUME);
             m->pause_wanted = p;
             m->self_paused = self;
             g_cond_signal (&m->cond); /* render thread applies it */
@@ -5241,6 +5350,7 @@ static void status_monitor_output (JsonBuilder *b, Mon *m)
 static void ipc_status (JsonBuilder *b)
 {
     Mon *m0 = D.mons ? D.mons->data : NULL;
+    walpe_memc_inc (WALPE_MEMC_STATUS);
     jb_bool (b, "ok", TRUE);
     json_builder_set_member_name (b, "state");
     json_builder_begin_object (b);
@@ -5900,6 +6010,7 @@ static char *state_line (gboolean event)
     json_builder_begin_object (b);
     if (event)
         jb_str (b, "event", "state");
+    walpe_memc_inc (WALPE_MEMC_STATE_PUSH);
     ipc_status (b);
     json_builder_end_object (b);
     JsonNode *rn = json_builder_get_root (b);
@@ -7319,6 +7430,122 @@ static void ipc_profile_result (JsonBuilder *b)
     }
 }
 
+/* {"cmd":"mem"} (`walpe-ctl mem`, engine/memreport.h): where the daemon's
+ * memory is. Computed now, for this request: the process as the kernel
+ * and the allocator see it, what happened how often since the start, and
+ * per monitor the GL objects of its context and what its wallpaper holds.
+ * Each monitor's part is written by its render thread between two frames
+ * (also a paused one's, which draws nothing for it); a thread that does
+ * not answer within three seconds - it is loading a wallpaper, or a
+ * software renderer is busy with one frame for that long - is reported as
+ * busy ({"wait": seconds} waits longer, up to a minute; nothing else is
+ * answered meanwhile). {"deep": true} also asks the driver for the size
+ * of every program binary. */
+static gint64 daemon_start_us;
+
+static void ipc_mem (JsonBuilder *b, JsonObject *o)
+{
+    static guint serial;
+    const gboolean deep = wpj_bool (o, "deep", FALSE);
+    const double wait_s = CLAMP (wpj_num (o, "wait", 3.0), 0.1, 60.0);
+    const gint64 t0 = g_get_monotonic_time ();
+    if (!++serial)
+        serial = 1;
+    walpe_memc_inc (WALPE_MEMC_MEM);
+    for (GList *l = D.mons; l; l = l->next) {
+        Mon *m = l->data;
+        g_mutex_lock (&m->lock);
+        m->mem_req = serial;
+        m->mem_deep = deep;
+        g_cond_signal (&m->cond);
+        g_mutex_unlock (&m->lock);
+    }
+    jb_bool (b, "ok", TRUE);
+    json_builder_set_member_name (b, "mem");
+    json_builder_begin_object (b);
+    jb_int (b, "report_format", 1);
+    jb_str (b, "version", WALPE_VERSION);
+    {
+        GDateTime *now = g_date_time_new_now_utc ();
+        char *ts = g_date_time_format_iso8601 (now);
+        jb_str (b, "time", ts);
+        g_free (ts);
+        g_date_time_unref (now);
+    }
+    json_builder_set_member_name (b, "uptime_s");
+    json_builder_add_double_value (b, (double) (t0 - daemon_start_us) / 1e6);
+    walpe_mem_process_json (b);   /* "process", "fds", "malloc", "mappings" */
+    json_builder_set_member_name (b, "counters");
+    json_builder_begin_object (b);
+    walpe_mem_counters_json (b);
+    jb_int (b, "config_saves", walpe_config_save_count ());
+    jb_int (b, "subscribers", walpe_ipc_subscribers ());
+    {
+        /* GLib numbers the sources of a main context in the order they
+         * are attached: the number a new one gets is how many the main
+         * loop has been given so far (timers, idle calls, watches). The
+         * probe is destroyed before the loop sees it. */
+        GSource *probe = g_idle_source_new ();
+        guint id = g_source_attach (probe, NULL);
+        g_source_destroy (probe);
+        g_source_unref (probe);
+        jb_int (b, "main_loop_sources_created", id);
+    }
+    json_builder_end_object (b);
+    walpe_modules_mem_json (b, daemon_start_us);   /* "modules", "video_module" */
+    {
+        guint snaps = 0;
+#ifdef HAVE_WEB
+        walpe_web_stats (&snaps);
+#endif
+        jb_int (b, "web_snapshots", snaps);
+        char *snd = walpe_sound_status ();
+        jb_str (b, "sound", snd);
+        g_free (snd);
+    }
+    g_mutex_lock (&Sw.lock);
+    jb_str (b, "gl_vendor", Sw.gl_vendor);
+    jb_str (b, "gl_renderer", Sw.gl_renderer);
+    jb_str (b, "gl_version", Sw.gl_version);
+    g_mutex_unlock (&Sw.lock);
+    /* one EGL share group: textures, buffers, programs, shaders,
+     * renderbuffers and samplers are the same objects in every monitor's
+     * census (framebuffers, vertex arrays and queries are each context's
+     * own) */
+    jb_bool (b, "gl_shared", walpe_gl_get_shared () && !g_atomic_int_get (&D.share_failed));
+    json_builder_set_member_name (b, "monitors");
+    json_builder_begin_array (b);
+    const gint64 deadline = g_get_monotonic_time () + (gint64) (wait_s * G_USEC_PER_SEC);
+    for (GList *l = D.mons; l; l = l->next) {
+        Mon *m = l->data;
+        char *js = NULL;
+        g_mutex_lock (&m->lock);
+        while (m->mem_done != serial && !m->quitting)
+            if (!g_cond_wait_until (&m->mem_cond, &m->lock, deadline))
+                break;
+        if (m->mem_done == serial)
+            js = g_steal_pointer (&m->mem_json);
+        g_mutex_unlock (&m->lock);
+        JsonNode *node = js ? wpj_parse_data (js, -1) : NULL;
+        g_free (js);
+        if (node) {
+            json_builder_add_value (b, node);   /* (takes the node) */
+        } else {
+            json_builder_begin_object (b);
+            jb_int (b, "index", m->index);
+            jb_str (b, "name", m->name);
+            jb_bool (b, "busy", TRUE);
+            jb_str (b, "note", "its render thread did not answer in time (it is loading a "
+                               "wallpaper, or busy with a slow frame): ask again, or with "
+                               "--wait SECONDS");
+            json_builder_end_object (b);
+        }
+    }
+    json_builder_end_array (b);
+    jb_int (b, "report_us", g_get_monotonic_time () - t0);
+    json_builder_end_object (b);
+}
+
 /* GPUPROF: WALPE_GPU_PROFILE=<seconds> = one profile shortly after start-up
  * (WALPE_GPU_PROFILE_DELAY seconds, default 5: the wallpapers load first) */
 static gboolean prof_env_start (gpointer user)
@@ -7344,6 +7571,7 @@ static char *ipc_handler (const char *req, gpointer user)
     json_builder_begin_object (b);
     gboolean quit = FALSE;
     guint saves_before = walpe_config_save_count ();
+    walpe_memc_inc (WALPE_MEMC_IPC);
 
     if (!g_strcmp0 (cmd, "add")) {
         const char *path = wpj_str (o, "path", NULL);
@@ -7451,6 +7679,8 @@ static char *ipc_handler (const char *req, gpointer user)
         }
     } else if (!g_strcmp0 (cmd, "status")) {
         ipc_status (b);
+    } else if (!g_strcmp0 (cmd, "mem")) {
+        ipc_mem (b, o);
     } else if (!g_strcmp0 (cmd, "pointer")) {
         /* {"action": "click" | "down" | "up" | "move", "x", "y"}: screen
          * pixels; treated as a click on the desktop at that spot. Web
@@ -7686,7 +7916,8 @@ static char *ipc_handler (const char *req, gpointer user)
     g_object_unref (b);
     /* cmd lives in root: decide before it goes */
     gboolean touch = g_strcmp0 (cmd, "status") && g_strcmp0 (cmd, "props") &&
-                     g_strcmp0 (cmd, "subscribe") && g_strcmp0 (cmd, "steam_libraries");
+                     g_strcmp0 (cmd, "subscribe") && g_strcmp0 (cmd, "steam_libraries") &&
+                     g_strcmp0 (cmd, "mem");
     json_node_unref (root);
     if (quit)
         g_main_loop_quit (D.loop);
@@ -8403,6 +8634,7 @@ static Mon *make_monitor (const WalpeOutput *out, const WalpeRect *g, int idx, g
     }
     g_mutex_init (&m->lock);
     g_cond_init (&m->cond);
+    g_cond_init (&m->mem_cond);
     m->clip_n = -1;     /* everything, until "Skip hidden areas" says otherwise */
     D.mons = g_list_append (D.mons, m);
     return m;
@@ -9133,6 +9365,7 @@ int main (int argc, char **argv)
         }
     }
 
+    daemon_start_us = g_get_monotonic_time ();     /* walpe-ctl mem: "uptime_s" */
     g_log_set_default_handler (log_guard, NULL);   /* rate limit + file size cap */
     /* libmpv refuses to initialize with a non-C LC_NUMERIC */
     setlocale (LC_NUMERIC, "C");
@@ -9573,6 +9806,8 @@ int main (int argc, char **argv)
         walpe_surface_free (m->ps);   /* its EGL surface, then its window */
         g_mutex_clear (&m->lock);
         g_cond_clear (&m->cond);
+        g_cond_clear (&m->mem_cond);
+        g_free (m->mem_json);
         g_free (m->name);
         g_free (m->want_path);
         g_free (m->loaded_path);

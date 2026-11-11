@@ -117,5 +117,16 @@ int walpe_ss_cursor_layers (WalpeSceneScript *ss, int **out);
 void walpe_ss_cursor_event (WalpeSceneScript *ss, const char *kind, int idx, float wx, float wy,
                             float lx, float ly);
 int walpe_ss_count (WalpeSceneScript *ss);
+/* `walpe-ctl mem` (memreport.h), render thread, when asked: the runtime's
+ * memory as QuickJS counts it (a walk over its heap). FALSE = there is no
+ * runtime to ask (none, or one the watchdog abandoned: `lost`). */
+typedef struct {
+    int scripts;
+    gboolean dead, lost;
+    gint64 malloc_bytes, malloc_blocks, limit_bytes;   /* everything the runtime allocated */
+    gint64 used_bytes;                                  /* ... of it in live values */
+    gint64 objects, strings, atoms, shapes, functions, arrays;
+} WalpeSsMem;
+gboolean walpe_ss_mem (WalpeSceneScript *ss, WalpeSsMem *out);
 gboolean walpe_ss_uses_audio (WalpeSceneScript *ss);
 void walpe_ss_free (WalpeSceneScript *ss);
