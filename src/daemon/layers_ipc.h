@@ -99,6 +99,7 @@ static void layers_redraw (const char *tp)
             /* a follower presents what its leader publishes next */
             g_mutex_lock (&m->lock);
             m->force_until_us = until;
+            m->follow_idle = FALSE;   /* (paused: the leader's next frame wakes it) */
             g_mutex_unlock (&m->lock);
         }
     }

@@ -243,6 +243,11 @@ typedef struct Mon {
                               * anyway), a follower's next slot (which takes the
                               * newest frame anyway): a pointer move or a frame
                               * published meanwhile needs no wake-up */
+    gboolean follow_idle;    /* lock: the render thread follows a leader, is paused
+                              * and owes its window no frame: it presents nothing
+                              * until something else wakes it (the resume, an
+                              * Expose, a forced frame), so a frame published
+                              * meanwhile needs no wake-up either */
     gint follow_free;        /* main -> follower thread (atomic): its leader never
                               * publishes more frames than this monitor refreshes:
                               * each one is presented when it arrives */
@@ -977,11 +982,15 @@ static gboolean sf_publish (Mon *m, int w, int h, guint64 clip_gen)
          * slot (its refresh rate or its own frame rate limit is below the
          * leader's rate) presents the newest frame when the slot comes: it
          * was woken for every frame published in between only to go back
-         * to sleep. WALPE_FOLLOW_GATE=1: always woken, as before (A/B). */
+         * to sleep. Nor is a paused follower that owes its window nothing
+         * (follow_idle): it was woken for every frame of a leader that
+         * went on rendering for another monitor, up to the frame rate, to
+         * present none of them. WALPE_FOLLOW_GATE=1: always woken, as
+         * before (A/B). */
         Mon *f = sf->fol[i];
         g_mutex_lock (&f->lock);
         f->render_req = TRUE;
-        if (!f->clock_wait || g_atomic_int_get (&follow_always_wake))
+        if ((!f->clock_wait && !f->follow_idle) || g_atomic_int_get (&follow_always_wake))
             g_cond_signal (&f->cond);
         g_mutex_unlock (&f->lock);
     }
@@ -2005,10 +2014,17 @@ static gpointer mon_thread (gpointer data)
                     if (m->settle_us && (!until || m->settle_us < until))
                         until = m->settle_us;
                     m->clock_wait = FALSE;
+                    /* a paused follower presents a frame of its leader only
+                     * for an Expose, a clip that grew, its first frame or a
+                     * forced one: with none of them owed, the frames its
+                     * leader publishes need not wake it (sf_publish) */
+                    m->follow_idle = m->follow_sf && paused && !m->needs_first_frame &&
+                                     !m->clip_owed && g_get_monotonic_time () >= force_until;
                     if (until)
                         g_cond_wait_until (&m->cond, &m->lock, until);
                     else
                         g_cond_wait (&m->cond, &m->lock);
+                    m->follow_idle = FALSE;
                     g_atomic_int_inc (&m->wakeups);
                     continue;
                 }

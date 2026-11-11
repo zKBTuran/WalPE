@@ -1409,6 +1409,21 @@ def case_fullscreen(env, W):
         is_state([False, True], [False, True], "shared rendering, the window on the second monitor")
         xc.move(w4, 0, 0, 1280, 360)
         is_state([True, True], [True, True], "shared rendering, the window across both")
+        # a paused follower sleeps: the frames its leader goes on publishing for its own
+        # monitor do not wake the follower's thread (it presents none of them)
+        fol = next((i for i, m in enumerate(mons()) if m.get("follows") is not None), None)
+        if check(fol is not None, "fullscreen: shared rendering: status names the follower", rc.brief(mons())):
+            xc.move(w4, 640 * fol, 0, 640, 360)
+            want = [i == fol for i in range(2)]
+            is_state(want, want, "shared rendering, the window on the follower's monitor")
+            before = mons()
+            time.sleep(1.5 * PATIENCE)
+            after = mons()
+            woke = (after[fol].get("wakeups") or 0) - (before[fol].get("wakeups") or 0)
+            led = (after[1 - fol].get("frames") or 0) - (before[1 - fol].get("frames") or 0)
+            check(led > 3 and woke <= 2,
+                  "fullscreen: shared rendering: the paused follower's thread sleeps while its leader draws",
+                  "in %.1f s: %d frames of the leader, %d wake-ups of the follower" % (1.5 * PATIENCE, led, woke))
         xc.focus(0)
         is_state([False, False], [False, False], "shared rendering, no window has the focus")
     finally:
