@@ -10,8 +10,14 @@
 
 static char outdir[512];
 
-static void put_u32 (int fd, guint32 v) { write (fd, &v, 4); }
-static void put_str (int fd, const char *s, int n) { write (fd, s, n); }
+/* (a short write of this tool's own test files is an error of the run) */
+static void put_bytes (int fd, const void *p, gsize n)
+{
+    if (write (fd, p, n) != (gssize) n)
+        g_error ("gencontent: write failed");
+}
+static void put_u32 (int fd, guint32 v) { put_bytes (fd, &v, 4); }
+static void put_str (int fd, const char *s, int n) { put_bytes (fd, s, n); }
 
 /* ---------------- .tex writer: TEXV0003 header + raw BGRA ---------------- */
 static void write_tex (const char *path, int w, int h, const guint8 *rgba)
@@ -33,7 +39,7 @@ static void write_tex (const char *path, int w, int h, const guint8 *rgba)
             row[x * 4 + 2] = p[0]; /* R */
             row[x * 4 + 3] = p[3];
         }
-        write (fd, row, w * 4);
+        put_bytes (fd, row, (gsize) w * 4);
     }
     g_free (row);
     close (fd);
@@ -98,7 +104,7 @@ static void gs (const char *s) { gb (s, strlen (s)); }
 #define EOI_CODE 257
 
 /* write one frame's LZW stream (9-bit codes, clear every ~250 literals) */
-static void lzw_frame (const guint8 *idx, int npix)
+G_GNUC_UNUSED static void lzw_frame (const guint8 *idx, int npix)
 {
     BitW w;
     bw_init (&w, gif_data);
@@ -216,7 +222,6 @@ int main (int argc, char **argv)
     /* ---- scene project ---- */
     char *scenedir = g_build_filename (outdir, "test-scene", NULL);
     g_mkdir_with_parents (scenedir, 0755);
-    char saved[512];
     snprintf (outdir, sizeof (outdir), "%s", scenedir);
 
     /* bg: vertical gradient deep blue -> near black */

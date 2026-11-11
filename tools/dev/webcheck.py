@@ -75,7 +75,9 @@ class Env:
             os.makedirs(p, mode=0o700)
             self.env[k] = p
         self.env.update({"LIBGL_ALWAYS_SOFTWARE": "1", "NO_AT_BRIDGE": "1", "WALPE_MODULE_DIR": self.build,
-                         "WALPE_MONITORS": "A=320x180+0+0@60", "WALPE_NO_AUDIO": "1", "WALPE_NO_MEDIA": "1"})
+                         "WALPE_MONITORS": "A=320x180+0+0@60", "WALPE_NO_AUDIO": "1", "WALPE_NO_MEDIA": "1",
+                         # (told by name: the X server started here, never a session's compositor)
+                         "WALPE_BACKEND": "x11"})
         if os.geteuid() == 0:
             self.env["WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS"] = "1"
         self.config = os.path.join(self.env["XDG_CONFIG_HOME"], "walpe", "config.json")

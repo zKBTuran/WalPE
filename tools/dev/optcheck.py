@@ -231,6 +231,11 @@ class Daemon:
             disp += os.read(r, 16)
         os.close(r)
         env['DISPLAY'] = ':' + disp.decode().strip()
+        # (this environment is the caller's: inside a Wayland session the daemon, left to
+        # choose, would draw on the real desktop instead of the X server started here)
+        env['WALPE_BACKEND'] = 'x11'
+        for k in ('WAYLAND_DISPLAY', 'WAYLAND_SOCKET'):
+            env.pop(k, None)
         self.log = open(os.path.join(self.R, 'daemon.log'), 'wb')
         self.proc = subprocess.Popen([os.path.join(build, 'walpe-daemon')], env=env, stdout=self.log, stderr=subprocess.STDOUT)
         self.sock = os.path.join(self.R, 'rt', 'walpe.sock')

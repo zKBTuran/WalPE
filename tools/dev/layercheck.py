@@ -69,9 +69,12 @@ class Env:
             p = os.path.join(self.tmp, d)
             os.makedirs(p, mode=0o700)
             self.env[k] = p
-        self.env.update({"LIBGL_ALWAYS_SOFTWARE": "1", "NO_AT_BRIDGE": "1",
+        # (this environment is the caller's: inside a Wayland session the daemon, left to
+        # choose, would put the test wallpapers on the real desktop. It is told to use X11,
+        # and the session's compositor is taken out of its sight)
+        self.env.update({"LIBGL_ALWAYS_SOFTWARE": "1", "NO_AT_BRIDGE": "1", "WALPE_BACKEND": "x11",
                          "WALPE_MONITORS": ",".join(f"{n}={w}x{h}+{x}+{y}@60" for n, w, h, x, y in MONS)})
-        for k in ("WALPE_PROP_PROBE", "WALPE_SKIP_IDS", "WALPE_NO_SCRIPTS"):
+        for k in ("WALPE_PROP_PROBE", "WALPE_SKIP_IDS", "WALPE_NO_SCRIPTS", "WAYLAND_DISPLAY", "WAYLAND_SOCKET"):
             self.env.pop(k, None)
         self.sock = os.path.join(self.env["XDG_RUNTIME_DIR"], "walpe.sock")
         self.config = os.path.join(self.env["XDG_CONFIG_HOME"], "walpe", "config.json")

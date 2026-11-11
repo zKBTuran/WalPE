@@ -70,7 +70,10 @@ class Env:
             self.env[k] = p
         self.env.update({"LIBGL_ALWAYS_SOFTWARE": "1", "NO_AT_BRIDGE": "1", "GDK_BACKEND": "x11",
                          "GSK_RENDERER": "cairo", "GTK_A11Y": "none", "WALPE_MONITORS": "A=640x360+0+0@60",
-                         "WALPE_MODULE_DIR": self.build})
+                         "WALPE_MODULE_DIR": self.build,
+                         # (the daemon is told its window system by name, as the window is with
+                         # GDK_BACKEND: neither may go looking for a session's compositor)
+                         "WALPE_BACKEND": "x11"})
         self.config = os.path.join(self.env["XDG_CONFIG_HOME"], "walpe", "config.json")
         self.daemon = None
         self.gui = None

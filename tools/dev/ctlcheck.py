@@ -56,8 +56,10 @@ class Env:
             p = os.path.join(self.tmp, d)
             os.makedirs(p, mode=0o700)
             self.env[k] = p
+        # (the daemon is told its window system by name: left to choose, it would take a
+        # Wayland session's compositor when it finds one, not the X server started here)
         self.env.update({"LIBGL_ALWAYS_SOFTWARE": "1", "NO_AT_BRIDGE": "1", "WALPE_MODULE_DIR": self.build,
-                         "WALPE_MONITORS": "A=640x360+0+0@60,B=640x360+640+0@60"})
+                         "WALPE_MONITORS": "A=640x360+0+0@60,B=640x360+640+0@60", "WALPE_BACKEND": "x11"})
         self.config = os.path.join(self.env["XDG_CONFIG_HOME"], "walpe", "config.json")
         self.xvfb = None
         self.daemon = None

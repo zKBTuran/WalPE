@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end check: a wallpaper that fails to load brings the previous one back.
 
-  python3 -I tools/dev/restorecheck.py --build build [--daemon FILE] [--keep] [--tmp DIR]
+  python3 -I tools/dev/restorecheck.py --build build [--daemon FILE] [--display KIND] [--keep] [--tmp DIR]
 
 Starts a private Xvfb (-displayfd, its framebuffer in a file: no screenshot
 tool needed) with two fake monitors, a private walpe-daemon (own XDG dirs in
@@ -26,7 +26,11 @@ log and the pixels in the middle of each monitor:
   monitors of different sizes (each loads on its own):
    8 red / blue per monitor, broken opened   each monitor has its own back, config too
 
-Exit code 0 = all passed, 1 = failures, 77 = skipped (no Xvfb). --daemon FILE
+The display is Xvfb, or with --display sway (or WALPE_CHECK_DISPLAY=sway) a headless
+Wayland compositor with two outputs (scripts/displayenv.py of the source tree).
+
+Exit code 0 = all passed, 1 = failures, 77 = skipped (the display's programs are
+not installed, or the build has no backend for it). --daemon FILE
 runs another walpe-daemon binary with the tools of --build (a build without
 the change: cases 2-5, 7 and 8 fail there, the monitors stay black).
 RESTORECHECK_PATIENCE=N multiplies every wait (a software renderer on a busy
@@ -56,6 +60,7 @@ def _harness_dir():
 sys.path.insert(0, _harness_dir())
 try:
     from checkenv import PATIENCE, wait_for, jdump, gen_scene, gen_broken, Env, name_of, brief   # noqa: E402,F401
+    import displayenv   # noqa: E402  (which display, and whether it can be used here)
 except ImportError:
     sys.stderr.write("restorecheck: scripts/checkenv.py of the WalPE source tree was not found in %s\n"
                      "(set WALPE_SRC to the source tree, or pass --build <source tree>/build)\n" % sys.path[0])
@@ -297,13 +302,15 @@ def run_mixed(env, red, blue, broken):
 
 def main():
     args = sys.argv[1:]
-    build, daemon, keep, tmp = "build", None, False, None
+    build, daemon, keep, tmp, display = "build", None, False, None, None
     while args:
         a = args.pop(0)
         if a == "--build" and args:
             build = args.pop(0)
         elif a == "--daemon" and args:
             daemon = args.pop(0)
+        elif a == "--display" and args:
+            display = args.pop(0)
         elif a == "--keep":
             keep = True
         elif a == "--tmp" and args:
@@ -311,14 +318,19 @@ def main():
         else:
             sys.stderr.write(__doc__)
             return 2
-    if not shutil.which("Xvfb"):
-        print("restorecheck: skipped (needs Xvfb)")
-        return 77
+    display = displayenv.pick(display)
+    if not display:
+        sys.stderr.write(__doc__)
+        return 2
+    skip = displayenv.unusable(display, build)
+    if skip:
+        print("restorecheck: skipped (%s)" % skip[0])
+        return skip[1]
     for b in (daemon or os.path.join(build, "walpe-daemon"), os.path.join(build, "walpe-ctl")):
         if not os.path.exists(b):
             print(f"restorecheck: {b} not found")
             return 2
-    env = Env(build, daemon, keep, tmp)
+    env = Env(build, daemon, keep, tmp, display)
     try:
         if len(env.sock.encode()) > 107:
             print(f"restorecheck: {env.sock} is too long for a socket ({len(env.sock.encode())} > 107 bytes): "
@@ -333,8 +345,8 @@ def main():
         layouts = [(run_same, [("A", 640, 360, 0, 0), ("B", 640, 360, 640, 0)]),
                    (run_mixed, [("A", 640, 360, 0, 0), ("B", 480, 270, 640, 0)])]
         if not env.start_x(1280, 360):
-            print("restorecheck: skipped (Xvfb did not start)")
-            return 77
+            print("restorecheck: skipped (the %s display did not start)" % display)
+            return displayenv.SKIP
         for fn, mons in layouts:
             jdump(env.config, {"config_version": 2, "fps": 30, "pause_covered": False, "pause_dpms": False})
             if not env.start_daemon(mons):
