@@ -45,7 +45,9 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             managers), inside a frame window (reparenting ones), moved to
             the other monitor, across both; nothing pauses while the focus
             is on another window; `set fs_all=on` pauses every monitor as
-            earlier versions did; status says all of it per monitor.
+            earlier versions did; status says all of it per monitor. Then
+            again with shared rendering (one monitor following the other's
+            frames): each monitor still pauses on its own.
   video     a video's load ends with its first picture: a clip the decoder
             cannot do anything with (its container reads well) is a failed
             load with a reason in status, and the wallpaper from before
@@ -1184,6 +1186,33 @@ def case_fullscreen(env, W):
         lc_bad = [ln for ln in env.since(mark).splitlines()
                   if re.search(r"CRITICAL \*\*|AddressSanitizer|runtime error:|Segmentation fault", ln)]
         check(env.daemon.poll() is None and not lc_bad, "fullscreen: the daemon runs, its log is clean", lc_bad[:5])
+        env.stop_daemon()
+
+        # The same with shared rendering, the default: same-size monitors that show one
+        # scene are rendered once, by a leader the others follow. Each still pauses on
+        # its own: the leader's scene keeps running for a follower that is shown.
+        xc.close()
+        xc = XClient(env.env["DISPLAY"])
+        rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False})
+        if not check(env.start_daemon([A, B]), "fullscreen: daemon started again, with shared rendering"):
+            return
+        env.open(W["anim"])
+        loaded(env, W["anim"])
+        wait_for(lambda: min(drawn(1.0)) > 3, 20, 0.1)
+        st = env.state()
+        check(st.get("shared_followers") == 1, "fullscreen: one monitor follows the other's rendering",
+              st.get("monitors_state"))
+        w4 = xc.window(0, 0, 640, 360)
+        xc.clients([w4])
+        xc.fullscreen(w4, True)
+        xc.focus(w4)
+        is_state([True, False], [True, False], "shared rendering, the window on the first monitor")
+        xc.move(w4, 640, 0, 640, 360)
+        is_state([False, True], [False, True], "shared rendering, the window on the second monitor")
+        xc.move(w4, 0, 0, 1280, 360)
+        is_state([True, True], [True, True], "shared rendering, the window across both")
+        xc.focus(0)
+        is_state([False, False], [False, False], "shared rendering, no window has the focus")
     finally:
         xc.close()
     env.stop_daemon()
