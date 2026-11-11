@@ -211,6 +211,52 @@ int main (void)
                "8 more rounds of text set up and released: %" G_GSIZE_FORMAT " bytes more on the heap", grown);
         printf ("text-part: 8 rounds of set-up and release leave %" G_GSIZE_FORMAT " bytes more on the heap\n", grown);
     }
+    /* The glyphs of a wallpaper's fonts go with the wallpaper: 24 scenes
+     * with a text size of their own each, one after the other, do not leave
+     * their glyph bitmaps behind (cairo kept the last 256 fonts nobody used
+     * any more, with every glyph: 7 to 10 MB here). Alone, and next to a
+     * scene whose text stays - which keeps the font map, and is drawn as
+     * before when its text changes after another scene has left. */
+    for (int other = 0; other < 2; other++) {
+        WalpeTextStyle kst = { 0 };
+        kst.pointsize = 20;
+        kst.box_w = 900; kst.box_h = 300;
+        kst.halign = kst.valign = 1;
+        Tex kt = { 0 };
+        if (other) {
+            walpe_text_hold ();
+            tex_update (&kt, &kst, "12:34:56", NULL);
+        }
+        gsize after2 = 0;
+        for (int cyc = 0; cyc < 26; cyc++) {
+            WalpeTextStyle st = { 0 };
+            st.pointsize = 24 + (float) cyc + 0.5f * (float) other;   /* (sizes no round before had) */
+            st.halign = st.valign = 1;
+            Tex t = { 0 };
+            walpe_text_hold ();
+            tex_update (&t, &st, "-12:34:56- Wednesday", NULL);
+            g_free (t.px);
+            walpe_text_release ();
+            if (other) {
+                const char *now = cyc & 1 ? "12:34:57" : "12:34:58";
+                tex_update (&kt, &kst, now, NULL);
+                tex_matches_full (&kt, &kst, now, "text of a scene that stays");
+            }
+            if (cyc == 1)
+                after2 = heap_in_use ();
+        }
+        gsize now = heap_in_use ();
+        gsize grown = now > after2 ? now - after2 : 0;
+        CHECK (grown <= 1024 * 1024,
+               "24 more scenes with a text size of their own%s: %" G_GSIZE_FORMAT " bytes more on "
+               "the heap", other ? ", next to a scene with text" : "", grown);
+        printf ("text-part: 24 scenes with a text size of their own%s leave %" G_GSIZE_FORMAT
+                " bytes more on the heap\n", other ? ", next to a scene with text" : "", grown);
+        if (other) {
+            g_free (kt.px);
+            walpe_text_release ();
+        }
+    }
     printf ("text-part: %d steps (%d partial) compared with full renders, clock digit in a 1600x900 "
             "box: %" G_GSIZE_FORMAT " of %" G_GSIZE_FORMAT " pixels, %d failures\n", steps,
             partial_steps, big_part, big_whole, fails);

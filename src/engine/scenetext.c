@@ -71,12 +71,56 @@ void walpe_text_hold (void)
     g_mutex_unlock (&text_lock);
 }
 
-/* the last scene with text layers is gone: fontconfig's config + font set
- * and pango's font map/glyph caches are freed (rebuilt by the next text) */
+/* cairo keeps a scaled font that nothing uses any more in a list of its
+ * own (256 "holdovers", the oldest goes when a new one comes) in case it is
+ * asked for again - and with it every glyph it has rasterised. Text layers
+ * are drawn at 300 dpi: a glyph of a 32 point layer is a bitmap 133 pixels
+ * high, a line of text some hundred kB, and every font and size of a
+ * wallpaper is one such font. They stayed when the wallpaper was closed, and
+ * when the font map was freed: half a megabyte and more per wallpaper with
+ * text that had been shown (16 wallpapers with a clock, a date and a small
+ * line each, one after the other: 6 MB; one line in 120 sizes: 49 MB), up
+ * to 256 fonts, for the life of the process. cairo has no call that empties
+ * the list (the one that resets its static data must not be used while any
+ * cairo object lives). So the list is turned over once: as many scaled
+ * fonts of a user font without glyphs as it has places are made and
+ * released; each pushes out the oldest holdover. What is left in the list
+ * is those, a few hundred bytes each. Fonts that are in use are not in the
+ * list and are not touched; a font pushed out is made again when a text
+ * asks for it. */
+#define TEXT_CAIRO_HOLDOVERS 256   /* CAIRO_SCALED_FONT_MAX_HOLDOVERS */
+static void text_forget_unused_fonts (void)
+{
+    cairo_font_face_t *face = cairo_user_font_face_create ();
+    cairo_font_options_t *fo = cairo_font_options_create ();
+    cairo_matrix_t ctm, fm;
+    cairo_matrix_init_identity (&ctm);
+    /* (+ 2: the font cairo remembers as the last one used joins the list
+     * when the first of these takes its place, and the last of these stays
+     * in that place) */
+    for (int i = 1; i <= TEXT_CAIRO_HOLDOVERS + 2; i++) {
+        cairo_matrix_init_scale (&fm, i, i);
+        cairo_scaled_font_destroy (cairo_scaled_font_create (face, &fm, &ctm, fo));
+    }
+    cairo_font_options_destroy (fo);
+    cairo_font_face_destroy (face);
+}
+
+/* a scene with text layers is gone. The last one: fontconfig's config +
+ * font set and pango's font map/glyph caches are freed (rebuilt by the next
+ * text). Not the last one: the font map stays for the others, without the
+ * fonts it has cached - those of the scene that left among them, each with
+ * its cairo font and glyphs (Pango keeps the last 256 font sets it was
+ * asked for). The scenes that stay get theirs again with their next text. */
 void walpe_text_release (void)
 {
     g_mutex_lock (&text_lock);
-    if (text_users > 0 && --text_users == 0 && text_map) {
+    if (text_users > 1 && text_map) {
+        text_users--;
+        if (PANGO_IS_FC_FONT_MAP (text_map))
+            pango_fc_font_map_cache_clear (PANGO_FC_FONT_MAP (text_map));
+        text_forget_unused_fonts ();
+    } else if (text_users > 0 && --text_users == 0 && text_map) {
         /* the font map holds its own reference on the config
          * (pango_fc_font_map_set_config) and Pango does not drop it when
          * the map is finalized: without this the whole FcConfig - font
@@ -89,6 +133,7 @@ void walpe_text_release (void)
         if (text_fc)
             FcConfigDestroy (text_fc);
         text_fc = NULL;
+        text_forget_unused_fonts ();
         g_message ("scenetext: no text layers left, font map freed");
     }
     g_mutex_unlock (&text_lock);
