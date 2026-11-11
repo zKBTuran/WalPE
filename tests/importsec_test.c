@@ -89,7 +89,7 @@ static void test_argv (void)
     mi.codec = g_strdup ("vp9");
     mi.pix_fmt = g_strdup ("yuv420p");
     const char *src = "/tmp/-y evil; $(touch x) `id` |& .mkv";
-    char **argv = walpe_import_build_argv (src, "/tmp/out.mp4.part", &mi, "libx264", FALSE);
+    char **argv = walpe_import_build_argv (src, "/tmp/out.mp4.part", &mi, "libx264", FALSE, NULL);
     int in = argv_index (argv, "-i");
     CHECK (in > 0 && argv[in + 1] != NULL);
     if (in > 0 && argv[in + 1]) {
@@ -201,7 +201,7 @@ int main (void)
     /* 2. output that is not UTF-8 */
     g_setenv ("FAKE_MODE", "chatty", TRUE);
     GError *err = NULL;
-    WalpeImport *job = walpe_import_start (src, lib, NULL, on_done, NULL, &err);
+    WalpeImport *job = walpe_import_start (src, lib, NULL, NULL, on_done, NULL, &err);
     CHECK (job != NULL);
     if (job) {
         gboolean done = wait_done (30);
@@ -217,7 +217,7 @@ int main (void)
     /* 3a. a conversion whose output grows for ever: stopped at 2 MB */
     g_setenv ("FAKE_MODE", "grow", TRUE);
     char *dst = g_build_filename (cache, "abc.mp4", NULL), *part = g_strconcat (dst, ".part", NULL);
-    job = walpe_import_start_to (src, dst, NULL, on_done, NULL, &err);
+    job = walpe_import_start_to (src, dst, NULL, NULL, on_done, NULL, &err);
     CHECK (job != NULL);
     if (job) {
         gboolean done = wait_done (30);
@@ -236,7 +236,7 @@ int main (void)
     g_clear_error (&err);
 
     /* 3b. the same file imported by hand is not stopped by that limit */
-    job = walpe_import_start (src, lib, NULL, on_done, NULL, &err);
+    job = walpe_import_start (src, lib, NULL, NULL, on_done, NULL, &err);
     CHECK (job != NULL);
     if (job) {
         gboolean done = wait_done (4);  /* 4 s = ~20 MB written, limit 2 MB */

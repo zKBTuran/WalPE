@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=WalPE Tray
+Comment=Tray icon for WalPE: live wallpapers for Linux (plays Wallpaper Engine content)
+Exec=walpe-tray
+Icon=walpe
+Terminal=false
+NoDisplay=true
+Categories=Utility;
+StartupNotify=false

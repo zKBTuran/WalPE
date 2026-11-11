@@ -1,6 +1,9 @@
 /* import.h - video import: normalize any ffmpeg-readable video into the one
- * format the renderer plays (H.264 High, yuv420p, <=1920x1080, MP4 with
- * faststart, no audio) by running the ffmpeg CLI as a child process.
+ * format the renderer plays (H.264 High, yuv420p, MP4 with faststart, no
+ * audio) by running the ffmpeg CLI as a child process. How large the
+ * result may be is the caller's to say (a WalpeVideoBox, resolution.h:
+ * the setting "video_resolution" and the monitors' render sizes decide);
+ * nothing here knows a screen size.
  *
  * Everything is asynchronous on the thread-default main context: encoder
  * probe -> ffprobe -> ffmpeg transcode (or remux) -> thumbnail. ffmpeg is
@@ -9,6 +12,7 @@
 #pragma once
 #include <glib.h>
 #include <gio/gio.h>
+#include "common/resolution.h"   /* WalpeVideoBox */
 
 G_BEGIN_DECLS
 
@@ -29,17 +33,19 @@ void     walpe_media_info_clear (WalpeMediaInfo *mi);
 gboolean walpe_media_info_parse (const char *json, WalpeMediaInfo *mi);
 
 /* output geometry: display size (SAR + rotation applied) fitted inside
- * 1920x1080, never upscaled, both dimensions even (>= 2) */
-void     walpe_import_target_size (const WalpeMediaInfo *mi, int *out_w, int *out_h);
+ * box (NULL or 0 x 0: no limit), never upscaled, both dimensions even
+ * (>= 2) */
+void     walpe_import_target_size (const WalpeMediaInfo *mi, const WalpeVideoBox *box,
+                                   int *out_w, int *out_h);
 /* TRUE when the stream can be stream-copied into MP4 unchanged (H.264,
- * yuv420p 8-bit, even dims within 1920x1080, no rotation, square pixels) */
-gboolean walpe_import_can_remux (const WalpeMediaInfo *mi);
+ * yuv420p 8-bit, even dims within box, no rotation, square pixels) */
+gboolean walpe_import_can_remux (const WalpeMediaInfo *mi, const WalpeVideoBox *box);
 
 /* argv for the ffmpeg run (NULL-terminated, g_strfreev). encoder is
  * ignored when remux is TRUE. */
 char   **walpe_import_build_argv (const char *src, const char *dst_part,
                                   const WalpeMediaInfo *mi, const char *encoder,
-                                  gboolean remux);
+                                  gboolean remux, const WalpeVideoBox *box);
 
 typedef struct _WalpeImport WalpeImport;
 /* called once on the main context; ok=FALSE carries a human-readable error */
@@ -48,11 +54,13 @@ typedef void (*WalpeImportDone) (WalpeImport *imp, gboolean ok, const char *dst,
 
 /* start importing src (absolute path) into dest_dir (created if missing).
  * encoder: NULL = $WALPE_IMPORT_ENCODER or "libx264"; "h264_nvenc" uses the
- * NVIDIA encoder and falls back to libx264 if it fails. Returns NULL with
- * err set when nothing could start (e.g. ffmpeg/ffprobe not installed). */
+ * NVIDIA encoder and falls back to libx264 if it fails. box: the largest
+ * picture the result may have (copied; NULL or 0 x 0 = the source's size).
+ * Returns NULL with err set when nothing could start (e.g. ffmpeg/ffprobe
+ * not installed). */
 WalpeImport *walpe_import_start (const char *src, const char *dest_dir,
-                                 const char *encoder, WalpeImportDone done,
-                                 gpointer user, GError **err);
+                                 const char *encoder, const WalpeVideoBox *box,
+                                 WalpeImportDone done, gpointer user, GError **err);
 /* the same pipeline writing exactly dst_file (absolute; its folder is
  * created, mode 0700), no thumbnail: the daemon's cache of converted
  * copies of video wallpapers the player cannot read itself. The source is
@@ -62,13 +70,16 @@ WalpeImport *walpe_import_start (const char *src, const char *dest_dir,
  * 8192) or when the disk is nearly full; 0 = no limit. Needs a running
  * main loop on the default context, like the rest of the job. */
 WalpeImport *walpe_import_start_to (const char *src, const char *dst_file,
-                                    const char *encoder, WalpeImportDone done,
-                                    gpointer user, GError **err);
+                                    const char *encoder, const WalpeVideoBox *box,
+                                    WalpeImportDone done, gpointer user, GError **err);
 /* where the converted copy of video src is cached:
- * <user cache dir>/walpe/video/<hash of path, size, mtime>.mp4 - a changed
- * or replaced source gets a new name. NULL when src cannot be stat'ed.
- * g_free. */
-char        *walpe_video_cache_file (const char *src);
+ * <user cache dir>/walpe/video/<hash of path, size, mtime>[-<W>x<H> |
+ * -full].mp4 - a changed or replaced source gets a new name, and a copy
+ * made for another box has another one (a copy fitted into 1920 x 1080 is
+ * not what a monitor set to 4K is to show). The 1920 x 1080 box has the
+ * plain name the copies had while that size was built in, so those stay
+ * in use. NULL when src cannot be stat'ed. g_free. */
+char        *walpe_video_cache_file (const char *src, const WalpeVideoBox *box);
 int          walpe_import_percent (WalpeImport *imp); /* -1 = unknown */
 const char  *walpe_import_label   (WalpeImport *imp); /* source file stem */
 const char  *walpe_import_mode    (WalpeImport *imp); /* "probe" "remux" "transcode:<enc>" */

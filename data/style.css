@@ -126,4 +126,15 @@ button.walpe-reset { min-width: 28px; min-height: 28px; padding: 2px; }
 .walpe-settings { padding: 18px 22px; }
 .walpe-settings-group { font-size: 1.1em; font-weight: 700; margin-top: 10px; }
 .walpe-settings-sub { opacity: 0.75; font-size: 0.93em; }
+/* under a pause setting that nothing in the session can drive (status
+ * "pause_rules"): the reason, set apart from the row's own description */
+.walpe-settings-note { opacity: 1; color: mix(@theme_fg_color, #e5a50a, 0.6); margin-bottom: 6px; }
 .walpe-settings label.error { color: mix(@theme_fg_color, #e01b24, 0.6); }
+/* one monitor in the "Monitor resolution" dialog and in the Resolution
+ * rows of the settings window */
+.walpe-res-row {
+  padding: 7px 2px;
+  border-bottom: 1px solid alpha(currentColor, 0.10);
+}
+.walpe-res-row:last-child { border-bottom: none; }
+.walpe-res-row label.error { opacity: 1; }

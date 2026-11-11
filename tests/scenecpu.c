@@ -189,7 +189,7 @@ int main (int argc, char **argv)
     g_string_append_printf (o, " pt_live=%.1f pt_draws=%.2f pt_kb=%.1f text=%.3f",
                             (double) st.pt_live / n, (double) st.pt_draws / n,
                             (double) st.pt_bytes / n / 1024.0, (double) st.text_renders / n);
-    if (walpe_cph_level >= 2)
+    if (walpe_cph_level_get () >= 2)
         g_string_append_printf (o, " sim_hash=%016" G_GINT64_MODIFIER "x vtx_hash=%016"
                                 G_GINT64_MODIFIER "x", st.pt_sim_hash, st.pt_vtx_hash);
     if (hash_frames > 0) {
@@ -215,7 +215,7 @@ int main (int argc, char **argv)
         g_free (px);
         walpe_cph_get (&st, TRUE);
         g_string_append_printf (o, " frame_hash=%016" G_GINT64_MODIFIER "x", hash);
-        if (walpe_cph_level >= 2)
+        if (walpe_cph_level_get () >= 2)
             g_string_append_printf (o, " sim_hash2=%016" G_GINT64_MODIFIER "x vtx_hash2=%016"
                                     G_GINT64_MODIFIER "x", st.pt_sim_hash, st.pt_vtx_hash);
     }

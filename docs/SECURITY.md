@@ -120,6 +120,43 @@ that store, and a GIF is checked as in the table above. A known limit: the cover
 by whatever picture loader the system's gdk-pixbuf offers for it, not by a fixed list of
 formats (such a list is prepared and not part of this release).
 
+## Parts added in 0.13
+
+The same rule - a wallpaper's files are data from strangers - as applied in the new parts.
+None of them has been attacked by anyone but its own tests.
+
+- **Sound files** ([SOUND.md](SOUND.md)): looked up inside the wallpaper's folder or
+  Wallpaper Engine's assets only (no absolute paths, no `..`, no links that lead out, no
+  addresses), regular files of at most 2 GiB; the file's first bytes decide the format, and
+  only four FFmpeg decoders can be reached (MP3, FLAC, Vorbis, Opus; WAV is read by WalPE
+  itself); 8000-192000 Hz, 1-8 channels, at most 6 hours, 64 files per layer, 32 sound
+  layers per wallpaper and 16 sounding layers in the whole daemon. A project cannot declare
+  an option named `walpe_sound`. Tests: `scenesound`, `sounddec`.
+- **Sprite sheets**: the frame table comes from the wallpaper and is checked before use
+  (every frame on the picture and with an area, times that are numbers); a sheet that
+  fails is refused. A script reaches the animations and the camera of its own scene only,
+  and what it sets is clamped. Tests: `sprite-sheet`, `scene-feat`.
+- **Fluid simulation**: an effect file gets a grid of at most 1024 cells on its longer side
+  and no buffer larger than the driver's largest texture. Test: `fx-sim`.
+- **Effect shaders on OpenGL ES** go through one more rewriting stage ([GPU.md](GPU.md))
+  with the limits of the table above. Tests: `fx-essl`, `fx-hostile`.
+- **Web wallpapers on Wayland**: by default the page's hidden window is an X window under
+  Xwayland, with the selection guard of X11 sessions. The private page host (experimental,
+  [WAYLAND.md](WAYLAND.md)) is a Wayland display inside the daemon to which only the page's
+  toolkit is connected: there is no clipboard of anyone else on it, and copy and drag
+  requests are cancelled. Test: `websec-private`. The wallpaper surface itself never takes
+  the keyboard.
+- **GPU choice**: for a `gpu` value other than `auto` the daemon starts short child
+  processes of itself (`--gpu-probe`) and sets driver variables in its own environment;
+  a variable that is already set is never replaced. `walpe-ctl gpu-stats` and the kernel
+  section of a profile read `/proc/<pid>/fdinfo` of your own processes and `/sys` of the
+  GPU, nothing of another user's process, and start no program but `nvidia-smi` (the
+  command and the report script only, never the daemon)
+  ([GPU-PROFILING.md](GPU-PROFILING.md)).
+- **logind** is asked over the system bus for three facts (suspend, locked hint, active
+  session); `WALPE_LOGIND_BUS=session` (tests) looks for it on the session bus, where any
+  program of yours can stand in for it.
+
 ## Workshop data
 
 What Steam's servers answer and

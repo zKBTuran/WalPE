@@ -38,10 +38,11 @@
 
 static int fxs_cost_frame_no (void)
 {
-    static int f = -2;
+    static WalpeLazy cell = -2;   /* -2 = not read yet, -1 = off (common/lazy.h) */
+    int f = walpe_lazy_get (&cell);
     if (f == -2) {
         const char *e = g_getenv ("WALPE_FX_COST");
-        f = e && *e ? atoi (e) : -1;
+        f = walpe_lazy_set (&cell, e && *e ? atoi (e) : -1);
     }
     return f;
 }

@@ -33,12 +33,41 @@ daemon after editing gpu.conf. The start-up log (`present: ...` lines) shows wha
 | `egl_display` | `own` | EGL uses an X connection of its own: the main loop's X requests never wait behind a render thread's swap. This is what the daemon does by default, whatever this key says (`WALPE_ONE_XCONN=1` in front of the daemon = one shared connection). |
 | `swap_damage` | `on` | swaps go through `eglSwapBuffersWithDamage` where the EGL has it (test of the path: the damage is the whole surface, no content reports less yet). |
 | `frame_align` | `on`, `off` (default) | every monitor's frame clock runs on one grid (multiples of 1 / fps on the monotonic clock) instead of starting when its wallpaper was loaded. Two monitors at 60 fps then present within a millisecond or two of each other, so a compositing manager gets their damage together: about 60 wake-ups a second instead of up to 120, each of which makes picom and the X server compose and present the screen once more. Frames, frame count and pictures are unchanged; a frame moves by less than one frame time. Scenes only (a plain video wallpaper follows its clip's own frame times). Live: `walpe-ctl set frame_align=on\|off`; `walpe-ctl status` has `frame_align`. Unmeasured on NVIDIA: compare the X and picom lines of `walpe-gpu-report.sh` ("programs on the GPU") and `power.draw` with it on and off; the daemon's own profile must not change. |
+| `wayland_reconnect` | seconds (0 = off, default) | Wayland only: what the daemon does when the compositor goes away. `0`: it shuts down in order and exits with status 1, as it does when an X server goes away. `N`: it restarts itself in place and waits up to N seconds for the compositor's socket to come back, then continues with the saved wallpapers. Tested with a killed headless sway and 30 seconds only ([WAYLAND.md](WAYLAND.md)). |
 
 If the start-up log says "the EGL config has no swap interval 0", `limiter` cannot take effect through EGL;
 on NVIDIA `__GL_SYNC_TO_VBLANK=0` in the daemon's environment is the driver-level equivalent.
 
 A variable already set in the daemon's environment (`__GL_YIELD=... walpe-daemon`) is never replaced.
-Other drivers (Mesa) ignore the `__GL_*` variables.
+
+## Mesa drivers (AMD, Intel, nouveau)
+
+Mesa ignores the `__GL_*` variables. When a Mesa driver renders, the hints that have a Mesa
+counterpart are handed to Mesa as well (the NVIDIA variables are set exactly as before, and
+nothing is set unless the key is in `gpu.conf`):
+
+| key | Mesa |
+|---|---|
+| `threaded = on\|off` | `mesa_glthread=true\|false` |
+| `shader_cache = on\|off\|/dir` | `MESA_SHADER_CACHE_DISABLE=false\|true` (and `MESA_SHADER_CACHE_DIR=/dir`) |
+| `shader_cache_size = BYTES` | `MESA_SHADER_CACHE_MAX_SIZE=<megabytes>M` |
+| `yield`, `max_frames`, `sync_display` | no counterpart: logged once as having no effect |
+
+Mesa keeps a shader cache by default, and synchronises every window to the display it is on.
+This table is tested as a table only (`tests/gpusel_test.c`); no Mesa hardware driver has
+run WalPE with these hints.
+
+## Wayland
+
+On the Wayland backend `present = vsync` (and `auto`) means: after each frame the render
+thread waits until the compositor has taken it (the surface's frame event) before it starts
+the next; `limiter` does not wait and paces by the frame clock alone. The frame rate limit
+per monitor works as on X11. Tearing is not possible either way: the compositor presents. A
+surface the compositor is not showing gets no frame events; the daemon notices within a
+fraction of a second and treats that monitor as covered. A Mesa setting that forbids
+swapping without vsync (`vblank_mode=3`) defeats the protection against a hidden surface
+blocking its render thread; the log warns ("cannot swap without waiting"). `yield`,
+`max_frames`, `sync_display` and `egl_display` are X11 / NVIDIA matters.
 
 Existing switches that belong to the same picture: `walpe-ctl set fps=N` (frame limit),
 `WALPE_NO_REFRESH_CAP=1` (do not limit a monitor to its refresh rate), `WALPE_LEADER=first`,

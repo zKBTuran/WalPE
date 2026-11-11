@@ -1304,6 +1304,17 @@ static void position_query (Player *p)
                             cancel, pos_done, g_strdup (p->name));
 }
 
+/* media thread: the context its timers belong to - its own, which it
+ * runs as its thread-default (media_thread). The global `mctx` is for the
+ * other threads, under `lock`: it is cleared when this thread is retired
+ * and replaced when a successor is started, so reading it from here
+ * without the lock was only right as long as nothing of this thread ran
+ * after its retirement. */
+static GMainContext *media_ctx (void)
+{
+    return g_main_context_get_thread_default ();
+}
+
 /* while something plays: timeline event once a second (WE: "sent
  * frequently while media is playing"), Position resync every 5 s */
 static gboolean tick_cb (gpointer u)
@@ -1329,10 +1340,10 @@ static void tick_update (void)
     if (want && !tick_id) {
         GSource *s = g_timeout_source_new_seconds (1);
         g_source_set_callback (s, tick_cb, NULL, NULL);
-        tick_id = g_source_attach (s, mctx);
+        tick_id = g_source_attach (s, media_ctx ());
         g_source_unref (s);
     } else if (!want && tick_id) {
-        GSource *s = g_main_context_find_source_by_id (mctx, tick_id);
+        GSource *s = g_main_context_find_source_by_id (media_ctx (), tick_id);
         if (s)
             g_source_destroy (s);
         tick_id = 0;
@@ -1353,7 +1364,7 @@ static gboolean session_bus_present (void)
 static void activate (void)
 {
     if (grace_id) {
-        GSource *s = g_main_context_find_source_by_id (mctx, grace_id);
+        GSource *s = g_main_context_find_source_by_id (media_ctx (), grace_id);
         if (s)
             g_source_destroy (s);
         grace_id = 0;
@@ -1459,7 +1470,7 @@ static gboolean release_cb (gpointer u)
     if (r == 0 && active && !grace_id) {
         GSource *s = g_timeout_source_new (GRACE_MS);
         g_source_set_callback (s, deactivate, NULL, NULL);
-        grace_id = g_source_attach (s, mctx);
+        grace_id = g_source_attach (s, media_ctx ());
         g_source_unref (s);
     }
     return G_SOURCE_REMOVE;

@@ -1,8 +1,12 @@
 #include "config.h"
+#include "glapi.h"
 #include "util.h"
 #include <glib/gstdio.h>
 #include <stdio.h>
 #include "layeradj.h"
+#include "gpusel.h"
+#include "engine/video_hwsel.h"   /* the words of "video_hwdec" (a header without dependencies) */
+#include "fluidsim.h"
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -119,6 +123,10 @@ static JsonNode *config_to_json (WalpeConfig *c)
     json_builder_add_int_value (b, c->fps);
     json_builder_set_member_name (b, "volume");
     json_builder_add_double_value (b, c->volume);
+    json_builder_set_member_name (b, "scene_sound");
+    json_builder_add_boolean_value (b, c->scene_sound);
+    json_builder_set_member_name (b, "mute");
+    json_builder_add_boolean_value (b, c->mute);
     json_builder_set_member_name (b, "paused");
     json_builder_add_boolean_value (b, c->paused);
     json_builder_set_member_name (b, "monitor_current");
@@ -162,20 +170,41 @@ static JsonNode *config_to_json (WalpeConfig *c)
         json_builder_set_member_name (b, "skip_hidden_inset");
         json_builder_add_int_value (b, c->skip_hidden_inset);
     }
+    /* the window system: written only when chosen, like the keys above */
+    if (c->backend == WALPE_BACKEND_X11 || c->backend == WALPE_BACKEND_WAYLAND) {
+        json_builder_set_member_name (b, "backend");
+        json_builder_add_string_value (b, walpe_backend_name (c->backend));
+    }
+    if (c->wayland_pointer) {
+        json_builder_set_member_name (b, "wayland_pointer");
+        json_builder_add_string_value (b, "off");
+    }
     json_builder_set_member_name (b, "fx_cache");
     json_builder_add_boolean_value (b, c->fx_cache);
     json_builder_set_member_name (b, "fx_specialize");
     json_builder_add_boolean_value (b, c->fx_specialize);
     json_builder_set_member_name (b, "fx_quality");
     json_builder_add_string_value (b, c->fx_quality ? c->fx_quality : "exact");
+    json_builder_set_member_name (b, "fluid_sim");
+    json_builder_add_boolean_value (b, c->fluid_sim);
+    json_builder_set_member_name (b, "fluid_quality");
+    json_builder_add_string_value (b, walpe_fluid_quality_name ((WalpeFluidQuality) c->fluid_quality));
     json_builder_set_member_name (b, "tex_downscale");
     json_builder_add_boolean_value (b, c->tex_downscale);
     /* "texture_slack" and "render_scale" are written with the quality
      * knobs below (walpe_config_quality_sync keeps both sides equal) */
     json_builder_set_member_name (b, "web_accel");
     json_builder_add_boolean_value (b, c->web_accel);
+    /* off | auto stay the switch they were (a file written here is read by
+     * an older build as before); one API by name is a word next to it */
     json_builder_set_member_name (b, "video_hwdec");
     json_builder_add_boolean_value (b, c->video_hwdec);
+    if (c->video_hwdec_api && *c->video_hwdec_api) {
+        json_builder_set_member_name (b, "video_hwdec_api");
+        json_builder_add_string_value (b, c->video_hwdec_api);
+    }
+    json_builder_set_member_name (b, "video_zerocopy");
+    json_builder_add_boolean_value (b, c->video_zerocopy);
     json_builder_set_member_name (b, "video_limit");
     json_builder_add_boolean_value (b, c->video_limit);
     json_builder_set_member_name (b, "video_upload");
@@ -188,10 +217,43 @@ static JsonNode *config_to_json (WalpeConfig *c)
     json_builder_add_boolean_value (b, c->particle_instancing);
     json_builder_set_member_name (b, "parallax");
     json_builder_add_boolean_value (b, c->parallax);
+    if (c->features && g_hash_table_size (c->features) > 0) {
+        /* renderer feature switches that were set (engine/features.h); a
+         * name that is absent keeps its default. Sorted: the file does not
+         * change from save to save. */
+        json_builder_set_member_name (b, "features");
+        json_builder_begin_object (b);
+        GList *names = g_list_sort (g_hash_table_get_keys (c->features), (GCompareFunc) strcmp);
+        for (GList *l = names; l; l = l->next) {
+            json_builder_set_member_name (b, l->data);
+            json_builder_add_boolean_value (
+                b, GPOINTER_TO_INT (g_hash_table_lookup (c->features, l->data)) == 1);
+        }
+        g_list_free (names);
+        json_builder_end_object (b);
+    }
     json_builder_set_member_name (b, "software_render");
     json_builder_add_boolean_value (b, c->software_render);
     json_builder_set_member_name (b, "software_threads");
     json_builder_add_int_value (b, c->software_threads);
+    /* the GPU choice: written only when it is not the default, so a
+     * config that never used it stays as it was */
+    if (c->gpu && strcmp (c->gpu, "auto")) {
+        json_builder_set_member_name (b, "gpu");
+        json_builder_add_string_value (b, c->gpu);
+    }
+    if (c->preset_follow_gpu) {
+        json_builder_set_member_name (b, "preset_follow_gpu");
+        json_builder_add_boolean_value (b, TRUE);
+    }
+    if (c->preset_gpu_class) {
+        json_builder_set_member_name (b, "preset_gpu_class");
+        json_builder_add_string_value (b, c->preset_gpu_class);
+    }
+    if (c->gl_api != WALPE_GL_API_AUTO) {
+        json_builder_set_member_name (b, "gl_api");
+        json_builder_add_string_value (b, walpe_gl_api_name ((WalpeGlApiPref) c->gl_api));
+    }
     if (c->steam_user) {
         json_builder_set_member_name (b, "steam_user");
         json_builder_add_string_value (b, c->steam_user);
@@ -208,6 +270,8 @@ static JsonNode *config_to_json (WalpeConfig *c)
     json_builder_add_boolean_value (b, c->pause_battery);
     json_builder_set_member_name (b, "battery_fps");
     json_builder_add_int_value (b, c->battery_fps);
+    json_builder_set_member_name (b, "pause_idle");
+    json_builder_add_int_value (b, c->pause_idle);
     json_builder_set_member_name (b, "preview_anim");
     json_builder_add_string_value (b, walpe_preview_anim_name (c->preview_anim));
     json_builder_set_member_name (b, "vsync");
@@ -251,9 +315,66 @@ static JsonNode *config_to_json (WalpeConfig *c)
     g_mutex_unlock (&props_lock);
     json_builder_end_object (b);
     walpe_layers_config_write (c, b);   /* "layers": per-wallpaper layer adjustments */
+    /* render resolution (resolution.h). Each member only while it says
+     * something: a config that never touched them keeps its other bytes */
+    if (c->monitors && g_hash_table_size (c->monitors)) {
+        json_builder_set_member_name (b, "monitors");
+        json_builder_begin_object (b);
+        GList *ks = g_list_sort (g_hash_table_get_keys (c->monitors), (GCompareFunc) strcmp);
+        for (GList *k = ks; k; k = k->next) {
+            const WalpeMonitorConf *mc = g_hash_table_lookup (c->monitors, k->data);
+            char *rs = walpe_res_format (&mc->res), *tl = walpe_texlimit_format (mc->tex_limit);
+            json_builder_set_member_name (b, k->data);
+            json_builder_begin_object (b);
+            json_builder_set_member_name (b, "resolution");
+            json_builder_add_string_value (b, rs);
+            json_builder_set_member_name (b, "texture_limit");
+            json_builder_add_string_value (b, tl);
+            json_builder_set_member_name (b, "asked");
+            json_builder_add_boolean_value (b, mc->asked);
+            json_builder_end_object (b);
+            g_free (rs);
+            g_free (tl);
+        }
+        g_list_free (ks);
+        json_builder_end_object (b);
+    }
+    if (!c->resolution_prompt) {
+        json_builder_set_member_name (b, "resolution_prompt");
+        json_builder_add_boolean_value (b, FALSE);
+    }
+    if (c->resolution_migrate) {
+        json_builder_set_member_name (b, "resolution_migrate");
+        json_builder_add_boolean_value (b, TRUE);
+    }
+    if (c->scale_filter != WALPE_SCALE_BILINEAR) {
+        json_builder_set_member_name (b, "scale_filter");
+        json_builder_add_string_value (b, walpe_scale_filter_name (c->scale_filter));
+    }
+    {
+        /* always written, "auto" too. It is also how a file tells that it
+         * has been of format 4: a build of format <= 3 that saves it keeps
+         * the members it does not know, this one among them, and stamps the
+         * file with its own version. Read again here, the member says
+         * "nothing to migrate" (walpe_config_load); without it that file
+         * looked like an upgrade - outputs nobody was asked about became
+         * "asked", and "auto" became "1080p". */
+        char *vr = walpe_vidres_format (&c->video_res);
+        json_builder_set_member_name (b, "video_resolution");
+        json_builder_add_string_value (b, vr);
+        g_free (vr);
+    }
     json_builder_end_object (b);
     return json_builder_get_root (b);
 }
+
+/* the members config_to_json writes only while they are set: a file that
+ * has one is not carrying something this build does not know */
+static const char *const optional_keys[] = {
+    "steam_user", "we_assets", "layers", "monitors", "resolution_prompt", "resolution_migrate",
+    "scale_filter",
+    "features",     /* the renderer feature switches that were ever set */
+};
 
 static const char *const focus_names[] = { "run", "limit", "pause" };
 static const char *const preview_names[] = { "always", "hover", "off" };
@@ -303,17 +424,21 @@ int walpe_preview_anim_parse (const char *s, int dflt)
     return dflt;
 }
 
-static guint save_count;
+static gint save_count;   /* atomic: the GUI and the tray also save from worker threads */
 static char *save_error;    /* why the last save failed (NULL = it was written) */
+static GMutex save_error_lock;   /* two saving threads must not both free the old text */
 
 const char *walpe_config_save_error (void)
 {
-    return save_error;
+    g_mutex_lock (&save_error_lock);
+    const char *e = save_error;
+    g_mutex_unlock (&save_error_lock);
+    return e;
 }
 
 guint walpe_config_save_count (void)
 {
-    return save_count;
+    return (guint) g_atomic_int_get (&save_count);
 }
 
 int walpe_config_migrate_fps (int version, int fps)
@@ -323,6 +448,29 @@ int walpe_config_migrate_fps (int version, int fps)
     if (version < 3 && fps == WALPE_FPS_UNCAPPED_DEFAULT)
         return WALPE_FPS_DEFAULT;
     return fps;
+}
+
+gboolean walpe_config_set_hwdec (WalpeConfig *c, const char *word)
+{
+    WalpeHwWant w;
+    if (!c || !walpe_hwsel_parse (word, &w))
+        return FALSE;
+    char *low = g_ascii_strdown (word, -1);
+    gboolean is_auto = !strcmp (g_strstrip (low), "auto");
+    g_free (low);
+    c->video_hwdec = w.on;
+    if (w.api[0] || is_auto) {
+        g_free (c->video_hwdec_api);
+        c->video_hwdec_api = w.api[0] ? g_strdup (w.api) : NULL;
+    }
+    return TRUE;
+}
+
+const char *walpe_config_hwdec_word (const WalpeConfig *c)
+{
+    if (!c || !c->video_hwdec)
+        return "off";
+    return c->video_hwdec_api && *c->video_hwdec_api ? c->video_hwdec_api : "auto";
 }
 
 int walpe_particle_lowres_from_name (const char *name, int fallback)
@@ -344,6 +492,36 @@ const char *walpe_particle_lowres_name (int mode)
     return mode <= 0 ? "off" : mode == 1 ? "auto" : "all";
 }
 
+/* names of feature switches: lower case letters, digits and '_', at most
+ * 63 bytes - what a "features" member of a config file is held to */
+static gboolean feature_name_ok (const char *name)
+{
+    gsize n = name ? strlen (name) : 0;
+    if (n < 1 || n > 63)
+        return FALSE;
+    for (gsize i = 0; i < n; i++)
+        if (!(g_ascii_islower (name[i]) || g_ascii_isdigit (name[i]) || name[i] == '_'))
+            return FALSE;
+    return TRUE;
+}
+
+void walpe_config_set_feature (WalpeConfig *cfg, const char *name, gboolean on)
+{
+    if (!cfg || !feature_name_ok (name))
+        return;
+    if (!cfg->features)
+        cfg->features = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+    if (g_hash_table_size (cfg->features) >= 256 && !g_hash_table_contains (cfg->features, name))
+        return;   /* a file with thousands of made-up names */
+    g_hash_table_replace (cfg->features, g_strdup (name), GINT_TO_POINTER (on ? 1 : 2));
+}
+
+int walpe_config_get_feature (const WalpeConfig *cfg, const char *name)
+{
+    int v = cfg && cfg->features && name ? GPOINTER_TO_INT (g_hash_table_lookup (cfg->features, name)) : 0;
+    return v == 1 ? 1 : v == 2 ? 0 : -1;
+}
+
 WalpeConfig *walpe_config_load (void)
 {
     WalpeConfig *c = g_new0 (WalpeConfig, 1);
@@ -354,6 +532,8 @@ WalpeConfig *walpe_config_load (void)
                                                * min(cap, its refresh rate) */
     c->config_version    = WALPE_CONFIG_VERSION;
     c->volume            = 0.0;
+    c->scene_sound       = FALSE;   /* wallpapers are silent until asked */
+    c->mute              = FALSE;
     c->paused            = FALSE;
     c->pause_fullscreen  = TRUE;
     c->pause_dpms        = TRUE;
@@ -365,9 +545,13 @@ WalpeConfig *walpe_config_load (void)
     c->skip_hidden       = WALPE_SKIP_OFF;
     c->skip_hidden_margin = WALPE_SKIP_MARGIN_DEFAULT;
     c->skip_hidden_inset = 0;
+    c->backend           = WALPE_BACKEND_AUTO;
+    c->wayland_pointer   = 0;
     c->fx_cache          = TRUE;
     c->fx_specialize     = FALSE;
     c->fx_quality        = g_strdup ("exact");
+    c->fluid_sim         = TRUE;
+    c->fluid_quality     = WALPE_FLUID_FULL;
     c->tex_downscale     = TRUE;
     c->texture_slack     = 2;
     c->render_scale      = 100;
@@ -377,16 +561,25 @@ WalpeConfig *walpe_config_load (void)
     c->parallax          = TRUE;
     c->software_render   = FALSE;
     c->software_threads  = 0;
+    c->gpu               = g_strdup ("auto");
+    c->preset_follow_gpu = FALSE;
+    c->preset_gpu_class  = NULL;
+    c->gl_api            = WALPE_GL_API_AUTO;
     c->vsync             = TRUE;
     c->audio             = FALSE;
     c->focus_action      = WALPE_FOCUS_RUN;
     c->focus_fps         = 15;
     c->pause_battery     = FALSE;
     c->battery_fps       = 0;
+    c->pause_idle        = 0;
     c->preview_anim      = WALPE_PREVIEW_ALWAYS;
     walpe_quality_preset (WALPE_PRESET_HIGH, &c->quality);
     c->qsync_slack = c->texture_slack;
     c->qsync_scale = c->render_scale;
+    c->resolution_prompt = TRUE;
+    c->resolution_migrate = FALSE;
+    c->scale_filter      = WALPE_SCALE_BILINEAR;
+    c->video_res.kind    = WALPE_VIDRES_AUTO;   /* as large as the monitors show it */
 
     char *path = g_build_filename (g_get_user_config_dir (), "walpe", "config.json", NULL);
     {
@@ -458,6 +651,8 @@ WalpeConfig *walpe_config_load (void)
             c->fps = fps;
         }
         c->volume = CLAMP (wpj_num (o, "volume", c->volume), 0.0, 1.0);
+        c->scene_sound = wpj_bool (o, "scene_sound", c->scene_sound);
+        c->mute = wpj_bool (o, "mute", c->mute);
         c->paused = wpj_bool (o, "paused", c->paused);
         { JsonObject *mc = wpj_obj (o, "monitor_current");
           GList *ks = mc ? json_object_get_members (mc) : NULL;
@@ -480,16 +675,38 @@ WalpeConfig *walpe_config_load (void)
                                                       c->skip_hidden_margin), 0.0, 512.0);
         c->skip_hidden_inset = (int) CLAMP (wpj_num (o, "skip_hidden_inset",
                                                      c->skip_hidden_inset), 0.0, 256.0);
+        /* a value that is not a backend's name reads as auto */
+        c->backend = walpe_backend_parse (wpj_str (o, "backend", NULL), c->backend);
+        { const char *wp = wpj_str (o, "wayland_pointer", NULL);
+          if (wp) c->wayland_pointer = !g_ascii_strcasecmp (wp, "off"); }
         c->fx_cache = wpj_bool (o, "fx_cache", c->fx_cache);
         c->fx_specialize = wpj_bool (o, "fx_specialize", c->fx_specialize);
         { const char *q = wpj_str (o, "fx_quality", NULL);
           if (q && (!strcmp (q, "exact") || !strcmp (q, "fast"))) {
               g_free (c->fx_quality); c->fx_quality = g_strdup (q); } }
+        c->fluid_sim = wpj_bool (o, "fluid_sim", c->fluid_sim);
+        { WalpeFluidQuality fq;   /* (a name that is no level keeps the default) */
+          if (walpe_fluid_quality_parse (wpj_str (o, "fluid_quality", NULL), &fq))
+              c->fluid_quality = (int) fq; }
         c->tex_downscale = wpj_bool (o, "tex_downscale", c->tex_downscale);
         c->texture_slack = wpj_num (o, "texture_slack", c->texture_slack) > 0 ? 2 : 0;
         c->render_scale = (int) CLAMP (wpj_num (o, "render_scale", c->render_scale), 25.0, 100.0);
         c->web_accel = wpj_bool (o, "web_accel", c->web_accel);
         c->video_hwdec = wpj_bool (o, "video_hwdec", c->video_hwdec);
+        {
+            /* "video_hwdec": a switch, or one of the words off | auto | <api>
+             * (a file edited by hand); "video_hwdec_api": the API alone */
+            const char *hw = wpj_str (o, "video_hwdec", NULL);
+            const char *api = wpj_str (o, "video_hwdec_api", NULL);
+            WalpeHwWant w;
+            if (hw && *hw)
+                walpe_config_set_hwdec (c, hw);
+            if (api && walpe_hwsel_parse (api, &w) && w.api[0]) {
+                g_free (c->video_hwdec_api);
+                c->video_hwdec_api = g_strdup (w.api);
+            }
+        }
+        c->video_zerocopy = wpj_bool (o, "video_zerocopy", c->video_zerocopy);
         c->video_limit = wpj_bool (o, "video_limit", c->video_limit);
         { const char *u = wpj_str (o, "video_upload", NULL);
           if (u && *u && strlen (u) < 40) {
@@ -500,9 +717,28 @@ WalpeConfig *walpe_config_load (void)
                                            5.0, 100.0);
         c->particle_instancing = wpj_bool (o, "particle_instancing", c->particle_instancing);
         c->parallax = wpj_bool (o, "parallax", c->parallax);
+        { /* renderer feature switches: every switch value under a sane name
+           * is kept, also one this build has no feature for */
+          JsonObject *fo = wpj_obj (o, "features");
+          GList *names = fo ? json_object_get_members (fo) : NULL;
+          for (GList *l = names; l; l = l->next) {
+              JsonNode *fn = json_object_get_member (fo, l->data);
+              if (fn && JSON_NODE_HOLDS_VALUE (fn) && json_node_get_value_type (fn) == G_TYPE_BOOLEAN)
+                  walpe_config_set_feature (c, l->data, json_node_get_boolean (fn));
+          }
+          g_list_free (names); }
         c->software_render = wpj_bool (o, "software_render", c->software_render);
         c->software_threads = (int) CLAMP (wpj_num (o, "software_threads", c->software_threads),
                                            0.0, 32.0);
+        { char *g = walpe_gpu_value_normalize (wpj_str (o, "gpu", NULL));
+          if (g) { g_free (c->gpu); c->gpu = g; } }
+        c->preset_follow_gpu = wpj_bool (o, "preset_follow_gpu", c->preset_follow_gpu);
+        { const char *pc = wpj_str (o, "preset_gpu_class", NULL);
+          if (pc && *pc && strlen (pc) < 24) {
+              g_free (c->preset_gpu_class); c->preset_gpu_class = g_strdup (pc); } }
+        { WalpeGlApiPref ga;    /* anything but the three names: auto */
+          if (walpe_gl_api_parse (wpj_str (o, "gl_api", NULL), &ga))
+              c->gl_api = (int) ga; }
         { const char *su = wpj_str (o, "steam_user", NULL);
           if (su && *su) { g_free (c->steam_user); c->steam_user = g_strdup (su); } }
         { const char *wa = wpj_str (o, "we_assets", NULL);
@@ -513,6 +749,7 @@ WalpeConfig *walpe_config_load (void)
         c->focus_fps = (int) CLAMP (wpj_num (o, "focus_fps", c->focus_fps), 1.0, 200.0);
         c->pause_battery = wpj_bool (o, "pause_battery", c->pause_battery);
         c->battery_fps = (int) CLAMP (wpj_num (o, "battery_fps", c->battery_fps), 0.0, 200.0);
+        c->pause_idle = (int) CLAMP (wpj_num (o, "pause_idle", c->pause_idle), 0.0, 86400.0);
         c->preview_anim = walpe_preview_anim_parse (wpj_str (o, "preview_anim", NULL), c->preview_anim);
         walpe_quality_load_json (o, &c->quality, NULL);
         /* the two keys both sides read: a key in the file is taken as the
@@ -562,6 +799,62 @@ WalpeConfig *walpe_config_load (void)
           } }
         walpe_layers_config_read (c, o);
         {
+            /* render resolution (resolution.h). A file of a version that
+             * had none: what that version did is what it says now - the
+             * outputs its user had run at their own mode without a
+             * question (entered when the daemon knows them:
+             * resolution_migrate), and videos are imported and converted
+             * within 1920 x 1080 as they were.
+             * Not a file that has "video_resolution": format 4 always
+             * writes it, so this one was of format 4 before a build of an
+             * older format saved it (and kept what it did not know). What
+             * it says holds: no upgrade step, the outputs without an entry
+             * are still to be asked about, auto is still auto. */
+            int fver = (int) CLAMP (wpj_num (o, "config_version", 1), 1.0, 1000.0);
+            if (fver < 4 && !json_object_has_member (o, "video_resolution")) {
+                c->resolution_migrate = TRUE;
+                walpe_vidres_parse ("1080p", &c->video_res, NULL);
+            }
+            c->resolution_migrate = wpj_bool (o, "resolution_migrate", c->resolution_migrate);
+            c->resolution_prompt = wpj_bool (o, "resolution_prompt", c->resolution_prompt);
+            { int f = walpe_scale_filter_parse (wpj_str (o, "scale_filter", NULL));
+              if (f >= 0)
+                  c->scale_filter = f; }
+            { const char *vr = wpj_str (o, "video_resolution", NULL);
+              if (vr)   /* (a value that is not one keeps what is set) */
+                  walpe_vidres_parse (vr, &c->video_res, NULL); }
+            JsonObject *mo = wpj_obj (o, "monitors");
+            GList *ks = mo ? json_object_get_members (mo) : NULL;
+            for (GList *k = ks; k; k = k->next) {
+                JsonObject *e = wpj_obj (mo, k->data);
+                if (!e || !walpe_monitor_name_ok (k->data))
+                    continue;
+                if (c->monitors && g_hash_table_size (c->monitors) >= WALPE_MONITORS_READ_MAX) {
+                    /* (every entry is in each listing and each save) */
+                    g_warning ("config: \"monitors\" has more than %d entries: the rest is not "
+                               "used and will not be saved again", WALPE_MONITORS_READ_MAX);
+                    break;
+                }
+                /* a value that is not one leaves that part at its default */
+                WalpeMonitorConf mc = { { WALPE_RES_NATIVE, 0, 0, 0 }, WALPE_TEXLIMIT_AUTO, TRUE };
+                walpe_res_parse (wpj_str (e, "resolution", "native"), &mc.res, NULL);
+                JsonNode *tn = json_object_get_member (e, "texture_limit");
+                if (tn && JSON_NODE_HOLDS_VALUE (tn)) {
+                    if (json_node_get_value_type (tn) == G_TYPE_STRING) {
+                        walpe_texlimit_parse (json_node_get_string (tn), &mc.tex_limit, NULL);
+                    } else if (json_node_get_value_type (tn) == G_TYPE_INT64 ||
+                               json_node_get_value_type (tn) == G_TYPE_DOUBLE) {
+                        double px = json_node_get_double (tn);
+                        if (px >= WALPE_TEXLIMIT_MIN && px <= WALPE_TEXLIMIT_MAX)
+                            mc.tex_limit = (int) px;
+                    }
+                }
+                mc.asked = wpj_bool (e, "asked", TRUE);
+                walpe_config_set_monitor (c, k->data, &mc);
+            }
+            g_list_free (ks);
+        }
+        {
             /* what this build does not read stays as it is (config.h
              * `extra`): every member of the file that a save of the
              * loaded settings would not write */
@@ -570,9 +863,11 @@ WalpeConfig *walpe_config_load (void)
             GList *ks = json_object_get_members (o);
             for (GList *k = ks; k; k = k->next) {
                 const char *name = k->data;
-                if (json_object_has_member (mo, name) || !strcmp (name, "steam_user") ||
-                    !strcmp (name, "we_assets") || !strcmp (name, "layers"))
-                    continue;   /* (the three are written only while set) */
+                gboolean optional = FALSE;   /* written only while set: not unknown */
+                for (guint q = 0; q < G_N_ELEMENTS (optional_keys); q++)
+                    optional = optional || !strcmp (name, optional_keys[q]);
+                if (json_object_has_member (mo, name) || optional)
+                    continue;
                 if (!c->extra)
                     c->extra = json_object_new ();
                 json_object_set_member (c->extra, name,
@@ -586,13 +881,17 @@ WalpeConfig *walpe_config_load (void)
         walpe_layers_config_read (c, NULL);
     }
     g_free (path);
+    /* (under the lock of its readers: the GUI and the tray load a config on
+     * worker threads as well as on their main thread) */
+    g_mutex_lock (&props_lock);
     active_config = c;
+    g_mutex_unlock (&props_lock);
     return c;
 }
 
 gboolean walpe_config_save (WalpeConfig *cfg)
 {
-    save_count++;
+    g_atomic_int_inc (&save_count);
     char *dir = g_build_filename (g_get_user_config_dir (), "walpe", NULL);
     g_mkdir_with_parents (dir, 0700);   /* created private; an existing one keeps its mode */
     char *path = g_build_filename (dir, "config.json", NULL);
@@ -621,8 +920,11 @@ gboolean walpe_config_save (WalpeConfig *cfg)
     /* kept for whoever answers the request that made the change: the
      * warning alone left `walpe-ctl set` and the settings window saying
      * "ok" for a change that is gone at the next start */
+    char *why = ok ? NULL : g_strdup (err ? err->message : "config.json could not be written");
+    g_mutex_lock (&save_error_lock);
     g_free (save_error);
-    save_error = ok ? NULL : g_strdup (err ? err->message : "config.json could not be written");
+    save_error = why;
+    g_mutex_unlock (&save_error_lock);
     g_clear_error (&err);
     g_free (data);
     json_node_unref (root);
@@ -633,6 +935,14 @@ gboolean walpe_config_save (WalpeConfig *cfg)
 void walpe_config_free (WalpeConfig *cfg)
 {
     if (!cfg) return;
+    /* no reader may find it any more before anything of it is freed
+     * (walpe_config_get_prop looks at active_config under this lock) */
+    g_mutex_lock (&props_lock);
+    if (active_config == cfg)
+        active_config = NULL;
+    g_mutex_unlock (&props_lock);
+    g_free (cfg->gpu);
+    g_free (cfg->preset_gpu_class);
     g_free (cfg->wallpapers_dir);
     g_free (cfg->current);
     if (cfg->monitor_current)
@@ -643,16 +953,19 @@ void walpe_config_free (WalpeConfig *cfg)
     g_free (cfg->we_assets);
     g_free (cfg->fx_quality);
     g_free (cfg->video_upload);
+    g_free (cfg->video_hwdec_api);
     g_free (cfg->broken_copy);
     if (cfg->props)
         g_hash_table_unref (cfg->props);
+    if (cfg->features)
+        g_hash_table_unref (cfg->features);
     walpe_layers_config_free (cfg);
     if (cfg->wallpaper_quality)
         g_hash_table_unref (cfg->wallpaper_quality);
+    if (cfg->monitors)
+        g_hash_table_unref (cfg->monitors);
     if (cfg->extra)
         json_object_unref (cfg->extra);
-    if (active_config == cfg)
-        active_config = NULL;
     g_free (cfg);
 }
 
@@ -660,13 +973,25 @@ void walpe_config_free (WalpeConfig *cfg)
 
 char *walpe_config_get_prop (const char *path, const char *key)
 {
-    if (!active_config || !active_config->props || !path || !key)
+    if (!path || !key)
+        return NULL;
+    /* Render threads ask here while the main thread may be storing the
+     * first option anyone ever set: walpe_config_set_prop makes the table
+     * under props_lock. Whether there is a table is therefore looked at
+     * under the lock as well (it used to be tested before it). Asked while
+     * a wallpaper loads and when one of its options changes, not per
+     * frame: two uncontended locks instead of one. */
+    g_mutex_lock (&props_lock);
+    gboolean any = active_config && active_config->props;
+    g_mutex_unlock (&props_lock);
+    if (!any)
         return NULL;
     char *cp = walpe_expand_path (path);   /* any spelling of the path finds its options */
     char *k = g_strconcat (cp ? cp : path, "\x1f", key, NULL);
     g_free (cp);
     g_mutex_lock (&props_lock);
-    const char *v = g_hash_table_lookup (active_config->props, k);
+    const char *v = active_config && active_config->props
+                        ? g_hash_table_lookup (active_config->props, k) : NULL;
     char *out = v ? g_strdup (v) : NULL;
     g_mutex_unlock (&props_lock);
     g_free (k);
@@ -735,6 +1060,58 @@ void walpe_config_set_monitor_path (WalpeConfig *cfg, const char *name, const ch
     if (!cfg->monitor_current)
         cfg->monitor_current = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
     g_hash_table_replace (cfg->monitor_current, g_strdup (name), walpe_expand_path (path));
+}
+
+/* ------------------------------------------ per-output render resolution */
+
+const WalpeMonitorConf *walpe_config_monitor (WalpeConfig *cfg, const char *name)
+{
+    return cfg && cfg->monitors && name ? g_hash_table_lookup (cfg->monitors, name) : NULL;
+}
+
+void walpe_config_monitor_get (WalpeConfig *cfg, const char *name, WalpeMonitorConf *out)
+{
+    const WalpeMonitorConf *mc = walpe_config_monitor (cfg, name);
+    if (mc) {
+        *out = *mc;
+    } else {
+        /* no entry: the output's own mode, textures as the render size asks,
+         * and nobody has been asked about it */
+        memset (out, 0, sizeof (*out));
+        out->res.kind = WALPE_RES_NATIVE;
+        out->tex_limit = WALPE_TEXLIMIT_AUTO;
+        out->asked = FALSE;
+    }
+}
+
+void walpe_config_set_monitor (WalpeConfig *cfg, const char *name, const WalpeMonitorConf *mc)
+{
+    if (!cfg || !walpe_monitor_name_ok (name))
+        return;
+    if (!mc) {
+        if (cfg->monitors)
+            g_hash_table_remove (cfg->monitors, name);
+        return;
+    }
+    if (!cfg->monitors)
+        cfg->monitors = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
+    WalpeMonitorConf *copy = g_memdup2 (mc, sizeof (*mc));
+    copy->asked = copy->asked != FALSE;
+    g_hash_table_replace (cfg->monitors, g_strdup (name), copy);
+}
+
+gboolean walpe_config_monitors_migrate (WalpeConfig *cfg, const char *const *names, guint n)
+{
+    if (!cfg || !cfg->resolution_migrate)
+        return FALSE;
+    for (guint i = 0; names && i < n; i++) {
+        if (!walpe_monitor_name_ok (names[i]) || walpe_config_monitor (cfg, names[i]))
+            continue;
+        WalpeMonitorConf mc = { { WALPE_RES_NATIVE, 0, 0, 0 }, WALPE_TEXLIMIT_AUTO, TRUE };
+        walpe_config_set_monitor (cfg, names[i], &mc);
+    }
+    cfg->resolution_migrate = FALSE;
+    return TRUE;
 }
 
 /* --------------------------------------------- per-wallpaper quality */

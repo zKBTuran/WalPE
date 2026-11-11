@@ -6,7 +6,9 @@
  *     pixmaps in several sizes (the state badge is part of the pixels),
  *     tooltip, Activate (left click: GUI), SecondaryActivate (middle
  *     click: pause/resume), ContextMenu (hosts that do not read dbusmenu:
- *     our own popup menu)
+ *     our own popup menu), ProvideXdgActivationToken (Wayland hosts call
+ *     it right before Activate / a menu event: the token that lets the
+ *     window we then raise or open come to the front)
  *   com.canonical.dbusmenu at /MenuBar: the same menu tree as the XEmbed
  *     popup, rendered by the host
  * Registered with org.kde.StatusNotifierWatcher, again whenever the
@@ -40,6 +42,7 @@ static const char sni_xml[] =
     "  <method name='Activate'><arg name='x' type='i' direction='in'/><arg name='y' type='i' direction='in'/></method>"
     "  <method name='SecondaryActivate'><arg name='x' type='i' direction='in'/><arg name='y' type='i' direction='in'/></method>"
     "  <method name='Scroll'><arg name='delta' type='i' direction='in'/><arg name='orientation' type='s' direction='in'/></method>"
+    "  <method name='ProvideXdgActivationToken'><arg name='token' type='s' direction='in'/></method>"
     "  <signal name='NewTitle'/>"
     "  <signal name='NewIcon'/>"
     "  <signal name='NewAttentionIcon'/>"
@@ -228,6 +231,10 @@ static void sni_call (GDBusConnection *c, const char *sender, const char *path, 
         xy[0] = x;
         xy[1] = y;
         g_idle_add (idle_popup, xy);
+    } else if (!strcmp (method, "ProvideXdgActivationToken")) {
+        const char *token = NULL;
+        g_variant_get (params, "(&s)", &token);
+        tray_set_activation_token (token);
     } else if (!strcmp (method, "Scroll")) {
         /* nothing bound (WE has no scroll action either) */
     } else {

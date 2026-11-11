@@ -1,14 +1,25 @@
 #!/bin/sh
 # walpe-gpu-report.sh - GPU numbers of a running walpe-daemon, for sending.
 #
-#   walpe-gpu-report.sh [SECONDS] [LABEL] [--pid PID] [--gpu N] [--no-profile]
+#   walpe-gpu-report.sh [SECONDS] [LABEL] [--pid PID] [--gpu N] [--device DEV]
+#                       [--ctl PATH] [--no-profile]
 #   walpe-gpu-report.sh [SECONDS] [LABEL] --baseline     (WalPE closed)
 #
 # Samples once a second for SECONDS (default 30):
-#   - nvidia-smi: utilization.gpu, utilization.memory, memory.used, power.draw,
-#     clocks.gr, clocks.mem, temperature.gpu, pstate (a field this GPU, driver
-#     or nvidia-smi does not have is reported as n/a, the rest still works);
-#   - nvidia-smi pmon: the daemon's own GPU memory and GPU share;
+#   - NVIDIA driver: nvidia-smi: utilization.gpu, utilization.memory,
+#     memory.used, power.draw, clocks.gr, clocks.mem, temperature.gpu, pstate
+#     (a field this GPU, driver or nvidia-smi does not have is reported as n/a,
+#     the rest still works); nvidia-smi pmon: the daemon's own GPU memory and
+#     GPU share. --gpu N = nvidia-smi's GPU index;
+#   - AMD, Intel and every other driver that publishes them: the kernel's own
+#     statistics through `walpe-ctl gpu-stats` (per-program GPU time and memory from
+#     /proc/<pid>/fdinfo, the device's busy / memory / power / temperature /
+#     clock attributes in /sys): GPU busy, the daemon's GPU share and GPU
+#     memory, the other programs on the GPU by name. Each row names its source
+#     or says "not available" and why. --device card1|renderD129|0000:03:00.0
+#     picks the GPU on a machine with two (default: the one the daemon renders
+#     on); --ctl PATH = the walpe-ctl to ask (default: the one next to this
+#     script, the daemon's, the one in PATH);
 #   - /proc: the daemon's CPU %, resident memory and thread count, and which
 #     of its threads used the CPU (decode, render, ...);
 # and prints min / avg / max, with what `walpe-ctl status` says about the
@@ -24,7 +35,9 @@
 # LABEL is a word for the header (old, new, ...). The output holds no file
 # paths and nothing of the wallpapers except workshop ids and, in the
 # profiler part, layer and effect names; of other programs only the names
-# of those that use the GPU. POSIX sh + awk only.
+# of those that use the GPU. POSIX sh + awk only (and walpe-ctl for the
+# kernel's statistics). (--proc-root DIR and --sys-root DIR are for the
+# tests: the trees `walpe-ctl gpu-stats` reads instead of /proc and /sys.)
 
 secs=30
 label=
@@ -32,15 +45,25 @@ pid=
 gpu=0
 profile=1
 baseline=0
+device=
+ctl_opt=
+proc_root=
+sys_root=
 while [ $# -gt 0 ]; do
     case "$1" in
     --pid) pid=$2; shift ;;
     --pid=*) pid=${1#--pid=} ;;
     --gpu) gpu=$2; shift ;;
     --gpu=*) gpu=${1#--gpu=} ;;
+    --device) device=$2; shift ;;
+    --device=*) device=${1#--device=} ;;
+    --ctl) ctl_opt=$2; shift ;;
+    --ctl=*) ctl_opt=${1#--ctl=} ;;
+    --proc-root) proc_root=$2; shift ;;
+    --sys-root) sys_root=$2; shift ;;
     --no-profile) profile=0 ;;
     --baseline) baseline=1 ;;
-    -h|--help) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *[!0-9]*|'') [ -z "$label" ] && label=$1 ;;
     *) secs=$1 ;;
     esac
@@ -54,9 +77,11 @@ case "$pid" in *[!0-9]*) pid= ;; esac
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/walpe-gpu-report.XXXXXX") || exit 1
 smi_pid=
 pmon_pid=
+drm_pid=
 cleanup () {
     [ -n "$smi_pid" ] && kill "$smi_pid" 2>/dev/null
     [ -n "$pmon_pid" ] && kill "$pmon_pid" 2>/dev/null
+    [ -n "$drm_pid" ] && kill "$drm_pid" 2>/dev/null
     rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -94,6 +119,29 @@ if [ -n "$pid" ]; then
 fi
 [ -z "$ctl" ] && ctl=$(command -v walpe-ctl 2>/dev/null)
 
+# the kernel's GPU statistics come from a walpe-ctl that has the `gpu-stats`
+# command (an older one prints its usage and fails): the one given, the one
+# installed next to this script, the daemon's, the one in PATH. One reading
+# now tells which GPU it is and whether the kernel has figures for it.
+gctl=
+gprobe=
+set --
+[ -n "$pid" ] && set -- "$@" --pid "$pid"
+[ -z "$pid" ] && set -- "$@" --no-process
+[ -n "$device" ] && set -- "$@" --device "$device"
+[ -n "$proc_root" ] && set -- "$@" --proc-root "$proc_root"
+[ -n "$sys_root" ] && set -- "$@" --sys-root "$sys_root"
+for c in "$ctl_opt" "${0%/*}/walpe-ctl" "$ctl" "$(command -v walpe-ctl 2>/dev/null)"; do
+    [ -n "$c" ] && [ -f "$c" ] && [ -x "$c" ] || continue
+    p=$("$c" gpu-stats --probe --sections "$@" 2>/dev/null) || continue
+    case "$p" in
+    "@walpe-gpustat 1"*) gctl=$c; gprobe=$p; break ;;
+    esac
+done
+gflag () {   # the value of an "@name value" line of the probe
+    printf '%s\n' "$gprobe" | sed -n "s/^@$1 //p" | head -n 1
+}
+
 tck=$(getconf CLK_TCK 2>/dev/null)
 [ "$tck" -gt 0 ] 2>/dev/null || tck=100
 
@@ -101,15 +149,44 @@ tck=$(getconf CLK_TCK 2>/dev/null)
 printf 'WalPE GPU report  %s%s  %s s\n' "${label:+label=$label  }" "$(date '+%Y-%m-%d %H:%M:%S')" "$secs"
 
 have_smi=0
+smi_note=
 if command -v nvidia-smi >/dev/null 2>&1; then
     if id_line=$(nvidia-smi -i "$gpu" --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>/dev/null) && [ -n "$id_line" ]; then
         have_smi=1
         printf 'GPU %s: %s\n' "$gpu" "$id_line"
     else
-        printf 'GPU: nvidia-smi is installed but does not answer for GPU %s (driver not loaded?): GPU numbers skipped\n' "$gpu"
+        smi_note=$(printf 'GPU: nvidia-smi is installed but does not answer for GPU %s (driver not loaded?): GPU numbers skipped' "$gpu")
     fi
 else
-    printf 'GPU: nvidia-smi not found: GPU numbers skipped (daemon numbers below still valid)\n'
+    smi_note='GPU: nvidia-smi not found: GPU numbers skipped (daemon numbers below still valid)'
+fi
+
+# The kernel's table is printed
+#  - without nvidia-smi: whenever the kernel lists a GPU (rows the driver
+#    does not publish say so);
+#  - next to nvidia-smi's: when the GPU in question is not the NVIDIA
+#    driver's and has figures (the daemon renders on the other GPU of a
+#    machine with two).
+# A GPU of the NVIDIA driver with a working nvidia-smi is reported exactly
+# as before.
+have_drm=0
+if [ -n "$gctl" ] && [ "$(gflag found)" = yes ]; then
+    if [ "$have_smi" = 0 ]; then
+        have_drm=1
+    elif [ "$(gflag nvidia)" = no ] && [ "$(gflag stats)" = yes ]; then
+        have_drm=1
+    fi
+fi
+if [ "$have_drm" = 1 ]; then
+    [ "$have_smi" = 0 ] && [ "$(gflag nvidia)" = yes ] && printf '%s\n' "$smi_note"
+    printf '%s\n' "$gprobe" | sed -n '/^@device$/,/^@found /p' | grep -v '^@'
+elif [ "$have_smi" = 0 ]; then
+    printf '%s\n' "$smi_note"
+    if [ -z "$gctl" ]; then
+        printf 'GPU: no walpe-ctl with the "gpu-stats" command found (it reads the kernel'"'"'s statistics on AMD and Intel): none of those either\n'
+    else
+        printf 'GPU: the kernel lists no GPU (nothing in /sys/class/drm): no kernel statistics either\n'
+    fi
 fi
 
 # mains power matters on a laptop: the GPU clocks down on battery
@@ -225,6 +302,13 @@ if [ "$have_smi" = 1 ]; then
     nvidia-smi pmon -i "$gpu" -c "$secs" -d 1 -s um > "$tmp/pmon.txt" 2>/dev/null &
     pmon_pid=$!
 fi
+if [ "$have_drm" = 1 ]; then
+    # the same arguments as the probe ("$@" still holds them); with a working
+    # nvidia-smi the table above is its, this one never asks it
+    [ "$have_smi" = 1 ] && set -- "$@" --no-nvidia-smi
+    "$gctl" gpu-stats --sample "$secs" --interval 1 --sections "$@" > "$tmp/drm.txt" 2>/dev/null &
+    drm_pid=$!
+fi
 : > "$tmp/proc.txt"
 if [ -n "$pid" ]; then
     threads_snapshot > "$tmp/thr0.txt"
@@ -267,6 +351,15 @@ if [ -n "$pmon_pid" ]; then
     kill "$pmon_pid" 2>/dev/null
     wait "$pmon_pid" 2>/dev/null
     pmon_pid=
+fi
+
+if [ -n "$drm_pid" ]; then
+    # it ends by itself after SECONDS; a slow last sample gets a few more
+    n=0
+    while kill -0 "$drm_pid" 2>/dev/null && [ "$n" -lt 8 ]; do sleep 1; n=$((n + 1)); done
+    kill "$drm_pid" 2>/dev/null
+    wait "$drm_pid" 2>/dev/null
+    drm_pid=
 fi
 
 # ---- statistics ----------------------------------------------------------
@@ -323,6 +416,16 @@ for f in $unknown; do
     [ "$f" = clocks.max.gr ] && continue
     printf '%-26s %-7s %9s %9s %9s  -  (this nvidia-smi does not know the field)\n' "$f" "" n/a n/a n/a
 done
+
+# the kernel's rows (walpe-ctl gpu-stats): the whole GPU, then the daemon
+if [ "$have_drm" = 1 ]; then
+    [ "$have_smi" = 1 ] && printf -- '-- the kernel'"'"'s statistics for the GPU named above --\n'
+    if grep -q '^@rows$' "$tmp/drm.txt" 2>/dev/null; then
+        sed -n '/^@rows$/,/^@programs$/p' "$tmp/drm.txt" | grep -v '^@'
+    else
+        printf '(walpe-ctl gpu-stats gave no samples)\n'
+    fi
+fi
 
 # the daemon on the GPU: nvidia-smi pmon (fb = its GPU memory, sm = its GPU
 # share). pmon prints "-" in a sample for which the driver has no figure for
@@ -440,6 +543,16 @@ if [ "$have_smi" = 1 ] && [ -s "$tmp/pmon.txt" ]; then
     fi
 fi
 
+# every program on the GPU as the kernel sees it (fdinfo): the processes of
+# this user by name; those of other users are counted, never read
+if [ "$have_drm" = 1 ] && grep -q '^@programs$' "$tmp/drm.txt" 2>/dev/null; then
+    sed -n '/^@programs$/,/^@notes$/p' "$tmp/drm.txt" | grep -v '^@' > "$tmp/dprocs.txt"
+    if [ -s "$tmp/dprocs.txt" ]; then
+        printf '\n'
+        cat "$tmp/dprocs.txt"
+    fi
+fi
+
 # the daemon counts its frames itself when started with WALPE_FPS_LOG=<s>
 # and its messages go to a file: the last such line (monitor names only)
 if [ -n "$pid" ]; then
@@ -451,9 +564,9 @@ if [ -n "$pid" ]; then
     fi
 fi
 
-cat <<'EOF'
-
-how to read this
+printf '\nhow to read this\n'
+# the nvidia-smi notes: with its table, and when there is no GPU table at all
+[ "$have_smi" = 1 ] || [ "$have_drm" = 0 ] && cat <<'EOF'
  - utilization.gpu is, in NVIDIA's words, the "percent of time over the past sample
    period during which one or more kernels was executing on the GPU": how much of the
    TIME the GPU was busy at the clock it was running at, not how much of its capacity
@@ -468,6 +581,12 @@ how to read this
    in which the driver has no figure for the program, so two averages are given: over
    the seconds that had a value (too high when many are missing) and with the missing
    ones as 0 (too low if the driver merely did not report). Read the pair as a range.
+EOF
+# the notes of the kernel's table (walpe-ctl gpu-stats writes those that apply)
+if [ "$have_drm" = 1 ] && grep -q '^@notes$' "$tmp/drm.txt" 2>/dev/null; then
+    sed -n '/^@notes$/,/^@end$/p' "$tmp/drm.txt" | grep -v '^@'
+fi
+cat <<'EOF'
  - Compare runs made the same way: same two wallpapers, same windows open, same power
    source, and wait until both wallpapers have finished loading before starting.
    `walpe-gpu-report.sh 30 idle --baseline` with WalPE closed gives what X and the
@@ -475,8 +594,14 @@ how to read this
  - A build without the profiler does not say how many frames it really draws: start
    the daemon with WALPE_FPS_LOG=5 and its output in a file (walpe-daemon 2>~/walpe.log)
    and this report shows its count.
- - n/a = this GPU, driver or nvidia-smi does not report the value; nothing is wrong.
 EOF
+[ "$have_smi" = 1 ] || [ "$have_drm" = 0 ] &&
+    printf ' - n/a = this GPU, driver or nvidia-smi does not report the value; nothing is wrong.\n'
+if [ "$have_drm" = 1 ]; then
+    printf ' - The profile below ("walpe-ctl profile") times the daemon'"'"'s own drawing with GL timer\n'
+    printf '   queries: those rows mean the same on every driver. Busy percentages and memory in\n'
+    printf '   the table above come from the kernel and the driver and differ in what they cover.\n'
+fi
 
 # ---- the daemon's own profile, when it has one ----------------------------
 if [ "$profile" = 1 ] && [ -n "$pid" ] && [ -n "$ctl" ]; then

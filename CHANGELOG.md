@@ -4,6 +4,106 @@ What changed in each released version of WalPE, newest first, written for people
 it. Version numbers are `0.<minor>.<patch>`; every release is tagged `v<version>` in git.
 Release names are album titles by the band Boris, one per release.
 
+## 0.13.0 "PINK" (not released)
+
+The development version. It contains every fix of 0.12.2. **Everything listed here was
+built and tested only on Mesa's software renderer (llvmpipe), a headless Wayland
+compositor (sway 1.9), a PulseAudio null sink and - the build for 64-bit ARM - under
+emulation. Nothing of it has been run on real AMD, Intel, NVIDIA or ARM hardware or on a
+real Wayland desktop.** On NVIDIA's driver under X11 with default settings it is meant
+to behave as 0.12.2 does, apart from the scene features and the one change to effects on
+colour-only layers below. What was compared, on the software renderer: the development
+tree before the fixes of 0.12.2 were merged in with
+release 0.12.1, call by call (four scenes: the same OpenGL calls) and picture by picture
+(the 91 test scenes: the same frames with the new features off); then the pictures of
+the final tree with those of that earlier tree.
+
+### Wayland
+
+- A Wayland backend next to the X11 one: one layer-shell surface per output on
+  compositors that offer the layer shell (sway, Hyprland, KDE Plasma and others; not
+  GNOME's Wayland session). The daemon picks the backend when it starts: `walpe-ctl
+  backend`, `walpe-ctl set backend=auto|x11|wayland`, `walpe-daemon --backend`.
+- Pause rules get their information from the compositor and from logind where the
+  session offers it; `walpe-ctl status` (`pause_rules`) says which rule can work. New:
+  pause after a time without input (`walpe-ctl set idle=N`).
+- The tray icon uses StatusNotifierItem on Wayland sessions; the window follows the
+  desktop's dark / light preference there.
+- Web wallpapers on a Wayland session run through Xwayland by default.
+- Build options `-Dx11` and `-Dwayland`. `./build.sh -Dwayland=disabled` gives the
+  X11-only build, in which the daemon and the web module link no Wayland library.
+- Wallpapers were shown on a headless sway 1.9 only. Known and left as they are: a
+  compositor that
+  accepts the connection and never answers holds the daemon's start; a wallpaper that is
+  not shown keeps being drawn when "pause when covered" is off; a lock screen pauses
+  through "pause when covered" only, unless the locker tells logind; with no monitor
+  left `walpe-ctl status` still lists the monitors; while the daemon waits for a
+  compositor to come back, `walpe-ctl` says it is not running.
+
+### Graphics cards
+
+- `walpe-ctl gpu` lists the graphics devices; `walpe-ctl set gpu=auto|integrated|
+  discrete|<device>` chooses the one that renders on a machine with two. `auto` (the
+  default) changes nothing.
+- An OpenGL ES 3.1 / 3.2 path for GPUs without desktop OpenGL 3.3 (`walpe-ctl set
+  gl_api=auto|gl|gles`); effect shaders are translated to GLSL ES. On Mesa's software
+  renderer every effect shader of the 91 test scenes compiles; pictures differ slightly
+  from desktop OpenGL, because OpenGL ES has no texture LOD bias (minified textures are
+  a little softer).
+- `walpe-ctl gpu-stats`, and the same figures in `walpe-gpu-report` and in a profile: GPU
+  busy, memory, power and temperature from the kernel's statistics on AMD and Intel.
+- Driver hints of `gpu.conf` are handed to Mesa drivers where Mesa has a counterpart.
+- Fallbacks for drivers without S3TC, with a smaller largest texture, or without float
+  render targets.
+
+### Render resolution
+
+- A render resolution per monitor: `native` (the default), 720p to 4K, or any size
+  (`walpe-ctl resolution`, Engine settings > Resolution). The window asks once about new
+  monitors; an existing installation is not asked and nothing changes size.
+- Imported and converted videos are no longer tied to 1080p (`video_resolution`; a
+  configuration from an older version keeps 1080p until you change it).
+- Effects on colour-only layers of a scene are computed as wide as the longer side of
+  the render size where that is more than 2048 pixels (0.12: 2048 at most). On a monitor
+  wider than 2048 pixels such a layer is sharper than before, also at native resolution.
+
+### Scenes
+
+- Camera parallax, camera shake, bloom, sprite-sheet layers and their script control,
+  and a script camera (zoom and position). Each has a switch (`walpe-ctl set bloom=off`,
+  ...). **They are on by default and change the picture of the scenes that ask for
+  them:** with default settings 16 of the 91 test scenes look different from the 0.12
+  releases, because bloom, camera shake, sprite sheets and the script camera are on.
+  `walpe-ctl set bloom=off camera_shake=off sprite_sheets=off script_camera=off` gives
+  the earlier pictures back, each switch for its own feature. The look of the camera
+  shake is an estimate; HDR bloom is not implemented.
+- The Fluid Simulation effect runs on the grid its file declares, at a fixed 60 steps a
+  second whatever the frame rate (`fluid_sim`, `fluid_quality`).
+- Scene sound layers (WAV, MP3, FLAC, Ogg) through PulseAudio / PipeWire, **off by
+  default**: `walpe-ctl set scene_sound=on volume=0.5`; `mute`; per wallpaper
+  `walpe-ctl setprop walpe_sound=on|off`. The `volume` setting now has an effect.
+  Measured against a null sink by recording it; nobody has heard it.
+
+### Video
+
+- Hardware decoding chooses its decoder by what the machine and its FFmpeg offer and by
+  the GPU that renders (`walpe-ctl set hwdec=off|auto|<api>`: VA-API, NVDEC, VDPAU, Vulkan
+  Video, V4L2); on NVIDIA's driver NVDEC stays first. Optional zero-copy
+  (`video_zerocopy`). Both off by default.
+
+### Other
+
+- The source builds for 64-bit ARM (aarch64) as well as x86-64, with meson cross files:
+  cross-compiled with 0 warnings, and 65 of the 68 tests that need no display pass under
+  emulation. Not run on ARM hardware. OpenGL ES 3.1 is the least an ARM GPU must offer.
+- Test setups for AddressSanitizer / UndefinedBehaviorSanitizer and ThreadSanitizer,
+  end-to-end tests on a headless Wayland compositor.
+
+### Known limitations
+
+- See the state of testing at the top of this section. The full list is in
+  [README.md](README.md#known-limitations).
+
 ## 0.12.2 "Amplifier Worship"
 
 Security fixes and bug fixes for 0.12.1; no new features. Updating is recommended for

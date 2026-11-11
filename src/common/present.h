@@ -179,6 +179,7 @@ static inline const char *const *walpe_gpuconf_keys (void)
     static const char *const keys[] = {
         "present", "idle_release", "egl_display", "swap_damage",
         "frame_align",
+        "wayland_reconnect",    /* seconds to wait for a Wayland compositor that went away */
         "yield", "threaded", "max_frames", "sync_display", "shader_cache", "shader_cache_size",
         NULL
     };
@@ -270,6 +271,68 @@ static inline gboolean walpe_driver_hint (const char *key, const char *value, GP
         if (!walpe_conf_bool (value, &b))
             return FALSE;
         g_ptr_array_add (out, g_strdup_printf ("__GL_SHADER_DISK_CACHE=%d", b ? 1 : 0));
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* The same hints for Mesa's drivers (radeonsi, iris, crocus, nouveau,
+ * ...), where Mesa has a setting that means the same. Appends
+ * "NAME=VALUE" strings (g_free) to out:
+ *   threaded          -> mesa_glthread=true|false
+ *   shader_cache      -> MESA_SHADER_CACHE_DISABLE=false|true, and for a
+ *                        directory MESA_SHADER_CACHE_DIR=<dir>
+ *   shader_cache_size -> MESA_SHADER_CACHE_MAX_SIZE=<n>M (the hint is in
+ *                        bytes, as the NVIDIA driver takes it)
+ * yield, max_frames and sync_display have no Mesa equivalent (every
+ * window is synchronised to the display it is on): *none = TRUE and
+ * nothing is appended. Returns FALSE when key is no driver hint or the
+ * value is not understood (walpe_driver_hint says the same). */
+static inline gboolean walpe_driver_hint_mesa (const char *key, const char *value,
+                                               GPtrArray *out, gboolean *none)
+{
+    gboolean b = FALSE;
+    if (none)
+        *none = FALSE;
+    if (!key || !value)
+        return FALSE;
+    gboolean unset = !*value || !g_ascii_strcasecmp (value, "default");
+    if (!strcmp (key, "yield") || !strcmp (key, "max_frames") || !strcmp (key, "sync_display")) {
+        if (!unset && none)
+            *none = TRUE;
+        return TRUE;
+    }
+    if (!strcmp (key, "threaded")) {
+        if (unset)
+            return TRUE;
+        if (!walpe_conf_bool (value, &b))
+            return FALSE;
+        g_ptr_array_add (out, g_strdup_printf ("mesa_glthread=%s", b ? "true" : "false"));
+        return TRUE;
+    }
+    if (!strcmp (key, "shader_cache_size")) {
+        if (unset)
+            return TRUE;
+        char *end = NULL;
+        gint64 n = g_ascii_strtoll (value, &end, 10);
+        if (!end || *end || n < 1)
+            return FALSE;
+        gint64 mb = (n + (1 << 20) - 1) >> 20;
+        g_ptr_array_add (out, g_strdup_printf ("MESA_SHADER_CACHE_MAX_SIZE=%" G_GINT64_FORMAT "M",
+                                               CLAMP (mb, (gint64) 1, (gint64) 65536)));
+        return TRUE;
+    }
+    if (!strcmp (key, "shader_cache")) {
+        if (unset)
+            return TRUE;
+        if (value[0] == '/') {
+            g_ptr_array_add (out, g_strdup ("MESA_SHADER_CACHE_DISABLE=false"));
+            g_ptr_array_add (out, g_strdup_printf ("MESA_SHADER_CACHE_DIR=%s", value));
+            return TRUE;
+        }
+        if (!walpe_conf_bool (value, &b))
+            return FALSE;
+        g_ptr_array_add (out, g_strdup_printf ("MESA_SHADER_CACHE_DISABLE=%s", b ? "false" : "true"));
         return TRUE;
     }
     return FALSE;

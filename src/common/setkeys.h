@@ -34,6 +34,9 @@ static const WalpeSetKey walpe_set_keys[] = {
     { "present", WALPE_SET_STR },
     { "software_render", WALPE_SET_BOOL },
     { "software_threads", WALPE_SET_ANY },      /* a number or "auto" */
+    { "gpu", WALPE_SET_STR },                   /* auto | integrated | discrete | a device */
+    { "preset_follow_gpu", WALPE_SET_BOOL },
+    { "gl_api", WALPE_SET_STR },                /* auto, gl or gles */
     { "fps", WALPE_SET_NUM },
     { "volume", WALPE_SET_NUM },
     { "pause_fullscreen", WALPE_SET_BOOL },
@@ -44,6 +47,7 @@ static const WalpeSetKey walpe_set_keys[] = {
     { "focus_fps", WALPE_SET_NUM },
     { "pause_battery", WALPE_SET_BOOL },
     { "battery_fps", WALPE_SET_NUM },
+    { "pause_idle", WALPE_SET_NUM },            /* seconds without input, 0 = off */
     { "preview_anim", WALPE_SET_ANY },          /* a name, or false = off */
     { "fx_cache", WALPE_SET_BOOL },
     { "web_accel", WALPE_SET_BOOL },
@@ -51,7 +55,7 @@ static const WalpeSetKey walpe_set_keys[] = {
     { "particle_density", WALPE_SET_ANY },      /* a number, also as text */
     { "particle_instancing", WALPE_SET_BOOL },
     { "tex_downscale", WALPE_SET_BOOL },
-    { "video_hwdec", WALPE_SET_BOOL },
+    { "video_hwdec", WALPE_SET_ANY },            /* a switch, or off / auto / the API's name */
     { "fx_specialize", WALPE_SET_BOOL },
     { "fx_quality", WALPE_SET_STR },
     { "fx_fast", WALPE_SET_BOOL },
@@ -81,6 +85,37 @@ static const WalpeSetKey walpe_set_keys[] = {
     { "skip_hidden_inset", WALPE_SET_NUM },
     { "video_limit", WALPE_SET_BOOL },
     { "video_upload", WALPE_SET_STR },
+    /* the window system the daemon draws on (auto / x11 / wayland; read
+     * at its next start) and, on Wayland, whether the wallpaper surface
+     * may take pointer input (auto / off) */
+    { "backend", WALPE_SET_STR },
+    { "wayland_pointer", WALPE_SET_STR },
+    /* hardware-decoded pictures stay in GPU memory (off by default) */
+    { "video_zerocopy", WALPE_SET_BOOL },
+    /* render resolution (common/resolution.h, which reads and checks the
+     * values): a value for every connected monitor, or NAME:VALUE pairs */
+    { "resolution", WALPE_SET_STR },            /* native, 720p .. 4k, WxH */
+    { "texture_limit", WALPE_SET_ANY },         /* auto, none (also off), pixels */
+    { "scale_filter", WALPE_SET_STR },          /* bilinear, nearest */
+    { "video_resolution", WALPE_SET_STR },      /* auto, none, a resolution */
+    { "resolution_prompt", WALPE_SET_BOOL },    /* may the GUI ask about new monitors */
+    /* renderer features: switches of engine/features.h. A feature of that
+     * table becomes a setting by its row here (the daemon takes every
+     * feature that is listed, without a branch of its own). */
+    { "camera_parallax", WALPE_SET_BOOL },
+    { "parallax_offset", WALPE_SET_BOOL },
+    { "script_camera", WALPE_SET_BOOL },
+    { "sprite_sheets", WALPE_SET_BOOL },
+    { "script_texanim", WALPE_SET_BOOL },
+    { "bloom", WALPE_SET_BOOL },
+    { "camera_shake", WALPE_SET_BOOL },
+    /* simulation effects (engine/fx_sim.h) */
+    { "fluid_sim", WALPE_SET_BOOL },
+    { "fluid_quality", WALPE_SET_STR },
+    /* wallpaper sound (engine/scenesound.h): scenes play their sound layers
+     * (off by default); silence that keeps the volume setting */
+    { "scene_sound", WALPE_SET_BOOL },
+    { "mute", WALPE_SET_BOOL },
 };
 
 static inline const WalpeSetKey *walpe_set_key_find (const char *name)

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=WalPE
+GenericName=Live wallpapers
+Comment=Animated, scene, video and web wallpapers: browse, apply, adjust
+Exec=walpe
+Icon=walpe
+Terminal=false
+Categories=Utility;Settings;DesktopSettings;
+Keywords=wallpaper;background;desktop;animated;
+StartupNotify=true
+StartupWMClass=walpe
+DBusActivatable=false

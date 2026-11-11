@@ -2,12 +2,16 @@
 """Shared harness of the end-to-end checks of the daemon (scripts/lifecheck.py, a registered
 test, and the developer tools on the `devtools` branch).
 
-A private Xvfb (-displayfd, its framebuffer in a file: no screenshot tool needed) with fake
-monitors, a private walpe-daemon (own XDG dirs in a temp dir), generated one-colour scenes,
+A private display (scripts/displayenv.py: Xvfb with its framebuffer in a file and fake
+monitors, or a headless Wayland compositor with real outputs), a private walpe-daemon (own XDG dirs in a temp dir), generated one-colour scenes,
 IPC helpers and a reader of the pixels in the middle of each monitor. Nothing of the
 user's is read or written. RESTORECHECK_PATIENCE=N multiplies every wait (a software
 renderer on a busy machine: 3 or more)."""
-import json, mmap, os, shutil, socket, struct, subprocess, sys, tempfile, time
+import json, os, shutil, socket, subprocess, sys, tempfile, time
+
+sys.dont_write_bytecode = True   # no __pycache__ next to the scripts
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import displayenv   # noqa: E402  (the display: Xvfb or a headless Wayland compositor)
 
 PATIENCE = max(1.0, float(os.environ.get("RESTORECHECK_PATIENCE", "1") or 1))
 
@@ -51,7 +55,7 @@ def gen_broken(out):
 
 
 class Env:
-    def __init__(self, build, daemon, keep, tmp=None):
+    def __init__(self, build, daemon, keep, tmp=None, display=None):
         self.build = os.path.abspath(build)
         self.daemon_bin = os.path.abspath(daemon) if daemon else os.path.join(self.build, "walpe-daemon")
         self.keep = keep
@@ -60,9 +64,8 @@ class Env:
             self.tmp = os.path.abspath(tmp)
         else:
             self.tmp = tempfile.mkdtemp(prefix="walpe-check-")
-        self.xvfb = None
+        self.display = displayenv.make(displayenv.pick(display) or "xvfb", self.tmp, PATIENCE)
         self.daemon = None
-        self.fb = None
         self.env = dict(os.environ)
         for k, d in (("XDG_RUNTIME_DIR", "rt"), ("XDG_CONFIG_HOME", "cfg"), ("XDG_CACHE_HOME", "cache"),
                      ("XDG_DATA_HOME", "data"), ("HOME", "home")):
@@ -79,52 +82,22 @@ class Env:
         self.mons = []
 
     def start_x(self, width, height):
-        """Xvfb on a display number it picks itself (-displayfd)"""
-        fbdir = os.path.join(self.tmp, "fb")
-        os.makedirs(fbdir)
-        r, w = os.pipe()
-        try:
-            self.xvfb = subprocess.Popen(["Xvfb", "-displayfd", str(w), "-screen", "0", f"{width}x{height}x24",
-                                          "-nolisten", "tcp", "-s", "0", "-fbdir", fbdir],
-                                         pass_fds=(w,), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except OSError:
-            os.close(r)
-            os.close(w)
+        """the display server (Xvfb, or the headless compositor) and the clients' variables for it"""
+        if not self.display.start(width, height):
             return False
-        os.close(w)
-        num = b""
-        t0 = time.time()
-        os.set_blocking(r, False)
-        while b"\n" not in num and time.time() - t0 < 20 * PATIENCE and self.xvfb.poll() is None:
-            try:
-                d = os.read(r, 32)
-                if d:
-                    num += d
-                    continue
-            except BlockingIOError:
-                pass
-            time.sleep(0.05)
-        os.close(r)
-        if b"\n" not in num:
-            return False
-        self.env["DISPLAY"] = ":" + num.decode().strip()
-        self.fb = os.path.join(fbdir, "Xvfb_screen0")
-        return bool(wait_for(lambda: os.path.exists(self.fb) and os.path.getsize(self.fb) > 100, 10))
+        self.display.client_env(self.env)
+        return True
 
     def stop_x(self):
-        if self.xvfb:
-            self.xvfb.terminate()
-            try:
-                self.xvfb.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.xvfb.kill()
-            self.xvfb = None
-        shutil.rmtree(os.path.join(self.tmp, "fb"), ignore_errors=True)
+        self.display.stop()
 
     def start_daemon(self, mons):
         """mons: [(name, w, h, x, y)]"""
-        self.mons = mons
-        self.env["WALPE_MONITORS"] = ",".join(f"{n}={w}x{h}+{x}+{y}@60" for n, w, h, x, y in mons)
+        # real outputs are made what is asked for and bring their own names; monitors
+        # that are rectangles of one X screen are told to the daemon
+        self.mons = mons = self.display.place(mons)
+        if self.display.fake_monitors:
+            self.env["WALPE_MONITORS"] = ",".join(f"{n}={w}x{h}+{x}+{y}@60" for n, w, h, x, y in mons)
         log = open(self.log, "a")
         self.daemon = subprocess.Popen([self.daemon_bin], env=self.env, stdout=log, stderr=subprocess.STDOUT,
                                        cwd=self.tmp)
@@ -134,6 +107,7 @@ class Env:
             if self.daemon.poll() is not None:
                 return False
             if os.path.exists(self.sock) and self.ipc({"cmd": "status"}):
+                self.mons = self.display.seen(mons, self.monitors)   # the daemon's order and names
                 return True
         return False
 
@@ -237,25 +211,9 @@ class Env:
             return 0
 
     def colour(self, mon):
-        """the pixel in the middle of a monitor, from Xvfb's framebuffer file (XWD)"""
+        """the pixel in the middle of a monitor, as the display shows it"""
         _, w, h, x, y = mon
-        with open(self.fb, "rb") as f:
-            m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-            try:
-                big = struct.unpack(">I", m[0:4])[0] < 65536
-                e = ">" if big else "<"
-                hd = struct.unpack(e + "25I", m[0:100])
-                header_size, bpp, bpl, ncolors = hd[0], hd[11], hd[12], hd[19]
-                msb, masks = hd[7] == 1, hd[14:17]
-                off = header_size + ncolors * 12 + (y + h // 2) * bpl + (x + w // 2) * (bpp // 8)
-                px = int.from_bytes(m[off:off + bpp // 8], "big" if msb else "little")
-            finally:
-                m.close()
-        out = []
-        for mask in masks:
-            sh = (mask & -mask).bit_length() - 1
-            out.append((px & mask) >> sh)
-        return tuple(out)
+        return self.display.pixel(mon, w // 2, h // 2)
 
 
 def name_of(rgb):

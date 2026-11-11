@@ -18,10 +18,12 @@ the result is ready; `walpe-ctl add` imports a file into the library for good.
 ## Import (`walpe-ctl add`, **Import** in the GUI)
 
 * H.264 **High** profile, **yuv420p** 8-bit, MP4 with `+faststart`
-* scaled to fit **within 1920×1080**, aspect preserved (sample aspect ratio
-  and rotation metadata applied), **never upscaled**, even dimensions
+* scaled to fit **within `video_resolution`** ([RESOLUTION.md](RESOLUTION.md): `auto` = the
+  largest render resolution among the monitors, 1920×1080 for a configuration that comes from
+  an older version), aspect preserved (sample aspect ratio and rotation metadata applied),
+  **never upscaled**, even dimensions
 * **source frame rate** kept
-* **audio dropped** (`-an`) — the renderer has no audio output
+* **audio dropped** (`-an`): video wallpapers are silent
 * already-conforming H.264 files are **remuxed** (stream copy, instant)
 
 Encoder: `libx264 -preset medium -crf 19` by default. To use the NVIDIA
@@ -56,7 +58,7 @@ with.
 | what | how | default |
 |---|---|---|
 | Videos follow the frame rate limit | window: Engine settings, "Videos follow the frame rate cap"; `walpe-ctl set video_limit=on\|off`; `WALPE_VIDEO_LIMIT=0\|1` in front of `walpe-daemon` overrides | off: videos keep their own frame rate |
-| Hardware decoding | `walpe-ctl set hwdec=on\|off` (see below) | off |
+| Hardware decoding | `walpe-ctl set hwdec=off\|auto\|<api>`, `video_zerocopy=on\|off` (see below) | off |
 | Leave the deblocking filter out | `WALPE_VIDEO_SKIP_DEBLOCK=nonref` in front of `walpe-daemon`: only for pictures no other picture is predicted from (they alone get slightly blockier; nothing builds on them); `=1`: for all pictures (blocky between keyframes) | filter on |
 | Box filter kernel of the half-size path | `WALPE_VIDEO_SIMD=c\|sse2` (comparisons only; the result is the same bytes) | AVX2 when the CPU has it, else SSE2 |
 | How a frame's planes reach their textures | `walpe-ctl set video_upload=legacy\|pbo\|pbodata\|persist\|direct`, each also with `+pingpong` (saved; takes effect with the next frame); `WALPE_VIDEO_UPLOAD=...` in front of `walpe-daemon` overrides; status: `video_upload`, `video_upload_now` | legacy |
@@ -102,32 +104,91 @@ grep -H -e '(scene update, uploads)' -e 'uploads textures' -e 'TOTAL mon' up-*.t
 
 ## Hardware decoding
 
-Off by default (`walpe-ctl set hwdec=on`) and not confirmed on a graphics card: its
-development and tests ran on Mesa's software renderer. To check it on your machine, with
-your wallpapers running and nothing covering them:
+Off by default, and **not confirmed on a graphics card**: it was written and tested on a
+machine without a GPU and without any hardware decoder (the choice of the decoder against
+made-up machines and made-up failures in the test `video-hwsel`; on the software renderer
+the daemon answers "the renderer is a software renderer" and decodes on the CPU). Every
+hardware path - VA-API, NVDEC, VDPAU, Vulkan Video, V4L2, zero-copy - is untested until
+someone runs it on such hardware.
 
 ```sh
-ffmpeg -hide_banner -hwaccels                  # "cuda" must be listed (Gentoo: media-video/ffmpeg USE=nvenc)
+walpe-ctl set hwdec=off        # software decoding (the default)
+walpe-ctl set hwdec=auto       # also hwdec=on and the switch in the settings window: try what
+                               # the machine offers; anything that fails ends in software decoding
+walpe-ctl set hwdec=vaapi      # only this API: vaapi, cuda (NVDEC), vdpau, vulkan, drm (V4L2
+                               # request API), v4l2m2m, or another device type of the installed FFmpeg
+walpe-ctl set video_zerocopy=on|off     # below; off by default
+```
+
+`config.json`: `"video_hwdec": true|false` and, when one API is chosen, `"video_hwdec_api"`.
+`WALPE_VIDEO_HWDEC=off|auto|<api>` and `WALPE_VIDEO_ZEROCOPY=0|1` in the daemon's
+environment override the settings. Both apply at once to videos that are playing (one short
+stop: the decoder is reopened and continues after the last picture shown).
+
+Which decoder is used with `auto` is decided by what the installed FFmpeg can do and by
+which GPU the daemon renders on, not by who made the card - with one exception: where
+NVIDIA's own kernel driver renders, `cuda` (NVDEC) is the first hardware decoder, as in
+0.12.1. Otherwise the order is:
+
+1. attempts on the GPU that renders the wallpaper (`vaapi` on its DRM render node);
+2. attempts where the API picks the device itself (`vdpau`; `cuda` on a machine with one GPU);
+3. attempts on another GPU than the one that renders: they work, but every picture is copied
+   through main memory and that GPU is kept awake; the status line says so;
+4. `vulkan` (Vulkan Video);
+5. hardware decoders of their own (`v4l2m2m` and the like), not on x86-64: there `auto` does
+   not open them, `hwdec=v4l2m2m` by name does.
+
+An attempt that fails before it has shown a picture is followed by the next one, and when
+none is left by software decoding. A decoder that fails after pictures were shown is
+replaced by software decoding at once, from the keyframe before the last picture shown.
+With software rendering ("Render on CPU") hardware decoding is not used.
+
+**Zero-copy.** By default each decoded picture is downloaded to main memory and uploaded
+like a software picture: the exact samples, on every driver (a 4K picture: 12 MB down, then
+the 2x reduction and 3 MB up). `video_zerocopy=on`: where the decoder can export its
+pictures as DMA-BUFs and the renderer's EGL can import them, the planes are used as
+textures where the decoder left them (8-bit and 10..16-bit 4:2:0). The first two pictures
+after every decoder start are also downloaded and compared with the imported planes, sample
+for sample; one differing sample and the stream is downloaded from then on. `cuda` and
+`vdpau` cannot export DMA-BUFs through FFmpeg and keep downloading. Not applied on this
+path: the half-size reduction of a 4K clip on a 1080p monitor.
+
+`walpe-ctl status`: `video_hwdec`, `video_hwdec_api` (`off`, `auto` or the API),
+`video_zerocopy`, and `video_decoder` with one entry per open video, for example
+
+```
+1920x1080 60.00 fps: software, 2 threads
+1920x1080 60.00 fps, H.264 High@L4.2, 8-bit 4:2:0: hardware (vaapi on /dev/dri/renderD128 [amdgpu], the GPU that renders; pictures are downloaded to main memory)
+...: hardware (cuda device 0 on /dev/dri/renderD128 [nvidia], the GPU that renders; ...)
+...: software, 2 threads (hardware decoding was asked for and is not in use: <attempt>: <kind of reason> (<detail>); ...)
+```
+
+(the codec profile is part of the line only while hardware decoding is asked for). Kinds of
+reason: `codec unsupported`, `no device`, `permission` (the DRM node may not be opened by
+this user: group `render` / `video`), `profile`, `resolution outside the decoder's limits`,
+`stream refused`, `decoder could not be opened`, `decoding failed`, `the renderer is a
+software renderer`.
+
+Per API at run time, besides an FFmpeg built with it: `vaapi` needs libva and a VA driver
+for the GPU; `cuda` NVIDIA's driver with `libcuda.so.1` and `libnvcuvid.so.1`; `vdpau`
+libvdpau, the GPU's VDPAU driver and an X display; `vulkan` a driver with Vulkan Video
+decode and FFmpeg 6.1 or newer. The build needs nothing new.
+
+To check it on your machine, with a video wallpaper running and nothing covering it:
+
+```sh
 walpe-ctl set hwdec=off; sleep 10
 walpe-ctl status | grep -o '"video_decoder":"[^"]*"'
 scripts/walpe-gpu-report.sh 30 swdec > swdec.txt
-walpe-ctl set hwdec=on; sleep 10
+walpe-ctl set hwdec=auto; sleep 10
 walpe-ctl status | grep -o '"video_decoder":"[^"]*"'
 scripts/walpe-gpu-report.sh 30 hwdec > hwdec.txt
-nvidia-smi dmon -s um -c 10 > dmon.txt         # column "dec": how busy the video decoder is
+nvidia-smi dmon -s um -c 10 > dmon.txt         # NVIDIA: column "dec", how busy the video decoder is
+walpe-ctl gpu-stats --sample 10 > gpu.txt      # AMD / Intel: a row "daemon engine ..." for the video
+                                               # decoder; no such row = it decodes on the CPU
 ./build/video-test /path/to/any-h264.mp4       # the hardware decoder's pictures against the CPU's
 ```
 
-`video_decoder` reads `...: hardware (cuda)` when the card decodes (`, no picture yet` until
-its first picture came out), and otherwise `software, N threads (hardware decoding was asked
-for and is not in use: <why>)` - no device and each device's error, a library that could not
-be loaded, the device refusing the stream, or pictures that failed. With two videos playing
-the line lists both. For a bug report: the two status lines, `swdec.txt`, `hwdec.txt`,
-`dmon.txt`, the line `video-test` prints, and whether the picture looked right (colours, no
-stutter, pause for 10 seconds and resume). What it does: the card decodes through FFmpeg
-(NVDEC as `cuda`, else VA-API, else VDPAU), the picture is copied back to main memory and
-uploaded through OpenGL like a software frame - so the decoder's CPU time goes away, the
-copies stay (a 4K picture: 12 MB down, then the 2x reduction and 3 MB up); a CUDA context
-also takes some hundred MB of main and video memory. Software decoding takes over by itself
-at the same picture when anything fails.
-
+For a bug report: the two status lines, the three or four files, the line `video-test`
+prints, and whether the picture looked right (colours, no stutter, pause for 10 seconds and
+resume).

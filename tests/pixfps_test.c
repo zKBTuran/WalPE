@@ -72,7 +72,7 @@ static void test_migration (void)
     put_config ("{\"wallpapers_dir\":\"/x\",\"current\":\"/x/1\",\"fps\":30,\"volume\":0.0,\"parallax\":true}");
     CHECK (daemon_start (&mig) == WALPE_FPS_DEFAULT && mig);
     char *txt = get_config ();
-    CHECK (strstr (txt, "\"config_version\" : 3") != NULL);
+    CHECK (strstr (txt, "\"config_version\" : 4") != NULL);
     CHECK (strstr (txt, "\"fps\" : 60") != NULL);
     CHECK (strstr (txt, "\"current\" : \"/x/1\"") != NULL);     /* the rest is kept */
     g_free (txt);
@@ -83,7 +83,7 @@ static void test_migration (void)
     CHECK (daemon_start (&mig) == 30 && !mig);
     CHECK (daemon_start (&mig) == 30 && !mig);
     txt = get_config ();
-    CHECK (strstr (txt, "\"fps\" : 30") != NULL && strstr (txt, "\"config_version\" : 3") != NULL);
+    CHECK (strstr (txt, "\"fps\" : 30") != NULL && strstr (txt, "\"config_version\" : 4") != NULL);
     g_free (txt);
 
     /* a config written by version 0.12 (default 200, or 200 put there by its
@@ -91,7 +91,7 @@ static void test_migration (void)
     put_config ("{\"config_version\":2,\"current\":\"/x/2\",\"fps\":200,\"parallax\":true}");
     CHECK (daemon_start (&mig) == 60 && mig);
     txt = get_config ();
-    CHECK (strstr (txt, "\"config_version\" : 3") != NULL && strstr (txt, "\"fps\" : 60") != NULL);
+    CHECK (strstr (txt, "\"config_version\" : 4") != NULL && strstr (txt, "\"fps\" : 60") != NULL);
     CHECK (strstr (txt, "\"current\" : \"/x/2\"") != NULL);
     g_free (txt);
     CHECK (daemon_start (&mig) == 60 && !mig);                  /* second start: nothing */

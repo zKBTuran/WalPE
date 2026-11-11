@@ -10,8 +10,7 @@
  *                      either (WE's scheme colour, checkboxes that only
  *                      carry a picture or a link).
  *   "needs:<feature>"  bound only to an engine feature WalPE does not
- *                      have (mouse parallax, bloom, camera shake, scene
- *                      sound, ...).
+ *                      have (HDR bloom, camera fade, scene sound, ...).
  *   "full:<n>"         bound to nothing but the "count" of particle
  *                      systems that are full whatever the option says:
  *                      their emitters keep more than the file's maxcount

@@ -16,10 +16,12 @@
 #include "video.h"      /* walpe_video_frames_noted */
 #include "scenenode_effects.h"
 #include "glutil.h"
+#include "glcaps.h"
 #include "clip.h"
 #include "particles.h"
 #include "weparticles.h"
 #include "common/util.h"
+#include "common/lazy.h"
 #include "common/tex.h"
 #include "common/config.h"
 #include "common/premult.h"
@@ -37,6 +39,8 @@
 #include "propprobe.h"
 #include "cpuphase.h"
 #include "gpuprof.h"   /* GPUPROF hooks: WALPE_PROF_* in scenenode_gl_render */
+#include "features.h"  /* run-time switches of renderer features */
+#include "scenesound.h" /* sound layers: scenenode_sound.h below */
 
 typedef enum { NK_EMPTY, NK_IMAGE, NK_PARTICLE, NK_TEXT } NodeKind;
 
@@ -89,6 +93,26 @@ typedef struct {
                           * which scripts read and change ("inst.*") */
     guint inst_scripted; /* WALPE_WE_OV_*: count / rate are driven by a script */
     gboolean text_dirty; /* a script changed text_value: re-render */
+    float par_depth[2];  /* "parallaxDepth": the layer's share of the camera
+                          * parallax per axis (0 0 = it takes no part) */
+    /* animated (sprite sheet) texture: tex is the whole sheet, the layer
+     * shows one frame of it (sprite_attach). sp_frame = the frame on show
+     * (this frame's clock), sp_shown = the frame whose texture coordinates
+     * sp_vbo holds (-1 = none yet), sp_inset = how far short of the
+     * frame's edges they stop (sprite_draw), sp_live = the animation was
+     * playing when its clock was last read (gl_render) */
+    struct WalpeSpriteAnim *sprite;
+    int sp_frame, sp_shown;
+    gboolean sp_live;
+    float sp_inset[2];
+    GLuint sp_vao, sp_vbo, sp_ebo;
+    /* sound layer (scenenode_sound.h): an object with "sound". Nothing of
+     * this changes what is drawn. */
+    WalpeSound *sound;   /* its player, owned by the scene's sound group (NULL:
+                          * no sound layer, none of its files is inside the
+                          * wallpaper, or this program plays no sound) */
+    gboolean snd_visible; /* the layer's own "visible": invisible = silent */
+    float snd_volume;    /* the layer's volume, 0..1 */
     gint64 text_bytes;   /* what its text texture counts in SceneNodeContent.text_bytes */
     int parent;          /* resolved node index (-1 = root) */
     /* per frame: world transform (parent chain applied, size excluded)
@@ -236,6 +260,12 @@ typedef struct {
     gboolean needs_audio;  /* g_AudioSpectrum effects / audio emitters */
     gboolean audio_ref;    /* holds a capture reference (visible + unpaused) */
     WalpeAudioSpectrum audio;
+    /* sound layers (scenenode_sound.h, scenesound.h) */
+    WalpeSoundGroup *sound_group; /* this scene's players (NULL = none) */
+    gboolean sound_tried;       /* the group was asked for */
+    gboolean sound_live;        /* between the first frame and gl_free */
+    gboolean sound_full;        /* more sound layers than players: said once */
+    int sound_objects;          /* objects with "sound" */
     GPtrArray *pending_scripts; /* PendingScript, consumed at gl_init */
     WalpeSceneScript *ss;       /* SceneScript runtime (NULL = none) */
     gint64 ss_us;               /* WALPE_PROBE: tick time accumulator */
@@ -272,6 +302,50 @@ typedef struct {
      * layer (2929592935 binds both to options) */
     float clear[3];
     float gen_zoom;
+    /* Camera parallax (general.cameraparallax; feature "camera_parallax",
+     * read when the scene loads). A layer without a parent is moved by
+     *   parallaxDepth * amount * ((its position - the camera) +
+     *                             (0.5 - pointer) * scene size * mouse influence)
+     * per axis: against the pointer, and - the first term, feature
+     * "parallax_offset" - away from the camera centre even while the
+     * pointer rests. Wallpaper Engine publishes no formula; this is what
+     * open-source renderers of the format do. Of the two that were
+     * compared one has the first term and one has not, hence its switch -
+     * which is off unless asked for: without the term a pointer that rests
+     * in the middle (or no pointer) moves nothing, exactly (the second
+     * term is 0 there and node_parallax leaves the matrix alone), and the
+     * scene at rest is the picture its file describes.
+     * Layers with a parent follow the layer their chain hangs on rigidly,
+     * whatever depth they carry themselves (node_world).
+     * The pointer is the one gl_render is handed by its caller (the middle
+     * until one was seen, its last place once it is gone) and is followed
+     * with a lag that ends `delay` seconds after it stopped: par_lag.pos
+     * is the lagging pointer, 0..1 from the left / from the BOTTOM of the
+     * monitor. Everything is in scene units, so the picture is the same
+     * share of any monitor size. */
+    gboolean par_on;
+    float par_amount, par_delay, par_infl;
+    WalpeParallaxLag par_lag;
+    gboolean par_moving;        /* the lagging pointer has not arrived yet */
+    gboolean par_offs;          /* this frame: feature "parallax_offset" */
+    float par_cam[2];           /* this frame: the camera's rest centre */
+    /* This frame's sideways offset of the view centre in scene units (Y
+     * up): the camera shake (scene_post_frame, scenenode_post.h) writes it
+     * once per frame before view_map () is called; nothing else does, and
+     * view_centre () is the one place that adds it. The parallax above
+     * measures from the centre without it (the shake sways the view as a
+     * whole). */
+    float cam_sway[2];
+    guint feat_serial;          /* walpe_feature_serial () this scene last drew with */
+    /* scripts moved the camera (setCameraTransforms: eye) or set the zoom
+     * (feature "script_camera"): how far the eye is from where the scene
+     * file puts it, in scene units, and the zoom in place of general.zoom
+     * (0 = no script set one) */
+    float cam_pan[2];
+    float scr_zoom;
+    int cam_moved;              /* frames to go in which a script's change of
+                                 * the two reaches the view (see the bake) */
+    gboolean has_sprites;       /* some image layer plays a sprite sheet */
     /* WALPE_PROP_PROBE (propprobe.h): virtual clock + one state digest */
     gboolean pprobe, pprobe_done;
     /* Frame skipping: the signature of the frame the surface shows (every
@@ -307,6 +381,16 @@ typedef struct {
     int render_scale;        /* 25..100 */
     gboolean rs_fixed;       /* set by WALPE_RENDER_SCALE: the setting is ignored */
     struct { GLuint fbo, tex; int w, h; } rs;
+    /* render resolution (content.h render_w / render_h): the same target
+     * serves a size chosen for the monitor that is not the surface's own.
+     * size_failed: no target of the chosen size could be made (once said,
+     * the surface's size is used); filter: the WALPE_SCALE_* the last
+     * frame was brought to the surface with */
+    gboolean size_failed;
+    int size_failed_w, size_failed_h;
+    int scale_filter;
+    int solid_cap;           /* solid_fx_size: the cap the solid layers' effect sizes
+                              * were last made with; 0 = SOLID_FX_CAP, as made */
     guint media_gen;         /* media_upload count (album art pixels) */
     int profile_frame;       /* WALPE_SCENE_PROFILE=<frame>: one line per layer
                               * of that frame (what it costs, why it is redrawn) */
@@ -335,11 +419,18 @@ typedef struct {
     guint64 px_fx;
     double px_base;
     gboolean px_ok;
+    /* (the camera shake's offset of this frame is cam_sway, above: written
+     * once per frame by scene_post_frame, before the frame's view is set
+     * up, and by nothing else; view_centre () adds it) */
+    /* general.bloom / general.camerashake of the scene (scenenode_post.h);
+     * NULL = it asks for neither */
+    struct ScenePost *post;
 } SceneNodeContent;
 
 typedef struct { int kind; float x, y; } PtrEv;
 
 #include "scenenode_layers.h"
+#include "scenenode_post.h"
 
 /* same resolution rules as scene.c legacy: direct, dir/assets/. The name
  * comes from the wallpaper's json: it stays below dir (no absolute path, no
@@ -457,6 +548,23 @@ static int systex_kind (JsonNode *e)
     return !g_strcmp0 (n, "$mediaThumbnail") ? 1 : !g_strcmp0 (n, "$mediaPreviousThumbnail") ? 2 : 0;
 }
 
+/* The working size of the effects on a solid layer (audio bars, gradients,
+ * colour fills: no texture, so the chain runs at the layer's size in scene
+ * units), capped on its longer side - the chain's output is scaled to the
+ * quad anyway. The cap is SOLID_FX_CAP when the layer is made (the render
+ * size is not known then) and max (SOLID_FX_CAP, longer side of the render
+ * size) from the first frame on (scenenode_gl_render): a picture rendered
+ * wider than 2048 pixels does not get such a layer computed 2048 wide and
+ * enlarged. Up to 2048 pixels the sizes are the ones they always were. */
+#define SOLID_FX_CAP 2048
+static void solid_fx_size (NodeObj *nv, float cap)
+{
+    float big = MAX (nv->size[0], nv->size[1]);
+    float k = big > cap ? cap / big : 1.0f;
+    nv->tex_w = nv->tex_full_w = MAX (1, walpe_d2i (nv->size[0] * k));
+    nv->tex_h = nv->tex_full_h = MAX (1, walpe_d2i (nv->size[1] * k));
+}
+
 /* model json -> material json -> texture file; returns texture + blending.
  * Handles the WE builtin models: solidlayer (white quad tinted by the
  * object color) and passthrough/composelayer (draws nothing). */
@@ -507,10 +615,11 @@ static char *user_texture_file (SceneNodeContent *s, const char *upid)
  * to RGBA8 as before (3-8 times the memory) instead of staying compressed */
 static gboolean node_dxt_fx (void)
 {
-    static int on = -1;
+    static WalpeLazy on_cell = WALPE_LAZY_UNSET;   /* read once (common/lazy.h) */
+    int on = walpe_lazy_get (&on_cell);
     if (on < 0) {
         const char *e = g_getenv ("WALPE_TEX_DXT_FX");
-        on = !(e && *e == '0');
+        on = walpe_lazy_set (&on_cell, !(e && *e == '0'));
     }
     return on;
 }
@@ -579,10 +688,11 @@ static gboolean node_tex_load (NodeObj *nv, int level, gboolean chain, gboolean 
  * real size and format only decoding tells), no sprite sheet. */
 static gboolean node_tex_predict (NodeObj *nv)
 {
-    static int lazy = -1;
+    static WalpeLazy lazy_cell = WALPE_LAZY_UNSET;
+    int lazy = walpe_lazy_get (&lazy_cell);
     if (lazy < 0) {
         const char *e = g_getenv ("WALPE_TEX_LAZY");
-        lazy = !(e && *e == '0');
+        lazy = walpe_lazy_set (&lazy_cell, !(e && *e == '0'));
     }
     WalpeTexProbe pr;
     if (!walpe_tex_probe (nv->tex_src, &pr) || pr.levels < 1)
@@ -639,10 +749,14 @@ static gboolean node_tex_predict (NodeObj *nv)
 }
 
 /* the layer's file texture: now at full size, or at the first frame at the
- * size it is drawn at (node_tex_fit / node_fx_input_fit) */
+ * size it is drawn at (node_tex_fit / node_fx_input_fit). frames (may be
+ * NULL): receives the frame table of an animated texture (g_free), which
+ * is never loaded late (node_tex_predict). */
 static gboolean node_tex_attach (NodeObj *nv, const char *path, guint lf, gboolean pmflag,
-                                 gboolean chain)
+                                 gboolean chain, WalpeTexFrame **frames)
 {
+    if (frames)
+        *frames = NULL;
     node_tex_job_done (nv);
     g_free (nv->tex_src);
     nv->tex_src = g_strdup (path);
@@ -653,7 +767,7 @@ static gboolean node_tex_attach (NodeObj *nv, const char *path, guint lf, gboole
     if (!node_tex_predict (nv)) {
         WalpeTexInfo ti;
         guint f = lf | (nv->tex_dxt && !chain ? WALPE_GL_TEX_NO_CHAIN : 0);
-        GLuint tx = walpe_gl_tex_cached (path, f, GL_CLAMP_TO_EDGE, pmflag, &ti);
+        GLuint tx = walpe_gl_tex_cached_frames (path, f, GL_CLAMP_TO_EDGE, pmflag, &ti, frames);
         if (!tx) {
             g_clear_pointer (&nv->tex_src, g_free);
             return FALSE;
@@ -679,14 +793,442 @@ static gboolean node_tex_attach (NodeObj *nv, const char *path, guint lf, gboole
     return TRUE;
 }
 
+/* ---- animated (sprite sheet) textures of image layers --------------------
+ *
+ * A .tex with the "animated" flag holds every frame of an animation on one
+ * sheet, and a table of frame rectangles with their durations. Wallpaper
+ * Engine's image shaders show one frame at a time by transforming the
+ * texture coordinate (origin + u * x axis + v * y axis of the frame); image
+ * layers do not blend between frames (particles do, in their own code).
+ *
+ * Here the layer keeps the sheet as its texture - one texture per sheet,
+ * shared and sized like any other layer texture - and the frame on show is
+ * that same transform: the four texture coordinates of the layer's quad
+ * (sprite_draw), or two uniforms of the layer's own material pass in front
+ * of its effects (fx_set_input_frame). A new frame costs 64 bytes of
+ * vertex data, or one run of the layer's effect chain; no texture is made,
+ * copied or uploaded for it.
+ *
+ * The table comes from the wallpaper and is not trusted: a frame that does
+ * not lie on the sheet, has no area or is no number refuses the whole
+ * table (walpe_sprite_anim_new); the layer then shows its first frame as a
+ * still when that one is sound, else the picture as a whole. Everything is
+ * checked as the floats the file holds - nothing here turns a frame
+ * rectangle into an index. */
+#define SPRITE_MAX_FRAMES 65536   /* what the container's parser admits */
+#define SPRITE_MAX_SIDE 16384
+
+struct WalpeSpriteAnim {
+    int n;                  /* frames on show (1 = a still) */
+    float (*uv)[6];         /* per frame: origin, x axis, y axis in 0..1 of the sheet */
+    double *end;            /* end of each frame on the animation's clock (s) */
+    double duration;
+    int fw, fh;             /* size of the first frame in sheet texels */
+    int max_level;          /* halvings of the sheet that keep every frame on whole texels */
+    int skipped;            /* frames on further images of the file: left out */
+    gboolean refused;       /* the table was malformed */
+    double t;               /* clock, 0 <= t < duration */
+    double rate;
+    gboolean playing, loop;
+};
+
+/* the frame lies on the sheet: its four corners (origin, + x axis, + y
+ * axis, + both), compared as floats - a sum that overflows is infinite and
+ * fails like a value that is no number - and it has at least a texel of
+ * area */
+static gboolean sprite_frame_ok (const WalpeTexFrame *f, float W, float H)
+{
+    const float v[6] = { f->x, f->y, f->w1, f->w2, f->h2, f->h1 };
+    for (int k = 0; k < 6; k++)
+        if (!isfinite (v[k]))
+            return FALSE;
+    const float e = 0.01f;
+    for (int c = 0; c < 4; c++) {
+        float px = f->x + ((c & 1) ? f->w1 : 0.0f) + ((c & 2) ? f->h2 : 0.0f);
+        float py = f->y + ((c & 1) ? f->w2 : 0.0f) + ((c & 2) ? f->h1 : 0.0f);
+        if (!(px >= -e && px <= W + e && py >= -e && py <= H + e))
+            return FALSE;
+    }
+    return fabsf (f->w1 * f->h1 - f->w2 * f->h2) >= 1.0f;
+}
+
+/* the frame that is on show at clock time t */
+static int sprite_frame_at (const WalpeSpriteAnim *sp, double t)
+{
+    int lo = 0, hi = sp->n - 1;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (t < sp->end[mid])
+            hi = mid;
+        else
+            lo = mid + 1;
+    }
+    return lo;
+}
+
+/* Frame table of an animated texture -> what a layer plays. sheet_w x
+ * sheet_h: the picture the rectangles are measured in (the image at level
+ * 0 of the file). Frames on another image of the container than the first
+ * are left out (only the first image is loaded); a frame without a
+ * duration takes 0.1 s. NULL: nothing to show frame-wise. *why (may be
+ * NULL; g_free): a sentence when the table was refused or cut. Pure: no
+ * GL, no files. */
+WalpeSpriteAnim *walpe_sprite_anim_new (const WalpeTexFrame *frames, int nframes, int sheet_w,
+                                        int sheet_h, char **why)
+{
+    if (why)
+        *why = NULL;
+    if (!frames || nframes < 1 || sheet_w < 1 || sheet_h < 1 || sheet_w > SPRITE_MAX_SIDE ||
+        sheet_h > SPRITE_MAX_SIDE)
+        return NULL;
+    const float W = (float) sheet_w, H = (float) sheet_h;
+    int bad = -1, kept = 0, skipped = 0;
+    if (nframes > SPRITE_MAX_FRAMES) {
+        bad = SPRITE_MAX_FRAMES;
+        nframes = 1;   /* only the first frame is looked at */
+    }
+    for (int i = 0; i < nframes && bad < 0; i++) {
+        if (frames[i].image != 0)
+            skipped++;
+        else if (!sprite_frame_ok (&frames[i], W, H))
+            bad = i;
+        else
+            kept++;
+    }
+    gboolean refused = bad >= 0;
+    if (refused) {
+        /* one frame that cannot be shown: no part of the table is played */
+        if (why)
+            *why = bad >= SPRITE_MAX_FRAMES
+                ? g_strdup_printf ("more than %d frames", SPRITE_MAX_FRAMES)
+                : g_strdup_printf ("frame %d does not lie on the %d x %d picture or has no area",
+                                   bad, sheet_w, sheet_h);
+        if (frames[0].image != 0 || !sprite_frame_ok (&frames[0], W, H))
+            return NULL;
+        kept = 1;
+        nframes = 1;
+        skipped = 0;
+    }
+    if (kept < 1)
+        return NULL;
+    WalpeSpriteAnim *sp = g_new0 (WalpeSpriteAnim, 1);
+    sp->uv = g_malloc_n ((gsize) kept, sizeof (*sp->uv));
+    sp->end = g_new (double, kept);
+    sp->max_level = 4;
+    while (sp->max_level > 0 &&
+           ((sheet_w & ((1 << sp->max_level) - 1)) || (sheet_h & ((1 << sp->max_level) - 1))))
+        sp->max_level--;
+    double acc = 0;
+    for (int i = 0; i < nframes && sp->n < kept; i++) {
+        const WalpeTexFrame *f = &frames[i];
+        if (f->image != 0)
+            continue;
+        float d = f->time;
+        acc += isfinite (d) && d > 0.0005f ? (double) MIN (d, 3600.0f) : 0.1;
+        float *uv = sp->uv[sp->n];
+        uv[0] = f->x / W;
+        uv[1] = f->y / H;
+        uv[2] = f->w1 / W;
+        uv[3] = f->w2 / H;
+        uv[4] = f->h2 / W;
+        uv[5] = f->h1 / H;
+        const float v[6] = { f->x, f->y, f->w1, f->w2, f->h2, f->h1 };
+        for (int k = 0; k < 6; k++)
+            while (sp->max_level > 0 && fmodf (v[k], (float) (1 << sp->max_level)) != 0.0f)
+                sp->max_level--;
+        if (sp->n == 0) {
+            /* (bounded by the sheet: the frame was checked against it) */
+            sp->fw = (int) CLAMP (lroundf (hypotf (f->w1, f->w2)), 1, SPRITE_MAX_SIDE);
+            sp->fh = (int) CLAMP (lroundf (hypotf (f->h2, f->h1)), 1, SPRITE_MAX_SIDE);
+        }
+        sp->end[sp->n++] = acc;
+    }
+    sp->duration = acc;
+    sp->skipped = skipped;
+    sp->refused = refused;
+    sp->rate = 1.0;
+    sp->loop = TRUE;
+    sp->playing = sp->n > 1;
+    if (!refused && skipped && why)
+        *why = g_strdup_printf ("%d frame(s) on further images of the file are left out", skipped);
+    return sp;
+}
+
+void walpe_sprite_anim_free (WalpeSpriteAnim *sp)
+{
+    if (!sp)
+        return;
+    g_free (sp->uv);
+    g_free (sp->end);
+    g_free (sp);
+}
+
+/* one step of the clock; returns the frame to show. A negative rate plays
+ * backwards. A looping animation wraps; one that does not stops on its
+ * last (backwards: first) frame. */
+int walpe_sprite_anim_step (WalpeSpriteAnim *sp, double dt)
+{
+    if (sp->n > 1 && sp->playing && isfinite (dt) && dt > 0 && isfinite (sp->rate) && sp->rate != 0) {
+        double t = sp->t + MIN (dt, 86400.0) * CLAMP (sp->rate, -1000.0, 1000.0);
+        if (sp->loop) {
+            t = fmod (t, sp->duration);
+            if (t < 0)
+                t += sp->duration;
+        } else if (t >= sp->duration) {
+            t = sp->end[sp->n - 2];   /* the start of the last frame */
+            sp->playing = FALSE;
+        } else if (t < 0) {
+            t = 0;
+            sp->playing = FALSE;
+        }
+        sp->t = t >= 0 && t < sp->duration ? t : 0.0;
+    }
+    return sprite_frame_at (sp, sp->t);
+}
+
+/* The animation as scripts drive it (ITextureAnimation): what = "play"
+ * (v > 0 play, 0 pause, < 0 stop: paused at time zero), "frame" (show frame
+ * v, playing or not), "rate", "time" (seconds into the animation), "loop",
+ * "join" (back onto the scene's clock `now`). Every value is brought into
+ * the table's range; one that is no number changes nothing. FALSE =
+ * unknown. */
+gboolean walpe_sprite_anim_control (WalpeSpriteAnim *sp, const char *what, double v, double now)
+{
+    if (!sp || !what)
+        return FALSE;
+    if (!strcmp (what, "play")) {
+        if (!isfinite (v))
+            return TRUE;
+        if (v > 0 && !sp->loop && sprite_frame_at (sp, sp->t) == sp->n - 1 && sp->rate > 0)
+            sp->t = 0;   /* an animation that ran to its end starts over */
+        sp->playing = v > 0 && sp->n > 1;
+        if (v < 0)
+            sp->t = 0;
+    } else if (!strcmp (what, "frame")) {
+        if (!isfinite (v))
+            return TRUE;
+        int f = (int) CLAMP (floor (v), 0.0, (double) (sp->n - 1));
+        sp->t = f > 0 ? sp->end[f - 1] : 0.0;
+    } else if (!strcmp (what, "rate")) {
+        if (isfinite (v))
+            sp->rate = CLAMP (v, -1000.0, 1000.0);
+    } else if (!strcmp (what, "time")) {
+        if (isfinite (v) && sp->duration > 0) {
+            double t = fmod (v, sp->duration);
+            sp->t = t < 0 ? t + sp->duration : t;
+            if (!(sp->t >= 0 && sp->t < sp->duration))
+                sp->t = 0;
+        }
+    } else if (!strcmp (what, "loop")) {
+        if (isfinite (v))
+            sp->loop = v != 0;
+    } else if (!strcmp (what, "join")) {
+        sp->t = isfinite (now) && now > 0 && sp->duration > 0 ? fmod (now, sp->duration) : 0.0;
+        if (!(sp->t >= 0 && sp->t < sp->duration))
+            sp->t = 0;
+    } else {
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/* what = "frames" | "duration" | "rate" | "playing" | "frame" | "time" |
+ * "loop" | "level" (halvings of the sheet that keep the frames on whole
+ * texels) | "refused" | "skipped"; 0 for anything else */
+double walpe_sprite_anim_query (const WalpeSpriteAnim *sp, const char *what)
+{
+    if (!sp || !what)
+        return 0;
+    if (!strcmp (what, "frames"))
+        return sp->n;
+    if (!strcmp (what, "duration"))
+        return sp->duration;
+    if (!strcmp (what, "rate"))
+        return sp->rate;
+    if (!strcmp (what, "playing"))
+        return sp->playing;
+    if (!strcmp (what, "frame"))
+        return sprite_frame_at (sp, sp->t);
+    if (!strcmp (what, "time"))
+        return sp->t;
+    if (!strcmp (what, "loop"))
+        return sp->loop;
+    if (!strcmp (what, "level"))
+        return sp->max_level;
+    if (!strcmp (what, "refused"))
+        return sp->refused;
+    if (!strcmp (what, "skipped"))
+        return sp->skipped;
+    return 0;
+}
+
+void walpe_sprite_anim_frame_size (const WalpeSpriteAnim *sp, int *w, int *h)
+{
+    *w = sp->fw;
+    *h = sp->fh;
+}
+
+/* frame f (brought into the table) as texture coordinates of the sheet:
+ * origin, x axis, y axis - a point (u, v) of the frame, v = 0 its first
+ * row, is origin + u * x axis + v * y axis */
+void walpe_sprite_anim_uv (const WalpeSpriteAnim *sp, int f, float uv[6])
+{
+    memcpy (uv, sp->uv[CLAMP (f, 0, sp->n - 1)], sizeof (float) * 6);
+}
+
+/* seconds until the frame on show changes by itself; < 0: it does not */
+double walpe_sprite_anim_next_change (const WalpeSpriteAnim *sp)
+{
+    if (sp->n < 2 || !sp->playing || !isfinite (sp->rate) || fabs (sp->rate) < 1e-6)
+        return -1;
+    int f = sprite_frame_at (sp, sp->t);
+    double left = sp->rate > 0 ? sp->end[f] - sp->t : sp->t - (f > 0 ? sp->end[f - 1] : 0.0);
+    return MAX (left, 0.0) / fabs (sp->rate);
+}
+
+/* A sprite layer's quad shows one frame: the size on screen the whole
+ * sheet would have at the same texel density - what the texture size
+ * rules (node_tex_fit) compare the stored texture with. So a sheet is
+ * reduced as one texture, by the measure of one of its frames. */
+static inline void node_sheet_extent (const NodeObj *nv, float *pw, float *ph)
+{
+    if (!nv->sprite || nv->sprite->fw < 1 || nv->sprite->fh < 1)
+        return;
+    *pw *= (float) nv->tex_w / (float) nv->sprite->fw;
+    *ph *= (float) nv->tex_h / (float) nv->sprite->fh;
+}
+
+/* the layer's file texture was attached and its file has a frame table
+ * (handed over; freed here). Decided when the scene loads: switching the
+ * feature loads the wallpapers again. */
+static void sprite_attach (SceneNodeContent *s, NodeObj *nv, WalpeTexFrame *frames)
+{
+    if (frames && walpe_feature (WALPE_FEAT_SPRITE_SHEETS) && !nv->sprite && nv->tex &&
+        !nv->tex_lazy && nv->video < 0 && nv->tex_ti.nframes > 0) {
+        if (nv->puppet) {
+            g_message ("scenenode: layer %s: a puppet with an animated texture: the picture is "
+                       "shown as a whole", nv->name ? nv->name : "?");
+        } else {
+            char *why = NULL;
+            nv->sprite = walpe_sprite_anim_new (frames, nv->tex_ti.nframes, nv->tex_w, nv->tex_h, &why);
+            const WalpeSpriteAnim *sp = nv->sprite;
+            if (sp && sp->refused)
+                g_warning ("scenenode: layer %s: sprite sheet %s refused (%s): its first frame is "
+                           "shown as a still", nv->name ? nv->name : "?", nv->tex_src, why);
+            else if (!sp)
+                g_warning ("scenenode: layer %s: sprite sheet %s refused (%s): the picture is "
+                           "shown as a whole", nv->name ? nv->name : "?", nv->tex_src,
+                           why ? why : "no usable frame");
+            else
+                g_message ("scenenode: layer %s plays a sprite sheet: %d frames of %dx%d on %dx%d, "
+                           "%.2f s%s%s", nv->name ? nv->name : "?", sp->n, sp->fw, sp->fh,
+                           nv->tex_w, nv->tex_h, sp->duration, why ? "; " : "", why ? why : "");
+            g_free (why);
+            nv->sp_frame = 0;
+            nv->sp_shown = -1;
+            nv->sp_live = sp && sp->playing;
+            if (sp && sp->n > 1)
+                s->has_sprites = TRUE;
+        }
+    }
+    g_free (frames);
+}
+
+/* how far short of a frame's edge (in parts of the frame) its texture
+ * coordinates stop when the frame, `texels` texels wide, is drawn over px
+ * pixels.
+ * Drawn larger than its texels, the quad's outermost pixels would be
+ * filtered from the neighbouring frame of the sheet as well (linear
+ * filtering reads up to half a texel past the edge); the frame is then
+ * read from the centres of its outermost texels - what a texture of its
+ * own, clamped at the edge, gives. At 1:1 and smaller nothing is cut: the
+ * pixel centres are at least half a texel inside already. */
+static float sprite_edge_inset (float texels, float px)
+{
+    if (!(texels >= 1.0f) || !(px > texels) || !(px > 2.0f))
+        return 0.0f;
+    float in = 0.5f * (1.0f / texels - 1.0f / px) / (1.0f - 1.0f / px);
+    return CLAMP (in, 0.0f, 0.25f);
+}
+
+/* the layer's quad with the texture coordinates of the frame on show, drawn
+ * by the quad program (glutil.h: v = 0 is the quad's upper edge). px_w x
+ * px_h: the quad's size on the target in pixels. The coordinates are
+ * rewritten when the frame or that size's share of the texels changes,
+ * never else. */
+static void sprite_draw (NodeObj *nv, GLuint tex, gboolean premult, float opacity,
+                         const float *mvp, int blend, const float tint[3], float px_w, float px_h)
+{
+    /* the frame's texels in the texture as it is stored (a sheet may be
+     * kept at a reduced size) */
+    const float in[2] = {
+        sprite_edge_inset (nv->tex_w > 0 ? (float) nv->sprite->fw * (float) nv->phys_w /
+                                           (float) nv->tex_w : 0.0f, px_w),
+        sprite_edge_inset (nv->tex_h > 0 ? (float) nv->sprite->fh * (float) nv->phys_h /
+                                           (float) nv->tex_h : 0.0f, px_h),
+    };
+    if (!nv->sp_vao) {
+        static const GLushort idx[6] = { 0, 1, 2, 2, 1, 3 };
+        glGenVertexArrays (1, &nv->sp_vao);
+        glBindVertexArray (nv->sp_vao);
+        glGenBuffers (1, &nv->sp_vbo);
+        glBindBuffer (GL_ARRAY_BUFFER, nv->sp_vbo);
+        glBufferData (GL_ARRAY_BUFFER, 16 * sizeof (float), NULL, GL_DYNAMIC_DRAW);
+        glEnableVertexAttribArray (0);
+        glVertexAttribPointer (0, 2, GL_FLOAT, GL_FALSE, 16, (void *) 0);
+        glEnableVertexAttribArray (1);
+        glVertexAttribPointer (1, 2, GL_FLOAT, GL_FALSE, 16, (void *) 8);
+        glGenBuffers (1, &nv->sp_ebo);
+        glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, nv->sp_ebo);
+        glBufferData (GL_ELEMENT_ARRAY_BUFFER, sizeof (idx), idx, GL_STATIC_DRAW);
+        glBindVertexArray (0);
+        glBindBuffer (GL_ARRAY_BUFFER, 0);
+        nv->sp_shown = -1;
+    }
+    if (nv->sp_shown != nv->sp_frame || fabsf (in[0] - nv->sp_inset[0]) > 1e-6f ||
+        fabsf (in[1] - nv->sp_inset[1]) > 1e-6f) {
+        /* corner positions and frame-local texture coordinates of the quad */
+        static const float pos[4][2] = { { -1, -1 }, { 1, -1 }, { -1, 1 }, { 1, 1 } };
+        static const float st[4][2] = { { 0, 1 }, { 1, 1 }, { 0, 0 }, { 1, 0 } };
+        float uv[6], v[16];
+        walpe_sprite_anim_uv (nv->sprite, nv->sp_frame, uv);
+        for (int k = 0; k < 4; k++) {
+            const float fs = st[k][0] > 0.5f ? 1.0f - in[0] : in[0];
+            const float ft = st[k][1] > 0.5f ? 1.0f - in[1] : in[1];
+            v[k * 4] = pos[k][0];
+            v[k * 4 + 1] = pos[k][1];
+            v[k * 4 + 2] = uv[0] + fs * uv[2] + ft * uv[4];
+            v[k * 4 + 3] = uv[1] + fs * uv[3] + ft * uv[5];
+        }
+        glBindBuffer (GL_ARRAY_BUFFER, nv->sp_vbo);
+        glBufferSubData (GL_ARRAY_BUFFER, 0, sizeof (v), v);
+        glBindBuffer (GL_ARRAY_BUFFER, 0);
+        nv->sp_shown = nv->sp_frame;
+        nv->sp_inset[0] = in[0];
+        nv->sp_inset[1] = in[1];
+    }
+    walpe_glutil_draw_mesh_tint (tex, premult, opacity, mvp, blend, tint, nv->sp_vao, 6);
+}
+
+static void sprite_gl_free (NodeObj *nv)
+{
+    if (nv->sp_vbo)
+        glDeleteBuffers (1, &nv->sp_vbo);
+    if (nv->sp_ebo)
+        glDeleteBuffers (1, &nv->sp_ebo);
+    if (nv->sp_vao)
+        glDeleteVertexArrays (1, &nv->sp_vao);
+    nv->sp_vao = nv->sp_vbo = nv->sp_ebo = 0;
+    nv->sp_shown = -1;
+}
+
 static gboolean load_image_object (SceneNodeContent *s, NodeObj *nv, const char *model_ref,
                                    const char *inst_utex)
 {
-    static gboolean warned_missing;
+    static atomic_int warned_missing;   /* (shared by the render threads: common/lazy.h) */
     char *mpath = resolve_model_ref (s->dir, model_ref);
     if (!mpath) {
-        if (!warned_missing) {
-            warned_missing = TRUE;
+        if (walpe_first_n (&warned_missing, 1)) {
             g_warning ("scenenode: model %s not found (further misses silent)", model_ref);
         }
         return FALSE;
@@ -708,7 +1250,7 @@ static gboolean load_image_object (SceneNodeContent *s, NodeObj *nv, const char 
         char *utex = user_texture_file (s, inst_utex);
         if (utex) {
             gboolean pmflag = !fx_has_effects (nv->fxset);
-            if (node_tex_attach (nv, utex, WALPE_TEX_LOAD_NATIVE_RG, pmflag, TRUE)) {
+            if (node_tex_attach (nv, utex, WALPE_TEX_LOAD_NATIVE_RG, pmflag, TRUE, NULL)) {
                 g_free (utex);
                 return TRUE;
             }
@@ -720,15 +1262,11 @@ static gboolean load_image_object (SceneNodeContent *s, NodeObj *nv, const char 
         glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         const guint8 white[4] = { 0xff, 0xff, 0xff, 0xff };
-        glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_BGRA, GL_UNSIGNED_BYTE, white);
+        walpe_gl_tex_image_bgra (1, 1, white);
         nv->premult = TRUE;
         /* effects on a solid layer (audio bars, gradients, ...) render at
-         * the layer's size, not at the 1x1 texture's (capped: the chain
-         * output is scaled to the quad anyway) */
-        float big = MAX (nv->size[0], nv->size[1]);
-        float k = big > 2048.0f ? 2048.0f / big : 1.0f;
-        nv->tex_w = nv->tex_full_w = MAX (1, walpe_d2i (nv->size[0] * k));
-        nv->tex_h = nv->tex_full_h = MAX (1, walpe_d2i (nv->size[1] * k));
+         * the layer's size, not at the 1x1 texture's (capped: solid_fx_size) */
+        solid_fx_size (nv, (float) SOLID_FX_CAP);
         nv->tex_ready = TRUE;
         nv->canvas = TRUE;
         if (nv->size[0] < 1 || nv->size[1] < 1)
@@ -885,7 +1423,9 @@ static gboolean load_image_object (SceneNodeContent *s, NodeObj *nv, const char 
                     /* WE effect shaders read and write STRAIGHT alpha:
                      * a layer with effects keeps its texture straight.
                      * Shared with the other monitors' contexts. */
-                    ok = node_tex_attach (nv, texpath, lf, !fxl, !fxl);
+                    WalpeTexFrame *frames = NULL;
+                    ok = node_tex_attach (nv, texpath, lf, !fxl, !fxl, &frames);
+                    sprite_attach (s, nv, frames);   /* (takes the table; none without a texture) */
                     g_free (texpath);
                 }
             }
@@ -1009,11 +1549,9 @@ static void make_text_texture (NodeObj *nv)
     glPixelStorei (GL_UNPACK_ROW_LENGTH, cairo_image_surface_get_stride (sf) / 4);
     glPixelStorei (GL_UNPACK_ALIGNMENT, 1);
     if (fresh)
-        glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, tw, th, 0, GL_BGRA, GL_UNSIGNED_BYTE,
-                      cairo_image_surface_get_data (sf));
+        walpe_gl_tex_image_bgra (tw, th, cairo_image_surface_get_data (sf));
     else
-        glTexSubImage2D (GL_TEXTURE_2D, 0, part[0], part[1], pw, ph, GL_BGRA, GL_UNSIGNED_BYTE,
-                         part_px);
+        walpe_gl_tex_sub_image_bgra (part[0], part[1], pw, ph, part_px);
     glPixelStorei (GL_UNPACK_ROW_LENGTH, 0);
     glPixelStorei (GL_UNPACK_ALIGNMENT, 4);
     /* text is rendered at the scene's size and drawn at the monitor's:
@@ -1477,6 +2015,8 @@ static void override_vec3 (JsonObject *io, const char *k, JsonObject *user_props
     }
 }
 
+#include "scenenode_sound.h"
+
 static void parse_node (NodeObj *nv, JsonObject *o, const char *dir, SceneNodeContent *s, GArray *out, int depth)
 {
     static const float one[2] = { 1.0f, 1.0f };
@@ -1489,6 +2029,17 @@ static void parse_node (NodeObj *nv, JsonObject *o, const char *dir, SceneNodeCo
     nv->visible = node_visible (o, s->user_props);
     nv->solid = wpj_bool (o, "solid", TRUE);
     nv->alpha = (float) prop_num (o, "alpha", 1.0);
+    /* a layer without the key takes no part in the camera parallax
+     * (Wallpaper Engine writes it for every layer it gives a depth); a
+     * depth no scene has is none. Read only in a scene that has the
+     * parallax: elsewhere nothing is drawn from it, and an option bound to
+     * it is not consumed (propprobe.h) - as before there was a parallax. */
+    if (s->par_on) {
+        prop_vec (o, "parallaxDepth", nv->par_depth, 2, (const float[2]) { 0.0f, 0.0f });
+        for (int k = 0; k < 2; k++)
+            nv->par_depth[k] = isfinite (nv->par_depth[k])
+                ? CLAMP (nv->par_depth[k], -1000.0f, 1000.0f) : 0.0f;
+    }
     nv->name = g_strdup (wpj_str (o, "name", NULL));
     {
         const char *at = wpj_str (o, "attachment", NULL);
@@ -1504,9 +2055,17 @@ static void parse_node (NodeObj *nv, JsonObject *o, const char *dir, SceneNodeCo
     }
     {
         int idx = (int) out->len;  /* flat objects: appended right after */
-        static const char *const sprops[] = { "visible", "alpha", "origin", "scale",
-                                              "angles", "color", "pointsize", "maxwidth",
-                                              "padding", NULL };
+        /* (the last entry only in a scene with camera parallax: there a
+         * script on "parallaxDepth" drives the layer's depth; elsewhere it
+         * runs without effect like every script on a property that is not
+         * drawn from) */
+        static const char *const sprops_par[] = { "visible", "alpha", "origin", "scale",
+                                                  "angles", "color", "pointsize", "maxwidth",
+                                                  "padding", "parallaxDepth", NULL };
+        static const char *const sprops_plain[] = { "visible", "alpha", "origin", "scale",
+                                                    "angles", "color", "pointsize", "maxwidth",
+                                                    "padding", NULL };
+        const char *const *sprops = s->par_on ? sprops_par : sprops_plain;
         for (int k = 0; sprops[k]; k++)
             collect_script (s, idx, o, sprops[k], sprops[k]);
         collect_inert_scripts (s, idx, o, sprops);
@@ -1835,8 +2394,10 @@ static void parse_node (NodeObj *nv, JsonObject *o, const char *dir, SceneNodeCo
         ts->ellipsis = prop_num (o, "limituseellipsis", 0.0) != 0;
         nv->tstyle = ts;
     } else if (wpj_str (o, "sound", NULL) || wpj_obj (o, "light")) {
-        nv->visible = FALSE; /* silent renderer */
+        nv->visible = FALSE; /* nothing to draw */
     }
+    if (json_object_has_member (o, "sound"))
+        node_sound_load (s, nv, o);   /* its player, if this program plays sound */
     if (!inst_scripts)   /* no WE particle system here: such scripts run without effect */
         collect_inert_scripts (s, (int) out->len, wpj_obj (o, "instanceoverride"), NULL);
 }
@@ -1873,6 +2434,8 @@ static void parse_nodes (JsonArray *arr, GArray *out, const char *dir, SceneNode
 
 /* ------------------------------------------------- SceneScript host */
 
+static float scene_zoom (SceneNodeContent *s);
+
 static int ss_find (gpointer u, const char *name)
 {
     SceneNodeContent *s = u;
@@ -1895,10 +2458,49 @@ static WalpeSsType ss_get (gpointer u, int idx, const char *prop, double *v, int
                            const char **str)
 {
     SceneNodeContent *s = u;
+    if (idx == -1 && !strcmp (prop, "scene.zoom")) {
+        /* the scene itself (layer -1): the zoom of the view - only while
+         * scripts may move the view; else they get no answer and see what
+         * they always saw */
+        if (!walpe_feature (WALPE_FEAT_SCRIPT_CAMERA))
+            return WSS_NONE;
+        v[0] = scene_zoom (s);
+        *n = 1;
+        return WSS_NUM;
+    }
     if (idx < 0 || (guint) idx >= s->nodes->len)
         return WSS_NONE;
     NodeObj *nv = &g_array_index (s->nodes, NodeObj, idx);
+    if (!strncmp (prop, "texanim.", 8)) {
+        /* ITextureAnimation of a layer that plays a sprite sheet (none
+         * for a still, a layer without one, or with the switch off:
+         * scripts get the inert object they always got) */
+        if (!nv->sprite || nv->sprite->n < 2 || !walpe_feature (WALPE_FEAT_SCRIPT_TEXANIM))
+            return WSS_NONE;
+        const char *k = prop + 8;
+        if (strcmp (k, "frames") && strcmp (k, "duration") && strcmp (k, "rate") &&
+            strcmp (k, "playing") && strcmp (k, "frame") && strcmp (k, "time") && strcmp (k, "loop"))
+            return WSS_NONE;
+        v[0] = walpe_sprite_anim_query (nv->sprite, k);
+        *n = 1;
+        return !strcmp (k, "playing") || !strcmp (k, "loop") ? WSS_BOOL : WSS_NUM;
+    }
+    if (!strcmp (prop, "parallaxDepth")) {
+        /* only where it is drawn from: in a scene without camera parallax
+         * scripts keep the plain value they always had */
+        if (!s->par_on)
+            return WSS_NONE;
+        v[0] = nv->par_depth[0];
+        v[1] = nv->par_depth[1];
+        *n = 2;
+        return WSS_VEC;
+    }
     *n = 3;
+    if (nv->sound) {   /* a sound layer that plays: its volume, isPlaying () */
+        WalpeSsType st = node_sound_get (s, nv, prop, v);
+        if (st != WSS_NONE)
+            return st;
+    }
     if (!strcmp (prop, "origin")) {
         v[0] = nv->origin[0]; v[1] = nv->origin[1]; v[2] = 0;
         return WSS_VEC;
@@ -1988,9 +2590,60 @@ static void ss_set (gpointer u, int idx, const char *prop, WalpeSsType t, const 
                     int n, const char *str)
 {
     SceneNodeContent *s = u;
+    if (idx == -1 && !strcmp (prop, "scene.zoom")) {
+        /* thisScene.setCameraTransforms ({ zoom }) or a script on
+         * general.zoom: scenes zoom in a little while their camera shake
+         * is on, so that the sway shows no edge. The camera counts as moved
+         * when the zoom of the view changed: not while the switch is off
+         * (the value is kept, it holds when the switch goes on, but the
+         * view is the scene file's and nothing else may change either),
+         * and not for a zoom equal to the one on show (3151551777 sets
+         * 1.01 over a stored 1.01). */
+        if (t == WSS_NUM && v[0] > 0.01 && v[0] < 100.0 && s->scr_zoom != (float) v[0]) {
+            const float shown = scene_zoom (s);
+            s->scr_zoom = (float) v[0];
+            if (scene_zoom (s) != shown)
+                s->cam_moved = 2;
+        }
+        return;
+    }
+    if (idx == -1 && !strcmp (prop, "scene.pan")) {
+        /* thisScene.setCameraTransforms ({ eye }): how far the script
+         * moved the camera sideways from where the scene file puts it */
+        if (t == WSS_VEC && n >= 2 && isfinite (v[0]) && isfinite (v[1])) {
+            const float px = (float) CLAMP (v[0], -1e6, 1e6), py = (float) CLAMP (v[1], -1e6, 1e6);
+            if ((px != s->cam_pan[0] || py != s->cam_pan[1]) &&
+                walpe_feature (WALPE_FEAT_SCRIPT_CAMERA))
+                s->cam_moved = 2;
+            s->cam_pan[0] = px;
+            s->cam_pan[1] = py;
+        }
+        return;
+    }
     if (idx < 0 || (guint) idx >= s->nodes->len)
         return;
     NodeObj *nv = &g_array_index (s->nodes, NodeObj, idx);
+    if (!strncmp (prop, "texanim.", 8)) {
+        /* getTextureAnimation ().play / pause / stop / setFrame / rate /
+         * setCurrentTime / loop / join: the layer's own sheet, by frame
+         * number or time, brought into the table's range by the clock.
+         * The frame shows with this frame (scripts run before the sprite
+         * clocks are read). */
+        if (nv->sprite && nv->sprite->n > 1 && (t == WSS_NUM || t == WSS_BOOL) &&
+            walpe_feature (WALPE_FEAT_SCRIPT_TEXANIM))
+            walpe_sprite_anim_control (nv->sprite, prop + 8, v[0],
+                                       (double) (s->last_frame_us - s->t0) / 1e6);
+        return;
+    }
+    if (!strcmp (prop, "parallaxDepth")) {
+        if (s->par_on && t == WSS_VEC && n >= 2 && isfinite (v[0]) && isfinite (v[1])) {
+            nv->par_depth[0] = (float) CLAMP (v[0], -1000.0, 1000.0);
+            nv->par_depth[1] = (float) CLAMP (v[1], -1000.0, 1000.0);
+        }
+        return;
+    }
+    if (nv->sound)   /* play / pause / stop, volume, visible of a sound layer's player */
+        node_sound_set (nv, prop, t, v);
     if (nv->inst && nv->weparts && !strncmp (prop, "inst.", 5)) {
         /* multipliers stay in the range the static overrides have; the
          * particle system takes them up at its next step */
@@ -2280,11 +2933,13 @@ static float tex_slack (gboolean plain)
 
 static float fx_min_scale (void)
 {
-    static float v = -1.0f;
-    if (v < 0.0f) {
+    static float v;
+    static gsize once;   /* (a float: g_once, see common/lazy.h) */
+    if (g_once_init_enter (&once)) {
         const char *e = g_getenv ("WALPE_FX_MIN_SCALE");
         float f = e && *e ? (float) g_ascii_strtod (e, NULL) : 1.0f / 64.0f;
         v = isfinite (f) ? CLAMP (f, 1.0f / 64.0f, 1.0f) : 1.0f / 64.0f;
+        g_once_init_leave (&once, 1);
     }
     return v;
 }
@@ -2292,9 +2947,11 @@ static float fx_min_scale (void)
 static float fx_working_scale (NodeObj *nv, const WalpeMat3 *m, int w, int h, int tw, int th,
                                float kmin)
 {
-    static int fullres = -1;
+    static WalpeLazy fullres_cell = WALPE_LAZY_UNSET;
+    int fullres = walpe_lazy_get (&fullres_cell);
     if (fullres < 0)
-        fullres = g_getenv ("WALPE_FX_FULLRES") && *g_getenv ("WALPE_FX_FULLRES") == '1';
+        fullres = walpe_lazy_set (&fullres_cell, g_getenv ("WALPE_FX_FULLRES") &&
+                                                 *g_getenv ("WALPE_FX_FULLRES") == '1');
     if (fullres || tw < 1 || th < 1)
         return 1.0f;
     float pw = hypotf (m->m[0] * w, m->m[1] * h), ph = hypotf (m->m[3] * w, m->m[4] * h);
@@ -2599,6 +3256,15 @@ static gboolean scenenode_gl_init (WalpeContent *c, GError **err)
     SceneNodeContent *s = (SceneNodeContent *) c;
     scene_thread_numeric_c ();
     walpe_glutil_init ();
+    {
+        /* a driver that cannot compile the effect shaders at all: one
+         * sentence that names it, instead of a compile log per effect */
+        const char *why = walpe_gl_caps_scene_error ();
+        if (why) {
+            g_set_error_literal (err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, why);
+            return FALSE;
+        }
+    }
     for (guint i = 0; i < s->nodes->len && !s->text_held; i++)
         if (g_array_index (s->nodes, NodeObj, i).kind == NK_TEXT) {
             s->text_held = TRUE;
@@ -2684,6 +3350,11 @@ static gboolean scenenode_gl_init (WalpeContent *c, GError **err)
         if (nv->parts || nv->weparts || nv->puppet ||
             (fx_has_effects (nv->fxset) && !fx_is_static (nv->fxset)))
             s->animates = TRUE;
+        /* a simulation effect needs the clock also when it is switched off
+         * at this moment (fluid_sim): switched on later it runs at once,
+         * and until then its frames are found unchanged and not drawn */
+        if (fx_has_simulation (nv->fxset))
+            s->animates = TRUE;
     }
     /* layers whose on-screen size a script may change keep their texture
      * as loaded (tex_downscale leaves them alone): a script or property
@@ -2763,6 +3434,7 @@ static gboolean scenenode_gl_init (WalpeContent *c, GError **err)
         s->audio_ref = TRUE;     /* dropped by set_paused(TRUE) / gl_free */
         walpe_audio_ref ();
     }
+    scene_post_init (s);   /* bloom / camera shake: the log lines (the sway's frame clock: scene_post_frame) */
     if (!s->animates && s->videos->len > 0) {
         s->animates = TRUE;
         s->only_video_anim = TRUE;
@@ -2775,9 +3447,23 @@ static gboolean scenenode_gl_init (WalpeContent *c, GError **err)
     }
     if (walpe_ss_uses_cursor (s->ss))
         s->base.uses_pointer_pos = TRUE;
+    if (s->par_on) {
+        /* camera parallax draws with the pointer position: the caller hands
+         * it over and asks for a frame when it moves */
+        guint deep = 0;
+        for (guint i = 0; i < s->nodes->len; i++) {
+            const NodeObj *nv = &g_array_index (s->nodes, NodeObj, i);
+            deep += nv->parent < 0 && (nv->par_depth[0] != 0 || nv->par_depth[1] != 0);
+        }
+        s->base.uses_pointer_pos = TRUE;
+        g_message ("scenenode: camera parallax (amount %.2f, delay %.2f s, mouse influence %.2f): "
+                   "%u layers with a depth", (double) s->par_amount, (double) s->par_delay,
+                   (double) s->par_infl, deep);
+    }
     g_message ("scenenode: pointer position %s, cursor events %s",
                s->base.uses_pointer_pos ? "used every frame" : "unused",
                s->base.wants_pointer ? "yes" : "no");
+    scene_sound_report (s);
     (void) err;
     return TRUE;
 }
@@ -2862,19 +3548,42 @@ static int cursor_hit (SceneNodeContent *s, float x, float y, float *lx, float *
     return best;
 }
 
-/* scene -> monitor mapping: pixels per scene unit (cover of the canvas,
- * times the camera zoom) and the scene point at the monitor centre (the
- * canvas centre moved by the camera layer's origin) */
-static void view_map (SceneNodeContent *s, float w, float h, float *k, float *cx, float *cy)
+/* the scene point at the monitor centre: the canvas centre moved by the
+ * camera layer's origin and by a script's pan - the camera's rest centre -
+ * and, with sway, by this frame's camera sway (cam_sway). Each addition
+ * only when there is something to add: a scene without them computes what
+ * it always did. */
+static void view_centre (SceneNodeContent *s, gboolean sway, float *cx, float *cy)
 {
-    *k = fmaxf (w / s->scene_w, h / s->scene_h) * s->cam_zoom * s->gen_zoom;
     *cx = s->scene_w / 2.0f;
     *cy = s->scene_h / 2.0f;
+    if ((s->cam_pan[0] != 0 || s->cam_pan[1] != 0) && walpe_feature (WALPE_FEAT_SCRIPT_CAMERA)) {
+        *cx += s->cam_pan[0];   /* a script moved the camera */
+        *cy += s->cam_pan[1];
+    }
+    if (sway && (s->cam_sway[0] != 0 || s->cam_sway[1] != 0)) {
+        *cx += s->cam_sway[0];   /* camera shake (scene_post_frame): once, here */
+        *cy += s->cam_sway[1];
+    }
     if (s->cam_node >= 0 && (guint) s->cam_node < s->nodes->len) {
         const NodeObj *cn = &g_array_index (s->nodes, NodeObj, s->cam_node);
         *cx += cn->origin[0];
         *cy += cn->origin[1];
     }
+}
+
+/* general.zoom, or the zoom a script set in its place */
+static float scene_zoom (SceneNodeContent *s)
+{
+    return s->scr_zoom > 0 && walpe_feature (WALPE_FEAT_SCRIPT_CAMERA) ? s->scr_zoom : s->gen_zoom;
+}
+
+/* scene -> monitor mapping: pixels per scene unit (cover of the canvas,
+ * times the camera zoom) and the scene point at the monitor centre */
+static void view_map (SceneNodeContent *s, float w, float h, float *k, float *cx, float *cy)
+{
+    *k = fmaxf (w / s->scene_w, h / s->scene_h) * s->cam_zoom * scene_zoom (s);
+    view_centre (s, TRUE, cx, cy);
 }
 
 static void cursor_dispatch (SceneNodeContent *s)
@@ -2938,6 +3647,87 @@ static void cursor_dispatch (SceneNodeContent *s)
  * as the members of a parent cycle do. */
 static __thread int node_world_depth;
 
+/* ---- camera parallax: the pure parts (scenenode.h) ---- */
+
+void walpe_parallax_lag_init (WalpeParallaxLag *l, float delay)
+{
+    l->pos[0] = l->pos[1] = l->target[0] = l->target[1] = 0.5f;
+    l->time = isfinite (delay) ? MAX (delay, 0.0f) : 0.0f;   /* at rest in the middle ... */
+    l->since = 3600.0f;                                      /* ... for a long time */
+}
+
+/* The lag: a clock runs up to `delay` while the pointer rests and is set
+ * back by the time since the previous move whenever the pointer moves;
+ * each frame the lagging pointer covers clock / delay of what is left. A
+ * pointer that keeps moving is followed at 1 / delay per second; `delay`
+ * seconds after it stopped the lagging pointer is exactly on it and
+ * nothing moves any more (so a scene at rest asks for no frames). */
+gboolean walpe_parallax_follow (WalpeParallaxLag *l, float tx, float ty, float dt, float delay)
+{
+    tx = isfinite (tx) ? CLAMP (tx, 0.0f, 1.0f) : 0.5f;
+    ty = isfinite (ty) ? CLAMP (ty, 0.0f, 1.0f) : 0.5f;
+    if (!isfinite (dt) || dt < 0)
+        dt = 0;
+    if (!isfinite (delay) || delay < 0)
+        delay = 0;
+    if (fabsf (tx - l->target[0]) > 1e-4f || fabsf (ty - l->target[1]) > 1e-4f) {
+        l->time = MAX (0.0f, l->time - l->since);
+        l->since = 0.0f;
+        l->target[0] = tx;
+        l->target[1] = ty;
+    }
+    l->since = MIN (l->since + dt, 3600.0f);
+    l->time = MIN (l->time + dt, delay);
+    float a = delay > 1e-3f ? CLAMP (l->time / delay, 0.0f, 1.0f) : 1.0f;
+    for (int k = 0; k < 2; k++) {
+        if (a >= 1.0f)
+            l->pos[k] = l->target[k];   /* arrived: exactly there */
+        else
+            l->pos[k] += (l->target[k] - l->pos[k]) * a;
+    }
+    return l->pos[0] != l->target[0] || l->pos[1] != l->target[1];
+}
+
+void walpe_parallax_shift (const float depth[2], float amount, float influence,
+                           const float pos[2], const float layer[2], const float camera[2],
+                           const float scene[2], gboolean offset, float out[2])
+{
+    for (int k = 0; k < 2; k++) {
+        float o = offset ? layer[k] - camera[k] : 0.0f;
+        float m = (0.5f - pos[k]) * scene[k] * influence;
+        float v = (o + m) * depth[k] * amount;
+        out[k] = isfinite (v) ? v : 0.0f;
+    }
+}
+
+/* this frame's pointer for the camera parallax. px, py: as gl_render gets
+ * them, -1..1 across the monitor with y growing downwards; (0, 0), the
+ * middle, while the caller has no pointer to report. */
+static void scene_parallax_begin (SceneNodeContent *s, float px, float py, float dt)
+{
+    s->par_moving = walpe_parallax_follow (&s->par_lag, px * 0.5f + 0.5f, py * -0.5f + 0.5f, dt,
+                                           s->par_delay);
+    s->par_offs = walpe_feature (WALPE_FEAT_PARALLAX_OFFSET);
+    /* rest centre: without the camera sway */
+    view_centre (s, FALSE, &s->par_cam[0], &s->par_cam[1]);
+}
+
+/* node_world, a layer without a parent in a scene with camera parallax:
+ * moved by its depth. Layers below it get the move through its matrix:
+ * a group stays in one piece, whatever depths its members carry, and what
+ * hangs on a puppet's attachment point stays on it. */
+static inline void node_parallax (SceneNodeContent *s, NodeObj *nv)
+{
+    if (nv->par_depth[0] == 0 && nv->par_depth[1] == 0)
+        return;
+    float sh[2];
+    walpe_parallax_shift (nv->par_depth, s->par_amount, s->par_infl, s->par_lag.pos,
+                          (const float[2]) { nv->world.m[6], nv->world.m[7] }, s->par_cam,
+                          (const float[2]) { s->scene_w, s->scene_h }, s->par_offs, sh);
+    if (sh[0] != 0 || sh[1] != 0)
+        walpe_mat3_translate (&nv->world, sh[0], sh[1]);
+}
+
 static void node_world (SceneNodeContent *s, guint i)
 {
     NodeObj *nv = &g_array_index (s->nodes, NodeObj, i);
@@ -2988,6 +3778,8 @@ static void node_world (SceneNodeContent *s, guint i)
     } else {
         nv->world = local;
     }
+    if (s->par_on && nv->parent < 0)
+        node_parallax (s, nv);
     /* the user's "Adjust layers" transform: last, after everything the
      * scene, its options, animations and scripts put into the node */
     if (s->n_adj)
@@ -3031,6 +3823,11 @@ static int node_fit_level (int W, int H, float pw, float ph)
 /* the layer's texture has a mip chain to come that is not on the GPU yet */
 static gboolean node_chain_pending (const NodeObj *nv)
 {
+    /* a sprite sheet whose frames do not lie on a 4-texel grid keeps its
+     * one level: the smaller levels of a chain average across the frames'
+     * edges, and every frame would show a seam of its neighbours */
+    if (nv->sprite && nv->sprite->max_level < 2)
+        return FALSE;
     if (nv->tex_comp)
         return !nv->tex_chain && nv->tex_mips > 1 && walpe_gl_mipmaps_enabled ();
     return nv->tex_want_mips;
@@ -3085,6 +3882,7 @@ static void node_tex_fit (SceneNodeContent *s, NodeObj *nv, guint i, const Walpe
                           int w, int h)
 {
     float pw = hypotf (m->m[0] * w, m->m[1] * h), ph = hypotf (m->m[3] * w, m->m[4] * h);
+    node_sheet_extent (nv, &pw, &ph);   /* a sprite sheet: sized as one texture */
     if (nv->ds_state == 3) {
         if (pw >= 1 && ph >= 1 && (nv->phys_w > pw * 2.02f || nv->phys_h > ph * 2.02f)) {
             node_chain_build (nv);
@@ -3212,6 +4010,10 @@ static int node_plain_level (SceneNodeContent *s, NodeObj *nv, guint i, float pw
                 L = 1;
         }
     }
+    /* a sprite sheet is halved only as often as its frames stay on whole
+     * texels: beyond that a halved texel would mix two frames */
+    if (nv->sprite)
+        L = MIN (L, nv->sprite->max_level);
     *fits_out = fits;
     return L;
 }
@@ -3297,6 +4099,10 @@ static gboolean node_fx_input_soft (NodeObj *nv, float share)
 {
     if (node_fx_soft_mode () == 1 || !(share > FX_INPUT_SOFT_MAX))
         return FALSE;
+    /* a sprite sheet: the layer's own material pass reads it first, texel
+     * for texel (fx_set_input_frame) */
+    if (nv->sprite)
+        return FALSE;
     /* a layer colour other than white: its own material pass reads the
      * texture first, texel for texel (fx_set_input_tint) */
     for (int c = 0; c < 3; c++)
@@ -3328,13 +4134,16 @@ static int node_fx_level (SceneNodeContent *s, NodeObj *nv, guint i, float fk, f
          * texels the blit put there are the ones the pass used to read from
          * the full texture. WALPE_TEX_FX_ODD=0: such a texture stays at
          * full size, as before. */
-        static int odd = -1;
+        static WalpeLazy odd_cell = WALPE_LAZY_UNSET;
+        int odd = walpe_lazy_get (&odd_cell);
         if (odd < 0) {
             const char *e = g_getenv ("WALPE_TEX_FX_ODD");
-            odd = !(e && *e == '0');
+            odd = walpe_lazy_set (&odd_cell, !(e && *e == '0'));
         }
         while (!odd && L > 0 && ((nv->tex_w & ((1 << L) - 1)) || (nv->tex_h & ((1 << L) - 1))))
             L--;
+        if (nv->sprite)   /* as node_plain_level: frames stay on whole texels */
+            L = MIN (L, nv->sprite->max_level);
         if (L > 0 && node_fx_input_soft (nv, share)) {
             if (node_fx_soft_mode () == 2) {
                 nv->fx_soft_cost = 1.0f;   /* not looked at: as if all of it were lost */
@@ -3466,6 +4275,11 @@ static float node_fx_kmin (SceneNodeContent *s, NodeObj *nv, guint i)
 {
     if (nv->compose || nv->kind != NK_IMAGE || nv->video >= 0 || nv->puppet || node_scripted (s, i))
         return fmaxf (0.5f, fx_min_scale ());
+    /* a sprite sheet that cannot be stored smaller than level max_level:
+     * its effects do not work below half of that, where the material pass
+     * would read the sheet beyond 2:1 (the rule for tex_downscale off) */
+    if (nv->sprite && s->downscale)
+        return fmaxf (0.5f / (float) (1 << nv->sprite->max_level), fx_min_scale ());
     /* tex_downscale off (preset Maximum, the exact picture): the texture
      * stays at file size, so its effects must not work below half of it
      * either - a first pass that reads it beyond 2:1 skips texels (plain
@@ -3648,6 +4462,8 @@ static void node_load_deferred (SceneNodeContent *s, NodeObj *nv, guint i, const
         node_tex_fit (s, nv, i, &m, w, h);
     if ((nv->tex_lazy || nv->fxin_state != 2) && fx_has_effects (nv->fxset) && !s->nofx) {
         int fw = nv->tex_w ? nv->tex_w : 256, fh = nv->tex_h ? nv->tex_h : 256;
+        if (nv->sprite)   /* its effects work on one frame of the sheet */
+            walpe_sprite_anim_frame_size (nv->sprite, &fw, &fh);
         node_fx_input_fit (s, nv, i, fx_working_scale (nv, &m, win_w, win_h, fw, fh,
                                                        node_fx_kmin (s, nv, i)),
                            node_view_share (&m));
@@ -3660,10 +4476,11 @@ static void node_load_deferred (SceneNodeContent *s, NodeObj *nv, guint i, const
  * loaded with the first frame too, as before */
 static gboolean tex_load_hidden (void)
 {
-    static int on = -1;
+    static WalpeLazy on_cell = WALPE_LAZY_UNSET;
+    int on = walpe_lazy_get (&on_cell);
     if (on < 0) {
         const char *e = g_getenv ("WALPE_TEX_LOAD_HIDDEN");
-        on = e && *e == '1';
+        on = walpe_lazy_set (&on_cell, e && *e == '1');
     }
     return on;
 }
@@ -3751,7 +4568,18 @@ static void scenenode_probe_general (SceneNodeContent *s, JsonBuilder *b)
 {
     probe_vec (b, "camzoom", &s->cam_zoom, 1);
     probe_vec (b, "genzoom", &s->gen_zoom, 1);
+    if (s->par_on)   /* (a digest of a scene without camera parallax is unchanged) */
+        probe_vec (b, "parallax", s->par_lag.pos, 2);
+    /* what a script made of the camera, where the view differs for it: the
+     * digest stays that of a scene whose view is the scene file's (the
+     * switch off, a pan of nothing, a zoom equal to general.zoom) */
+    if ((s->cam_pan[0] != 0 || s->cam_pan[1] != 0) && walpe_feature (WALPE_FEAT_SCRIPT_CAMERA))
+        probe_vec (b, "campan", s->cam_pan, 2);
+    const float zoom = scene_zoom (s);
+    if (zoom != s->gen_zoom)
+        probe_vec (b, "scriptzoom", &zoom, 1);
     probe_vec (b, "clearcolor", s->clear, 3);
+    scene_post_probe (s, b);   /* bloom / camera shake, when the scene has them */
 }
 
 static void probe_vec (JsonBuilder *b, const char *k, const float *v, int n)
@@ -3791,6 +4619,8 @@ static void scenenode_probe_dump (SceneNodeContent *s)
         probe_vec (b, "angle", &nv->angle_z, 1);
         probe_vec (b, "color", nv->tint, 3);
         probe_vec (b, "size", nv->size, 2);
+        if (nv->sprite)   /* sprite sheet: the frame on show, of how many */
+            probe_vec (b, "sprite", (const float[2]) { (float) nv->sp_frame, (float) nv->sprite->n }, 2);
         json_builder_set_member_name (b, "blend");
         json_builder_add_int_value (b, nv->blend);
         json_builder_set_member_name (b, "tex");
@@ -3823,6 +4653,8 @@ static void scenenode_probe_dump (SceneNodeContent *s)
             json_builder_set_member_name (b, "puppet");
             walpe_puppet_probe (nv->puppet, b);
         }
+        if (nv->sound)
+            node_sound_probe (nv, b);
         if (nv->fxset) {
             json_builder_set_member_name (b, "fx");
             fx_probe_dump (nv->fxset, b);
@@ -3860,10 +4692,13 @@ static void scenenode_px_begin (SceneNodeContent *s)
     s->qa.base = 0;
     if (!s->base.stats_wanted || s->px_state != 0 || s->frame_no % 20 != 3)
         return;
-    if (s->px_can < 0)
-        s->px_can = epoxy_is_desktop_gl () &&
-                    (epoxy_gl_version () >= 46 ||
-                     epoxy_has_gl_extension ("GL_ARB_pipeline_statistics_query"));
+    if (s->px_can < 0) {
+        const WalpeGlCaps *gc = walpe_gl_caps ();
+        s->px_can = gc ? gc->pipeline_stats
+                       : epoxy_is_desktop_gl () &&
+                         (epoxy_gl_version () >= 46 ||
+                          epoxy_has_gl_extension ("GL_ARB_pipeline_statistics_query"));
+    }
     if (!s->px_can)
         return;
     GLint cur = 0;   /* somebody else's query of the same kind is running */
@@ -3880,6 +4715,7 @@ static void scenenode_px_end (SceneNodeContent *s, int w, int h)
 {
     FxAcct a;
     fx_acct_take (&a);
+    scene_post_acct (s, &a);   /* the frame's bloom counts as its effect passes do */
     if (s->px_state == 1) {
         glEndQuery (GL_FRAGMENT_SHADER_INVOCATIONS_ARB);
         s->px_fx = a.px_now;
@@ -4000,13 +4836,19 @@ static void scenenode_texres_apply (SceneNodeContent *s)
     if (s->texres_applied || s->frame_no < 3)
         return;
     s->texres_applied = TRUE;
-    for (guint i = 0; s->q.tex_res > 0 && i < s->nodes->len; i++) {
+    const int tex_cap = MAX (s->base.tex_limit, 0);   /* content.h: texture_limit */
+    for (guint i = 0; (s->q.tex_res > 0 || tex_cap > 0) && i < s->nodes->len; i++) {
         NodeObj *nv = &g_array_index (s->nodes, NodeObj, i);
         if (nv->kind != NK_IMAGE || !nv->tex_src || nv->video >= 0 || nv->systex ||
             nv->tex_lazy || !nv->tex)
             continue;
         const int have = nv->tex_lod, was = nv->tex_min_lod;
         int lod = have + s->q.tex_res;
+        /* texture_limit (resolution.h): the level at which the texture's
+         * longer side is within the cap, when that is further down. Same
+         * path as the knob: never larger again, the levels a compressed
+         * file does not store are not reached. */
+        lod = MAX (lod, walpe_texlimit_level (nv->tex_w, nv->tex_h, tex_cap));
         while (lod > have && ((nv->tex_w >> lod) < 64 || (nv->tex_h >> lod) < 64))
             lod--;
         if (lod <= have)
@@ -4053,6 +4895,7 @@ static void scenenode_drop_targets (SceneNodeContent *s)
     }
     bake_drop (s);
     scene_target_drop (&s->rs.fbo, &s->rs.tex);
+    scene_post_drop_targets (s);
     walpe_weparticles_drop_targets ();
     walpe_glutil_blend_release ();
     fx_targets_release ();
@@ -4196,6 +5039,8 @@ static guint64 node_signature (SceneNodeContent *s, guint i, gboolean *vol)
     SIG_ADD (h, nv->phys_w);
     SIG_ADD (h, nv->phys_h);
     SIG_ADD (h, nv->pix_serial);
+    if (nv->sprite)   /* the frame of its sheet on show */
+        SIG_ADD (h, nv->sp_frame);
     SIG_ADD (h, nv->text_baked);
     h = sig_mix (h, nv->world.m, sizeof (nv->world.m));
     h = sig_mix (h, nv->size, sizeof (nv->size));
@@ -4367,35 +5212,93 @@ static gboolean scenenode_gl_render (WalpeContent *c, int w, int h, float px, fl
     walpe_cph_to (WALPE_CPH_OTHER);   /* CPU phases (cpuphase.h): off unless WALPE_CPU_PHASES */
     WALPE_CPH_COUNT (frames, 1);
     scene_thread_numeric_c ();
+    if (s->sound_group && !s->sound_live) {
+        /* the first frame: from now on the scene is shown. (Not gl_init: a
+         * scene loaded on a paused monitor is paused right after it.) */
+        s->sound_live = TRUE;
+        scene_sound_sync (s);
+    }
     tex_slack_pct = s->slack_pct;
     gboolean lost = c->surface_lost;
     gboolean exposed = c->surface_exposed;
     c->surface_lost = c->surface_exposed = FALSE;
     c->frame_unchanged = FALSE;
-    /* render scale: everything below works at the reduced size; the frame
-     * is scaled up to the window (win_w x win_h) at the end */
-    const int win_w = w, win_h = h;
-    GLuint scene_fb = 0;   /* where the frame is drawn: the window, or s->rs */
+    /* Three sizes. out_w x out_h: the surface the finished frame is put
+     * on. win_w x win_h: the size chosen for this monitor's picture
+     * (content.h render_w / render_h; the surface's own unless the owner
+     * set another) - "the monitor" for everything below: g_Screen, effect
+     * working sizes, what is stored of each texture. w x h: what the frame
+     * is drawn at, the chosen size times the render scale. Whenever that
+     * is not the surface's size the frame is drawn into the scene's own
+     * target and scaled to the surface at the end. With nothing chosen and
+     * the render scale at 100 all three are the same and the frame is
+     * drawn straight into the surface. */
+    const int out_w = w, out_h = h;
+    int lw = out_w, lh = out_h;
+    if (c->render_w > 0 && c->render_h > 0 &&
+        !(s->size_failed && s->size_failed_w == c->render_w && s->size_failed_h == c->render_h)) {
+        lw = c->render_w;
+        lh = c->render_h;
+    }
+    int rw = lw, rh = lh;
     if (s->render_scale < 100) {
-        int rw = MIN (win_w, MAX (16, (win_w * s->render_scale + 50) / 100));
-        int rh = MIN (win_h, MAX (16, (win_h * s->render_scale + 50) / 100));
-        if (rw != win_w || rh != win_h) {
-            if (scene_target_ensure (&s->rs.fbo, &s->rs.tex, &s->rs.w, &s->rs.h, rw, rh, GL_RGBA8,
-                                     TRUE)) {
-                scene_fb = s->rs.fbo;
-                w = rw;
-                h = rh;
-            } else {
-                g_warning ("scenenode: no %dx%d render target: render_scale stays at 100", rw, rh);
-                s->render_scale = 100;
-                s->rs_fixed = TRUE;
+        rw = MIN (lw, MAX (16, (lw * s->render_scale + 50) / 100));
+        rh = MIN (lh, MAX (16, (lh * s->render_scale + 50) / 100));
+    }
+    GLuint scene_fb = 0;   /* where the frame is drawn: the surface, or s->rs */
+    if (rw != out_w || rh != out_h) {
+        if (scene_target_ensure (&s->rs.fbo, &s->rs.tex, &s->rs.w, &s->rs.h, rw, rh, GL_RGBA8,
+                                 TRUE)) {
+            scene_fb = s->rs.fbo;
+        } else if (lw != out_w || lh != out_h) {
+            /* the chosen size cannot be had (beyond what the GL gives a
+             * texture, or no memory for it): the surface's own, and the
+             * same choice is not tried again every frame */
+            g_warning ("scenenode: no %dx%d render target: this wallpaper is rendered at the "
+                       "output's own %dx%d", rw, rh, out_w, out_h);
+            s->size_failed = TRUE;
+            s->size_failed_w = c->render_w;
+            s->size_failed_h = c->render_h;
+            lw = rw = out_w;
+            lh = rh = out_h;
+        } else {
+            g_warning ("scenenode: no %dx%d render target: render_scale stays at 100", rw, rh);
+            s->render_scale = 100;
+            s->rs_fixed = TRUE;
+            rw = out_w;
+            rh = out_h;
+        }
+    }
+    w = rw;
+    h = rh;
+    const int win_w = lw, win_h = lh;
+    {
+        /* solid layers: the cap of their effects' working size follows the
+         * render size once that is wider than the built-in cap
+         * (solid_fx_size). With a render size of up to 2048 pixels on its
+         * longer side nothing in here ever runs. */
+        const int cap = MAX (SOLID_FX_CAP, MAX (win_w, win_h));
+        if (cap != (s->solid_cap ? s->solid_cap : SOLID_FX_CAP)) {
+            s->solid_cap = cap;
+            for (guint i = 0; i < s->nodes->len; i++) {
+                NodeObj *nv = &g_array_index (s->nodes, NodeObj, i);
+                if (nv->canvas && nv->size[0] >= 1 && nv->size[1] >= 1)
+                    solid_fx_size (nv, (float) cap);
             }
         }
     }
     if (!scene_fb && s->rs.tex)
         scene_target_drop (&s->rs.fbo, &s->rs.tex);
     const gboolean scaled = scene_fb != 0;
+    /* another way of scaling the same frame is another picture */
+    if (scene_fb && c->scale_filter != s->scale_filter) {
+        s->scale_filter = c->scale_filter;
+        c->picture_serial++;
+    }
 
+    /* camera shake: this frame's offset of the view centre; and whether
+     * the frame gets bloom (scenenode_post.h) */
+    scene_post_frame (s);
     float k, vcx, vcy;
     view_map (s, (float) w, (float) h, &k, &vcx, &vcy);
     WalpeMat3 tail;
@@ -4417,6 +5320,15 @@ static gboolean scenenode_gl_render (WalpeContent *c, int w, int h, float px, fl
     if (pts != s->pt_serial) {
         s->pt_serial = pts;
         scenenode_particles_changed (s);
+    }
+    {
+        /* a renderer feature was switched while the scene runs: what it
+         * draws may have changed although nothing in the scene did */
+        guint fts = walpe_feature_serial ();
+        if (fts != s->feat_serial) {
+            s->feat_serial = fts;
+            c->picture_serial++;
+        }
     }
     gint64 now_us = g_get_monotonic_time ();
     /* A frame drawn while the scene is paused - the X server exposed a
@@ -4467,6 +5379,11 @@ static gboolean scenenode_gl_render (WalpeContent *c, int w, int h, float px, fl
     /* g_Screen / g_TexelSize are the monitor's whatever the render scale:
      * blur radii and the like are given in screen texels */
     fx_set_frame_info (win_w, win_h, px * 0.5f + 0.5f, py * -0.5f + 0.5f, (float) dt);
+    /* simulation effects (fx_sim.h): the pointer arrives clamped to this
+     * monitor's rectangle, so a position on its edge means the pointer is
+     * on another monitor - there is none for this picture, and the fluid
+     * gets no push along the edge it was clamped to */
+    fx_set_pointer_state (fabsf (px) < 1.0f && fabsf (py) < 1.0f, s->cur_down);
     if (s->media_ref)
         scene_media_update (s);
     fx_set_system_textures (s->media_tex[1], s->media_w[1], s->media_h[1],
@@ -4525,6 +5442,16 @@ static gboolean scenenode_gl_render (WalpeContent *c, int w, int h, float px, fl
     }
     walpe_cph_to (WALPE_CPH_WORLD);
 
+    if (s->par_on) {
+        /* A scene without a frame clock that is at rest draws its next
+         * frame when the pointer moves, perhaps minutes later: dt is then
+         * the time it rested, not a frame's. Taken as lag time it ended the
+         * lag before it began - the layers jumped to the pointer's first
+         * new place and only then followed it. The travel starts with this
+         * frame; while it lasts the scene draws at its frame rate. */
+        const gboolean rested = !s->animates && !s->par_moving;
+        scene_parallax_begin (s, px, py, rested ? 0.0f : (float) dt);
+    }
     for (guint i = 0; i < s->nodes->len; i++)
         g_array_index (s->nodes, NodeObj, i).world_state = 0;
     for (guint i = 0; i < s->nodes->len; i++)
@@ -4544,6 +5471,35 @@ static gboolean scenenode_gl_render (WalpeContent *c, int w, int h, float px, fl
     walpe_cph_to (WALPE_CPH_OTHER);
     if (s->tex_deferred)
         scene_load_deferred_textures (s, &tail, w, h, win_w, win_h);
+    /* Sprite sheets: every animated layer's clock (the scripts of this
+     * frame have run). A layer whose frame changed shows it through its
+     * signature (sp_frame); its effects, which cache their result over an
+     * input that stands still, are told. sprite_due = seconds until the
+     * next change of a layer that is shown, < 0 = none is coming. */
+    double sprite_due = -1;
+    for (guint i = 0; s->has_sprites && i < s->nodes->len; i++) {
+        NodeObj *nv = &g_array_index (s->nodes, NodeObj, i);
+        if (!nv->sprite || nv->sprite->n < 2)
+            continue;
+        /* The time since the last frame counts for an animation that was
+         * playing through it. One a script has started in this frame
+         * starts now: in a scene without a frame clock the last frame may
+         * be minutes ago, and play () from a cursor event put the
+         * animation that far ahead - one that does not loop was on its
+         * last frame, stopped, before it had shown a single one. */
+        const gboolean ran = nv->sp_live;
+        int f = walpe_sprite_anim_step (nv->sprite, s->paused || !ran ? 0.0 : dt);
+        nv->sp_live = nv->sprite->playing;
+        if (f != nv->sp_frame) {
+            nv->sp_frame = f;
+            fx_invalidate (nv->fxset);
+        }
+        if (!node_drawn (nv))
+            continue;
+        double left = walpe_sprite_anim_next_change (nv->sprite);
+        if (left >= 0 && (sprite_due < 0 || left < sprite_due))
+            sprite_due = left;
+    }
     walpe_cph_to (WALPE_CPH_PT_SIM);
 
     /* Particle systems are advanced here, before anything is drawn: with
@@ -4616,6 +5572,12 @@ static gboolean scenenode_gl_render (WalpeContent *c, int w, int h, float px, fl
          * into the boxes of that clip only (0 = no clip) */
         guint clip_serial = walpe_clip_serial ();
         SIG_ADD (fsig, clip_serial);
+    }
+    if (s->post) {
+        /* bloom is added to the finished frame: the frame on screen has
+         * it, or not, as this number says (the bake holds no bloom) */
+        guint post_sig = scene_post_signature (s);
+        SIG_ADD (fsig, post_sig);
     }
     /* "Adjust layers": any change of the user's adjustments draws a frame
      * (their effect on a layer is in its world matrix / visibility already;
@@ -4693,8 +5655,15 @@ static gboolean scenenode_gl_render (WalpeContent *c, int w, int h, float px, fl
                                 * until the copy at i == run_end those layers
                                 * must be drawn in full (no clip) */
     GLenum bake_fmt = scene_fb ? GL_RGBA8 : scene_window_format ();
-    gboolean bake_ok = !s->no_bake && s->animates && !s->paused && run_draws >= BAKE_MIN_DRAWS &&
+    gboolean bake_ok = !s->no_bake && (s->animates || s->has_sprites) && !s->paused &&
+                       run_draws >= BAKE_MIN_DRAWS &&
                        run_px >= BAKE_MIN_COVER * (float) w * (float) h && bake_fmt != 0;
+    /* a script is moving the camera, or the view sways (camera shake):
+     * the view of this frame differs from the last one's, and a bake
+     * taken now would be good for this frame only (a copy of the whole
+     * frame, each frame, that nothing reads) */
+    if (s->cam_moved || scene_post_view_moves (s))
+        bake_ok = FALSE;
     /* the window was covered in part and came back: the bake is taken
      * anew from this frame. A copy made while another window covered a
      * part of ours may hold anything there - a driver need not keep the
@@ -4749,6 +5718,14 @@ static gboolean scenenode_gl_render (WalpeContent *c, int w, int h, float px, fl
                     clip_from_parts = parts;
                 }
             }
+        /* bloom reads all of the finished frame: every layer is drawn in
+         * full, its final add is what the clip limits. (Not in a frame of
+         * which nothing can be seen: no bloom is added to it either -
+         * scene_post_bloom - so nothing reads the layers.) */
+        if (scene_post_reads_frame (s) && walpe_clip_boxes (clip_any) != 0) {
+            clip_from = s->nodes->len;
+            clip_from_parts = FALSE;
+        }
     }
 
     WALPE_PROF_STAGE (WALPE_PROF_ST_LAYERS);   /* GPUPROF */
@@ -5086,6 +6063,17 @@ static gboolean scenenode_gl_render (WalpeContent *c, int w, int h, float px, fl
                 src_pm = FALSE;
             }
             int fw = nv->tex_w ? nv->tex_w : 256, fh = nv->tex_h ? nv->tex_h : 256;
+            /* a sprite sheet: the layer's picture is one frame of it (not
+             * while album art stands in for the texture) */
+            const WalpeSpriteAnim *sprite = src_tex == nv->tex ? nv->sprite : NULL;
+            if (sprite)
+                walpe_sprite_anim_frame_size (sprite, &fw, &fh);
+            if (nv->sprite && !s->nofx && nv->fxset) {
+                float fuv[6];
+                if (sprite)
+                    walpe_sprite_anim_uv (sprite, nv->sp_frame, fuv);
+                fx_set_input_frame (nv->fxset, sprite ? fuv : NULL);
+            }
             /* the working factor (and what is stored for it) is the one of
              * the window's own size; a reduced render scale then shrinks
              * the targets with the frame */
@@ -5145,10 +6133,14 @@ static gboolean scenenode_gl_render (WalpeContent *c, int w, int h, float px, fl
                 if (cn >= 0)
                     fx_set_clip_uv (&cuv[0][0], cn);
             }
+            /* a simulation effect is pushed by the pointer where the
+             * pointer is on the layer: the quad's place in the frame */
+            if (!s->nofx && fx_has_simulation (nv->fxset))
+                fx_set_pointer_map (m.m);
             GLuint draw_tex = s->nofx ? src_tex
                 : fx_run_for_object (nv->fxset, src_tex, fw, fh,
-                                     nv->tex_full_w ? nv->tex_full_w : nv->tex_w,
-                                     nv->tex_full_h ? nv->tex_full_h : nv->tex_h,
+                                     sprite ? fw : nv->tex_full_w ? nv->tex_full_w : nv->tex_w,
+                                     sprite ? fh : nv->tex_full_h ? nv->tex_full_h : nv->tex_h,
                                      now, fk, nv->video < 0 && src_tex == nv->tex);
             if (draw_tex == src_tex && src_tex == nv->tex && nv->video < 0 && !s->nofx &&
                 fx_has_effects (nv->fxset) && node_chain_pending (nv)) {
@@ -5157,6 +6149,7 @@ static gboolean scenenode_gl_render (WalpeContent *c, int w, int h, float px, fl
                  * straight, like a plain layer's, and like a plain layer's
                  * it gets its mip chain once it is drawn beyond 2:1 */
                 float pw = hypotf (m.m[0] * w, m.m[1] * h), ph = hypotf (m.m[3] * w, m.m[4] * h);
+                node_sheet_extent (nv, &pw, &ph);
                 if (pw >= 1 && ph >= 1 && (nv->phys_w > pw * 2.02f || nv->phys_h > ph * 2.02f)) {
                     node_chain_build (nv);
                     SCENE_PICTURE_CHANGED (s);
@@ -5189,6 +6182,10 @@ static gboolean scenenode_gl_render (WalpeContent *c, int w, int h, float px, fl
                 walpe_puppet_draw (nv->puppet, now, nv->size[0] / 2.0f, nv->size[1] / 2.0f,
                                    draw_tex, draw_tex == src_tex ? src_pm : FALSE,
                                    dalpha, m.m, nv->blend, dtint);
+            else if (sprite && draw_tex == src_tex)
+                /* the sheet itself (no effect ran): the frame on show */
+                sprite_draw (nv, draw_tex, src_pm, dalpha, m.m, nv->blend, dtint,
+                             hypotf (m.m[0] * w, m.m[1] * h), hypotf (m.m[3] * w, m.m[4] * h));
             else
                 walpe_glutil_draw_quad_tint (draw_tex, draw_tex == src_tex ? src_pm : FALSE,
                                              dalpha, m.m, nv->blend, dtint);
@@ -5280,18 +6277,25 @@ static gboolean scenenode_gl_render (WalpeContent *c, int w, int h, float px, fl
     }
     WALPE_PROF_STAGE (WALPE_PROF_ST_POST);   /* GPUPROF */
     walpe_cph_to (WALPE_CPH_POST);
+    /* bloom of the finished frame, at the size it was drawn at (the
+     * reference size is the one the effects are told the screen has) */
+    scene_post_bloom (s, scene_fb, s->rs.tex, w, h, win_w, win_h);
     if (scene_fb) {
-        /* the reduced frame, scaled up to the window */
+        /* the frame from the scene's own target, scaled to the surface (up
+         * from a smaller render size, down from a larger one). Bilinear
+         * unless the setting asks for whole pixels (scale_filter nearest:
+         * exact at whole multiples of the render size). */
         glBindFramebuffer (GL_READ_FRAMEBUFFER, scene_fb);
         glBindFramebuffer (GL_DRAW_FRAMEBUFFER, 0);
-        glBlitFramebuffer (0, 0, w, h, 0, 0, win_w, win_h, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        glBlitFramebuffer (0, 0, w, h, 0, 0, out_w, out_h, GL_COLOR_BUFFER_BIT,
+                           s->scale_filter == WALPE_SCALE_NEAREST ? GL_NEAREST : GL_LINEAR);
         glBindFramebuffer (GL_FRAMEBUFFER, 0);
-        glViewport (0, 0, win_w, win_h);
+        glViewport (0, 0, out_w, out_h);
     }
     /* "Adjust layers": outline of the highlighted layers, on the window (a
      * frame that is not drawn keeps the one that has it) */
     if (s->hl && s->hl->len)
-        scene_layers_outline (s, &tail, win_w, win_h);
+        scene_layers_outline (s, &tail, out_w, out_h);
 frame_done:
     walpe_cph_to (WALPE_CPH_POST);
     for (guint i = 0; i < s->videos->len; i++) {
@@ -5333,9 +6337,21 @@ frame_done:
         s->summary_done = TRUE;
         scenenode_log_summary (s, w, h);
     }
+    if (s->cam_moved)
+        s->cam_moved--;
+    /* a scene that draws frames only while the camera parallax follows the
+     * pointer is in a run of frames right now */
+    const gboolean par_run = s->par_on && s->par_moving && !s->animates && !s->paused;
+    /* ... and so is one whose script moved the camera in this frame: the
+     * view was set up before the scripts ran (view_map above), so the move
+     * shows in the next frame - which a scene without a frame clock has to
+     * ask for (a script that sets the zoom from a cursor or media event,
+     * with no update () anywhere: the picture kept the old view until
+     * something else drew a frame) */
+    const gboolean cam_run = s->cam_moved > 0 && !s->animates && !s->paused;
     if (s->paused)
         scenenode_drop_targets (s);   /* the one frame drawn under a cover */
-    else if (!s->animates)
+    else if (!s->animates && !par_run && !cam_run && sprite_due < 0)
         fx_targets_release ();   /* no frame clock: nothing borrows them again soon */
     scenenode_trim_heap (s);
     if (s->animates && !s->paused) {
@@ -5345,6 +6361,23 @@ frame_done:
         if (s->only_video_anim && video_iv > iv)
             iv = video_iv;
         c->next_frame_us = walpe_frame_clock_next (&s->due_us, iv);
+    } else if (par_run || cam_run) {
+        /* frames while the lagging pointer travels. Once it has arrived
+         * nothing is asked for: the caller draws a frame when the pointer
+         * moves again. (cam_run: the one frame that shows the new view.) */
+        gint64 due = g_get_monotonic_time () + 1000000 / (s->fps_cap > 0 ? s->fps_cap : 30);
+        if (!c->next_frame_us || due < c->next_frame_us)
+            c->next_frame_us = due;
+    }
+    if (!s->animates && !s->paused && sprite_due >= 0) {
+        /* a scene that only moves in its sprite sheets: the next frame when
+         * the next sprite frame is due (not before the frame rate limit
+         * allows), none while every animation is paused */
+        gint64 due = g_get_monotonic_time () +
+                     MAX ((gint64) (MIN (sprite_due, 3600.0) * 1e6),
+                          (gint64) (1000000 / (s->fps_cap > 0 ? s->fps_cap : 30)));
+        if (!c->next_frame_us || due < c->next_frame_us)
+            c->next_frame_us = due;
     }
     walpe_cph_to (WALPE_CPH_NONE);
     return !c->frame_unchanged;
@@ -5355,6 +6388,7 @@ static void scenenode_gl_free (WalpeContent *c)
     SceneNodeContent *s = (SceneNodeContent *) c;
     for (guint i = 0; i < s->nodes->len; i++) {
         NodeObj *nv = &g_array_index (s->nodes, NodeObj, i);
+        sprite_gl_free (nv);
         if (nv->tex && nv->video < 0)
             walpe_gl_tex_release (nv->tex); /* shared file texture or own */
         node_tex_job_done (nv);
@@ -5376,6 +6410,7 @@ static void scenenode_gl_free (WalpeContent *c)
     s->text_bytes = 0;
     bake_drop (s);
     scene_target_drop (&s->rs.fbo, &s->rs.tex);
+    scene_post_gl_free (s);
     fx_targets_release ();   /* the pool of this render thread */
     walpe_glutil_blend_release ();
     if (s->px_query) {   /* quality accounting */
@@ -5390,6 +6425,8 @@ static void scenenode_gl_free (WalpeContent *c)
         s->audio_ref = FALSE;
         walpe_audio_unref ();
     }
+    s->sound_live = FALSE;   /* not shown any more: silent */
+    scene_sound_sync (s);
     if (s->text_held) {
         s->text_held = FALSE;
         walpe_text_release ();
@@ -5434,6 +6471,7 @@ static void scenenode_set_paused (WalpeContent *c, gboolean p)
 {
     SceneNodeContent *s = (SceneNodeContent *) c;
     s->paused = p;
+    scene_sound_sync (s);   /* a paused scene is silent */
     s->due_us = 0; /* re-phase the frame clock on resume */
     s->last_frame_us = 0; /* particles resume where they stopped */
     /* the scene clock (g_Time, SceneScript engine.runtime, timers, property
@@ -5478,7 +6516,9 @@ static void scenenode_set_paused (WalpeContent *c, gboolean p)
 static void scenenode_free (WalpeContent *c)
 {
     SceneNodeContent *s = (SceneNodeContent *) c;
+    scene_sound_free (s);
     scene_layers_free (s);
+    scene_post_free (s);
     g_free (s->cur_layers);
     g_clear_pointer (&s->fx_miss_logged, g_hash_table_unref);
     if (s->ptr_q)
@@ -5494,6 +6534,7 @@ static void scenenode_free (WalpeContent *c)
             g_free (nv->attach);
             g_free (nv->tex_src);
             g_free (nv->inst);
+            g_clear_pointer (&nv->sprite, walpe_sprite_anim_free);
             if (nv->tstyle) {
                 walpe_text_style_clear (nv->tstyle);
                 g_free (nv->tstyle);
@@ -5633,6 +6674,26 @@ WalpeContent *walpe_scenenode_new_from_root (JsonNode *root, const char *project
             s->clear[i] = clear_on && isfinite (c3[i]) ? CLAMP (c3[i], 0.0f, 1.0f) : 0.0f;
         double gz = prop_num (gen0, "zoom", 1.0);
         s->gen_zoom = isfinite (gz) && gz > 0.01 ? (float) gz : 1.0f;
+        /* general.cameraparallax*, plain or bound to a user option. Read
+         * before the objects: a script on a layer's "parallaxDepth" drives
+         * the depth only in a scene that has the parallax (parse_node).
+         * Each setting is read only where something is drawn from it: with
+         * the switch off none is, and amount, delay and influence only in
+         * a scene whose parallax is on (an option bound to a setting that
+         * is not read is not consumed: propprobe.h). */
+        const gboolean par = walpe_feature (WALPE_FEAT_CAMERA_PARALLAX) &&
+                             prop_num (gen0, "cameraparallax", 0.0) != 0;
+        double pa = par ? prop_num (gen0, "cameraparallaxamount", 0.5) : 0.0;
+        double pd = par ? prop_num (gen0, "cameraparallaxdelay", 0.1) : 0.0;
+        double pi = par ? prop_num (gen0, "cameraparallaxmouseinfluence", 0.5) : 0.0;
+        s->par_on = par && isfinite (pa) && isfinite (pd) && isfinite (pi);
+        s->par_amount = s->par_on ? (float) CLAMP (pa, -100.0, 100.0) : 0.0f;
+        s->par_delay = s->par_on ? (float) CLAMP (pd, 0.0, 60.0) : 0.0f;
+        s->par_infl = s->par_on ? (float) CLAMP (pi, -100.0, 100.0) : 0.0f;
+        walpe_parallax_lag_init (&s->par_lag, s->par_delay);
+        s->feat_serial = walpe_feature_serial ();
+        /* general.bloom* / general.camerashake*, plain or user-bound */
+        scene_post_parse (s, gen0);
         /* perspective-rendered particle systems: WE draws them with a
          * perspective camera of the scene's "fov" (50 by default) placed
          * where the z = 0 plane fills the orthographic view. Read off

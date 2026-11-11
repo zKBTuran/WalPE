@@ -56,6 +56,7 @@ __attribute__ ((used)) static const void *const walpe_module_api[] = {
     (const void *) walpe_video_note_frame,
     (const void *) walpe_video_limit, (const void *) walpe_video_frame_limit,
     (const void *) walpe_video_upload_mode, (const void *) walpe_video_note_upload,
+    (const void *) walpe_video_hwdec_api, (const void *) walpe_video_zerocopy,
     (const void *) wpj_str, (const void *) wpj_obj,
     (const void *) wpj_num, (const void *) wpj_bool, (const void *) wpj_parse_file,
 };
@@ -176,6 +177,12 @@ char *walpe_web_info (void)
 {
     const WalpeWebModule *m = walpe_web_module (FALSE);
     return m ? m->web_info () : g_strdup ("");
+}
+
+char *walpe_web_host (void)
+{
+    const WalpeWebModule *m = walpe_web_module (FALSE);
+    return m ? m->web_host () : g_strdup ("");
 }
 
 void walpe_web_stats (guint *snapshots)

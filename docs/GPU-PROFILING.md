@@ -1,6 +1,12 @@
 # Measuring WalPE's GPU use
 
-Two tools. Both are off / not running unless you ask for them.
+Three tools. All are off / not running unless you ask for them.
+
+> **State of testing.** The NVIDIA parts are those of 0.12.1. The AMD and Intel parts
+> (`walpe-ctl gpu-stats`, the kernel's rows of the report, the kernel section of a profile)
+> were written from the kernel's documentation of its statistics interface and tested
+> against hand-written sample files only; they are not yet confirmed on hardware. On the
+> one machine they ran on (no GPU) every row reads "not available".
 
 ## 1. Comparing two builds or two settings (three commands)
 
@@ -16,11 +22,16 @@ build, also one that has no profiler. With your wallpapers showing:
 
 Each run samples once a second for 30 s and prints min / avg / max of
 
-- `nvidia-smi`: utilization.gpu, utilization.memory, memory.used, power.draw,
+- on NVIDIA's driver, `nvidia-smi`: utilization.gpu, utilization.memory, memory.used, power.draw,
   clocks.gr, clocks.mem, temperature.gpu, pstate, and an estimate of the load
   at full clock (utilization x clocks.gr / clocks.max.gr);
 - `nvidia-smi pmon`: walpe-daemon's own GPU memory and GPU share, and the
   same for every other program on the GPU (X, the compositor);
+- on AMD, Intel and the other drivers of the kernel: the kernel's own statistics, read by
+  `walpe-ctl gpu-stats` (below): GPU busy, memory in use, power, temperature and clock where
+  the driver has them, walpe-daemon's share of the GPU and its GPU memory, and the other
+  programs on the GPU by name. No root, no extra tool. On a machine with both kinds of GPU
+  both tables are printed;
 - `/proc`: walpe-daemon's CPU %, resident memory, threads, and its busiest
   threads by name (`av:h264:*` and `walpe-video` = video decode,
   `walpe-monN` = a monitor's render thread);
@@ -61,6 +72,50 @@ far from P0) takes longer for the same work, so light work can read as a
 high percentage. `power.draw` (watts) and the clocks printed next to the
 percentage are what make two builds comparable: fewer watts at the same or
 a lower clock is less GPU work.
+
+### `walpe-ctl gpu-stats`
+
+    walpe-ctl gpu-stats [--sample SECONDS] [--interval SECONDS] [--pid PID | --no-process]
+                        [--device card1|renderD129|0000:03:00.0] [--json] [--no-nvidia-smi]
+
+prints the GPU's and walpe-daemon's figures as the kernel and the driver account them. It
+is a local command: it reads `/proc` and `/sys` itself and does not need a running daemon
+(without one, and with `--no-process`, it reports on the GPU alone). SECONDS defaults to 2.
+On the NVIDIA driver it asks `nvidia-smi`, because that driver gives the kernel interfaces
+no statistics. Which GPU: the one the daemon renders on, else the only GPU, else the boot
+GPU; `--device` overrides. Without `--pid` the daemon measured is the lowest process id
+named `walpe-daemon` of this user. (`walpe-ctl gpu` is a different command: it shows and
+sets which GPU WalPE uses, [GPU.md](GPU.md).)
+
+Every row ends with its source in brackets - `(fdinfo: ...)`, `(amdgpu sysfs: ...)`,
+`(Intel sysfs: ...)`, `(hwmon)`, `(computed: ...)` - or reads `n/a ... (not available:
+<why>)` when this driver or kernel does not publish the value. "Not available" is
+information, not an error.
+
+| Row | Meaning |
+|---|---|
+| GPU busy | the device's own busy figure (amdgpu: `gpu_busy_percent`). Intel has no whole-GPU figure a user may read |
+| GPU busy, visible clients | the engine time of every program this user may read, as a share of wall time. A lower bound when the row says so: programs of other users (an X server running as root) are not in it |
+| VRAM used / GTT used | whole GPU, all programs (amdgpu). On an integrated AMD GPU "VRAM" is only the part of system memory the firmware set aside |
+| power, temperature, clock | from the device's hwmon node or the Intel frequency files |
+| daemon GPU share | time the kernel accounted to walpe-daemon on the engine that draws, divided by wall time; further rows for other engines it used (video decode) |
+| daemon GPU memory | what the kernel holds for walpe-daemon's buffers, by memory region |
+| programs on the GPU | one line per program of yours with a DRM client: name, memory, share |
+
+Like every busy percentage these are shares of time at the clock the GPU was running at,
+not of its capacity. A buffer shared by two programs is counted in both, so the
+per-program figures do not add up to the GPU's. A GPU that is powered down is not woken up
+to be asked. Software rendering has no DRM client: the daemon's rows then read "not
+available".
+
+What is read: of your own processes the process name and the kernel's documented `drm-*`
+keys in `/proc/<pid>/fdinfo`; of the system `/sys/class/drm` and the GPU's device
+directory. Never a command line, an environment, a file name, or anything of another
+user's process. The report holds the names of your GPU clients (a browser, a game): look
+before you post it.
+
+`walpe-ctl status` has a member `gpu_stats` with the daemon's own share and memory, read
+at most once a second and only while a client asks for the status.
 
 ## 2. The profiler: `walpe-ctl profile [SECONDS] [--json] [--sync]`
 
@@ -134,6 +189,18 @@ messages de-duplicated with counts (PERFORMANCE messages first: shader
 recompiles, slow paths, buffer moves between video and host memory,
 synchronous pixel transfers), and one `TOTAL:` line.
 
+On AMD, Intel and the other kernel drivers the memory part ends with a section "GPU as
+the kernel accounts it": what `walpe-ctl gpu-stats` reads, sampled once a second during
+the run by a thread of the daemon (JSON: `kernel_gpu_stats`). The two kinds of numbers in
+one report are not the same thing: the table rows come from GL timer queries around WalPE's
+own draws and mean the same on every driver; the kernel's figures cover everything the
+process does on the GPU (hardware video decoding has an engine of its own) and exist only
+where the driver publishes them. Do not expect the two percentages to match.
+`WALPE_GPU_PROFILE_KERNEL` in the daemon's environment: `0` leaves the section out, `self`
+reads only the daemon's own process and the device, `1` reads everything. Not set:
+everything, except on the NVIDIA kernel driver, where the section is off and a profile is
+exactly what it was in 0.12.1 (no extra thread, the same report).
+
 GPU time comes from `GL_TIME_ELAPSED` timer queries (desktop GL 3.3 or
 ARB_timer_query; GLES 3 with EXT_disjoint_timer_query). Without them the
 table shows CPU time only and says so. The `timer:` line of each monitor
@@ -179,4 +246,5 @@ Layers and passes do not nest: a begin closes what was left open.
 
 Tests: `gpuprof` (report formatting on hand-made reports; then real runs on
 GL 3.3 and GLES 3 where an EGL device or surfaceless platform exists) and
-`gpu-report` (the script against a stand-in `nvidia-smi`).
+`gpu-report` (the script against a stand-in `nvidia-smi` and made-up kernel trees),
+`gpustat` (the kernel statistics reader against made-up `/proc` and `/sys` trees).

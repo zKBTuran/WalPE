@@ -35,18 +35,40 @@
  * grab the pointer), no native drag-and-drop, no text selection outside
  * form fields (it would take the PRIMARY selection), no window fullscreen,
  * the wheel does not scroll the document as a whole, and the main frame
- * cannot navigate away from the wallpaper (see the navigation guard below). */
+ * cannot navigate away from the wallpaper (see the navigation guard below).
+ *
+ * The private page host (webhost_wl.c; used where there is no X display,
+ * or when asked for with WALPE_WEB_HOST=private): the
+ * page's window is on a Wayland display of the module's own, and what the
+ * daemon hands over is sent from that display as the wl_pointer /
+ * wl_keyboard events a compositor would send. Also "native": GDK reads
+ * them like any input and the page gets trusted events, with the same
+ * guards, the same middle-button rule and the same fallback to "js".
+ * There is one pointer and one keyboard on that display: they are on one
+ * page at a time (wl_inside, wl_keys). */
 #include "walpe-build-config.h"
 #include "webinput.h"
-#include <gdk/x11/gdkx.h>
 #include <libsoup/soup.h>
+/* the X11 page host: GTK's X11 backend and Xlib in this build */
+#if defined (GDK_WINDOWING_X11) && !defined (WALPE_WEB_NO_X11)
+#define WI_HAVE_X11 1
+#include <gdk/x11/gdkx.h>
 #include <X11/Xlib.h>
-#ifdef HAVE_XI2
+#if defined (HAVE_XI2)
+#define WI_HAVE_XI2 1
 #include <X11/extensions/XInput2.h>
+#endif
+#endif
+/* the private page host */
+#if defined (GDK_WINDOWING_WAYLAND) && defined (HAVE_WEBHOST_WL)
+#define WI_HAVE_WL 1
+#include <gdk/wayland/gdkwayland.h>
+#include "webhost_wl.h"
 #endif
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include <unistd.h>
 
 enum { WI_NATIVE, WI_JS, WI_OFF };
 
@@ -57,6 +79,7 @@ struct WebInput {
     char *base;             /* URI prefix of the wallpaper's own files */
     int mode;
     gboolean forced;        /* WALPE_WEB_INPUT chose the mode: no fallback */
+    gboolean wl;            /* native events go through the private page host */
     gboolean acked;         /* the page saw a trusted pointer event */
     guint unacked;          /* native events sent before the first ack */
     gint64 unacked_since;
@@ -137,7 +160,7 @@ static const char *INPUT_JS =
 
 /* ------------------------------------------------------- native delivery */
 
-#ifdef HAVE_XI2
+#ifdef WI_HAVE_XI2
 static gint64 time_delta;   /* X server time - monotonic ms, from real events */
 
 /* server time for an injected event: the real event's, else the monotonic
@@ -380,7 +403,74 @@ static void wi_set_buttons (WebInput *wi, guint buttons)
         wi_grab = NULL;
 }
 
-#ifdef HAVE_XI2
+#ifdef WI_HAVE_WL
+/* ---- the private page host's pointer and keyboard */
+static WebInput *wl_inside;     /* the page the host's pointer is on */
+static WebInput *wl_keys;       /* the page that has the host's keyboard */
+
+static guint32 wl_now (void)
+{
+    return (guint32) (g_get_monotonic_time () / 1000);
+}
+
+/* the id GTK's connection gave the window's wl_surface: how the host is
+ * told which window is meant. 0 while the window has none (hidden: GDK
+ * makes a new surface each time a window is shown). */
+static guint32 wl_surface_of (WebInput *wi)
+{
+    GdkSurface *surf = gtk_native_get_surface (GTK_NATIVE (wi->win));
+    if (!surf || !GDK_IS_WAYLAND_SURFACE (surf))
+        return 0;
+    struct wl_surface *ws = gdk_wayland_surface_get_wl_surface (surf);
+    return ws ? wl_proxy_get_id ((struct wl_proxy *) ws) : 0;
+}
+
+/* native events went out and the page has not confirmed any: as on the
+ * X11 host, after 40 of them over 3 s the script path takes over */
+static void wl_done (WebInput *wi)
+{
+    if (wi->acked || wi->forced)
+        return;
+    gint64 now = g_get_monotonic_time ();
+    if (!wi->unacked++)
+        wi->unacked_since = now;
+    if (wi->unacked >= 40 && now - wi->unacked_since > 3 * G_TIME_SPAN_SECOND) {
+        g_warning ("web: %s got no pointer event from the page host's display (%u sent); "
+                   "using script-dispatched events instead", wi->label, wi->unacked);
+        wi->mode = WI_JS;
+        wi->inside = FALSE;
+        if (wl_inside == wi) {
+            walpe_webhost_pointer_leave ();
+            wl_inside = NULL;
+        }
+    }
+}
+
+/* put the pointer at x, y (enter first when it was elsewhere); FALSE when
+ * the window has no surface to enter right now */
+static gboolean wl_goto (WebInput *wi, double x, double y)
+{
+    gboolean moved = !wi->inside || fabs (x - wi->x) >= 0.01 || fabs (y - wi->y) >= 0.01;
+    wi->x = x;
+    wi->y = y;
+    if (!wi->inside || wl_inside != wi) {
+        guint32 id = wl_surface_of (wi);
+        if (!id)
+            return FALSE;
+        if (wl_inside && wl_inside != wi)
+            wl_inside->inside = FALSE;  /* the host sends that page its leave */
+        wi->inside = TRUE;
+        wl_inside = wi;
+        walpe_webhost_pointer_enter (id, x, y);
+        moved = TRUE;       /* an enter alone moves nothing in the page */
+    }
+    if (moved)
+        walpe_webhost_pointer_motion (wl_now (), x, y);
+    return TRUE;
+}
+#endif
+
+#ifdef WI_HAVE_XI2
 /* native events went out and the page has not confirmed any: after 40 of
  * them over 3 s the script path takes over (an ack switches back) */
 static void wi_done (WebInput *wi)
@@ -440,7 +530,14 @@ void web_input_move (WebInput *wi, double x, double y, guint32 time)
         js_send (wi, "move", x, y, 0, 0, 0);
         return;
     }
-#ifdef HAVE_XI2
+#ifdef WI_HAVE_WL
+    if (wi->wl) {
+        if (wl_goto (wi, x, y))
+            wl_done (wi);
+        return;
+    }
+#endif
+#ifdef WI_HAVE_XI2
     wi_goto (wi, x, y, wi_time (time));
     wi_done (wi);
 #else
@@ -466,7 +563,20 @@ void web_input_button (WebInput *wi, int button, gboolean down, double x, double
         return;
     }
     (void) time;
-#ifdef HAVE_XI2
+#ifdef WI_HAVE_WL
+    if (wi->wl) {
+        if (!wl_goto (wi, x, y))
+            return;
+        wi_set_buttons (wi, down ? wi->buttons | bit : wi->buttons & ~bit);
+        if (button == 2)    /* script events only, as on the X11 host (see below) */
+            js_send (wi, down ? "down" : "up", x, y, button, 0, 0);
+        else
+            walpe_webhost_pointer_button (wl_now (), button, down);
+        wl_done (wi);
+        return;
+    }
+#endif
+#ifdef WI_HAVE_XI2
     time = wi_time (time);
     if (button == 2) {
         /* The middle button never reaches the page as a real event:
@@ -500,7 +610,16 @@ void web_input_scroll (WebInput *wi, int dx, int dy, double x, double y, guint32
         return;
     }
     (void) time;
-#ifdef HAVE_XI2
+#ifdef WI_HAVE_WL
+    if (wi->wl) {
+        if (!wl_goto (wi, x, y))
+            return;
+        walpe_webhost_pointer_wheel (wl_now (), CLAMP (dx, -16, 16), CLAMP (dy, -16, 16));
+        wl_done (wi);
+        return;
+    }
+#endif
+#ifdef WI_HAVE_XI2
     time = wi_time (time);
     wi_goto (wi, x, y, time);
     /* X wheel buttons: 4 up, 5 down, 6 left, 7 right; GDK makes one
@@ -528,7 +647,25 @@ void web_input_leave (WebInput *wi, guint32 time)
         return;
     }
     (void) time;
-#ifdef HAVE_XI2
+#ifdef WI_HAVE_WL
+    if (wi->wl) {
+        for (int b = 1; b <= 3; b++)
+            if (wi->buttons & (1u << b)) {
+                if (b != 2 && wl_inside == wi)
+                    walpe_webhost_pointer_button (wl_now (), b, FALSE);
+                wi_set_buttons (wi, wi->buttons & ~(1u << b));
+                if (b == 2)
+                    js_send (wi, "cancel", wi->x, wi->y, b, 0, 0);
+            }
+        if (wl_inside == wi) {
+            walpe_webhost_pointer_leave ();
+            wl_inside = NULL;
+        }
+        wi->inside = FALSE;
+        return;
+    }
+#endif
+#ifdef WI_HAVE_XI2
     time = wi_time (time);
     for (int b = 1; b <= 3; b++)
         if (wi->buttons & (1u << b)) {
@@ -556,6 +693,76 @@ void web_input_cancel (WebInput *wi)
             js_send (wi, "cancel", wi->x, wi->y, b, 0, 0);
         }
     wi->buttons = held;     /* web_input_leave does the bookkeeping and the real releases */
+}
+
+/* ---- keyboard (webinput.h). Keys exist as real events only: a script
+ * cannot make a trusted key event, and an untrusted one types nothing. So
+ * they are delivered through the private page host or not at all. */
+
+gboolean web_input_takes_keys (WebInput *wi)
+{
+#ifdef WI_HAVE_WL
+    return wi && wi->wl && wi->mode == WI_NATIVE;
+#else
+    (void) wi;
+    return FALSE;
+#endif
+}
+
+void web_input_keymap (int fd, guint32 size)
+{
+#ifdef WI_HAVE_WL
+    if (walpe_webhost_running ()) {
+        walpe_webhost_keymap (fd, size);    /* takes the descriptor over */
+        return;
+    }
+#endif
+    (void) size;
+    if (fd >= 0)
+        close (fd);
+}
+
+void web_input_keyboard_focus (WebInput *wi, gboolean focus)
+{
+#ifdef WI_HAVE_WL
+    if (!web_input_takes_keys (wi))
+        return;
+    if (focus) {
+        guint32 id = wl_surface_of (wi);
+        if (!id)
+            return;
+        wl_keys = wi;
+        /* keys go to the widget that has GTK's focus in the window */
+        gtk_widget_grab_focus (GTK_WIDGET (wi->view));
+        walpe_webhost_keyboard_focus (id);
+    } else if (wl_keys == wi) {
+        wl_keys = NULL;
+        walpe_webhost_keyboard_focus (0);
+    }
+#else
+    (void) wi; (void) focus;
+#endif
+}
+
+void web_input_key (WebInput *wi, guint32 evdev_key, gboolean down, guint32 time)
+{
+    (void) time;    /* the host's own clock: one time base for all its events */
+#ifdef WI_HAVE_WL
+    if (web_input_takes_keys (wi) && wl_keys == wi)
+        walpe_webhost_key (wl_now (), evdev_key, down);
+#else
+    (void) wi; (void) evdev_key; (void) down;
+#endif
+}
+
+void web_input_modifiers (const guint32 mods[4])
+{
+#ifdef WI_HAVE_WL
+    if (walpe_webhost_running ())
+        walpe_webhost_modifiers (mods[0], mods[1], mods[2], mods[3]);
+#else
+    (void) mods;
+#endif
 }
 
 void web_input_ack (WebInput *wi)
@@ -866,7 +1073,14 @@ WebInput *web_input_new (GtkWidget *win, WebKitWebView *view, const char *label)
     wi->view = view;
     wi->label = g_strdup (label ? label : "");
     const char *e = g_getenv ("WALPE_WEB_INPUT");
-    gboolean native = native_setup (wi);
+    gboolean native;
+#ifdef WI_HAVE_WL
+    if (GDK_IS_WAYLAND_DISPLAY (gtk_widget_get_display (win)) && walpe_webhost_running ()) {
+        wi->wl = TRUE;
+        native = TRUE;
+    } else
+#endif
+        native = native_setup (wi);
     if (e && (!strcmp (e, "off") || !strcmp (e, "0"))) {
         wi->mode = WI_OFF;
     } else if (e && !strcmp (e, "js")) {
@@ -878,6 +1092,8 @@ WebInput *web_input_new (GtkWidget *win, WebKitWebView *view, const char *label)
         if (!native)
             g_message ("web: no XInput2 on GDK's display: pointer input goes to the page as "
                        "script-dispatched events");
+        else if (wi->wl)
+            g_debug ("web: pointer input reaches %s through the page host's display", wi->label);
     }
     WebKitUserContentManager *ucm = webkit_web_view_get_user_content_manager (view);
     WebKitUserScript *us = webkit_user_script_new (INPUT_JS, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES,
@@ -909,6 +1125,16 @@ void web_input_free (WebInput *wi)
     if (!wi)
         return;
     native_forget (wi);
+#ifdef WI_HAVE_WL
+    if (wl_inside == wi) {
+        walpe_webhost_pointer_leave ();
+        wl_inside = NULL;
+    }
+    if (wl_keys == wi) {
+        walpe_webhost_keyboard_focus (0);
+        wl_keys = NULL;
+    }
+#endif
     wi_set_buttons (wi, 0);
     g_signal_handlers_disconnect_by_data (wi->view, wi);
     g_free (wi->label);

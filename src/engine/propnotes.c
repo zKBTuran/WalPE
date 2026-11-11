@@ -34,11 +34,14 @@ static const char *general_feature (const char *k)
     if (!strcmp (k, "clearcolor") || !strcmp (k, "zoom"))
         return NULL;
     if (g_str_has_prefix (k, "cameraparallax"))
-        return "mouse parallax";
-    if (g_str_has_prefix (k, "bloom"))
-        return "bloom";
-    if (g_str_has_prefix (k, "camerashake"))
-        return "camera shake";
+        return NULL;   /* camera parallax (scenenode.c) */
+    /* the standard bloom and the camera shake are drawn (scenenode_post.h);
+     * Wallpaper Engine's HDR bloom (hdr, bloomhdr*) is not */
+    if (!strcmp (k, "bloom") || !strcmp (k, "bloomstrength") || !strcmp (k, "bloomthreshold") ||
+        !strcmp (k, "bloomtint") || g_str_has_prefix (k, "camerashake"))
+        return NULL;
+    if (g_str_has_prefix (k, "bloom") || !strcmp (k, "hdr"))
+        return "HDR bloom";
     if (g_str_has_prefix (k, "camerafade"))
         return "camera fade";
     return "this scene setting";
@@ -137,7 +140,8 @@ static void walk (Scan *sc, JsonNode *n, const char *feature, int depth)
         mark (sc, json_node_get_string (u), feature);
     else if (u && JSON_NODE_HOLDS_OBJECT (u))
         mark (sc, wpj_str (json_node_get_object (u), "name", NULL), feature);
-    /* a sound object plays nothing in WalPE: whatever is bound on it */
+    /* a sound object: whatever is bound on it does something only while
+     * wallpaper sound is switched on (off by default) */
     const char *sub = feature;
     if (json_object_has_member (o, "sound") && json_object_has_member (o, "id"))
         sub = "scene sound";
@@ -164,7 +168,7 @@ static void walk (Scan *sc, JsonNode *n, const char *feature, int depth)
         }
         const char *f = sub;
         if (!strcmp (key, "parallaxDepth"))
-            f = "mouse parallax";
+            f = NULL;   /* read by the camera parallax */
         walk (sc, v, f, depth + 1);
     }
     g_list_free (ks);
@@ -573,6 +577,10 @@ char *walpe_prop_note_text (const char *note)
 {
     if (!note)
         return NULL;
+    if (!strcmp (note, "needs:scene sound"))
+        return g_strdup ("Belongs to the wallpaper's sound: no effect until sound is switched on "
+                         "(walpe-ctl set scene_sound=on, or for this wallpaper only: "
+                         "walpe-ctl setprop walpe_sound=on) and the volume is above 0.");
     if (g_str_has_prefix (note, "needs:"))
         return g_strdup_printf ("Needs %s, which WalPE does not support yet: no effect.", note + 6);
     if (!strcmp (note, "unused"))

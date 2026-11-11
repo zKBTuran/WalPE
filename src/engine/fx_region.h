@@ -878,9 +878,10 @@ static void fxr_traits (EffPass *pass, const char *vsrc, const char *fsrc, const
     default:
         break;
     }
-    static int log = -1;
+    static WalpeLazy log_cell = WALPE_LAZY_UNSET;   /* read once (common/lazy.h) */
+    int log = walpe_lazy_get (&log_cell);
     if (log < 0)
-        log = g_getenv ("WALPE_FX_REGION_LOG") != NULL;
+        log = walpe_lazy_set (&log_cell, g_getenv ("WALPE_FX_REGION_LOG") != NULL);
     if (log && g_getenv ("WALPE_FX_REGION_LOG")[0] == '2')
         g_message ("fx region: %s body code: %s | %s", name ? name : "?", vb ? vb : "-", fb ? fb : "-");
     if (log) {
@@ -1543,8 +1544,16 @@ static gboolean fxr_result_size (EffectChain *ch, int rw, int rh, int *w, int *h
 /* WALPE_FX_REGION_LOG=1: the first plans of this thread, one line each,
  * and one per pass of a plan (what it has to write, as a share of its
  * target; the strong part of its displacement map) */
-static int fxr_log_on = -1;
+static WalpeLazy fxr_log_on = WALPE_LAZY_UNSET;   /* every render thread asks (common/lazy.h) */
 static __thread int fxr_log_lines;
+
+static int fxr_log_wanted (void)
+{
+    int on = walpe_lazy_get (&fxr_log_on);
+    if (on < 0)
+        on = walpe_lazy_set (&fxr_log_on, g_getenv ("WALPE_FX_REGION_LOG") != NULL);
+    return on;
+}
 
 static float fxr_need_share (const FxNeed *n)
 {
@@ -1558,9 +1567,7 @@ static float fxr_need_share (const FxNeed *n)
 
 static void fxr_log_pass (int chain, int q, const EffPass *p, guint id)
 {
-    if (fxr_log_on < 0)
-        fxr_log_on = g_getenv ("WALPE_FX_REGION_LOG") != NULL;
-    if (!fxr_log_on || fxr_log_lines >= 400)
+    if (!fxr_log_wanted () || fxr_log_lines >= 400)
         return;
     fxr_log_lines++;
     g_message ("fx region:   chain %d pass %d hash 0x%016" G_GINT64_MODIFIER "x model %d: %s, %d rect(s), share %.3f; map %s %.3f",
@@ -1575,11 +1582,8 @@ static void fxr_log_pass (int chain, int q, const EffPass *p, guint id)
 
 static void fxr_log_plan (gpointer set, gboolean ok, int from, int a, int b)
 {
-#define log fxr_log_on
 #define lines fxr_log_lines
-    if (log < 0)
-        log = g_getenv ("WALPE_FX_REGION_LOG") != NULL;
-    if (!log || lines >= 400)
+    if (!fxr_log_wanted () || lines >= 400)
         return;
     lines++;
     if (from < 0)
@@ -1588,6 +1592,5 @@ static void fxr_log_plan (gpointer set, gboolean ok, int from, int a, int b)
     else
         g_message ("fx region: set %p: plan %s from chain %d, result %dx%d", set, ok ? "made" : "dropped",
                    from, a, b);
-#undef log
 #undef lines
 }

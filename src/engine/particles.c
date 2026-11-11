@@ -1,5 +1,6 @@
 #include "particles.h"
 #include "glutil.h"
+#include "glfeat.h"
 #include "clip.h"
 #include "common/util.h"
 #include <math.h>
@@ -302,11 +303,16 @@ void walpe_particles_render (WalpeParticles *p, float scene_w, float scene_h,
     glUniform1i (p->loc_tex, 0);
     glUniform1f (p->loc_premult, p->sys[0].tex ? (p->sys[0].premult ? 1.0f : 0.0f) : 1.0f);
     glBindVertexArray (p->vao);
-    glEnable (GL_PROGRAM_POINT_SIZE);
+    /* OpenGL ES has no such switch (gl_PointSize always counts there);
+     * the enum would be GL_INVALID_ENUM on every draw */
+    const gboolean point_switch = !walpe_gl_feat_es ();
+    if (point_switch)
+        glEnable (GL_PROGRAM_POINT_SIZE);
     glBlendFunc (GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     for (int it = 0; walpe_clip_next (&it, NULL);)   /* per visible box (clip.h) */
         glDrawArrays (GL_POINTS, 0, p->count);
-    glDisable (GL_PROGRAM_POINT_SIZE);
+    if (point_switch)
+        glDisable (GL_PROGRAM_POINT_SIZE);
     glBindVertexArray (0);
     glBlendFunc (GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 }

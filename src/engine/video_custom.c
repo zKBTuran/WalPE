@@ -41,19 +41,31 @@
  *   frame that was on screen and decodes (without showing, skipping
  *   pictures nothing refers to) up to it, so playback continues exactly
  *   where it stopped.
- * - Hardware decoding (off by default, video.h): the GPU decodes, the
- *   frame is downloaded as NV12/P010 and takes the same upload path; any
- *   failure falls back to software decoding at the same position. */
+ * - Hardware decoding (off by default, video.h): a hardware decoder
+ *   decodes, the frame is downloaded as NV12/P010 and takes the same
+ *   upload path; any failure falls back to software decoding at the same
+ *   position. Which decoder, on which device, in which order is decided
+ *   by what FFmpeg in this build offers and by which GPU renders, not by
+ *   who made the GPU - with one exception: where NVIDIA's own driver
+ *   renders, "cuda" stays the first attempt (video_hwsel.h holds the
+ *   rules). With "video_zerocopy" the picture is not downloaded where the
+ *   decoder can export it as DMA-BUFs and EGL can import them: the plane
+ *   textures are then the decoder's own memory, drawn by the same shader. */
 #include "video.h"
 #include "videotex.h"
 #include "glutil.h"
+#include "common/lazy.h"
 #include "mp4demux.h"
 #include "yuvconv.h"
 #include "modules.h"
+#include "video_hwsel.h"
+#include <epoxy/egl.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_drm.h>   /* a picture described as DMA-BUFs */
+#include <libavutil/log.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -63,6 +75,19 @@
 #include <errno.h>
 #include <dirent.h>
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
+/* the daemon's record of the GPU in use, in a tree that keeps one */
+#if defined(__has_include)
+#if __has_include("common/gpusel.h")
+#include "common/gpusel.h"
+#define CV_HAVE_GPUSEL 1
+#endif
+#endif
+#ifndef EGL_DRM_RENDER_NODE_FILE_EXT
+#define EGL_DRM_RENDER_NODE_FILE_EXT 0x3377
+#endif
 #ifdef __GLIBC__
 #include <malloc.h>
 #endif
@@ -154,6 +179,18 @@ typedef struct {
      * (0 = in ordinary memory), stage_len bytes from the buffer's start */
     int stage1;
     gsize stage_len;
+    /* zero-copy (video.h "video_zerocopy"): the picture stays in GPU
+     * memory. hw keeps the decoder's surface for as long as the frame is
+     * queued, drm describes it as DMA-BUFs, zc_pl are the planes a viewer
+     * imports (video_hwsel.h). zc: 0 = an ordinary frame; 1 = import (there
+     * are no planes in main memory, pl[] is not set); 2 = it was downloaded
+     * as well and a viewer compares the two before the import is trusted. */
+    AVFrame *hw, *drm;
+    int zc, zc_n;
+    int zc_gen;                 /* the decoder start it belongs to (CvSource.zc_gen) */
+    WalpeDmaPlane zc_pl[3];
+    int zc_fd[WALPE_DMA_MAX];
+    float zc_crop[2][4];        /* luma, chroma: texture coordinate scale x, y; largest x, y */
 } CvFrame;
 
 /* per-monitor half: GL textures in its EGL context, upload + draw */
@@ -215,6 +252,30 @@ typedef struct {
      * frames that found no idle buffer, bytes this thread copied itself */
     guint up_frames, up_tex_calls, up_buf_calls, up_maps, up_fences, up_staged, up_waits;
     double up_copied;
+    /* zero-copy (render thread unless noted): the planes drawn are EGL
+     * images of the decoder's own picture instead of uploaded textures */
+    int zc_can;                 /* src->lock: this GL context can import DMA-BUFs; -1 = not asked yet */
+    const char *zc_cant;        /* src->lock: why it cannot (a constant) */
+    int zc_how;                 /* 1 = glEGLImageTargetTexture2DOES, 2 = glEGLImageTargetTexStorageEXT */
+    gboolean zc_mods;           /* the EGL display takes format modifiers */
+    gboolean zc_on;             /* ztex is what is drawn */
+    GLuint ztex[3];
+    EGLImageKHR zimg[3];
+    AVFrame *zhold;             /* the picture they show: the decoder does not reuse it meanwhile */
+    float zcrop[2][4];
+    GLuint zfbo;                /* the self-check reads the imported planes back through it */
+    guint64 skip_seq;           /* a frame that could not be shown here: not tried again */
+    /* src->lock, WALPE_FPS_LOG: what the uploads since the last log line
+     * added to the counters above, and the path they took. The render
+     * thread adds to it under the lock it takes after every upload anyway
+     * (cv_viewer_upload); the decode thread prints and clears it under the
+     * same lock. The log line used to read and clear the render thread's
+     * own counters from the decode thread, without any lock. */
+    struct {
+        guint frames, tex_calls, buf_calls, maps, fences, staged, waits;
+        double copied;
+        int real, mode;
+    } up_log;
 } CvViewer;
 
 /* shared decode pipeline (path-keyed, refcounted) */
@@ -303,15 +364,41 @@ struct _CvSource {
     /* src->lock: frames queued, and those queued after their presentation
      * time (cv_push_frame) */
     guint lag_frames, lag_late;
-    /* hardware decoding */
-    gboolean hw_wanted;         /* decode thread: hardware decoding was asked for */
-    gboolean hw_asked;          /* decode thread: the setting when the decoder was opened */
-    AVBufferRef *hw_dev;
-    enum AVPixelFormat hw_fmt;
-    const char *hw_name;
-    gint hw_refused;            /* atomic: the device does not take this stream */
+    /* hardware decoding (video_hwsel.h holds the rules; decode thread, or
+     * source creation before the thread exists, unless noted) */
+    WalpeHwSel hw;              /* the attempts, the one in use, why the others failed */
+    gboolean hw_planned;        /* hw was made for hw_want and the machine as known then */
+    WalpeHwWant hw_want;        /* the setting the plan was made for */
+    guint hw_serial;            /* walpe_video_hwdec_api's count at that time */
+    gint hw_gpu_serial;         /* cv_gpu_serial at that time */
+    gboolean hw_asked;          /* hardware decoding is asked for (hw_want.on) */
+    gboolean hw_on;             /* the open decoder is a hardware decoder */
+    gboolean hw_own;            /* ... one that finds its hardware itself (no device of ours) */
+    gboolean hw_gpu_pics;       /* ... and its pictures arrive in GPU memory */
+    AVBufferRef *hw_dev;        /* its device, NULL = none of ours */
+    enum AVPixelFormat hw_fmt;  /* the format of its pictures in GPU memory, NONE = it says */
+    const char *hw_name;        /* the API's name */
+    /* atomic: 1 = the device does not take this stream, 2 = a picture
+     * beyond the size limit, 3 = pictures cropped at the left or top */
+    gint hw_refused;
+    int hw_fmt_taken;           /* times libavcodec offered hw_fmt and got it */
+    int hw_sw_fmt;              /* the format the stream decodes to in software */
     int hw_errors;              /* failures in a row */
-    gboolean hw_off;            /* gave up for this source: software from now on */
+    char *hw_profile;           /* "H.264 High@L4.2, 8-bit 4:2:0" (status line) */
+    GString *hw_log;            /* FFmpeg's warnings and errors while a hardware decoder is tried */
+    /* zero-copy */
+    gboolean zc_asked;          /* the switch when the decoder was opened */
+    gboolean zc_ok;             /* this decoder's pictures may go out as DMA-BUFs */
+    int zc_slots;               /* viewers its picture pool was sized for */
+    AVFrame *zc_hw;             /* the picture in GPU memory that is being handed over */
+    int zc_cur;                 /* how: 0 / 1 / 2 as CvFrame.zc */
+    gint zc_verified;           /* atomic: pictures whose imported planes equalled their download */
+    int zc_gen;                 /* src->lock: counts the decoder starts; a comparison counts for its own */
+    guint64 zc_check_seq;       /* src->lock: the last picture that was counted (once, whoever compared) */
+    gint zc_refused;            /* atomic: a viewer could not import, or found a difference */
+    gint zc_dirty;              /* atomic: the status line is to be written again */
+    char *zc_why;               /* src->lock: why zero-copy is not in use */
+    guint zc_sent;              /* fps log: pictures handed over without a copy */
     /* direct upload (src->lock): persistently mapped buffers that the
      * viewer stage_owner made in its GL context and that the decode thread
      * fills (cv_stage_take); stage_want = the largest frame it had to place */
@@ -321,8 +408,6 @@ struct _CvSource {
     CvViewer *stage_owner;
     gboolean stage_closing;
     guint stage_misses;         /* frames that found no free buffer (fps log) */
-    char *hw_why;               /* decode thread: why hardware decoding is not in use (status) */
-    gboolean hw_seen;           /* decode thread: a picture came out of the hardware decoder */
     /* the frame the last hardware picture was downloaded into, used again
      * when nothing else refers to it any more (cv_dl_take) */
     AVFrame *dl_keep;
@@ -358,10 +443,14 @@ static double cv_now (void)
  * of each stage (0 = off) */
 static double cv_fps_log_s (void)
 {
-    static double v = -1;
-    if (v < 0) {
+    /* asked by the decode thread of every video and by the render threads
+     * (a double: g_once, see common/lazy.h) */
+    static double v;
+    static gsize once;
+    if (g_once_init_enter (&once)) {
         const char *e = g_getenv ("WALPE_FPS_LOG");
         v = e && *e ? CLAMP (g_ascii_strtod (e, NULL), 0.0, 3600.0) : 0;
+        g_once_init_leave (&once, 1);
     }
     return v;
 }
@@ -419,10 +508,11 @@ static double cv_workers_cpu (int *n)
  * are the decoder's output, unchanged while they waited in the queue. */
 static int cv_md5_n (void)
 {
-    static int n = -1;
+    static WalpeLazy cell = WALPE_LAZY_UNSET;   /* read once (common/lazy.h) */
+    int n = walpe_lazy_get (&cell);
     if (n < 0) {
         const char *e = g_getenv ("WALPE_VIDEO_MD5");
-        n = e && *e ? CLAMP (atoi (e), 0, 1000000) : 0;
+        n = walpe_lazy_set (&cell, e && *e ? CLAMP (atoi (e), 0, 1000000) : 0);
     }
     return n;
 }
@@ -430,6 +520,8 @@ static int cv_md5_n (void)
 /* MD5 of the samples of f, planes row by row without padding (g_free) */
 static char *cv_frame_md5_str (const CvFrame *f)
 {
+    if (f->zc == 1)
+        return g_strdup ("(in GPU memory)");    /* zero-copy: no samples in main memory */
     GChecksum *ck = g_checksum_new (G_CHECKSUM_MD5);
     int n = f->kind == CV_BGRA ? 1 : f->kind == CV_NV ? 2 : 3;
     for (int i = 0; i < n; i++) {
@@ -641,21 +733,43 @@ static void box2 (const guint8 *s, int ss, int sw, int sh, guint8 *d, int ds, in
     }
 }
 
-/* every attached viewer shows the frame at <= half size (src->lock held) */
-static gboolean cv_half_ok (CvSource *src, int w, int h)
+/* The largest size any attached viewer shows the whole frame at, in
+ * pixels (src->lock held). A viewer's size follows the render resolution
+ * chosen for its monitor (cvv_gl_render) or the layer's size in its scene
+ * (walpe_video_tex_set_view). 0 x 0: at least one viewer needs every pixel
+ * of the frame, or none is attached - nothing smaller than the decoded
+ * frame may be handed out. This is what a decoder that can scale while it
+ * decodes asks; frames larger than the answer are always right. */
+static void cv_want_size (CvSource *src, int *w, int *h)
 {
-    static int disabled = -1;
-    if (disabled < 0)
-        disabled = g_getenv ("WALPE_VIDEO_FULLRES") ? 1 : 0;
-    if (disabled || src->viewers->len == 0)
-        return FALSE;
+    int mw = 0, mh = 0;
     for (guint i = 0; i < src->viewers->len; i++) {
         CvViewer *vw = g_ptr_array_index (src->viewers, i);
         int ww = g_atomic_int_get (&vw->want_w), wh = g_atomic_int_get (&vw->want_h);
-        if (ww <= 0 || wh <= 0 || w / 2 < ww || h / 2 < wh)
-            return FALSE;
+        if (ww <= 0 || wh <= 0) {
+            mw = mh = 0;
+            break;
+        }
+        mw = MAX (mw, ww);
+        mh = MAX (mh, wh);
     }
-    return TRUE;
+    *w = mw;
+    *h = mh;
+}
+
+/* every attached viewer shows the frame at <= half size (src->lock held) */
+static gboolean cv_half_ok (CvSource *src, int w, int h)
+{
+    /* (src->lock is this source's own: two videos get here at once) */
+    static WalpeLazy disabled_cell = WALPE_LAZY_UNSET;
+    int disabled = walpe_lazy_get (&disabled_cell);
+    if (disabled < 0)
+        disabled = walpe_lazy_set (&disabled_cell, g_getenv ("WALPE_VIDEO_FULLRES") ? 1 : 0);
+    if (disabled || src->viewers->len == 0)
+        return FALSE;
+    int ww = 0, wh = 0;
+    cv_want_size (src, &ww, &wh);
+    return ww > 0 && wh > 0 && w / 2 >= ww && h / 2 >= wh;
 }
 
 /* range and matrix of a decoded frame (WALPE_YUV_* bits) */
@@ -907,7 +1021,7 @@ static void cv_test_nv12 (CvSource *src)
  * returns FALSE for unsupported frames. *copied = bytes written here. */
 static gboolean cv_fill_frame (CvSource *src, CvFrame *f, double *copied)
 {
-    static int fmt_err_n, fmt_note_n;
+    static atomic_int fmt_err_n, fmt_note_n;   /* every decode thread counts (common/lazy.h) */
     AVFrame *fr = src->frame;
     int w = fr->width, h = fr->height;
     *copied = 0;
@@ -1003,12 +1117,12 @@ static gboolean cv_fill_frame (CvSource *src, CvFrame *f, double *copied)
     if (fr->format != AV_PIX_FMT_YUV420P && fr->format != AV_PIX_FMT_YUVJ420P) {
         const char *fn = av_get_pix_fmt_name ((enum AVPixelFormat) fr->format);
         if (!cv_normalize (src, ip, is)) {
-            if (fmt_err_n++ < 5)
+            if (walpe_first_n (&fmt_err_n, 5))
                 g_warning ("video: frame format %s (%d) is not supported: %s shows nothing",
                            fn ? fn : "?", fr->format, src->path);
             return FALSE;
         }
-        if (fmt_note_n++ < 1)
+        if (walpe_first_n (&fmt_note_n, 1))
             g_message ("video: %s frames are converted to 8-bit 4:2:0 on the CPU (%s)",
                        fn ? fn : "?", src->path);
     }
@@ -1071,10 +1185,12 @@ static gboolean cv_fill_frame (CvSource *src, CvFrame *f, double *copied)
 /* seconds every viewer must have been paused before the decoder is freed */
 static double cv_park_s (void)
 {
-    static double v = -1;
-    if (v < 0) {
+    static double v;
+    static gsize once;   /* (a double, asked by every decode thread: g_once) */
+    if (g_once_init_enter (&once)) {
         const char *e = g_getenv ("WALPE_VIDEO_PARK_S");
         v = e && *e ? CLAMP (g_ascii_strtod (e, NULL), 0.0, 86400.0) : CV_PARK_S;
+        g_once_init_leave (&once, 1);
     }
     return v;
 }
@@ -1085,6 +1201,13 @@ static void cv_park (CvSource *src);
 static void cv_frame_release (CvSource *src, CvFrame *f)
 {
     av_frame_unref (f->av);
+    if (f->zc) {
+        /* zero-copy: the description first, then the picture it maps (a
+         * viewer that still shows it holds its own reference) */
+        av_frame_unref (f->drm);
+        av_frame_unref (f->hw);
+        f->zc = f->zc_n = 0;
+    }
     if (f->stage1) {
         /* its mapped buffer is free for another frame (once the GPU has
          * finished reading it: cv_stage_take) */
@@ -1401,12 +1524,19 @@ static int cv_threads_for (const CvSource *src, int *max)
 static enum AVPixelFormat cv_get_format (AVCodecContext *c, const enum AVPixelFormat *fmts)
 {
     CvSource *src = c->opaque;
-    for (const enum AVPixelFormat *p = fmts; *p != AV_PIX_FMT_NONE; p++)
-        if (*p == src->hw_fmt)
-            return *p;
+    src->hw_sw_fmt = (int) c->sw_pix_fmt;
+    if (src->hw_fmt != AV_PIX_FMT_NONE)
+        for (const enum AVPixelFormat *p = fmts; *p != AV_PIX_FMT_NONE; p++)
+            if (*p == src->hw_fmt) {
+                src->hw_fmt_taken++;
+                return *p;
+            }
     /* the device does not decode this stream (profile, size, bit depth):
-     * the decode loop reopens the decoder for software decoding */
-    g_atomic_int_set (&src->hw_refused, 1);
+     * the decode loop reopens the decoder for the next attempt or for
+     * software decoding. A decoder that finds its hardware itself and
+     * hands out pictures in main memory is not asked anything here. */
+    if (!src->hw_own)
+        g_atomic_int_set (&src->hw_refused, 1);
     for (const enum AVPixelFormat *p = fmts; *p != AV_PIX_FMT_NONE; p++) {
         const AVPixFmtDescriptor *d = av_pix_fmt_desc_get (*p);
         if (d && !(d->flags & AV_PIX_FMT_FLAG_HWACCEL))
@@ -1420,21 +1550,14 @@ static void cv_hw_close (CvSource *src)
     av_buffer_unref (&src->hw_dev);
     src->hw_fmt = AV_PIX_FMT_NONE;
     src->hw_name = NULL;
-    src->hw_seen = FALSE;
+    src->hw_on = src->hw_own = FALSE;
+    src->zc_ok = FALSE;
+    src->zc_cur = 0;
+    walpe_hwsel_closed (&src->hw);
+    if (src->zc_hw)
+        av_frame_unref (src->zc_hw);
     if (src->dl_keep)
         av_frame_unref (src->dl_keep);
-}
-
-/* why hardware decoding is not in use, for the status line and the log
- * (decode thread, or source creation before the thread exists) */
-static void cv_hw_set_why (CvSource *src, const char *fmt, ...) G_GNUC_PRINTF (2, 3);
-static void cv_hw_set_why (CvSource *src, const char *fmt, ...)
-{
-    va_list ap;
-    g_free (src->hw_why);
-    va_start (ap, fmt);
-    src->hw_why = g_strdup_vprintf (fmt, ap);
-    va_end (ap);
 }
 
 /* nothing but the kept copy refers to the buffers of k */
@@ -1522,105 +1645,851 @@ static int cv_hw_download (CvSource *src)
     return rc;
 }
 
-/* Hardware decoding when asked for (video.h; off by default): a device
- * of the first type that exists and that libavcodec's H.264 decoder can
- * use. FALSE = software decoding. */
-/* is hardware decoding asked for: WALPE_VIDEO_HWDEC when set (*only = the
- * one device type it names, if it names one), else the setting */
-static gboolean cv_hw_asked (const char **only)
+/* the hardware picture src->frame into main memory, in its place, with
+ * its properties (time stamp, colour tags) */
+static int cv_hw_to_memory (CvSource *src)
+{
+    int rc = cv_hw_download (src);
+    if (rc >= 0)
+        rc = av_frame_copy_props (src->swframe, src->frame);
+    av_frame_unref (src->frame);
+    if (rc < 0) {
+        av_frame_unref (src->swframe);
+        return rc;
+    }
+    av_frame_move_ref (src->frame, src->swframe);
+    return 0;
+}
+
+/* ------------------------------------------------ hardware: the settings */
+
+static void cv_note_decoder (CvSource *src);
+
+/* WALPE_VIDEO_HWDEC, when it is set to one of the setting's words (off,
+ * auto, or the name of one API): it decides instead of the setting */
+static gboolean cv_hw_env (WalpeHwWant *w)
+{
+    static const char *e;
+    static WalpeHwWant env;
+    static gboolean env_ok;
+    static gsize once;
+    if (g_once_init_enter (&once)) {
+        e = g_getenv ("WALPE_VIDEO_HWDEC");
+        env_ok = e && *e && walpe_hwsel_parse (e, &env);
+        if (e && *e && !env_ok)
+            g_warning ("WALPE_VIDEO_HWDEC=%s: not off, auto or the name of a decoding API: ignored", e);
+        g_once_init_leave (&once, 1);
+    }
+    if (env_ok)
+        *w = env;
+    return env_ok;
+}
+
+/* is hardware decoding asked for at all (any thread; an integer read) */
+static gboolean cv_hw_is_asked (void)
+{
+    WalpeHwWant w;
+    return cv_hw_env (&w) ? w.on : walpe_video_hwdec () != 0;
+}
+
+/* "video_hwdec": WALPE_VIDEO_HWDEC when set, else the setting. Returns a
+ * number that changes whenever the setting was set. */
+static guint cv_hw_want (WalpeHwWant *w)
+{
+    if (cv_hw_env (w))
+        return 0;
+    memset (w, 0, sizeof (*w));
+    guint serial = walpe_video_hwdec_api (w->api, sizeof (w->api));
+    w->on = walpe_video_hwdec () != 0;
+    if (!w->on)
+        w->api[0] = 0;
+    return serial;
+}
+
+/* "video_zerocopy"; WALPE_VIDEO_ZEROCOPY=0|1 overrides it */
+static gboolean cv_zc_asked (void)
 {
     static const char *e;
     static gsize once;
     if (g_once_init_enter (&once)) {
-        e = g_getenv ("WALPE_VIDEO_HWDEC");
+        e = g_getenv ("WALPE_VIDEO_ZEROCOPY");
         g_once_init_leave (&once, 1);
     }
-    if (only)
-        *only = NULL;
-    if (e && *e) {
-        if (!g_ascii_strcasecmp (e, "0") || !g_ascii_strcasecmp (e, "off") ||
-            !g_ascii_strcasecmp (e, "no"))
-            return FALSE;
-        if (only && g_ascii_strcasecmp (e, "1") && g_ascii_strcasecmp (e, "auto") &&
-            g_ascii_strcasecmp (e, "on") && g_ascii_strcasecmp (e, "yes"))
-            *only = e;
-        return TRUE;
-    }
-    return walpe_video_hwdec () != 0;
+    if (e && *e)
+        return !(!g_ascii_strcasecmp (e, "0") || !g_ascii_strcasecmp (e, "off") ||
+                 !g_ascii_strcasecmp (e, "no"));
+    return walpe_video_zerocopy () != 0;
 }
 
-static gboolean cv_hw_setup (CvSource *src, const AVCodec *codec)
+/* ------------------------------------- hardware: what this FFmpeg offers */
+
+typedef struct {
+    const AVCodec *codec;
+    enum AVHWDeviceType type;   /* the device it is given, NONE = it finds its hardware itself */
+    enum AVPixelFormat fmt;     /* its pictures in GPU memory, NONE = main memory, or it says */
+} CvHwImpl;
+#define CV_MAX_OFFERS 16
+static WalpeHwOffer cv_offers[CV_MAX_OFFERS];
+static CvHwImpl cv_impls[CV_MAX_OFFERS];    /* cv_impls[i] belongs to cv_offers[i] */
+static int cv_n_offers;
+
+static void cv_offer_add (const char *api, WalpeHwKind kind, const AVCodec *codec,
+                          enum AVHWDeviceType type, enum AVPixelFormat fmt)
 {
-    static const char *const auto_types[] = { "cuda", "vaapi", "vdpau", NULL };
-    const char *one[2] = { NULL, NULL };
-    const char *const *types = auto_types;
-    src->hw_asked = cv_hw_asked (&one[0]);
-    if (!src->hw_asked)
-        return FALSE;
-    if (one[0])
-        types = one;
-    src->hw_wanted = TRUE;
-    if (!src->gpu_yuv) {
-        /* nothing to gain: the picture would be downloaded to be drawn by the CPU */
-        cv_hw_set_why (src, "the renderer is a software renderer");
-        return FALSE;
-    }
-    if (src->hw_off)
-        return FALSE;       /* failed before (hw_why says how) */
-    GString *why = g_string_new (NULL);
-    for (int t = 0; types[t]; t++) {
-        enum AVHWDeviceType type = av_hwdevice_find_type_by_name (types[t]);
-        enum AVPixelFormat fmt = AV_PIX_FMT_NONE;
-        if (type == AV_HWDEVICE_TYPE_NONE) {
-            g_string_append_printf (why, "%s%s: not in this FFmpeg build", why->len ? "; " : "",
-                                    types[t]);
+    if (cv_n_offers >= CV_MAX_OFFERS || !api || !*api || !codec)
+        return;
+    WalpeHwOffer *o = &cv_offers[cv_n_offers];
+    const char *tn = type != AV_HWDEVICE_TYPE_NONE ? av_hwdevice_get_type_name (type) : NULL;
+    memset (o, 0, sizeof (*o));
+    g_strlcpy (o->api, api, sizeof (o->api));
+    g_strlcpy (o->codec, codec->name ? codec->name : "?", sizeof (o->codec));
+    o->kind = kind;
+    g_strlcpy (o->dev_type, tn ? tn : "", sizeof (o->dev_type));
+    o->cookie = cv_n_offers;
+    cv_impls[cv_n_offers].codec = codec;
+    cv_impls[cv_n_offers].type = type;
+    cv_impls[cv_n_offers].fmt = fmt;
+    cv_n_offers++;
+}
+
+/* Everything this FFmpeg build can decode H.264 with besides its software
+ * decoder (listed once per process): the hardware accelerations of its own
+ * decoder, one per device type (avcodec_get_hw_config; the type has to be
+ * one libavutil was built with, av_hwdevice_iterate_types), and the
+ * hardware decoders that are codecs of their own (h264_v4l2m2m and the
+ * like). Nothing is looked for by name: what is there is listed, and
+ * video_hwsel.h puts it in order. */
+static void cv_offers_init (void)
+{
+    static gsize once;
+    if (!g_once_init_enter (&once))
+        return;
+    const AVCodec *native = avcodec_find_decoder (AV_CODEC_ID_H264);
+    for (int i = 0; native; i++) {
+        const AVCodecHWConfig *cfg = avcodec_get_hw_config (native, i);
+        if (!cfg)
+            break;
+        if (!(cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX))
             continue;
-        }
+        gboolean built = FALSE, listed = FALSE;
+        for (enum AVHWDeviceType t = av_hwdevice_iterate_types (AV_HWDEVICE_TYPE_NONE);
+             t != AV_HWDEVICE_TYPE_NONE; t = av_hwdevice_iterate_types (t))
+            built |= t == cfg->device_type;
+        /* (a device type listed with a second pixel format: the first one) */
+        for (int k = 0; k < cv_n_offers; k++)
+            listed |= cv_impls[k].codec == native && cv_impls[k].type == cfg->device_type;
+        if (built && !listed)
+            cv_offer_add (av_hwdevice_get_type_name (cfg->device_type), WALPE_HW_DEVICE, native,
+                          cfg->device_type, cfg->pix_fmt);
+    }
+    void *it = NULL;
+    const AVCodec *c;
+    while ((c = av_codec_iterate (&it))) {
+        if (c == native || c->id != AV_CODEC_ID_H264 || !av_codec_is_decoder (c) ||
+            !(c->capabilities & AV_CODEC_CAP_HARDWARE))
+            continue;
+        const char *name = c->wrapper_name && *c->wrapper_name ? c->wrapper_name : c->name;
+        enum AVHWDeviceType type = AV_HWDEVICE_TYPE_NONE;
+        enum AVPixelFormat fmt = AV_PIX_FMT_NONE;
         for (int i = 0;; i++) {
-            const AVCodecHWConfig *cfg = avcodec_get_hw_config (codec, i);
+            const AVCodecHWConfig *cfg = avcodec_get_hw_config (c, i);
             if (!cfg)
                 break;
-            if ((cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) &&
-                cfg->device_type == type) {
+            if (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) {
+                type = cfg->device_type;
                 fmt = cfg->pix_fmt;
                 break;
             }
+            if (fmt == AV_PIX_FMT_NONE && (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_INTERNAL))
+                fmt = cfg->pix_fmt;
         }
-        if (fmt == AV_PIX_FMT_NONE) {
-            g_string_append_printf (why, "%s%s: no H.264 support in this FFmpeg build",
-                                    why->len ? "; " : "", types[t]);
-            continue;
-        }
-        AVBufferRef *dev = NULL;
-        int rc = av_hwdevice_ctx_create (&dev, type, NULL, NULL, 0);
-        if (rc < 0 || !dev) {
-            g_string_append_printf (why, "%s%s: %s", why->len ? "; " : "", types[t],
-                                    av_err2str (rc));
-            if (type == AV_HWDEVICE_TYPE_CUDA) {
-                /* libavutil loads NVIDIA's libraries by name and says only
-                 * on stderr which one it missed: say it here */
-                static const char *const libs[] = { "libcuda.so.1", "libnvcuvid.so.1" };
-                for (guint i = 0; i < G_N_ELEMENTS (libs); i++) {
-                    void *h = dlopen (libs[i], RTLD_LAZY | RTLD_LOCAL);
-                    if (h)
-                        dlclose (h);
-                    else
-                        g_string_append_printf (why, " (%s cannot be loaded)", libs[i]);
-                }
-            }
-            continue;
-        }
-        src->hw_dev = dev;
-        src->hw_fmt = fmt;
-        src->hw_name = av_hwdevice_get_type_name (type);
-        g_string_free (why, TRUE);
-        return TRUE;
+        cv_offer_add (name, type != AV_HWDEVICE_TYPE_NONE ? WALPE_HW_WRAPPER_DEVICE : WALPE_HW_WRAPPER,
+                      c, type, fmt);
     }
-    g_message ("video: hardware decoding is not available (%s): decoding on the CPU", why->str);
-    cv_hw_set_why (src, "no device: %s", why->str);
-    g_string_free (why, TRUE);
-    src->hw_off = TRUE;     /* not asked again for this source */
+#ifdef CV_TEST_HWFAKE
+    /* tests: two "hardware decoders" that are the software decoder, so that
+     * the attempts, a refused stream and a failure in the middle of a clip
+     * can be played through on a machine without decoding hardware
+     * (tests/video_test.c) */
+    if (native) {
+        cv_offer_add ("fake", WALPE_HW_WRAPPER, native, AV_HWDEVICE_TYPE_NONE, AV_PIX_FMT_NONE);
+        cv_offer_add ("fake", WALPE_HW_WRAPPER, native, AV_HWDEVICE_TYPE_NONE, AV_PIX_FMT_NONE);
+    }
+#endif
+    g_once_init_leave (&once, 1);
+}
+
+/* how many of the offers a plan for `want` is made from: all of them */
+static int cv_offers_for (const WalpeHwWant *want)
+{
+    int n = cv_n_offers;
+#ifdef CV_TEST_HWFAKE
+    /* (the tests' stand-ins, the last two, are tried by name only) */
+    if (strcmp (want->api, "fake") && n >= 2)
+        n -= 2;
+#else
+    (void) want;
+#endif
+    return n;
+}
+
+/* --------------------------------------- hardware: the GPU that renders */
+
+static GMutex cv_gpu_lock;
+static WalpeHwGpu cv_gpu;       /* cv_gpu_lock */
+static gpointer cv_gpu_dpy;     /* cv_gpu_lock: the EGL display it was read from */
+static gint cv_gpu_serial;      /* atomic: counts the changes of cv_gpu */
+
+/* name is one of the words of a space-separated extension list */
+static gboolean cv_ext_listed (const char *list, const char *name)
+{
+    gsize n = strlen (name);
+    for (const char *p = list; p && (p = strstr (p, name)); p += n)
+        if ((p == list || p[-1] == ' ') && (p[n] == 0 || p[n] == ' '))
+            return TRUE;
     return FALSE;
+}
+
+/* the kernel driver behind a DRM device node ("" = not known): the name
+ * the node's sysfs entry links to. For messages; one thing only is decided
+ * by it: whether NVIDIA's own driver renders (cv_gpu_probe,
+ * WalpeHwGpu.nvidia_driver). */
+static void cv_node_driver (const char *node, char *out, gsize len)
+{
+    struct stat st;
+    out[0] = 0;
+    if (!node || !*node || stat (node, &st) != 0 || !S_ISCHR (st.st_mode))
+        return;
+    char link[96], target[256];
+    g_snprintf (link, sizeof link, "/sys/dev/char/%u:%u/device/driver", major (st.st_rdev),
+                minor (st.st_rdev));
+    ssize_t n = readlink (link, target, sizeof target - 1);
+    if (n <= 0)
+        return;
+    target[n] = 0;
+    const char *base = strrchr (target, '/');
+    base = base ? base + 1 : target;
+    /* (a name, not text to pass on as it is) */
+    if (*base && strspn (base, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") ==
+        strlen (base))
+        g_strlcpy (out, base, len);
+}
+
+/* the render node of the device whose primary node is `card`
+ * ("/dev/dri/card0" -> "/dev/dri/renderD128"), "" = it has none */
+static void cv_card_render_node (const char *card, char *out, gsize len)
+{
+    out[0] = 0;
+    const char *base = card ? strrchr (card, '/') : NULL;
+    if (!base || !base[1] || strspn (base + 1, "abcdefghijklmnopqrstuvwxyzD0123456789") != strlen (base + 1))
+        return;
+    if (g_str_has_prefix (base + 1, "renderD")) {
+        g_strlcpy (out, card, len);
+        return;
+    }
+    char *dir = g_strdup_printf ("/sys/class/drm/%s/device/drm", base + 1);
+    GDir *d = g_dir_open (dir, 0, NULL);
+    const char *e;
+    while (d && (e = g_dir_read_name (d)))
+        if (g_str_has_prefix (e, "renderD") && strlen (e) < 24) {
+            g_snprintf (out, len, "/dev/dri/%s", e);
+            break;
+        }
+    if (d)
+        g_dir_close (d);
+    g_free (dir);
+}
+
+/* every DRM render node of the machine, with its kernel driver */
+static void cv_gpu_nodes (WalpeHwGpu *g)
+{
+    g->n_nodes = 0;
+    for (int i = 0; i < 64 && g->n_nodes < WALPE_HW_MAX_NODES; i++) {
+        char path[64];
+        g_snprintf (path, sizeof path, "/dev/dri/renderD%d", 128 + i);
+        if (!g_file_test (path, G_FILE_TEST_EXISTS))
+            continue;
+        g_strlcpy (g->nodes[g->n_nodes], path, sizeof (g->nodes[0]));
+        cv_node_driver (path, g->node_driver[g->n_nodes], sizeof (g->node_driver[0]));
+        g->n_nodes++;
+    }
+}
+
+/* Render thread, its context current: which device this EGL display
+ * renders on - its DRM render node, and the compute device number where the
+ * device reports one (EGL_EXT_device_query and the device's own
+ * extensions) - and which render nodes the machine has. Read once per
+ * display; a source whose decoder was opened before this was known follows
+ * (cv_hw_stale). Only questions are asked: nothing of the display changes. */
+static void cv_gpu_probe (void)
+{
+    EGLDisplay dpy = eglGetCurrentDisplay ();
+    if (dpy == EGL_NO_DISPLAY)
+        return;
+    g_mutex_lock (&cv_gpu_lock);
+    gboolean done = cv_gpu_dpy == (gpointer) dpy;
+    g_mutex_unlock (&cv_gpu_lock);
+    if (done)
+        return;
+    WalpeHwGpu g;
+    memset (&g, 0, sizeof g);
+    g.ordinal = -1;
+    g.software = walpe_gl_is_software ();
+    if (epoxy_has_egl_extension (EGL_NO_DISPLAY, "EGL_EXT_device_query") ||
+        epoxy_has_egl_extension (EGL_NO_DISPLAY, "EGL_EXT_device_base")) {
+        EGLAttrib a = 0;
+        if (eglQueryDisplayAttribEXT (dpy, EGL_DEVICE_EXT, &a) && a) {
+            EGLDeviceEXT dev = (EGLDeviceEXT) a;
+            const char *dx = eglQueryDeviceStringEXT (dev, EGL_EXTENSIONS);
+            if (dx) {
+                const char *node = NULL;
+                g.known = TRUE;
+                if (cv_ext_listed (dx, "EGL_EXT_device_drm_render_node"))
+                    node = eglQueryDeviceStringEXT (dev, EGL_DRM_RENDER_NODE_FILE_EXT);
+                if (node && *node && strlen (node) < sizeof (g.render_node)) {
+                    g_strlcpy (g.render_node, node, sizeof (g.render_node));
+                } else if (cv_ext_listed (dx, "EGL_EXT_device_drm")) {
+                    const char *card = eglQueryDeviceStringEXT (dev, EGL_DRM_DEVICE_FILE_EXT);
+                    cv_card_render_node (card, g.render_node, sizeof (g.render_node));
+                }
+                /* the device says which compute device it is, or - by not
+                 * having the extension - that it is none */
+                g.ordinal_known = TRUE;
+                if (cv_ext_listed (dx, "EGL_NV_device_cuda")) {
+                    EGLAttrib ord = -1;
+                    if (eglQueryDeviceAttribEXT (dev, EGL_CUDA_DEVICE_NV, &ord) && ord >= 0 && ord < 64)
+                        g.ordinal = (int) ord;
+                    else
+                        g.ordinal_known = FALSE;
+                }
+                if (cv_ext_listed (dx, "EGL_MESA_device_software"))
+                    g.software = TRUE;
+            }
+        }
+        eglGetError ();     /* a refused question leaves an error code behind: not the caller's */
+    }
+#ifdef CV_HAVE_GPUSEL
+    {
+        /* the daemon's own record knows the device also where the EGL
+         * driver cannot be asked */
+        WalpeGpuInUse u;
+        memset (&u, 0, sizeof u);
+        if (walpe_gpu_in_use (&u)) {
+            if (!g.render_node[0] && u.render_node && strlen (u.render_node) < sizeof (g.render_node))
+                g_strlcpy (g.render_node, u.render_node, sizeof (g.render_node));
+            if (u.driver && *u.driver)
+                g_strlcpy (g.driver, u.driver, sizeof (g.driver));
+            g.software |= u.software;
+            g.known = TRUE;
+            walpe_gpu_in_use_clear (&u);
+        }
+    }
+#endif
+    if (g.render_node[0] && !g.driver[0])
+        cv_node_driver (g.render_node, g.driver, sizeof (g.driver));
+    /* NVIDIA's own driver renders: "cuda" is then the first hardware decoder
+     * (the project's rule, the one rule of video_hwsel.h that goes by a
+     * name). The kernel driver of the render node says it; where that is
+     * not known (no node, no sysfs), the vendor string of the display this
+     * context renders on. Neither known = FALSE: the plan as without it. */
+    /* (the daemon has the same fact from common/gpusel.h: walpe_gpu_in_use ().driver) */
+    if (g.driver[0]) {
+        g.nvidia_driver = !strcmp (g.driver, "nvidia");
+    } else {
+        const char *vendor = eglQueryString (dpy, EGL_VENDOR);
+        g.nvidia_driver = vendor && !g_ascii_strncasecmp (vendor, "NVIDIA", 6);
+        eglGetError ();     /* (as above: not the caller's) */
+    }
+    cv_gpu_nodes (&g);
+    g_mutex_lock (&cv_gpu_lock);
+    gboolean changed = memcmp (&cv_gpu, &g, sizeof g) != 0;
+    cv_gpu = g;
+    cv_gpu_dpy = (gpointer) dpy;
+    g_mutex_unlock (&cv_gpu_lock);
+    if (changed) {
+        g_atomic_int_inc (&cv_gpu_serial);
+        g_debug ("video: the renderer's device is %s%s%s%s, compute device %d%s%s",
+                 g.known ? (g.render_node[0] ? g.render_node : "one without a render node") : "not known",
+                 g.driver[0] ? " [" : "", g.driver, g.driver[0] ? "]" : "", g.ordinal,
+                 g.software ? " (a software renderer)" : "",
+                 g.nvidia_driver ? " (NVIDIA's driver: cuda is tried first)" : "");
+    }
+}
+
+/* the machine as known now (a copy); returns the change count it belongs to */
+static gint cv_gpu_get (WalpeHwGpu *g)
+{
+    g_mutex_lock (&cv_gpu_lock);
+    *g = cv_gpu;
+    gint serial = g_atomic_int_get (&cv_gpu_serial);
+    g_mutex_unlock (&cv_gpu_lock);
+    if (g->n_nodes == 0)
+        cv_gpu_nodes (g);       /* no GL context has been seen yet */
+#if defined(__x86_64__)
+    /* x86-64: auto does not open FFmpeg's V4L2 stateful decoder (it would
+     * open every /dev/video* node, webcams too); hwdec=v4l2m2m still does
+     * (video_hwsel.h, walpe_hwsel_auto_skips) */
+    g->x86_64 = TRUE;
+#endif
+    return serial;
+}
+
+/* ----------------------------------------- hardware: what FFmpeg says
+ * FFmpeg tells why a device cannot be made, or why it does not take a
+ * stream, only in its log: the calls return a general error code or simply
+ * offer a software format. While a thread tries a hardware decoder, the
+ * warnings and errors FFmpeg logs on that thread are therefore also
+ * collected (the last few hundred bytes) for the status line. Everything
+ * still goes to FFmpeg's own log output, unchanged. The callback is
+ * installed the first time hardware decoding is asked for: a daemon that
+ * never asks keeps FFmpeg's logging as it is. */
+static __thread GString *cv_log_to;
+
+static void cv_log_cb (void *avcl, int level, const char *fmt, va_list vl)
+{
+    GString *to = cv_log_to;
+    if (to && fmt && level >= 0 && level <= AV_LOG_WARNING) {
+        va_list cp;
+        char line[240];
+        va_copy (cp, vl);
+        g_vsnprintf (line, sizeof line, fmt, cp);
+        va_end (cp);
+        g_strchomp (line);
+        /* (it ends up in the status: plain ASCII, no control characters) */
+        for (char *q = line; *q; q++)
+            if ((guchar) *q < 0x20 || (guchar) *q >= 0x7f)
+                *q = '?';
+        if (*line) {
+            if (to->len)
+                g_string_append (to, " / ");
+            g_string_append (to, line);
+            if (to->len > 480)
+                g_string_erase (to, 0, (gssize) (to->len - 480));
+        }
+    }
+    av_log_default_callback (avcl, level, fmt, vl);
+}
+
+static void cv_log_install (void)
+{
+    static gsize once;
+    if (g_once_init_enter (&once)) {
+        av_log_set_callback (cv_log_cb);
+        g_once_init_leave (&once, 1);
+    }
+}
+
+/* ------------------------------------------- hardware: device and plan */
+
+/* The device of attempt t. NULL: *why and *detail (g_free) say what
+ * failed. A DRM node the user may not open is told apart from a device
+ * that is not there before FFmpeg is asked (it reports both alike). */
+static AVBufferRef *cv_hw_device (CvSource *src, WalpeHwTry *t, const CvHwImpl *im, WalpeHwWhy *why,
+                                  char **detail)
+{
+    AVBufferRef *dev = NULL;
+    int rc;
+    *why = WALPE_HW_WHY_NO_DEVICE;
+    *detail = NULL;
+    gboolean by_node = t->node[0] && (t->derive || !strcmp (t->device, t->node));
+    if (by_node && access (t->node, R_OK | W_OK) != 0) {
+        int e = errno;
+        if (e == EACCES || e == EPERM) {
+            *why = WALPE_HW_WHY_PERMISSION;
+            *detail = g_strdup_printf ("%s may not be opened by this user (%s): the node belongs to a "
+                                       "group, usually render or video, that the user is not in",
+                                       t->node, g_strerror (e));
+        } else {
+            *detail = g_strdup_printf ("%s: %s", t->node, g_strerror (e));
+        }
+        return NULL;
+    }
+    g_string_truncate (src->hw_log, 0);
+    if (t->derive) {
+        AVBufferRef *drm = NULL;
+        rc = av_hwdevice_ctx_create (&drm, AV_HWDEVICE_TYPE_DRM, t->node, NULL, 0);
+        if (rc >= 0 && drm) {
+            rc = av_hwdevice_ctx_create_derived (&dev, im->type, drm, 0);
+            av_buffer_unref (&drm);
+        } else {
+            /* this FFmpeg cannot open DRM devices: the API's own first
+             * device, and the status says that the API chose */
+            av_buffer_unref (&drm);
+            rc = av_hwdevice_ctx_create (&dev, im->type, NULL, NULL, 0);
+            if (rc >= 0 && dev) {
+                t->derive = FALSE;
+                t->where = WALPE_HW_UNKNOWN;
+                t->dmabuf = FALSE;
+                t->node[0] = t->driver[0] = 0;
+            }
+        }
+    } else {
+        rc = av_hwdevice_ctx_create (&dev, im->type, t->device[0] ? t->device : NULL, NULL, 0);
+    }
+    if (rc >= 0 && dev)
+        return dev;
+    av_buffer_unref (&dev);
+    GString *d = g_string_new (av_err2str (rc));
+    if (rc == AVERROR (EACCES) || rc == AVERROR (EPERM) ||
+        walpe_hwsel_classify (src->hw_log->str, WALPE_HW_WHY_NO_DEVICE) == WALPE_HW_WHY_PERMISSION)
+        *why = WALPE_HW_WHY_PERMISSION;
+    {
+        /* libraries FFmpeg loads by name for this API: it says only in its
+         * log which one it missed */
+        const WalpeHwApi *a = walpe_hwsel_api (cv_offers[t->offer].dev_type[0] ? cv_offers[t->offer].dev_type
+                                                                               : t->api);
+        char **libs = a && a->libs && *a->libs ? g_strsplit (a->libs, " ", -1) : NULL;
+        for (int i = 0; libs && libs[i]; i++) {
+            if (!*libs[i])
+                continue;
+            void *h = dlopen (libs[i], RTLD_LAZY | RTLD_LOCAL);
+            if (h)
+                dlclose (h);
+            else
+                g_string_append_printf (d, " (%s cannot be loaded)", libs[i]);
+        }
+        g_strfreev (libs);
+    }
+    if (src->hw_log->len)
+        g_string_append_printf (d, "; FFmpeg: %s", src->hw_log->str);
+    *detail = g_string_free (d, FALSE);
+    return NULL;
+}
+
+/* Make the plan for the setting and the machine as they are now; failures
+ * of an earlier plan are forgotten (the setting was switched: try again). */
+static void cv_hw_replan (CvSource *src)
+{
+    WalpeHwWant want;
+    WalpeHwGpu gpu;
+    src->hw_serial = cv_hw_want (&want);
+    src->hw_want = want;
+    src->hw_asked = want.on;
+    src->hw_planned = TRUE;
+    if (!want.on) {
+        /* the default: nothing is listed, probed or installed */
+        src->hw_gpu_serial = g_atomic_int_get (&cv_gpu_serial);
+        walpe_hwsel_start (&src->hw, NULL, 0, NULL, &want);
+        return;
+    }
+    cv_offers_init ();
+    cv_log_install ();
+    cv_gpu_probe ();        /* (when this thread has a GL context; else what a render thread found) */
+    src->hw_gpu_serial = cv_gpu_get (&gpu);
+    /* the picture drawn by the CPU (software GL, WALPE_CPU_YUV): nothing
+     * to gain, it would be downloaded for that */
+    if (!src->gpu_yuv)
+        gpu.software = TRUE;
+    walpe_hwsel_start (&src->hw, cv_offers, cv_offers_for (&want), &gpu, &want);
+    if (src->hw.n == 0 && src->hw.general == WALPE_HW_WHY_NOT_BUILT && want.api[0] &&
+        av_hwdevice_find_type_by_name (want.api) == AV_HWDEVICE_TYPE_NONE) {
+        g_free (src->hw.general_text);
+        src->hw.general_text = g_strdup_printf ("%s: neither a device type nor an H.264 hardware "
+                                                "decoder of this FFmpeg build", want.api);
+    }
+}
+
+/* Decode thread: does the open decoder still fit - the setting, the
+ * zero-copy switch (it sizes a hardware decoder's picture pool) and the GPU
+ * that renders (a decoder opened before the first GL context of the
+ * process did not know it)? Two integer comparisons while nothing changed. */
+static gboolean cv_hw_stale (CvSource *src)
+{
+    WalpeHwWant want;
+    guint serial = cv_hw_want (&want);
+    gint gs = g_atomic_int_get (&cv_gpu_serial);
+    gboolean zc = src->hw_on ? cv_zc_asked () : src->zc_asked;
+    if (serial == src->hw_serial && gs == src->hw_gpu_serial && zc == src->zc_asked)
+        return FALSE;
+    gboolean stale = want.on != src->hw_want.on || strcmp (want.api, src->hw_want.api) != 0 ||
+                     zc != src->zc_asked;
+    if (!stale && want.on && gs != src->hw_gpu_serial) {
+        /* the render GPU became known: only if the first attempt would be
+         * another one than the decoder in use */
+        WalpeHwGpu gpu;
+        WalpeHwTry tries[WALPE_HW_MAX_TRIES];
+        cv_gpu_get (&gpu);
+        if (!src->gpu_yuv)
+            gpu.software = TRUE;
+        int n = walpe_hwsel_plan (cv_offers, cv_offers_for (&want), &gpu, &want, tries);
+        const WalpeHwTry *cur = walpe_hwsel_current (&src->hw);
+        stale = n > 0 && (!cur || strcmp (cur->api, tries[0].api) || strcmp (cur->device, tries[0].device) ||
+                          cur->derive != tries[0].derive);
+    }
+    if (!stale) {
+        src->hw_serial = serial;
+        src->hw_gpu_serial = gs;
+    }
+    return stale;
+}
+
+/* a decoder that is a codec of its own is told what FFmpeg's decoder reads
+ * from the stream by itself: the size the file declares and the parameter
+ * sets (Annex B, as the packets carry them) */
+static void cv_wrapper_setup (CvSource *src)
+{
+    static const guint8 sc[4] = { 0, 0, 0, 1 };
+    const Mp4Demux *d = src->demux;
+    src->dec->width = src->dec->coded_width = d->width;
+    src->dec->height = src->dec->coded_height = d->height;
+    gsize len = 8 + d->sps_len + d->pps_len;
+    if (d->sps_len == 0 || d->pps_len == 0 || len > (1 << 20))
+        return;
+    guint8 *x = av_mallocz (len + AV_INPUT_BUFFER_PADDING_SIZE);
+    if (!x)
+        return;
+    memcpy (x, sc, 4);
+    memcpy (x + 4, d->sps, d->sps_len);
+    memcpy (x + 4 + d->sps_len, sc, 4);
+    memcpy (x + 8 + d->sps_len, d->pps, d->pps_len);
+    src->dec->extradata = x;
+    src->dec->extradata_size = (int) len;
+}
+
+/* --------------------------------------- hardware: zero-copy, decoder side */
+
+/* why zero-copy is not in use, for the status line (any thread; never with
+ * src->lock held). NULL = it is, or was not asked for. */
+static void cv_zc_set_why (CvSource *src, const char *why)
+{
+    g_mutex_lock (&src->lock);
+    if (g_strcmp0 (src->zc_why, why)) {
+        g_free (src->zc_why);
+        src->zc_why = g_strdup (why);
+        g_atomic_int_set (&src->zc_dirty, 1);
+    }
+    g_mutex_unlock (&src->lock);
+}
+
+/* A decoder is being opened (t = the attempt, NULL = software): may its
+ * pictures go out as DMA-BUFs, and how many must its pool hold for that.
+ * Besides what the decoder needs for itself, pictures are held by the
+ * queue (CV_AHEAD, one being handed over, one in the decode loop) and by
+ * every viewer (the one on screen, and the next one while it is imported). */
+static void cv_zc_setup (CvSource *src, const WalpeHwTry *t)
+{
+    const char *why = NULL;
+    src->zc_asked = t ? cv_zc_asked () : FALSE;
+    src->zc_ok = FALSE;
+    src->zc_cur = 0;
+    g_mutex_lock (&src->lock);
+    src->zc_gen++;
+    g_atomic_int_set (&src->zc_verified, 0);
+    g_atomic_int_set (&src->zc_refused, 0);
+    g_mutex_unlock (&src->lock);
+    if (t && src->zc_asked) {
+        const WalpeHwApi *a = walpe_hwsel_api (t->api);
+        if (a && !a->dmabuf) {
+            why = "this decoding API cannot export its pictures as DMA-BUFs";
+        } else if (!t->dmabuf) {
+            why = t->where == WALPE_HW_OTHER ? "the decoder is not the GPU that renders"
+                                             : "the API chose the device: it is not known to be the "
+                                               "GPU that renders";
+        } else {
+            g_mutex_lock (&src->lock);
+            int nv = (int) src->viewers->len;
+            g_mutex_unlock (&src->lock);
+            src->zc_ok = TRUE;
+            src->zc_slots = MAX (nv, 1) + 1;
+            src->dec->extra_hw_frames = CV_AHEAD + 2 + 2 * src->zc_slots;
+            why = "no picture yet";
+        }
+    }
+    cv_zc_set_why (src, why);
+}
+
+/* Decode thread: how the hardware picture just decoded goes out. 0 = it is
+ * downloaded (the safe way); 2 = both ways, and a viewer compares the
+ * imported planes with the download (video_hwsel.h, WALPE_ZC_*); 1 = as
+ * DMA-BUFs only, once enough pictures were found equal. */
+static int cv_zc_mode (CvSource *src)
+{
+    if (!src->zc_ok || g_atomic_int_get (&src->zc_refused))
+        return 0;       /* (zc_why says why) */
+    const char *why = NULL;
+    g_mutex_lock (&src->lock);
+    if (src->viewers->len == 0)
+        why = "no picture yet";
+    else if ((int) src->viewers->len > src->zc_slots)
+        why = "more monitors show this video than the decoder's picture pool was sized for";
+    for (guint i = 0; !why && i < src->viewers->len; i++) {
+        const CvViewer *vw = g_ptr_array_index (src->viewers, i);
+        if (vw->zc_can < 0)
+            why = "no picture yet";
+        else if (!vw->zc_can)
+            why = vw->zc_cant ? vw->zc_cant : "the renderer cannot import DMA-BUFs";
+    }
+    g_mutex_unlock (&src->lock);
+    if (why) {
+        cv_zc_set_why (src, why);
+        return 0;
+    }
+    return g_atomic_int_get (&src->zc_verified) >= WALPE_ZC_CHECK_FRAMES ? 1 : 2;
+}
+
+/* Decode thread: describe the hardware picture hw as DMA-BUFs in the frame
+ * slot f - f->drm (the description; closing it closes the buffers'
+ * handles), f->hw (keeps the surface), the planes to import, and the
+ * frame's layout as the upload path would have it. FALSE: this decoder's
+ * pictures do not go out that way (*why, a constant); f holds nothing. */
+static gboolean cv_zc_map (CvSource *src, CvFrame *f, const AVFrame *hw, const char **why)
+{
+    av_frame_unref (f->drm);
+    av_frame_unref (f->hw);
+    f->zc = f->zc_n = 0;
+    *why = "the decoder cannot export its pictures as DMA-BUFs";
+    if (hw->format == AV_PIX_FMT_DRM_PRIME) {
+        if (av_frame_ref (f->drm, hw) < 0)
+            return FALSE;
+    } else {
+        f->drm->format = AV_PIX_FMT_DRM_PRIME;
+        if (av_hwframe_map (f->drm, hw, AV_HWFRAME_MAP_READ) < 0) {
+            av_frame_unref (f->drm);
+            return FALSE;
+        }
+    }
+    const AVDRMFrameDescriptor *d = (const AVDRMFrameDescriptor *) (gconstpointer) f->drm->data[0];
+    const AVHWFramesContext *fc =
+        hw->hw_frames_ctx ? (const AVHWFramesContext *) (gconstpointer) hw->hw_frames_ctx->data : NULL;
+    enum AVPixelFormat swf = fc ? fc->sw_format : AV_PIX_FMT_NONE;
+    if (d && swf == AV_PIX_FMT_NONE && d->nb_layers >= 1) {
+        /* a decoder without a frames context: the first layer says it */
+        switch (d->layers[0].format) {
+        case WALPE_DRM_NV12: swf = AV_PIX_FMT_NV12; break;
+        case WALPE_DRM_P010: swf = AV_PIX_FMT_P010LE; break;
+        case WALPE_DRM_YUV420:
+        case WALPE_DRM_YVU420: swf = AV_PIX_FMT_YUV420P; break;
+        default: break;
+        }
+    }
+    const AVPixFmtDescriptor *pd = swf != AV_PIX_FMT_NONE ? av_pix_fmt_desc_get (swf) : NULL;
+    gboolean ok = d && pd && pd->nb_components >= 3 && hw->width >= 1 && hw->height >= 1 &&
+                  !(pd->flags & (AV_PIX_FMT_FLAG_RGB | AV_PIX_FMT_FLAG_BE | AV_PIX_FMT_FLAG_PAL |
+                                 AV_PIX_FMT_FLAG_BITSTREAM | AV_PIX_FMT_FLAG_HWACCEL |
+                                 AV_PIX_FMT_FLAG_BAYER));
+    int depth = ok ? pd->comp[0].depth : 8, shift = ok ? pd->comp[0].shift : 0;
+    int bytes = depth > 8 ? 2 : 1;
+    ok = ok && depth >= 8 && depth <= 16 && pd->comp[1].depth == depth && pd->comp[2].depth == depth &&
+         pd->comp[1].shift == shift && pd->comp[2].shift == shift && depth + shift <= 8 * bytes;
+    WalpeDmaDesc desc;
+    WalpeDmaWant want;
+    memset (&desc, 0, sizeof desc);
+    memset (&want, 0, sizeof want);
+    if (ok) {
+        *why = "the picture's layout is not one the plane textures can hold";
+        want.nplanes = pd->comp[1].plane == 1 && pd->comp[2].plane == 1 ? 2 : 3;
+        want.bytes = bytes;
+        want.surf_w = fc && fc->width >= hw->width ? fc->width : hw->width;
+        want.surf_h = fc && fc->height >= hw->height ? fc->height : hw->height;
+        want.log2_cw = pd->log2_chroma_w;
+        want.log2_ch = pd->log2_chroma_h;
+        ok = d->nb_objects >= 1 && d->nb_objects <= WALPE_DMA_MAX && d->nb_layers >= 1 &&
+             d->nb_layers <= WALPE_DMA_MAX;
+        if (bytes == 2 && g_atomic_int_get (&src->gl_r16) != 1) {
+            *why = "the renderer's GL has no 16-bit textures for this stream";
+            ok = FALSE;
+        }
+    }
+    if (ok) {
+        desc.nb_objects = d->nb_objects;
+        desc.nb_layers = d->nb_layers;
+        for (int i = 0; i < d->nb_objects; i++) {
+            desc.modifier[i] = d->objects[i].format_modifier;
+            desc.size[i] = d->objects[i].size;
+            f->zc_fd[i] = d->objects[i].fd;
+            ok &= d->objects[i].fd >= 0;
+        }
+        for (int l = 0; l < d->nb_layers; l++) {
+            desc.layers[l].format = d->layers[l].format;
+            desc.layers[l].nb_planes = d->layers[l].nb_planes;
+            for (int k = 0; k < WALPE_DMA_MAX && k < d->layers[l].nb_planes; k++) {
+                desc.layers[l].planes[k].object = d->layers[l].planes[k].object_index;
+                desc.layers[l].planes[k].offset = d->layers[l].planes[k].offset > 0
+                    ? (gsize) d->layers[l].planes[k].offset : 0;
+                desc.layers[l].planes[k].pitch = d->layers[l].planes[k].pitch > 0
+                    ? (gsize) d->layers[l].planes[k].pitch : 0;
+                ok &= d->layers[l].planes[k].offset >= 0;
+            }
+        }
+        ok = ok && walpe_dma_planes (&desc, &want, f->zc_pl, why);
+    }
+    if (ok && av_frame_ref (f->hw, hw) < 0)
+        ok = FALSE;
+    if (!ok) {
+        av_frame_unref (f->drm);
+        av_frame_unref (f->hw);
+        return FALSE;
+    }
+    f->zc_n = want.nplanes;
+    /* the frame as the upload path describes it (cv_direct_layout) */
+    int w = hw->width, h = hw->height;
+    int cw = AV_CEIL_RSHIFT (w, want.log2_cw), ch = AV_CEIL_RSHIFT (h, want.log2_ch);
+    f->kind = want.nplanes == 2 ? CV_NV : CV_YUV;
+    f->bytes = bytes;
+    f->scale = (float) ((bytes == 2 ? 65535.0 : 255.0) / (double) (1 << (depth + shift - 8)));
+    f->mode = cv_frame_mode (hw);
+    f->w = w;
+    f->h = h;
+    f->pw[0] = w;
+    f->ph[0] = h;
+    f->pw[1] = f->pw[2] = cw;
+    f->ph[1] = f->ph[2] = ch;
+    /* the picture is the top left part of the surface: where its right and
+     * bottom edge are in texture coordinates, and the centre of its last
+     * sample (the shader does not sample beyond it, as CLAMP_TO_EDGE does
+     * on a texture of the picture's own size) */
+    for (int c = 0; c < 2; c++) {
+        const WalpeDmaPlane *pl = &f->zc_pl[c];
+        int pw = c ? cw : w, ph = c ? ch : h;
+        f->zc_crop[c][0] = (float) pw / (float) pl->w;
+        f->zc_crop[c][1] = (float) ph / (float) pl->h;
+        f->zc_crop[c][2] = ((float) pw - 0.5f) / (float) pl->w;
+        f->zc_crop[c][3] = ((float) ph - 0.5f) / (float) pl->h;
+    }
+    *why = NULL;
+    return TRUE;
+}
+
+/* Decode thread: f is the slot of the picture just decoded; src->zc_cur
+ * says how it was to go out and src->zc_hw is the picture in GPU memory.
+ * Returns what was arranged: 0 = an ordinary frame, src->frame is in main
+ * memory; 1 = f shows the picture where it is and nothing is in main
+ * memory; 2 = f can show it where it is and src->frame holds its download
+ * for the comparison; -1 = the picture could not be had either way. */
+static int cv_zc_take (CvSource *src, CvFrame *f)
+{
+    int zc = src->zc_cur;
+    src->zc_cur = 0;
+    if (!zc)
+        return 0;
+    const char *why = NULL;
+    if (!cv_zc_map (src, f, src->zc_hw, &why)) {
+        /* this decoder's pictures do not go out that way: downloads from here on */
+        src->zc_ok = FALSE;
+        cv_zc_set_why (src, why);
+        g_message ("video: zero-copy is not used for %s (%s): pictures are downloaded", src->path,
+                   why ? why : "?");
+        av_frame_unref (src->zc_hw);
+        if (zc == 1 && cv_hw_to_memory (src) < 0)
+            return -1;      /* (src->frame was still the picture in GPU memory) */
+        return 0;
+    }
+    av_frame_unref (src->zc_hw);
+    f->zc_gen = src->zc_gen;    /* (written by this thread only) */
+    if (zc == 1) {
+        av_frame_unref (f->av);
+        for (int i = 0; i < 3; i++) {
+            f->pl[i] = NULL;
+            f->ls[i] = 0;
+        }
+        f->zc = 1;
+        src->zc_sent++;
+        cv_zc_set_why (src, NULL);
+    } else {
+        cv_zc_set_why (src, "the first pictures are compared with their download before the import "
+                            "is trusted");
+    }
+    return zc;
 }
 
 /* The status line names every video that is open, not only the one whose
@@ -1661,25 +2530,37 @@ static void cv_notes_set (CvSource *src, char *note)
     g_mutex_unlock (&cv_notes_lock);
 }
 
-/* for `walpe-ctl status`: what this source's decoder does. in_vain:
- * hardware decoding is asked for and not in use - the line then says why
- * (no device and each device's error, the device refused the stream,
- * downloads or decode calls failed), so the status alone tells whether
- * the GPU decodes and, if not, what stopped it. A hardware decoder that
- * has been opened and has not delivered a picture yet says so: opening
- * succeeds before the device has seen the stream. */
-static void cv_note_decoder (CvSource *src, gboolean in_vain)
+/* for `walpe-ctl status`: what this source's decoder does - size, frame
+ * rate and codec profile; then the hardware decoder's API, its device and
+ * whether that is the GPU that renders, and how the pictures reach the
+ * renderer; or "software" and, when hardware decoding is asked for, every
+ * attempt that failed with the kind of reason (video_hwsel.h has the exact
+ * form). So the status alone tells whether hardware decodes and, if not,
+ * what stopped it. A hardware decoder that has been opened and has not
+ * delivered a picture yet says so: opening succeeds before the device has
+ * seen the stream. Decode thread (or source creation), src->lock not held. */
+static void cv_note_decoder (CvSource *src)
 {
-    int thr = src->dec ? src->dec->thread_count : src->threads;
-    char *note = src->hw_dev
-        ? g_strdup_printf ("%dx%d %.2f fps: hardware (%s)%s", src->demux->width, src->demux->height,
-                           cv_clip_fps (src->demux), src->hw_name ? src->hw_name : "?",
-                           src->hw_seen ? "" : ", no picture yet")
-        : g_strdup_printf ("%dx%d %.2f fps: software, %d thread%s%s%s%s", src->demux->width,
-                           src->demux->height, cv_clip_fps (src->demux), thr, thr == 1 ? "" : "s",
-                           in_vain ? " (hardware decoding was asked for and is not in use: " : "",
-                           in_vain ? (src->hw_why ? src->hw_why : "not available or failed") : "",
-                           in_vain ? ")" : "");
+    WalpeHwNote nt;
+    memset (&nt, 0, sizeof nt);
+    nt.w = src->demux->width;
+    nt.h = src->demux->height;
+    nt.fps = cv_clip_fps (src->demux);
+    /* the codec profile is said where hardware decoding is asked for (it is
+     * what a device refuses a stream for); with the setting off the line is
+     * the one it always was, letter for letter */
+    nt.profile = src->hw_asked ? src->hw_profile : NULL;
+    nt.threads = src->dec ? src->dec->thread_count : src->threads;
+    nt.hw = src->hw_on;
+    nt.in_memory = src->hw_on && src->hw_own && src->hw.seen && !src->hw_gpu_pics;
+    g_mutex_lock (&src->lock);
+    char *zw = g_strdup (src->zc_why);
+    g_mutex_unlock (&src->lock);
+    nt.zero_copy = src->hw_on && src->zc_ok && !zw && !g_atomic_int_get (&src->zc_refused) &&
+                   g_atomic_int_get (&src->zc_verified) >= WALPE_ZC_CHECK_FRAMES;
+    nt.zc_why = src->hw_on && src->zc_asked && !nt.zero_copy ? (zw ? zw : "no picture yet") : NULL;
+    char *note = walpe_hwsel_note (&src->hw, &nt);
+    g_free (zw);
     cv_notes_set (src, note);
 }
 
@@ -1694,34 +2575,79 @@ static void cv_note_decoder (CvSource *src, gboolean in_vain)
  * delay (no issue: nothing is interactive) and one frame buffer.
  * WALPE_VIDEO_THREADS=N overrides;
  * WALPE_VIDEO_SKIP_DEBLOCK=1 skips the filter (for a CPU that cannot
- * decode the clip otherwise; the picture degrades between keyframes). */
+ * decode the clip otherwise; the picture degrades between keyframes).
+ *
+ * Hardware decoding asked for: the attempts of the plan that have not
+ * failed are tried in order (video_hwsel.h) - make the device, open the
+ * decoder with it - and the first that opens is used; when none is left
+ * the software decoder is opened as always. */
 static gboolean cv_decoder_open (CvSource *src, gboolean first, GError **err)
 {
-    const AVCodec *codec = avcodec_find_decoder (AV_CODEC_ID_H264);
-    if (!codec) {
+    const AVCodec *sw = avcodec_find_decoder (AV_CODEC_ID_H264);
+    if (!sw) {
         g_set_error (err, G_IO_ERROR, G_IO_ERROR_FAILED, "no H.264 decoder");
         return FALSE;
     }
-    for (int attempt = 0; attempt < 2; attempt++) {
+    if (src->threads < 1)
+        src->threads = cv_threads_for (src, &src->threads_max);
+    if (!src->hw_planned)
+        cv_hw_replan (src);
+    GString *log_prev = cv_log_to;
+    gboolean opened = FALSE;
+    for (int round = 0; round <= WALPE_HW_MAX_TRIES && !opened; round++) {
+        WalpeHwTry *t = NULL;
+        if (src->hw_asked && walpe_hwsel_next (&src->hw))
+            t = &src->hw.tries[src->hw.cur];
+        const CvHwImpl *im = t ? &cv_impls[t->offer] : NULL;
+        const AVCodec *codec = t ? im->codec : sw;
+        AVBufferRef *dev = NULL;
+        /* (what FFmpeg logs on this thread while a hardware decoder is tried) */
+        cv_log_to = t ? src->hw_log : log_prev;
+        if (t)
+            g_string_truncate (src->hw_log, 0);
+        if (t && im->type != AV_HWDEVICE_TYPE_NONE) {
+            WalpeHwWhy why = WALPE_HW_WHY_NO_DEVICE;
+            char *detail = NULL;
+            dev = cv_hw_device (src, t, im, &why, &detail);
+            if (!dev) {
+                GString *nm = g_string_new (NULL);
+                walpe_hwsel_try_name (t, nm);
+                g_message ("video: %s cannot be used (%s: %s)", nm->str, walpe_hwsel_why_name (why),
+                           detail ? detail : "?");
+                g_string_free (nm, TRUE);
+                walpe_hwsel_failed (&src->hw, why, detail);
+                g_free (detail);
+                continue;
+            }
+        }
         src->dec = avcodec_alloc_context3 (codec);
-        if (!src->dec)
+        if (!src->dec) {
+            av_buffer_unref (&dev);
             break;
+        }
         src->dec->max_pixels = CV_MAX_PIXELS;   /* no frame buffer beyond it (see there) */
-        if (src->threads < 1)
-            src->threads = cv_threads_for (src, &src->threads_max);
-        src->hw_wanted = FALSE;
-        gboolean hw = attempt == 0 && cv_hw_setup (src, codec);
-        gboolean wanted = src->hw_wanted || attempt > 0;
-        if (hw) {
-            /* the GPU decodes: one thread feeds it */
-            src->dec->hw_device_ctx = av_buffer_ref (src->hw_dev);
+        if (t) {
+            /* a hardware decoder: one thread feeds it */
+            src->hw_dev = dev;
+            src->hw_fmt = im->fmt;
+            src->hw_name = cv_offers[t->offer].api;
+            src->hw_on = TRUE;
+            src->hw_own = im->type == AV_HWDEVICE_TYPE_NONE;
+            src->hw_fmt_taken = 0;
+            src->hw_gpu_pics = FALSE;
+            src->hw_sw_fmt = (int) AV_PIX_FMT_NONE;
+            if (dev)
+                src->dec->hw_device_ctx = av_buffer_ref (dev);
             src->dec->get_format = cv_get_format;
             src->dec->opaque = src;
             src->dec->thread_count = 1;
+            if (codec != sw)
+                cv_wrapper_setup (src);
         } else {
             src->dec->thread_count = src->threads;
             src->dec->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
         }
+        cv_zc_setup (src, t);
         {
             /* opt-in only: "nonref" leaves the filter out for the pictures
              * no other picture is predicted from (they alone get blockier,
@@ -1737,25 +2663,38 @@ static gboolean cv_decoder_open (CvSource *src, gboolean first, GError **err)
         src->hw_errors = 0;
         walpe_vlag_restart (&src->lag, cv_now ());   /* the start is not the steady state */
         if (avcodec_open2 (src->dec, codec, NULL) >= 0) {
-            if (hw && first)
+            if (t && first) {
+                GString *nm = g_string_new (NULL);
+                walpe_hwsel_try_name (t, nm);
                 g_message ("video: %dx%d %.2f fps, hardware decoding (%s)", src->demux->width,
-                           src->demux->height, cv_clip_fps (src->demux), src->hw_name);
-            else if (first)
+                           src->demux->height, cv_clip_fps (src->demux), nm->str);
+                g_string_free (nm, TRUE);
+            } else if (first) {
                 g_message ("video: %dx%d %.2f fps, %d decode thread(s)%s", src->demux->width,
                            src->demux->height, cv_clip_fps (src->demux), src->dec->thread_count,
                            src->dec->skip_loop_filter == AVDISCARD_ALL ? ", deblocking SKIPPED"
                            : src->dec->skip_loop_filter == AVDISCARD_NONREF
                                ? ", deblocking SKIPPED for non-reference pictures" : "");
-            cv_note_decoder (src, !hw && wanted);
-            return TRUE;
+            }
+            opened = TRUE;
+            break;
         }
         avcodec_free_context (&src->dec);
-        if (!hw)
+        if (!t)
             break;
-        g_message ("video: the %s decoder could not be opened: decoding on the CPU", src->hw_name);
-        cv_hw_set_why (src, "the %s decoder could not be opened", src->hw_name);
+        {
+            /* the device exists and the decoder does not open with it */
+            char *d = g_strdup (src->hw_log->len ? src->hw_log->str : "avcodec_open2 failed");
+            g_message ("video: the %s decoder could not be opened (%s)", src->hw_name, d);
+            walpe_hwsel_failed (&src->hw, walpe_hwsel_classify (d, WALPE_HW_WHY_OPEN), d);
+            g_free (d);
+        }
         cv_hw_close (src);
-        src->hw_off = TRUE;
+    }
+    cv_log_to = log_prev;
+    if (opened) {
+        cv_note_decoder (src);
+        return TRUE;
     }
     g_set_error (err, G_IO_ERROR, G_IO_ERROR_FAILED, "avcodec_open2 failed");
     return FALSE;
@@ -1930,6 +2869,9 @@ static void cv_restart_at (CvSource *src, double raw, double play, guint cursor)
 static gboolean cv_unpark (CvSource *src)
 {
     GError *err = NULL;
+    /* (the setting may have changed while the clip was parked) */
+    if (src->hw_planned && cv_hw_stale (src))
+        cv_hw_replan (src);
     if (!cv_decoder_open (src, FALSE, &err)) {
         g_warning ("video: %s: %s", src->path, err ? err->message : "decoder");
         g_clear_error (&err);
@@ -1946,13 +2888,20 @@ static gboolean cv_unpark (CvSource *src)
     return TRUE;
 }
 
-/* the hardware decoder gave up (or refuses the stream): software decoding
- * from the keyframe before the last frame that was queued */
-static gboolean cv_hw_fallback (CvSource *src, const char *why)
+/* The hardware decoder gave up, or refuses the stream (kind and why say
+ * what happened): the next attempt of the plan when no picture of this
+ * decoder was shown yet, software decoding otherwise and when no attempt
+ * is left (video_hwsel.h) - from the keyframe before the last frame that
+ * was queued, so that nothing is missing and nothing shows twice. The
+ * viewers keep the picture they have meanwhile. */
+static gboolean cv_hw_fallback (CvSource *src, WalpeHwWhy kind, const char *why)
 {
-    g_message ("video: hardware decoding (%s) failed for %s (%s): decoding on the CPU",
-               src->hw_name ? src->hw_name : "?", src->path, why);
-    cv_hw_set_why (src, "%s: %s", src->hw_name ? src->hw_name : "?", why);
+    char name[24];
+    g_strlcpy (name, src->hw_name ? src->hw_name : "?", sizeof name);
+    gboolean more = walpe_hwsel_failed (&src->hw, kind, why);
+    g_message ("video: hardware decoding (%s) failed for %s (%s: %s): %s", name, src->path,
+               walpe_hwsel_why_name (kind), why,
+               more ? "trying the next decoder" : "decoding on the CPU");
     double raw = src->last_raw, play = src->last_play;
     guint cursor = 0, target = 0;
     gboolean exact = cv_restart_point (src, raw, G_MAXUINT, &cursor, &target);
@@ -1961,7 +2910,6 @@ static gboolean cv_hw_fallback (CvSource *src, const char *why)
     av_frame_unref (src->swframe);
     avcodec_free_context (&src->dec);
     cv_hw_close (src);
-    src->hw_off = TRUE;
     GError *err = NULL;
     if (!cv_decoder_open (src, TRUE, &err)) {
         g_warning ("video: %s: %s", src->path, err ? err->message : "decoder");
@@ -1982,35 +2930,38 @@ static gboolean cv_hw_fallback (CvSource *src, const char *why)
 }
 
 /* The hardware decoding setting changed while the clip plays (walpe-ctl
- * set hwdec=on|off, the switch in the settings): reopen the decoder the
- * other way and continue after the last frame that was queued (the
- * frames since the last keyframe are decoded again: one short stop). A
- * decoder that cannot be opened in hardware goes
- * on in software (cv_decoder_open). A parked clip reads the setting when
- * it resumes. */
+ * set hwdec=..., the switch in the settings, video_zerocopy), or the GPU
+ * that renders became known after the decoder was opened: make the plan
+ * anew, reopen the decoder by it and continue after the last frame that
+ * was queued (the frames since the last keyframe are decoded again: one
+ * short stop). A decoder that cannot be opened in hardware goes on in
+ * software (cv_decoder_open). A parked clip reads the setting when it
+ * resumes. */
 static gboolean cv_hw_switch (CvSource *src)
 {
-    gboolean want = cv_hw_asked (NULL);
-    if (want == src->hw_asked)
+    if (!cv_hw_stale (src))
         return TRUE;
-    src->hw_asked = want;
-    if (want ? (src->hw_dev != NULL || !src->gpu_yuv) : src->hw_dev == NULL) {
-        /* nothing to change (software GL never decodes in hardware) */
-        if (want && !src->gpu_yuv)
-            cv_hw_set_why (src, "the renderer is a software renderer");
-        cv_note_decoder (src, want && !src->hw_dev);
+    WalpeHwWant want;
+    cv_hw_want (&want);
+    if ((!want.on && !src->hw_on) || (want.on && !src->gpu_yuv)) {
+        /* nothing to reopen: software decodes and stays (software GL never
+         * decodes in hardware); the status line follows the setting */
+        cv_hw_replan (src);
+        cv_note_decoder (src);
         return TRUE;
     }
     double raw = src->last_raw, play = src->last_play;
     guint cursor = 0, target = 0;
     gboolean exact = raw >= 0 && cv_restart_point (src, raw, G_MAXUINT, &cursor, &target);
-    g_message ("video: hardware decoding switched %s for %s", want ? "on" : "off", src->path);
+    g_message ("video: hardware decoding is now \"%s\"%s for %s: the decoder is reopened",
+               walpe_hwsel_want_name (&want), want.on && cv_zc_asked () ? " with zero-copy" : "",
+               src->path);
     src->skip_idx = target;
     av_frame_unref (src->frame);
     av_frame_unref (src->swframe);
     avcodec_free_context (&src->dec);
     cv_hw_close (src);
-    src->hw_off = FALSE;    /* asked again: try again */
+    cv_hw_replan (src);     /* asked again: every attempt is tried again */
     GError *err = NULL;
     if (!cv_decoder_open (src, TRUE, &err)) {
         g_warning ("video: %s: %s", src->path, err ? err->message : "decoder");
@@ -2039,7 +2990,7 @@ static gboolean cv_hw_switch (CvSource *src)
  * gets here. */
 static void cv_threads_raise (CvSource *src)
 {
-    if (src->hw_dev || src->raise_to > 0 || src->threads >= src->threads_max)
+    if (src->hw_on || src->raise_to > 0 || src->threads >= src->threads_max)
         return;
     double now = cv_now ();
     g_mutex_lock (&src->lock);
@@ -2138,35 +3089,62 @@ static gpointer cv_decode_thread (gpointer data)
             g_usleep (500000);
             continue;
         }
-        if (src->hw_dev && (g_atomic_int_get (&src->hw_refused) || src->hw_errors >= 3 ||
-                            hw_bad >= 8)) {
-            char why[160];
-            if (g_atomic_int_get (&src->hw_refused))
-                g_snprintf (why, sizeof why, "the device does not decode this stream (profile, "
-                            "size or bit depth)");
-            else if (src->hw_errors >= 3)
-                g_snprintf (why, sizeof why, "%d pictures in a row could not be downloaded: %s",
-                            src->hw_errors, av_err2str (hw_err));
-            else
-                g_snprintf (why, sizeof why, "%d decode calls in a row failed: %s", hw_bad,
-                            av_err2str (hw_err));
+        if (src->hw_on && (g_atomic_int_get (&src->hw_refused) || src->hw_errors >= 3 ||
+                           hw_bad >= 8)) {
+            /* what happened, as a kind of reason and in words; FFmpeg's own
+             * words (its log on this thread) where it gave some */
+            char why[420];
+            const char *said = src->hw_log->len ? src->hw_log->str : NULL;
+            int refused = g_atomic_int_get (&src->hw_refused);
+            WalpeHwWhy kind = WALPE_HW_WHY_REFUSED;
+            if (refused == 2) {
+                kind = WALPE_HW_WHY_SIZE;
+                g_snprintf (why, sizeof why, "a picture larger than the player takes (%d megapixels)",
+                            CV_MAX_PIXELS / 1000000);
+            } else if (refused == 3) {
+                kind = WALPE_HW_WHY_PROFILE;
+                g_snprintf (why, sizeof why, "the stream crops its pictures at the left or top edge, "
+                            "which a picture in GPU memory does not carry");
+            } else if (refused && !src->hw_own && src->hw_fmt_taken == 0) {
+                const char *fn = av_get_pix_fmt_name ((enum AVPixelFormat) src->hw_sw_fmt);
+                kind = WALPE_HW_WHY_PROFILE;
+                g_snprintf (why, sizeof why, "FFmpeg has no hardware decoding for this stream's "
+                            "format (%s)", fn ? fn : "?");
+            } else if (refused) {
+                kind = walpe_hwsel_classify (said, WALPE_HW_WHY_REFUSED);
+                g_snprintf (why, sizeof why, "%s", said ? said : "the device does not decode this "
+                            "stream");
+            } else if (src->hw_errors >= 3) {
+                kind = WALPE_HW_WHY_DOWNLOAD;
+                g_snprintf (why, sizeof why, "%d pictures in a row could not be brought to main "
+                            "memory: %s", src->hw_errors, av_err2str (hw_err));
+            } else {
+                kind = src->hw.seen ? WALPE_HW_WHY_DECODE
+                                    : walpe_hwsel_classify (said, WALPE_HW_WHY_DECODE);
+                g_snprintf (why, sizeof why, "%d decode calls in a row failed: %s%s%s", hw_bad,
+                            av_err2str (hw_err), said ? "; FFmpeg: " : "", said ? said : "");
+            }
             hw_bad = 0;
-            if (!cv_hw_fallback (src, why))
+            if (!cv_hw_fallback (src, kind, why))
                 break;
         }
         if (!cv_hw_switch (src))
             break;
+        /* (a viewer changed what the status line says about zero-copy) */
+        if (g_atomic_int_compare_and_exchange (&src->zc_dirty, 1, 0))
+            cv_note_decoder (src);
+        cv_log_to = src->hw_on ? src->hw_log : NULL;
         cv_threads_raise (src);
         /* more threads from here on: the decoder is told that its input
          * ended, the frames it still holds come out below as always, and
          * the new decoder takes the next sample */
-        gboolean drain = src->raise_to > 0 && !src->hw_dev && src->skip_until < 0 &&
+        gboolean drain = src->raise_to > 0 && !src->hw_on && src->skip_until < 0 &&
                          cv_raise_here (src);
         /* (declared in front of the drain pass's jump: both ways into the
          * receive loop start without a picture) */
         gboolean got_frame = FALSE;
-        if (src->raise_to > 0 && src->hw_dev)
-            src->raise_to = 0;      /* the GPU decodes now */
+        if (src->raise_to > 0 && src->hw_on)
+            src->raise_to = 0;      /* a hardware decoder decodes now */
 
         double c0 = cv_cpu ();
         const Mp4Sample *smp = drain ? NULL : mp4_demux_next (src->demux);
@@ -2246,10 +3224,10 @@ static gpointer cv_decode_thread (gpointer data)
         int sp_rc = avcodec_send_packet (src->dec, src->pkt);
         src->st_decode += cv_cpu () - c1;
         if (sp_rc < 0) {
-            static int sp_err_n;
-            if (sp_err_n++ < 5)
+            static atomic_int sp_err_n;
+            if (walpe_first_n (&sp_err_n, 5))
                 g_warning ("send_packet failed: %d (%s)", sp_rc, av_err2str (sp_rc));
-            if (src->hw_dev) {
+            if (src->hw_on) {
                 hw_bad++;
                 hw_err = sp_rc;
                 continue;       /* a few of them in a row: software decoding */
@@ -2281,9 +3259,14 @@ receive:
         while (!g_atomic_int_get (&src->quit)) {
             double c2 = cv_cpu ();
             int rf_rc = avcodec_receive_frame (src->dec, src->frame);
+#ifdef CV_TEST_HW_RECEIVE
+            /* tests: what the "hardware decoder" does with this picture */
+            if (src->hw_on)
+                rf_rc = CV_TEST_HW_RECEIVE (src, rf_rc);
+#endif
             src->st_decode += cv_cpu () - c2;
             if (rf_rc < 0) {
-                if (src->hw_dev && rf_rc != AVERROR (EAGAIN) && rf_rc != AVERROR_EOF) {
+                if (src->hw_on && rf_rc != AVERROR (EAGAIN) && rf_rc != AVERROR_EOF) {
                     hw_bad++;
                     hw_err = rf_rc;
                 }
@@ -2291,33 +3274,70 @@ receive:
             }
             got_frame = TRUE;
             hw_bad = 0;
-            if (src->hw_dev && src->frame->format == src->hw_fmt) {
-                /* the picture is in GPU memory: download it (NV12 / P010) */
-                double c3 = cv_cpu ();
-                int rc = cv_hw_download (src);
-                if (rc >= 0)
-                    rc = av_frame_copy_props (src->swframe, src->frame);
-                av_frame_unref (src->frame);
-                if (rc < 0) {
-                    src->hw_errors++;
-                    hw_err = rc;
-                    av_frame_unref (src->swframe);
+            if (src->hw_on) {
+                const AVPixFmtDescriptor *pd =
+                    av_pix_fmt_desc_get ((enum AVPixelFormat) src->frame->format);
+                gboolean in_gpu = pd && (pd->flags & AV_PIX_FMT_FLAG_HWACCEL);
+                src->zc_cur = 0;
+                av_frame_unref (src->zc_hw);
+                if (src->frame->width < 1 || src->frame->height < 1 ||
+                    (gint64) src->frame->width * src->frame->height > CV_MAX_PIXELS) {
+                    /* the size limit holds whoever decodes: libavcodec
+                     * applies max_pixels to the frames it allocates, a
+                     * decoder with buffers of its own may not ask it */
+                    g_atomic_int_set (&src->hw_refused, 2);
+                    av_frame_unref (src->frame);
                     break;
                 }
-                src->hw_errors = 0;
-                av_frame_move_ref (src->frame, src->swframe);
-                src->st_copied += (double) src->frame->width * src->frame->height * 1.5;
-                src->st_prep += cv_cpu () - c3;
-                if (!src->hw_seen) {
-                    /* the device really decodes this stream: say so */
-                    src->hw_seen = TRUE;
-                    g_clear_pointer (&src->hw_why, g_free);
-                    cv_note_decoder (src, FALSE);
+                if (in_gpu && (src->frame->crop_left || src->frame->crop_top)) {
+                    /* a picture in GPU memory comes with its right and
+                     * bottom cut off and nothing else: such a stream would
+                     * be shown shifted. The software decoder crops it. */
+                    g_atomic_int_set (&src->hw_refused, 3);
+                    av_frame_unref (src->frame);
+                    break;
                 }
-            } else if (src->hw_dev && !g_atomic_int_get (&src->hw_refused)) {
-                /* a hardware decoder that hands out pictures in main memory
-                 * is not decoding on the GPU: treat it as a refusal */
-                g_atomic_int_set (&src->hw_refused, 1);
+                if (in_gpu) {
+                    /* the picture is in GPU memory: download it (NV12 /
+                     * P010), unless the viewers take it where it is */
+                    double c3 = cv_cpu ();
+                    int zc = cv_zc_mode (src);
+                    if (zc) {
+                        av_frame_unref (src->zc_hw);
+                        if (av_frame_ref (src->zc_hw, src->frame) < 0)
+                            zc = 0;
+                    }
+                    if (zc != 1) {
+                        int rc = cv_hw_to_memory (src);
+                        if (rc < 0) {
+                            src->hw_errors++;
+                            hw_err = rc;
+                            av_frame_unref (src->zc_hw);
+                            break;
+                        }
+                        src->hw_errors = 0;
+                        src->st_copied += (double) src->frame->width * src->frame->height * 1.5;
+                    }
+                    src->zc_cur = zc;
+                    src->st_prep += cv_cpu () - c3;
+                } else if (!src->hw_own && !g_atomic_int_get (&src->hw_refused)) {
+                    /* a hardware acceleration that hands out pictures in
+                     * main memory is not decoding on the GPU: treat it as a
+                     * refusal */
+                    g_atomic_int_set (&src->hw_refused, 1);
+                }
+                if (in_gpu)
+                    src->hw_gpu_pics = TRUE;
+                if (in_gpu || src->hw_own) {
+                    /* (what FFmpeg logged up to a good picture explains no
+                     * later failure) */
+                    g_string_truncate (src->hw_log, 0);
+                    if (!src->hw.seen) {
+                        /* the device really decodes this stream: say so */
+                        walpe_hwsel_picture (&src->hw);
+                        cv_note_decoder (src);
+                    }
+                }
             }
             /* our packet pts are in 1/timescale units and the decoder
              * may override avctx->time_base from SPS timing info —
@@ -2397,12 +3417,35 @@ receive:
                          src->path);
             src->half = half;
             double c4 = cv_cpu (), copied = 0;
-            static int test_nv = -1;
+            static WalpeLazy test_nv_cell = WALPE_LAZY_UNSET;
+            int test_nv = walpe_lazy_get (&test_nv_cell);
             if (test_nv < 0)
-                test_nv = g_getenv ("WALPE_VIDEO_TEST_NV12") ? 1 : 0;
-            if (test_nv)
-                cv_test_nv12 (src);
-            gboolean conv = cv_fill_frame (src, f, &copied);
+                test_nv = walpe_lazy_set (&test_nv_cell, g_getenv ("WALPE_VIDEO_TEST_NV12") ? 1 : 0);
+            gboolean conv;
+            /* zero-copy: 1 = f shows the decoder's picture where it is
+             * (nothing to fill); 2 = it can, and the download in src->frame
+             * is filled in as always for the comparison - at full size */
+            int zc = src->hw_on ? cv_zc_take (src, f) : 0;
+            if (zc == 1) {
+                conv = TRUE;
+            } else if (zc < 0) {
+                conv = FALSE;
+                src->hw_errors++;
+            } else {
+                gboolean keep_half = src->half;
+                if (zc)
+                    src->half = FALSE;
+                if (test_nv)
+                    cv_test_nv12 (src);
+                conv = cv_fill_frame (src, f, &copied);
+                src->half = keep_half;
+                if (zc && conv) {
+                    f->zc = 2;
+                } else if (zc) {
+                    av_frame_unref (f->drm);
+                    av_frame_unref (f->hw);
+                }
+            }
             cv_stage_written (src, f);
             src->st_prep += cv_cpu () - c4;
             src->st_copied += copied;
@@ -2435,8 +3478,8 @@ receive:
                     if (d > 0.001 && d < 1.0 && !(keep > 0))
                         src->frame_interval = src->frame_interval > 0
                             ? src->frame_interval * 0.8 + d * 0.2 : d;
-                    static int dlog_n;
-                    if (dlog_n++ < 4)
+                    static atomic_int dlog_n;
+                    if (walpe_first_n (&dlog_n, 4))
                         g_message ("video: pts delta %.4fs (frame pts %.3f, tb %d/%d, ts %u, has_bf %d)",
                                    d, raw, src->dec->time_base.num,
                                    src->dec->time_base.den, src->demux->timescale,
@@ -2477,20 +3520,21 @@ receive:
                                             vw->st_upload * 1e3 / MAX (vw->shown, 1),
                                             vw->st_bytes / 1048576.0 / MAX (vw->shown, 1),
                                             vw->st_draw * 1e3 / MAX (vw->st_draws, 1));
-                    /* (the upload counters are the render thread's: read here
-                     * without its leave, good enough for a log line) */
+                    /* (the upload counters themselves are the render
+                     * thread's: this is what it handed over, up_log) */
                     g_string_append_printf (ls, ", upload path %s%s: %u texture and %u buffer "
                                             "calls, %u maps, %u fences, %.2f MB copied by the render "
                                             "thread, %u of %u frames from buffers the decoder wrote",
-                                            cv_up_name (vw->up_real),
-                                            vw->up_mode > 0 && (vw->up_mode & WALPE_VUP_PINGPONG)
-                                                ? "+pingpong" : "",
-                                            vw->up_tex_calls, vw->up_buf_calls, vw->up_maps,
-                                            vw->up_fences, vw->up_copied / 1048576.0, vw->up_staged,
-                                            vw->up_frames);
-                    vw->up_frames = vw->up_tex_calls = vw->up_buf_calls = vw->up_maps = 0;
-                    vw->up_fences = vw->up_staged = vw->up_waits = 0;
-                    vw->up_copied = 0;
+                                            cv_up_name (vw->up_log.real),
+                                            vw->up_log.mode > 0 &&
+                                            (vw->up_log.mode & WALPE_VUP_PINGPONG) ? "+pingpong" : "",
+                                            vw->up_log.tex_calls, vw->up_log.buf_calls,
+                                            vw->up_log.maps, vw->up_log.fences,
+                                            vw->up_log.copied / 1048576.0, vw->up_log.staged,
+                                            vw->up_log.frames);
+                    vw->up_log.frames = vw->up_log.tex_calls = vw->up_log.buf_calls = 0;
+                    vw->up_log.maps = vw->up_log.fences = vw->up_log.staged = vw->up_log.waits = 0;
+                    vw->up_log.copied = 0;
                     vw->shown = vw->skipped = 0;
                     vw->st_upload = vw->st_draw = vw->st_bytes = 0;
                     vw->st_draws = 0;
@@ -2504,16 +3548,20 @@ receive:
                                         "(%.2f MB copied)",
                                         src->st_demux * 1e3 / nfr, src->st_decode * 1e3 / nfr,
                                         wd * 1e3 / nfr, nthr,
-                                        src->hw_dev ? ", hardware " : "",
-                                        src->hw_dev ? src->hw_name : "",
+                                        src->hw_on ? ", hardware " : "",
+                                        src->hw_on ? src->hw_name : "",
                                         src->st_prep * 1e3 / nfr,
                                         src->st_copied / 1048576.0 / nfr);
                 src->st_workers = wk;
                 src->st_demux = src->st_decode = src->st_prep = src->st_copied = 0;
-                if (src->hw_dev && src->dl_reused + src->dl_fresh > 0)
+                if (src->hw_on && src->dl_reused + src->dl_fresh > 0)
                     g_string_append_printf (ls, "; downloads into the kept frame %u, into a new "
                                             "one %u", src->dl_reused, src->dl_fresh);
                 src->dl_reused = src->dl_fresh = 0;
+                if (src->zc_sent > 0)
+                    g_string_append_printf (ls, "; %u pictures handed over without a copy "
+                                            "(zero-copy)", src->zc_sent);
+                src->zc_sent = 0;
                 if (keep > 0 || src->lim_skipped + src->lim_unshown > 0)
                     g_string_append_printf (ls, "; frame limit: %.2f pictures a second wanted, %u "
                                             "not decoded, %u decoded and not shown", keep,
@@ -2600,8 +3648,11 @@ static void cv_recompute_paused (CvSource *src)
 typedef struct {
     GLuint prog;
     GLint mvp, ky, kc, sc, t[3];
+    GLint cy, cc;               /* zero-copy variant: where the picture is on its surface */
 } CvProg;
-static __thread CvProg cv_prog[2];
+/* [0] three planes, [1] Y + UV; [2], [3] the same for planes that are the
+ * decoder's surface (zero-copy) */
+static __thread CvProg cv_prog[4];
 static __thread GLuint cv_vao, cv_vbo;
 
 static const char *CV_VS =
@@ -2633,6 +3684,37 @@ static const char *CV_FS =
     "           / 256.0 / 255.0;\n"
     "  frag = vec4(clamp(c, 0.0, 1.0), 1.0); }\n";
 
+/* The same conversion for planes that are the decoder's own surface
+ * (zero-copy): the picture is the top left part of a surface that is a few
+ * rows and columns larger (1920x1080 lies on 1920x1088), so the texture
+ * coordinates are scaled to the picture and held at the centre of its last
+ * sample - what CLAMP_TO_EDGE does on a texture of the picture's own size.
+ * Everything after the three texture reads is CV_FS, word for word; the
+ * shader of uploaded pictures (CV_FS) is not touched by this path. */
+static const char *CV_FS_ZC =
+    "in vec2 v_uv;\n"
+    "uniform sampler2D u_y, u_u, u_v;\n"
+    "uniform vec2 u_ky;\n"
+    "uniform vec4 u_kc;\n"
+    "uniform float u_s;\n"
+    "uniform vec4 u_cy;\n"      /* luma plane: scale x, y; largest x, y */
+    "uniform vec4 u_cc;\n"      /* chroma planes: the same */
+    "out vec4 frag;\n"
+    "void main(){\n"
+    "  vec2 ty = min(v_uv * u_cy.xy, u_cy.zw);\n"
+    "  vec2 tc = min(v_uv * u_cc.xy, u_cc.zw);\n"
+    "  float Y = max(texture(u_y, ty).r * u_s - u_ky.y, 0.0) * u_ky.x;\n"
+    "#ifdef CV_NV\n"
+    "  vec2 uv = texture(u_u, tc).rg * u_s - 128.0;\n"
+    "#else\n"
+    "  vec2 uv = vec2(texture(u_u, tc).r, texture(u_v, tc).r) * u_s - 128.0;\n"
+    "#endif\n"
+    "  float U = uv.x;\n"
+    "  float V = uv.y;\n"
+    "  vec3 c = vec3(Y + u_kc.x * V, Y - u_kc.y * U - u_kc.z * V, Y + u_kc.w * U)\n"
+    "           / 256.0 / 255.0;\n"
+    "  frag = vec4(clamp(c, 0.0, 1.0), 1.0); }\n";
+
 static GLuint cv_compile (GLenum type, const char *defs, const char *body)
 {
     const char *hdr = epoxy_is_desktop_gl () ? "#version 330\n"
@@ -2652,13 +3734,14 @@ static GLuint cv_compile (GLenum type, const char *defs, const char *body)
     return s;
 }
 
-static CvProg *cv_program (int kind)
+static CvProg *cv_program (int kind, gboolean surface)
 {
-    CvProg *p = &cv_prog[kind == CV_NV ? 1 : 0];
+    CvProg *p = &cv_prog[(kind == CV_NV ? 1 : 0) + (surface ? 2 : 0)];
     if (p->prog)
         return p;
     GLuint vs = cv_compile (GL_VERTEX_SHADER, "", CV_VS);
-    GLuint fs = cv_compile (GL_FRAGMENT_SHADER, kind == CV_NV ? "#define CV_NV 1\n" : "", CV_FS);
+    GLuint fs = cv_compile (GL_FRAGMENT_SHADER, kind == CV_NV ? "#define CV_NV 1\n" : "",
+                            surface ? CV_FS_ZC : CV_FS);
     p->prog = glCreateProgram ();
     glAttachShader (p->prog, vs);
     glAttachShader (p->prog, fs);
@@ -2674,6 +3757,8 @@ static CvProg *cv_program (int kind)
     p->ky = glGetUniformLocation (p->prog, "u_ky");
     p->kc = glGetUniformLocation (p->prog, "u_kc");
     p->sc = glGetUniformLocation (p->prog, "u_s");
+    p->cy = surface ? glGetUniformLocation (p->prog, "u_cy") : -1;
+    p->cc = surface ? glGetUniformLocation (p->prog, "u_cc") : -1;
     if (!cv_vao) {
         /* strip quad: pos(2) uv(2); v=0 at clip top, as glutil's */
         static const float verts[4][4] = {
@@ -2699,9 +3784,15 @@ static CvProg *cv_program (int kind)
 /* draw the viewer's plane textures as opaque RGB */
 static void cv_draw_planes (CvViewer *vw, const float *mvp)
 {
-    CvProg *p = cv_program (vw->pkind);
+    /* (zero-copy: the planes are the decoder's surface, vw->ztex) */
+    const GLuint *planes = vw->zc_on ? vw->ztex : vw->ptex;
+    CvProg *p = cv_program (vw->pkind, vw->zc_on);
     int n = vw->pkind == CV_NV ? 2 : 3;
     glUseProgram (p->prog);
+    if (vw->zc_on) {
+        glUniform4fv (p->cy, 1, vw->zcrop[0]);
+        glUniform4fv (p->cc, 1, vw->zcrop[1]);
+    }
     int k[6];
     walpe_yuv_coeffs (vw->ymode, k);
     glUniform2f (p->ky, (float) k[0], (float) k[1]);
@@ -2709,7 +3800,7 @@ static void cv_draw_planes (CvViewer *vw, const float *mvp)
     glUniform1f (p->sc, vw->pscale);
     for (int i = 0; i < n; i++) {
         glActiveTexture (GL_TEXTURE0 + (GLenum) i);
-        glBindTexture (GL_TEXTURE_2D, vw->ptex[i]);
+        glBindTexture (GL_TEXTURE_2D, planes[i]);
         glUniform1i (p->t[i], i);
     }
     glActiveTexture (GL_TEXTURE0);
@@ -2719,6 +3810,298 @@ static void cv_draw_planes (CvViewer *vw, const float *mvp)
     glDrawArrays (GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray (0);
     glBlendFunc (GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+}
+
+/* --------------------------------------- hardware: zero-copy, viewer side
+ * ("video_zerocopy", video.h). A hardware picture is not downloaded and
+ * uploaded: each of its planes, where the decoder left it, becomes a
+ * texture (a DMA-BUF imported as an EGL image, EGL_EXT_image_dma_buf_import
+ * with modifiers where the display takes them), and the planes are drawn by
+ * the conversion shader of the upload path. The driver converts nothing:
+ * formats (NV12 as R8 + GR88, P010 as R16 + GR1616, three 8-bit planes),
+ * range and matrix are exactly the upload path's (video_hwsel.h has the
+ * table). GL_TEXTURE_EXTERNAL_OES is not used: there the driver would
+ * choose the conversion, and desktop GL has no such sampler.
+ *
+ * The picture equals the software path's as soon as the imported textures
+ * hold the decoder's samples. That is checked: the first pictures after
+ * every decoder start come with their download, and the imported planes
+ * are read back and compared with it, sample for sample (WALPE_ZC_*). A
+ * difference, or anything that cannot be imported or read back, refuses
+ * the stream: it is downloaded from then on. Nothing of this could be run
+ * where it was written (no GPU, no VA-API device). */
+
+/* render thread, its context current: can this GL context draw from DMA-BUFs */
+static void cv_zc_caps (CvViewer *vw)
+{
+    int how = 0;
+    gboolean mods = FALSE;
+    const char *cant = NULL;
+    EGLDisplay dpy = eglGetCurrentDisplay ();
+    if (dpy == EGL_NO_DISPLAY)
+        cant = "the renderer's GL context is not an EGL context";
+    else if (walpe_gl_is_software ())
+        cant = "the renderer is a software renderer";
+    else if (!epoxy_has_egl_extension (dpy, "EGL_KHR_image_base") ||
+             !epoxy_has_egl_extension (dpy, "EGL_EXT_image_dma_buf_import"))
+        cant = "the renderer's EGL has no EGL_EXT_image_dma_buf_import";
+    else if (epoxy_has_gl_extension ("GL_OES_EGL_image"))
+        how = 1;
+    else if (epoxy_has_gl_extension ("GL_EXT_EGL_image_storage"))
+        how = 2;
+    else
+        cant = "the renderer's GL has neither GL_OES_EGL_image nor GL_EXT_EGL_image_storage";
+    if (how)
+        mods = epoxy_has_egl_extension (dpy, "EGL_EXT_image_dma_buf_import_modifiers");
+    g_mutex_lock (&vw->src->lock);
+    vw->zc_can = how ? 1 : 0;
+    vw->zc_cant = cant;
+    vw->zc_how = how;
+    vw->zc_mods = mods;
+    g_mutex_unlock (&vw->src->lock);
+}
+
+/* Render thread, its context current: what hardware decoding needs to
+ * know from the renderer - which device this context renders on and
+ * whether it can draw from the decoder's own memory. Questions only, and
+ * asked only once hardware decoding is asked for: with the setting off
+ * (the default) the renderer is never asked anything. */
+static void cv_hw_render_side (CvViewer *vw)
+{
+    if (vw->zc_can >= 0 || !cv_hw_is_asked ())
+        return;         /* (zc_can is written by this thread only) */
+    cv_gpu_probe ();
+    cv_zc_caps (vw);
+}
+
+static void cv_zc_discard (GLuint *tex, EGLImageKHR *img)
+{
+    /* (EGL is asked only when there is an image to destroy: a viewer that
+     * never drew from a decoder's picture - every viewer while hardware
+     * decoding is off - makes no EGL call here) */
+    EGLDisplay dpy = EGL_NO_DISPLAY;
+    gboolean asked = FALSE;
+    for (int i = 0; i < 3; i++) {
+        if (tex[i])
+            glDeleteTextures (1, &tex[i]);
+        tex[i] = 0;
+        if (img[i] != EGL_NO_IMAGE_KHR) {
+            if (!asked) {
+                dpy = eglGetCurrentDisplay ();
+                asked = TRUE;
+            }
+            if (dpy != EGL_NO_DISPLAY)
+                eglDestroyImageKHR (dpy, img[i]);
+        }
+        img[i] = EGL_NO_IMAGE_KHR;
+    }
+}
+
+/* render thread, its context current: the viewer lets go of the decoder's
+ * picture (uploaded planes follow, or its GL side ends) */
+static void cv_zc_drop (CvViewer *vw)
+{
+    cv_zc_discard (vw->ztex, vw->zimg);
+    av_frame_free (&vw->zhold);
+    vw->zc_on = FALSE;
+}
+
+/* Render thread, f pinned: the planes of f as textures tex[] behind the
+ * EGL images img[], without a copy. FALSE (*why, a constant): nothing was
+ * made. */
+static gboolean cv_zc_import (CvViewer *vw, const CvFrame *f, GLuint *tex, EGLImageKHR *img,
+                              const char **why)
+{
+    EGLDisplay dpy = eglGetCurrentDisplay ();
+    gboolean ok = dpy != EGL_NO_DISPLAY && vw->zc_how && f->zc_n >= 2 && f->zc_n <= 3;
+    for (int i = 0; i < 3; i++) {
+        tex[i] = 0;
+        img[i] = EGL_NO_IMAGE_KHR;
+    }
+    *why = "EGL does not import the decoder's picture";
+    while (glGetError () != GL_NO_ERROR)
+        ;
+    for (int i = 0; ok && i < f->zc_n; i++) {
+        const WalpeDmaPlane *p = &f->zc_pl[i];
+        EGLint at[24];
+        int k = 0;
+        if (p->object < 0 || p->object >= WALPE_DMA_MAX || f->zc_fd[p->object] < 0) {
+            ok = FALSE;
+            break;
+        }
+        at[k++] = EGL_WIDTH;
+        at[k++] = p->w;
+        at[k++] = EGL_HEIGHT;
+        at[k++] = p->h;
+        at[k++] = EGL_LINUX_DRM_FOURCC_EXT;
+        at[k++] = (EGLint) p->fourcc;
+        at[k++] = EGL_DMA_BUF_PLANE0_FD_EXT;
+        at[k++] = f->zc_fd[p->object];
+        at[k++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
+        at[k++] = (EGLint) p->offset;
+        at[k++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;
+        at[k++] = (EGLint) p->pitch;
+        if (p->modifier != WALPE_DRM_MOD_INVALID) {
+            if (vw->zc_mods) {
+                at[k++] = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
+                at[k++] = (EGLint) (guint32) (p->modifier & 0xffffffffu);
+                at[k++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
+                at[k++] = (EGLint) (guint32) (p->modifier >> 32);
+            } else if (p->modifier != WALPE_DRM_MOD_LINEAR) {
+                *why = "the picture's memory layout needs a format modifier and the renderer's EGL "
+                       "takes none (no EGL_EXT_image_dma_buf_import_modifiers)";
+                ok = FALSE;
+                break;
+            }
+        }
+        at[k++] = EGL_NONE;
+        img[i] = eglCreateImageKHR (dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, (EGLClientBuffer) NULL, at);
+        if (img[i] == EGL_NO_IMAGE_KHR) {
+            eglGetError ();     /* (taken off the thread: the reason is the refusal itself) */
+            ok = FALSE;
+            break;
+        }
+        glGenTextures (1, &tex[i]);
+        glBindTexture (GL_TEXTURE_2D, tex[i]);
+        if (vw->zc_how == 1)
+            glEGLImageTargetTexture2DOES (GL_TEXTURE_2D, (GLeglImageOES) img[i]);
+        else
+            glEGLImageTargetTexStorageEXT (GL_TEXTURE_2D, (GLeglImageOES) img[i], NULL);
+        glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        if (glGetError () != GL_NO_ERROR) {
+            *why = "GL does not take the imported picture as a texture";
+            ok = FALSE;
+        }
+    }
+    if (!ok)
+        cv_zc_discard (tex, img);
+    return ok;
+}
+
+/* Render thread, f pinned, f->zc == 2 (its planes are in main memory too):
+ * are the imported planes tex[] the decoder's samples? Each is read back
+ * through a framebuffer, in strips, and compared with the download over
+ * the picture's area - WALPE_ZC_TOLERANCE, i.e. no difference at all.
+ * FALSE (*why): a difference, or it could not be read. The framebuffer,
+ * pack buffer and pack alignment bindings are put back. */
+static gboolean cv_zc_verify (CvViewer *vw, const CvFrame *f, const GLuint *tex, const char **why)
+{
+    int n = f->kind == CV_NV ? 2 : 3;
+    if (f->kind == CV_BGRA || n != f->zc_n || !f->pl[0] || (f->bytes != 1 && f->bytes != 2)) {
+        *why = "the downloaded picture has another layout than the exported one";
+        return FALSE;
+    }
+    GLint prev_fbo = 0, prev_pack = 4, prev_pbo = 0;
+    glGetIntegerv (GL_READ_FRAMEBUFFER_BINDING, &prev_fbo);
+    glGetIntegerv (GL_PACK_ALIGNMENT, &prev_pack);
+    glGetIntegerv (GL_PIXEL_PACK_BUFFER_BINDING, &prev_pbo);
+    if (!vw->zfbo)
+        glGenFramebuffers (1, &vw->zfbo);
+    glBindFramebuffer (GL_READ_FRAMEBUFFER, vw->zfbo);
+    glBindBuffer (GL_PIXEL_PACK_BUFFER, 0);
+    glPixelStorei (GL_PACK_ALIGNMENT, 1);
+    while (glGetError () != GL_NO_ERROR)
+        ;
+    gboolean ok = TRUE, same = TRUE;
+    GLenum type = f->bytes == 2 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE;
+    for (int i = 0; ok && same && i < n; i++) {
+        int comps = f->kind == CV_NV && i == 1 ? 2 : 1;
+        int pw = f->pw[i], ph = f->ph[i];
+        if (pw < 1 || ph < 1 || pw > f->zc_pl[i].w || ph > f->zc_pl[i].h || !f->pl[i] ||
+            f->ls[i] < pw * comps * f->bytes) {
+            ok = FALSE;
+            break;
+        }
+        glFramebufferTexture2D (GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[i], 0);
+        glReadBuffer (GL_COLOR_ATTACHMENT0);
+        if (glCheckFramebufferStatus (GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            ok = FALSE;
+            break;
+        }
+        /* read as RGBA (every GL reads that back): 4 components per sample */
+        gsize row = (gsize) pw * 4 * (gsize) f->bytes;
+        int strip = (int) MAX ((gsize) 1, ((gsize) 4 << 20) / row);
+        guint8 *buf = g_malloc (row * (gsize) strip);
+        for (int y = 0; ok && same && y < ph; y += strip) {
+            int rows = MIN (strip, ph - y);
+            glReadPixels (0, y, pw, rows, GL_RGBA, type, buf);
+            if (glGetError () != GL_NO_ERROR) {
+                ok = FALSE;
+                break;
+            }
+            same = walpe_zc_rows_equal (buf, row, 4, f->pl[i] + (gssize) y * f->ls[i], (gsize) f->ls[i],
+                                        comps, f->bytes, pw, rows);
+        }
+        g_free (buf);
+    }
+    glFramebufferTexture2D (GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+    glBindFramebuffer (GL_READ_FRAMEBUFFER, (GLuint) prev_fbo);
+    glBindBuffer (GL_PIXEL_PACK_BUFFER, (GLuint) prev_pbo);
+    glPixelStorei (GL_PACK_ALIGNMENT, prev_pack);
+    *why = !ok ? "the imported picture could not be read back for the comparison with its download"
+               : "the imported planes are not, sample for sample, what the download gives";
+    return ok && same;
+}
+
+/* Render thread, f pinned: show f where the decoder left it. TRUE = this
+ * viewer now draws from the decoder's picture. FALSE = not shown that way
+ * (the caller uploads the frame's planes when it has some); the source is
+ * told, and downloads from its next picture on. */
+static gboolean cv_zc_show (CvViewer *vw, const CvFrame *f)
+{
+    CvSource *src = vw->src;
+    const char *why = "the renderer cannot import DMA-BUFs";
+    GLuint tex[3] = { 0, 0, 0 };
+    EGLImageKHR img[3] = { EGL_NO_IMAGE_KHR, EGL_NO_IMAGE_KHR, EGL_NO_IMAGE_KHR };
+    AVFrame *hold = NULL;
+    if (g_atomic_int_get (&src->zc_refused))
+        return FALSE;       /* (said already) */
+    if (!vw->zc_how || !cv_zc_import (vw, f, tex, img, &why))
+        goto refuse;
+    if (f->zc == 2) {
+        if (!cv_zc_verify (vw, f, tex, &why))
+            goto refuse;
+    }
+    /* the picture stays out of the decoder's hands while it is on screen */
+    hold = av_frame_clone (f->hw);
+    if (!hold) {
+        why = "out of memory";
+        goto refuse;
+    }
+    cv_zc_drop (vw);
+    for (int i = 0; i < 3; i++) {
+        vw->ztex[i] = tex[i];
+        vw->zimg[i] = img[i];
+    }
+    vw->zhold = hold;
+    memcpy (vw->zcrop, f->zc_crop, sizeof (vw->zcrop));
+    vw->zc_on = TRUE;
+    vw->pkind = f->kind;
+    vw->pscale = f->scale;
+    vw->ymode = f->mode;
+    vw->fw = f->w;
+    vw->fh = f->h;
+    if (f->zc == 2) {
+        /* one more picture of this decoder found equal (counted once, also
+         * when several monitors compared it) */
+        g_mutex_lock (&src->lock);
+        if (f->zc_gen == src->zc_gen && f->seq != src->zc_check_seq) {
+            src->zc_check_seq = f->seq;
+            g_atomic_int_inc (&src->zc_verified);
+        }
+        g_mutex_unlock (&src->lock);
+    }
+    return TRUE;
+refuse:
+    cv_zc_discard (tex, img);
+    if (g_atomic_int_compare_and_exchange (&src->zc_refused, 0, 1)) {
+        cv_zc_set_why (src, why);
+        g_message ("video: zero-copy is not used for %s (%s): pictures are downloaded", src->path, why);
+    }
+    return FALSE;
 }
 
 static gboolean cv_viewer_upload (CvViewer *vw, int *bw, int *bh, gint64 *next_us);
@@ -2749,6 +4132,7 @@ static gboolean cvv_gl_init (WalpeVideo *v, GError **err)
         g_atomic_int_set (&vw->src->gl_r16, 0);
     else
         g_atomic_int_compare_and_exchange (&vw->src->gl_r16, -1, 1);
+    cv_hw_render_side (vw);     /* (hardware decoding asked for: what the renderer is) */
     return TRUE;
 }
 
@@ -2785,8 +4169,20 @@ static gboolean cvv_gl_render (WalpeVideo *v, int w, int h, GError **err)
     WalpeMat3 m;
     float k = 1.0f;
     walpe_fit_matrix (&v->fit, (float) bw, (float) bh, (float) w, (float) h, m.m, &k);
-    g_atomic_int_set (&vw->want_w, (int) ceilf (bw * k));
-    g_atomic_int_set (&vw->want_h, (int) ceilf (bh * k));
+    /* What the decoder is asked to keep (want_w / want_h): the size the
+     * frame has at the render resolution chosen for this monitor (video.h
+     * render_w / render_h), else on the surface. The frame itself is drawn
+     * straight to the surface, as large as it was decoded: nothing is made
+     * softer on the way that the output could show. */
+    float kw = k;
+    if (v->render_w > 0 && v->render_h > 0 && (v->render_w != w || v->render_h != h)) {
+        float m2[9];
+        kw = 1.0f;
+        walpe_fit_matrix (&v->fit, (float) bw, (float) bh, (float) v->render_w,
+                          (float) v->render_h, m2, &kw);
+    }
+    g_atomic_int_set (&vw->want_w, (int) ceilf (bw * kw));
+    g_atomic_int_set (&vw->want_h, (int) ceilf (bh * kw));
     double c0 = cv_cpu ();
     if (vw->pkind)
         cv_draw_planes (vw, m.m);
@@ -3079,19 +4475,20 @@ static void cv_copy_planes (const CvFrame *f, int n, guint8 *dst, const gsize *o
 static double cv_upload_frame (CvViewer *vw, const CvFrame *f)
 {
     double bytes = 0;
+    if (vw->zc_on)
+        cv_zc_drop (vw);        /* uploaded planes from here on */
     glPixelStorei (GL_UNPACK_ALIGNMENT, 1);
     if (f->kind == CV_BGRA) {
         glBindTexture (GL_TEXTURE_2D, vw->tex);
         glPixelStorei (GL_UNPACK_ROW_LENGTH, f->ls[0] / 4);
         /* (re)allocate storage only when needed; frames reuse it via SubImage */
         if (!vw->tex_alloced || vw->tex_w != f->w || vw->tex_h != f->h) {
-            glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, f->w, f->h, 0, GL_BGRA, GL_UNSIGNED_BYTE,
-                          NULL);
+            walpe_gl_tex_image_bgra (f->w, f->h, NULL);
             vw->tex_alloced = TRUE;
             vw->tex_w = f->w;
             vw->tex_h = f->h;
         }
-        glTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0, f->w, f->h, GL_BGRA, GL_UNSIGNED_BYTE, f->pl[0]);
+        walpe_gl_tex_sub_image_bgra (0, 0, f->w, f->h, f->pl[0]);
         vw->pkind = 0;
         vw->up_tex_calls++;
         bytes = (double) f->w * f->h * 4;
@@ -3296,6 +4693,7 @@ static gboolean cv_viewer_upload (CvViewer *vw, int *bw, int *bh, gint64 *next_u
 {
     CvSource *src = vw->src;
     *next_us = 0;
+    cv_hw_render_side (vw); /* (hardware decoding switched on while the video plays) */
     cv_up_sync (vw);        /* the upload path in force; nothing is pinned yet */
     /* measuring aid (WALPE_VIDEO_UPLOAD=hold): the first frame stays */
     gboolean hold = (vw->up_mode & WALPE_VUP_HOLD) && vw->drawn_seq;
@@ -3304,7 +4702,7 @@ static gboolean cv_viewer_upload (CvViewer *vw, int *bw, int *bh, gint64 *next_u
         cv_viewer_tick (vw, cv_now ());
     double next_due = 0;
     CvFrame *f = src->has_frame ? cv_pick_frame (src, &next_due) : NULL;
-    if (f && vw->drawn_seq != f->seq && !hold) {
+    if (f && vw->drawn_seq != f->seq && vw->skip_seq != f->seq && !hold) {
         vw->shown++;
         if (vw->drawn_seq && f->seq > vw->drawn_seq + 1)
             vw->skipped += (guint) (f->seq - vw->drawn_seq - 1);
@@ -3313,15 +4711,48 @@ static gboolean cv_viewer_upload (CvViewer *vw, int *bw, int *bh, gint64 *next_u
          * monitors do not wait behind this one */
         f->pins++;
         g_mutex_unlock (&src->lock);
+        /* WALPE_FPS_LOG: what this upload adds to the counters goes to the
+         * log's copy under the lock taken below (nothing when it is off) */
+        const gboolean logging = cv_fps_log_s () > 0;
+        const guint u0[7] = { vw->up_frames, vw->up_tex_calls, vw->up_buf_calls, vw->up_maps,
+                              vw->up_fences, vw->up_staged, vw->up_waits };
+        const double uc0 = vw->up_copied;
         double c0 = cv_cpu ();
-        double bytes = cv_upload_frame (vw, f);
+        double bytes = 0;
+        gboolean shown = TRUE;
+        /* zero-copy: the textures become the decoder's picture; a frame
+         * that has its planes in main memory too (the first ones, for the
+         * comparison) is uploaded when that is refused. A frame without
+         * them that this context cannot import is not shown here: the
+         * picture on screen stays until the decoder, told so, downloads. */
+        if (f->zc && cv_zc_show (vw, f))
+            ;
+        else if (f->zc == 1)
+            shown = FALSE;
+        else
+            bytes = cv_upload_frame (vw, f);
         double c1 = cv_cpu ();
-        if (f->seq <= (guint64) cv_md5_n ())
+        if (shown && f->seq <= (guint64) cv_md5_n ())
             cv_frame_md5 (f, "upload", src->path);
         g_mutex_lock (&src->lock);
-        vw->drawn_seq = f->seq;
+        if (shown)
+            vw->drawn_seq = f->seq;
+        else
+            vw->skip_seq = f->seq;
         vw->st_upload += c1 - c0;
         vw->st_bytes += bytes;
+        if (logging) {
+            vw->up_log.frames += vw->up_frames - u0[0];
+            vw->up_log.tex_calls += vw->up_tex_calls - u0[1];
+            vw->up_log.buf_calls += vw->up_buf_calls - u0[2];
+            vw->up_log.maps += vw->up_maps - u0[3];
+            vw->up_log.fences += vw->up_fences - u0[4];
+            vw->up_log.staged += vw->up_staged - u0[5];
+            vw->up_log.waits += vw->up_waits - u0[6];
+            vw->up_log.copied += vw->up_copied - uc0;
+            vw->up_log.real = vw->up_real;
+            vw->up_log.mode = vw->up_mode;
+        }
         if (--f->pins == 0)
             g_cond_broadcast (&src->cond);
         /* the upload took a moment: a newer frame may be due by now */
@@ -3391,6 +4822,11 @@ static void cvv_gl_free (WalpeVideo *v)
     CvViewer *vw = (CvViewer *) v;
     cv_up_reset (vw);       /* buffers, the second texture set, the stage */
     vw->up_mode = -1;
+    cv_zc_drop (vw);        /* zero-copy: the imported planes and the picture they hold */
+    if (vw->zfbo) {
+        glDeleteFramebuffers (1, &vw->zfbo);
+        vw->zfbo = 0;
+    }
     if (vw->ptex[0]) {
         glDeleteTextures (3, vw->ptex);
         memset (vw->ptex, 0, sizeof (vw->ptex));
@@ -3442,6 +4878,8 @@ static void cvv_free (WalpeVideo *v)
         cv_notes_set (src, NULL);
         for (int i = 0; i <= CV_AHEAD; i++) {
             av_frame_free (&src->buf[i].av);
+            av_frame_free (&src->buf[i].drm);   /* (the description before the picture it maps) */
+            av_frame_free (&src->buf[i].hw);
             g_free (src->buf[i].data);
         }
         mp4_demux_free (src->demux);
@@ -3451,7 +4889,12 @@ static void cvv_free (WalpeVideo *v)
         avcodec_free_context (&src->dec);
         cv_hw_close (src);
         av_frame_free (&src->dl_keep);
-        g_free (src->hw_why);
+        av_frame_free (&src->zc_hw);
+        walpe_hwsel_clear (&src->hw);
+        if (src->hw_log)
+            g_string_free (src->hw_log, TRUE);
+        g_free (src->hw_profile);
+        g_free (src->zc_why);
         g_free (src->half_buf);
         g_free (src->norm_buf);
         if (src->annexb)
@@ -3462,6 +4905,9 @@ static void cvv_free (WalpeVideo *v)
         g_ptr_array_free (src->viewers, TRUE);
         g_free (src);
     }
+    /* (zero-copy: a picture this viewer still held goes back to its
+     * decoder's pool, or is freed with it when the decoder is gone) */
+    av_frame_free (&vw->zhold);
     /* no main-loop source references the viewer: free synchronously */
     g_free (vw);
 }
@@ -3477,6 +4923,7 @@ static CvViewer *cv_viewer_new (CvSource *src)
     vw->base.free = cvv_free;
     vw->src = src;
     vw->up_mode = -1;
+    vw->zc_can = -1;        /* its GL context has not been asked yet */
 
     g_mutex_lock (&src->lock);
     src->refs++;
@@ -3497,6 +4944,8 @@ static CvSource *cv_source_create (const char *key, const char *path, guint64 of
     g_mutex_init (&src->lock);
     g_cond_init (&src->cond);
     src->hw_fmt = AV_PIX_FMT_NONE;
+    walpe_hwsel_clear (&src->hw);
+    src->hw_log = g_string_new (NULL);
     src->gl_r16 = -1;
     src->last_raw = src->last_play = -1;
     src->skip_until = -1;
@@ -3525,6 +4974,9 @@ static CvSource *cv_source_create (const char *key, const char *path, guint64 of
             ? (double) t0 / (double) src->demux->timescale : 0;
     }
     src->dl_keep = av_frame_alloc ();
+    src->zc_hw = av_frame_alloc ();
+    /* (status line: the profile the file declares) */
+    src->hw_profile = walpe_h264_profile_text (src->demux->sps, src->demux->sps_len);
     /* GPU conversion unless the renderer is itself a CPU rasterizer
      * (measured on llvmpipe: 4K I420 shader path 214% vs 190% CPU) or
      * WALPE_CPU_YUV=1; WALPE_GPU_YUV=1 forces it */
@@ -3549,6 +5001,8 @@ static CvSource *cv_source_create (const char *key, const char *path, guint64 of
     src->annexb = g_string_sized_new (64 * 1024);
     for (int i = 0; i <= CV_AHEAD; i++) {
         src->buf[i].av = av_frame_alloc ();
+        src->buf[i].hw = av_frame_alloc ();
+        src->buf[i].drm = av_frame_alloc ();
         src->spare[src->nspare++] = &src->buf[i];
     }
     src->pkt = av_packet_alloc ();
@@ -3566,7 +5020,12 @@ fail:
     cv_hw_close (src);
     cv_notes_set (src, NULL);
     av_frame_free (&src->dl_keep);
-    g_free (src->hw_why);
+    av_frame_free (&src->zc_hw);
+    walpe_hwsel_clear (&src->hw);
+    if (src->hw_log)
+        g_string_free (src->hw_log, TRUE);
+    g_free (src->hw_profile);
+    g_free (src->zc_why);
     g_free (src->path);
     g_ptr_array_free (src->viewers, TRUE);
     g_cond_clear (&src->cond);
@@ -3717,6 +5176,7 @@ WALPE_API const WalpeVideoModule *walpe_video_module_entry (void)
         WALPE_MODULE_ABI, walpe_video_custom_new, walpe_video_tex_new, walpe_video_tex_update,
         walpe_video_tex_interval_us, walpe_video_tex_set_view, walpe_video_tex_set_paused,
         walpe_video_tex_free,
+        { walpe_sounddec_open, walpe_sounddec_read, walpe_sounddec_close },   /* sounddec.c */
     };
     return &m;
 }

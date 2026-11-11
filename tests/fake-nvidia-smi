@@ -31,6 +31,8 @@ done
 value () {   # field, sample number
     case "$1" in
     name) echo "NVIDIA GeForce RTX 4050 Laptop GPU" ;;
+    index) echo 0 ;;                       # asked by walpe-ctl gpu-stats (common/gpustat.c)
+    pci.bus_id) echo "00000000:01:00.0" ;;
     driver_version) echo "550.120" ;;
     memory.total) echo "6141 MiB" ;;
     utilization.gpu) echo $((20 + ($2 % 3) * 10)) ;;       # 20 30 40 ...

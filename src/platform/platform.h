@@ -1,0 +1,358 @@
+/* platform.h - the window system behind the daemon.
+ *
+ * The daemon renders with EGL into one surface per monitor and knows
+ * nothing of Xlib or libwayland: outputs, the wallpaper surfaces, how a
+ * frame is presented and paced, the pointer and the pause signals come
+ * through this interface. Two backends implement it: platform/x11.c
+ * (override-redirect windows below everything, EWMH, RandR, XInput2 - the
+ * code that used to live in daemon/main.c, unchanged in what it does) and
+ * platform/wayland.c (one zwlr_layer_shell_v1 background surface per
+ * wl_output). Which one runs is decided once at start-up
+ * (common/backend.h); a build may hold only one of them.
+ *
+ * Threading: unless a function says "render thread", it is called on the
+ * main thread (the thread of the default GMainContext), and every event
+ * callback runs there. The three presentation hooks (walpe_surface_*swap*,
+ * walpe_surface_set_interval) are called on the render thread that owns
+ * the surface's EGL context.
+ *
+ * Layout changes: surfaces are made for the outputs found at start-up and
+ * are never resized. When outputs come, go or change, the backend says so
+ * (outputs_changed); the daemon reads the list again and, when it really
+ * differs, restarts itself in place - the same on both backends. */
+#pragma once
+#include <glib.h>
+#include <json-glib/json-glib.h>
+#include <epoxy/egl.h>
+#include "common/backend.h"
+#include "common/config.h"
+#include "platform/signals.h"
+
+/* ---------------------------------------------------------------- outputs */
+
+/* wl_output.transform numbering; X11 reports 0 (a rotated RandR output
+ * already has a rotated rectangle) */
+enum {
+    WALPE_TRANSFORM_NORMAL = 0, WALPE_TRANSFORM_90, WALPE_TRANSFORM_180, WALPE_TRANSFORM_270,
+    WALPE_TRANSFORM_FLIPPED, WALPE_TRANSFORM_FLIPPED_90, WALPE_TRANSFORM_FLIPPED_180,
+    WALPE_TRANSFORM_FLIPPED_270,
+};
+
+typedef struct {
+    /* Identifies the output for as long as this layout lasts (surfaces and
+     * per-output signals carry it). Never 0. X11: its index in the list
+     * + 1. Wayland: the wl_registry name of its wl_output. Not stable
+     * across restarts: settings are keyed by `name`. */
+    guint32 id;
+    /* The connector name as the window system reports it: the key of the
+     * per-monitor settings. X11: the RandR 1.5 monitor whose rectangle
+     * this is ("HDMI-0", "DP-2"), WALPE_MONITORS "NAME=", else "monN".
+     * Wayland: wl_output.name / xdg_output.name ("DP-1", "HDMI-A-1"), else
+     * "monN". Never NULL. */
+    char *name;
+    char *canon;            /* walpe_output_name_canon (name): the same on both
+                             * backends where only the spelling differs */
+    /* what the monitor says about itself; NULL = not known. Wayland:
+     * wl_output.geometry make / model, wl_output.description. X11: not
+     * filled yet (it would take the EDID property of the RandR output). */
+    char *make, *model, *serial, *description;
+    /* the rectangle the daemon renders for it, in pixels. The rectangles
+     * of one list never overlap; pointer positions are given in the same
+     * space. X11: root-window coordinates. Wayland: sizes are the output's
+     * video mode (after its transform), positions the compositor's layout
+     * scaled to pixels, or - where outputs of different scales would then
+     * overlap - one row from left to right. */
+    int x, y, width, height;
+    /* the compositor's own layout units (X11: the same as above) */
+    int logical_x, logical_y, logical_width, logical_height;
+    double refresh_hz;      /* 0 = unknown */
+    double scale;           /* pixels per layout unit; 1.0 on X11 */
+    int transform;          /* WALPE_TRANSFORM_* */
+} WalpeOutput;
+
+typedef struct {
+    int n;
+    WalpeOutput *o;
+} WalpeOutputList;
+
+void walpe_output_list_free (WalpeOutputList *l);            /* clears *l, does not free l */
+void walpe_output_list_copy (WalpeOutputList *dst, const WalpeOutputList *src);
+/* same rectangles, names, refresh rates (within 0.5 Hz), scales and
+ * transforms, in the same order */
+gboolean walpe_output_list_equal (const WalpeOutputList *a, const WalpeOutputList *b);
+/* the entry called `name`: exact first, then by canonical name; NULL = none */
+const WalpeOutput *walpe_output_list_find (const WalpeOutputList *l, const char *name);
+/* the id of the list's only output; 0 = it has none, or more than one.
+ * For whoever knows "the output" without a name (a Wayland compositor
+ * whose wl_output is older than version 4 tells none): with one output
+ * there is no doubt which one is meant, with several nobody can tell. */
+guint32 walpe_output_list_only_id (const WalpeOutputList *l);
+
+/* What the daemon does when the window system says its outputs changed:
+ * the decision as a pure function (daemon/main.c layout_check uses it,
+ * tests/outputs_test.c walks it through hotplug sequences).
+ *   running - the layout the daemon's surfaces were made for
+ *   seen    - the outputs now
+ *   pending - a different layout seen at the look before (n = 0: none)
+ *   force   - a surface was taken away: `running` is not what is on
+ *             screen even if `seen` reads the same
+ *   too_soon - the last restart was a moment ago;  busy - an import or a
+ *             download would be cut off
+ * SAME: nothing to do (forget pending). WAIT: remember `seen` as pending
+ * and look again (a change must hold for two looks: the window system
+ * goes through passing states). RESTART: restart in place to follow it.
+ * *settled (may be NULL): seen equals pending. */
+typedef enum { WALPE_LAYOUT_SAME, WALPE_LAYOUT_WAIT, WALPE_LAYOUT_RESTART } WalpeLayoutVerdict;
+
+static inline WalpeLayoutVerdict walpe_layout_verdict (const WalpeOutputList *running,
+                                                       const WalpeOutputList *seen,
+                                                       const WalpeOutputList *pending,
+                                                       gboolean force, gboolean too_soon,
+                                                       gboolean busy, gboolean *settled)
+{
+    gboolean held = pending->n && walpe_output_list_equal (seen, pending);
+    if (settled)
+        *settled = held;
+    if (walpe_output_list_equal (seen, running) && !force)
+        return WALPE_LAYOUT_SAME;
+    if (!held || too_soon || busy)
+        return WALPE_LAYOUT_WAIT;
+    return WALPE_LAYOUT_RESTART;
+}
+
+/* ----------------------------------------------------------------- events */
+
+typedef struct WalpeSurface WalpeSurface;
+
+typedef struct {
+    /* outputs were added, removed or changed (debounce and compare:
+     * intermediate states are announced too) */
+    void (*outputs_changed) (gpointer user);
+    /* a part of the surface lost its pixels and must be drawn again (X11
+     * Expose). surface_user = WalpeSurfaceSpec.user */
+    void (*surface_exposed) (gpointer surface_user, gpointer user);
+    /* the window system took the surface away (Wayland: layer surface
+     * closed, its output gone; a --windowed window was closed). Nothing
+     * can be presented on it any more. */
+    void (*surface_closed) (gpointer surface_user, gpointer user);
+    /* the pointer moved while motion was asked for (walpe_platform_input_select) */
+    void (*pointer_motion) (gpointer user);
+    /* windows were moved, mapped, restacked or closed: what is under a
+     * pointer that has not moved may be something else now. Optional for
+     * a backend whose pointer position already follows such changes
+     * (Wayland: enter / leave events). */
+    void (*windows_changed) (gpointer user);
+    /* a button went down or up. button: 1 left, 2 middle, 3 right, 4-7 one
+     * wheel click up / down / left / right. button_wanted is asked first
+     * and can save the backend the work of finding the position.
+     * x, y: as WalpePointer; on_desktop: nothing but the wallpaper is under it. */
+    gboolean (*button_wanted) (int button, gpointer user);
+    void (*button) (int button, gboolean down, int x, int y, gboolean on_desktop, guint32 time_ms,
+                    gpointer user);
+    /* the connection to the window system is gone for good. X11 never
+     * reports this (Xlib ends the process; the two files named in
+     * WalpePlatformOpts are removed first). */
+    void (*connection_lost) (gpointer user);
+} WalpePlatformEvents;
+
+/* ------------------------------------------------------------- life cycle */
+
+typedef struct {
+    WalpeConfig *cfg;           /* read by the backend, never written */
+    gboolean windowed;          /* --windowed: one plain window instead of wallpapers */
+    gboolean probe;             /* a short-lived test process: no events, no signals */
+    gboolean wait_for_display;  /* the display may refuse connections for a moment
+                                 * (X11: right after another client of this
+                                 * program left a server without -noreset) */
+    int reconnect_wait_s;       /* Wayland: how long to wait for the compositor's
+                                 * socket to (re)appear before giving up; 0 = not */
+    /* files to remove when the connection dies under the process (X11) */
+    const char *crash_marker_path, *socket_path;
+    const WalpePlatformEvents *events;
+    gpointer user;
+} WalpePlatformOpts;
+
+/* which backends this build holds */
+gboolean walpe_platform_built (WalpeBackend b);
+
+/* A first look at the Wayland compositor named by the environment, on a
+ * short connection of its own that is closed again before this returns
+ * (main thread; fine before any other thread exists; makes no EGL call).
+ * The automatic backend choice and the GPU choice read it. */
+typedef struct {
+    gboolean connected;     /* FALSE: no connection (or no Wayland backend in this build) */
+    gboolean layer_shell;   /* zwlr_layer_shell_v1 is offered: wallpapers are possible */
+    gboolean xdg_shell;     /* xdg_wm_base is offered: --windowed is possible */
+    char *display_node;     /* the DRM device the compositor composes with
+                             * ("/dev/dri/card1"), NULL = not told (g_free) */
+} WalpePlatformProbe;
+void walpe_platform_probe_wayland (WalpePlatformProbe *out);
+
+/* Connect. backend: WALPE_BACKEND_X11 or _WAYLAND (the result of
+ * walpe_backend_choose). FALSE: *err says why (g_free). Must run before
+ * any thread exists that touches the window system. */
+gboolean walpe_platform_open (WalpeBackend backend, const WalpePlatformOpts *opts, char **err);
+/* the backend that is open (WALPE_BACKEND_AUTO = none) */
+WalpeBackend walpe_platform_backend (void);
+/* one line about the display for the start-up log, e.g. "wm=yes" (X11) or
+ * "compositor: layer-shell v4, xdg-output, viewporter" (g_free) */
+char *walpe_platform_describe (void);
+/* start delivering events and start the pause-signal providers; the
+ * surfaces exist. layout_events: also announce output changes. */
+void walpe_platform_start (gboolean layout_events, const WalpeSignalSink *sink, gpointer sink_user);
+/* once, after the first wallpapers were assigned: put the surfaces where
+ * they belong in the stacking order (X11: below everything) */
+void walpe_platform_settle (void);
+/* all surfaces are freed: disconnect */
+void walpe_platform_close (void);
+/* make sure the window system has processed everything sent so far */
+void walpe_platform_sync (void);
+
+/* ---------------------------------------------------------------- outputs */
+
+/* the outputs now (a fresh look); fills *out (walpe_output_list_free) */
+void walpe_platform_outputs (WalpeOutputList *out);
+
+/* -------------------------------------------------------------------- EGL */
+
+/* The EGLDisplay of the connection, not yet initialised (the caller calls
+ * eglInitialize, and eglTerminate before walpe_platform_close).
+ * EGL_NO_DISPLAY = none. Which GPU serves it was decided before, through
+ * the environment the GPU choice set up; the backend adds nothing to it. */
+EGLDisplay walpe_platform_egl_display (void);
+/* the DRM device the window system composes with, when the open backend
+ * knows it; NULL otherwise. Valid until walpe_platform_close. */
+const char *walpe_platform_display_node (void);
+/* text appended to the EGL line of the start-up log (", own X connection") */
+const char *walpe_platform_egl_note (void);
+/* EGL_NATIVE_VISUAL_ID a window config should have to be accepted by the
+ * surfaces made here (X11: the root window's visual; Wayland: XRGB8888);
+ * 0 = no preference */
+unsigned long walpe_platform_egl_visual (void);
+/* can a window surface really be made with this config? */
+gboolean walpe_platform_egl_config_usable (EGLDisplay dpy, EGLConfig conf);
+/* TRUE: frames are paced by the backend itself (Wayland frame callbacks),
+ * so both "swap intervals" exist whatever the EGL config says */
+gboolean walpe_platform_paces (void);
+
+/* --------------------------------------------------------------- surfaces */
+
+typedef enum {
+    WALPE_SURFACE_WALLPAPER,    /* covers `output`, below every window, takes no input */
+    WALPE_SURFACE_WINDOW,       /* a normal window of width x height (--windowed) */
+    WALPE_SURFACE_PROBE,        /* never shown: width x height, for a test frame */
+} WalpeSurfaceKind;
+
+typedef struct {
+    WalpeSurfaceKind kind;
+    const WalpeOutput *output;  /* WALLPAPER: which one (copied, need not stay valid) */
+    int width, height;          /* WINDOW / PROBE */
+    const char *title;          /* WINDOW */
+    gpointer user;              /* handed back in surface events */
+} WalpeSurfaceSpec;
+
+/* Three sizes, kept apart:
+ *   output size  - WalpeOutput.width x height: the pixels the monitor shows.
+ *   surface size - the size of the buffers of the EGL window surface: what
+ *                  glViewport of the default framebuffer covers and what a
+ *                  swap presents. After walpe_surface_new it is the output
+ *                  size (WINDOW / PROBE: the size asked for, or what the
+ *                  window system made of it).
+ *   render size  - the size the daemon draws the wallpaper at. The
+ *                  platform knows nothing of it. A daemon that renders
+ *                  smaller than the surface scales its picture up itself -
+ *                  or asks the backend to present smaller buffers
+ *                  (walpe_surface_set_buffer_size), which a backend that
+ *                  can scale on presentation does for free. */
+
+/* Make the native window and its EGL window surface. *w, *h: the surface
+ * size in pixels. NULL on failure; eglGetError () then still holds EGL's
+ * reason when the EGL surface was what failed. */
+WalpeSurface *walpe_surface_new (const WalpeSurfaceSpec *spec, EGLDisplay dpy, EGLConfig conf,
+                                 EGLSurface *egl_surface, int *w, int *h);
+/* destroys the EGL surface, then the native window. The surface's render
+ * thread has ended. */
+void walpe_surface_free (WalpeSurface *s);
+/* the surface size now */
+void walpe_surface_size (WalpeSurface *s, int *w, int *h);
+/* Render thread, between two frames (after a swap, before the first GL
+ * call of the next frame): from the next frame on the surface's buffers
+ * are w x h pixels and the window system scales them to the output.
+ * TRUE = done (walpe_surface_size answers w x h from now on). FALSE = this
+ * backend cannot (X11: a window's buffers have the window's size); the
+ * surface is unchanged and the caller scales its picture itself.
+ * w, h < 1 = back to the output size. */
+gboolean walpe_surface_set_buffer_size (WalpeSurface *s, int w, int h);
+/* WalpeOutput.id of a WALLPAPER; for a WINDOW the id its per-output pause
+ * signals are reported under (X11: 1), 0 = none; 0 for a PROBE */
+guint32 walpe_surface_output (WalpeSurface *s);
+/* a number that names the native window in logs (X11: the window id) */
+unsigned long walpe_surface_native_id (WalpeSurface *s);
+/* the wallpaper on this surface uses the pointer (position or clicks) or
+ * not. Wayland: the surface takes pointer input only while it does; X11:
+ * nothing (the pointer is read from the root window). */
+void walpe_surface_want_pointer (WalpeSurface *s, gboolean want);
+
+/* ---- presentation, render thread
+ * The daemon's "swap interval" (present.h): 1 = after a swap the thread
+ * waits until the display took the frame, 0 = it does not. */
+/* the surface is to run with interval iv from now on; returns the value
+ * to hand to eglSwapInterval on this thread (X11: iv itself; Wayland: 0,
+ * the wait is done in walpe_surface_swapped) */
+int walpe_surface_set_interval (WalpeSurface *s, int iv);
+/* right before eglSwapBuffers of the surface */
+void walpe_surface_pre_swap (WalpeSurface *s);
+/* right after a successful swap; may block for interval 1, but never for
+ * long: a surface the window system does not show must not hold its
+ * thread (the backend reports it as WALPE_SIG_COVERED instead) */
+void walpe_surface_swapped (WalpeSurface *s);
+
+/* what the window system said about the frames it was given (Wayland:
+ * frame callbacks, wp_presentation feedback). Any thread. FALSE = this
+ * backend has no such numbers (X11). */
+typedef struct {
+    guint64 committed;      /* swaps handed to the window system */
+    guint64 presented;      /* of them, reported as shown on the output */
+    guint64 discarded;      /* reported as never shown (replaced by a newer frame) */
+    guint64 wait_timeouts;  /* interval-1 waits that ended without an answer */
+    gint64 last_presented_us; /* g_get_monotonic_time () scale; 0 = none yet */
+    double refresh_hz;      /* the output's refresh as the feedback gives it; 0 = unknown */
+    gboolean hidden;        /* the window system is not showing the surface now */
+} WalpePresentStats;
+gboolean walpe_surface_present_stats (WalpeSurface *s, WalpePresentStats *out);
+
+/* ---------------------------------------------------------------- pointer */
+
+typedef struct {
+    int x, y;               /* in the space of WalpeOutput x / y / width / height */
+    gboolean inside;        /* FALSE: the pointer is where the backend cannot see it
+                             * (Wayland: over another client's window); x, y are
+                             * then the last position seen */
+    guintptr under;         /* names what is under the pointer; changes when that changes */
+} WalpePointer;
+
+/* where the pointer is now; FALSE = unknown (nothing was ever seen, or the
+ * query failed) */
+gboolean walpe_platform_pointer (WalpePointer *out);
+/* is `under` (from WalpePointer) the bare desktop, i.e. the wallpaper or a
+ * desktop-icon window? May ask the window system once per new value. */
+gboolean walpe_platform_on_desktop (guintptr under);
+/* what the daemon wants to be told about (each costs wake-ups while on):
+ * buttons - button events; motion - one pointer_motion event when the
+ * pointer moves (the daemon then reads positions itself until it rests). */
+void walpe_platform_input_select (gboolean buttons, gboolean motion);
+/* FALSE: there are no input events here at all (X11 without XInput2): the
+ * daemon polls the position slowly instead */
+gboolean walpe_platform_has_input_events (void);
+
+/* ----------------------------------------------------------- presentation */
+
+/* is something else putting the windows on screen, so that a swap that
+ * waits for the display only adds a wait? (X11: a compositing manager
+ * owns _NET_WM_CM_Sn. Wayland: FALSE - its frame callbacks are that wait.) */
+gboolean walpe_platform_composited (void);
+/* log what the display offers for presentation (start-up, once) */
+void walpe_platform_present_log (void);
+/* backend keys for `walpe-ctl status` (the builder is inside the "state"
+ * object) */
+void walpe_platform_status (JsonBuilder *b);

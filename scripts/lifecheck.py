@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end checks of the daemon's lifecycle: loads, reloads, restarts.
 
-  python3 -I scripts/lifecheck.py --build build [--daemon FILE] [--only a,b] [--keep] [--tmp DIR]
+  python3 -I scripts/lifecheck.py --build build [--daemon FILE] [--display KIND] [--only a,b] [--keep] [--tmp DIR]
 
 Uses the harness scripts/checkenv.py (private Xvfb, private daemon, pixel
 reading): generated scenes only, nothing of the user's is read or written. Each case starts its own daemon:
@@ -44,7 +44,14 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             monitor either. Needs an ffmpeg program that writes H.264
             (the clip is made here); skipped without one.
 
-Exit code 0 = all passed, 1 = failures, 77 = skipped (no Xvfb). --daemon FILE
+The display is Xvfb, or with --display sway (or WALPE_CHECK_DISPLAY=sway) a
+headless Wayland compositor (scripts/displayenv.py); the cases are the same
+on both, except `restart`, which changes the layout the way only the X11
+backend is given one (WALPE_MONITORS=@FILE and an X event) and is skipped
+under Wayland: outputs that change there are scripts/waylandcheck.py's.
+
+Exit code 0 = all passed, 1 = failures, 77 = skipped (the display's programs
+are not installed, or the build has no backend for it). --daemon FILE
 runs another walpe-daemon binary with the tools of --build (a build without
 the fixes: the cases fail there). LIFECHECK_PATIENCE=N multiplies every
 wait (a software renderer on a busy machine: 3 or more). --tmp DIR: work in
@@ -55,6 +62,7 @@ sys.dont_write_bytecode = True   # no __pycache__ next to the scripts
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("RESTORECHECK_PATIENCE", os.environ.get("LIFECHECK_PATIENCE", "1") or "1")
 import checkenv as rc   # noqa: E402  (Env, the scene generators, the pixel reader)
+import displayenv       # noqa: E402  (which display, and whether it can be used here)
 
 PATIENCE = rc.PATIENCE
 fails = 0
@@ -158,10 +166,11 @@ class Env(rc.Env):
     environment for one start, the log from a mark on"""
 
     def start_daemon(self, mons, cpus=None, extra=None, hz=None):
-        self.mons = mons
-        env = dict(self.env)
         hz = hz or [60] * len(mons)
-        env["WALPE_MONITORS"] = ",".join(f"{n}={w}x{h}+{x}+{y}@{z}" for (n, w, h, x, y), z in zip(mons, hz))
+        self.mons = mons = self.display.place(mons, hz)
+        env = dict(self.env)
+        if self.display.fake_monitors:
+            env["WALPE_MONITORS"] = ",".join(f"{n}={w}x{h}+{x}+{y}@{z}" for (n, w, h, x, y), z in zip(mons, hz))
         env.update(extra or {})
         self.run_env = env
         log = open(self.log, "a")
@@ -174,6 +183,7 @@ class Env(rc.Env):
             if self.daemon.poll() is not None:
                 return False
             if os.path.exists(self.sock) and self.ipc({"cmd": "status"}):
+                self.mons = self.display.seen(mons, self.monitors)   # the daemon's order and names
                 return True
         return False
 
@@ -195,24 +205,21 @@ class Env(rc.Env):
         rep = self.ipc({"cmd": "status"})
         return (rep or {}).get("state") or {}
 
-    def xdo(self, *args):
-        if not shutil.which("xdotool"):
-            return None
-        return subprocess.run(["xdotool"] + [str(a) for a in args], env=self.env, stdout=subprocess.PIPE,
-                              stderr=subprocess.STDOUT).stdout.decode()
-
 
 def wait_for(fn, timeout=10.0, step=0.2):
     return rc.wait_for(fn, timeout, step)
 
 
 def loaded(env, path, mon=None, timeout=30):
-    """wait until the monitor(s) show path (status: current, a type, no load_error)"""
+    """wait until the monitor(s) show path (status: current, a type, not "loading" any
+    more, no load_error). "current" is the wallpaper a monitor was given and "type" what
+    it shows until that is loaded: after a scene, the two alone are true of the next
+    scene from the moment it is opened."""
     def ok():
         ms = env.monitors()
         sel = ms if mon is None else ms[mon:mon + 1]
         return bool(sel) and all(m.get("current") == path and m.get("type") not in (None, "none") and
-                                 not m.get("load_error") for m in sel)
+                                 not m.get("loading") and not m.get("load_error") for m in sel)
     return bool(wait_for(ok, timeout, 0.2))
 
 
@@ -230,9 +237,15 @@ def colour_is(env, mon, pred, timeout=6.0):
 def case_pointer(env, W):
     """After every load of a scene whose picture follows the pointer the
     daemon tracks the pointer. The pointer sits at the left edge the whole
-    time: tracked = blue, not tracked = purple (the shader's centre value)."""
-    if env.xdo("getmouselocation") is None:
-        print("skip pointer (needs xdotool)")
+    time: tracked = blue, not tracked = purple (the shader's centre value).
+    Under Wayland a client is told of a pointer only when the compositor
+    gives one of its surfaces the pointer focus, and a compositor does that
+    when the pointer moves (sway 1.9: not when the surface under a resting
+    pointer begins to take input). There the pointer is moved one step
+    aside and back after each load; what is checked is the same: the new
+    wallpaper's surface takes the pointer."""
+    if not env.display.can_point():
+        print("skip pointer (needs xdotool under X, a virtual pointer device under Wayland)")
         return
     mon = ("A", 640, 360, 0, 0)
     rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False,
@@ -240,8 +253,14 @@ def case_pointer(env, W):
     cpus = {sorted(os.sched_getaffinity(0))[0]}
     if not check(env.start_daemon([mon], cpus=cpus), "pointer: daemon started (on one CPU)"):
         return
+    # the monitor as the display knows it: ("A", ...) itself on X, where the name is this
+    # check's to give; under Wayland the compositor's output name, by which a picture of
+    # it is asked for (a screenshot of an output called "A" does not exist there)
+    mon = env.mons[0]
     try:
-        env.xdo("mousemove", 4, 100)   # (a client is connected now: the server keeps the position)
+        # (a client is connected now: the server keeps the position; the tool runs in the
+        # check's own environment, as everything else the check starts)
+        env.display.pointer(4, 100, env=env.env)
         tracked = []
         rounds = 8
         for i in range(rounds):
@@ -250,7 +269,13 @@ def case_pointer(env, W):
             colour_is(env, mon, lambda c: rc.name_of(c) == "red")
             env.open(W["ptr"])
             loaded(env, W["ptr"])
-            c = colour_is(env, mon, lambda c: rc.name_of(c) == "blue", 4.0)
+
+            def blue(c):
+                if rc.name_of(c) != "blue" and env.display.winsys == "wayland":
+                    env.display.pointer(5, 100, env=env.env)
+                    env.display.pointer(4, 100, env=env.env)
+                return rc.name_of(c) == "blue"
+            c = colour_is(env, mon, blue, 4.0)
             tracked.append(rc.name_of(c))
         check(tracked == ["blue"] * rounds,
               f"pointer: the scene follows the pointer after each of {rounds} loads", tracked)
@@ -463,6 +488,10 @@ def case_restart(env, W):
     """The monitor layout changes under a running daemon: it restarts in place."""
     A, B = ("A", 640, 360, 0, 0), ("B", 640, 360, 640, 0)
     mf = os.path.join(env.tmp, "monitors")
+    if env.display.winsys != "x11":
+        print("skip restart (the layout is changed through WALPE_MONITORS=@FILE and an X event here: "
+              "X11 only; scripts/waylandcheck.py changes real outputs)")
+        return
     if not poke_root(env.env["DISPLAY"]):
         print("skip restart (no libX11 for ctypes: cannot announce a layout change)")
         return
@@ -736,6 +765,10 @@ def case_layout(env, W):
     change is made in between and nothing announces it."""
     mf = os.path.join(env.tmp, "monitors-start")
     one, two = "A=640x360+0+0@60", "A=640x360+0+0@60,B=640x360+640+0@60"
+    if env.display.winsys != "x11":
+        print("skip layout (the layout is changed through WALPE_MONITORS=@FILE here: X11 only; "
+              "scripts/waylandcheck.py changes real outputs)")
+        return
 
     def layout(text):
         with open(mf + ".new", "w") as f:
@@ -826,7 +859,8 @@ def case_busy(env, W):
 
     def restarted():
         txt = env.since(mark)
-        return "restarting to apply it" in txt and " up (wm=" in txt and bool(env.state())
+        # (the line every start ends with: "... up (wm=..., backend=x11)" or "... up (<compositor>, ...)")
+        return "restarting to apply it" in txt and '" up (' in txt and bool(env.state())
     check(bool(wait_for(restarted, 40, 0.3)), "busy: the restart comes once the download is over",
           env.since(mark)[-400:])
     check(env.daemon.poll() is None and env.daemon.pid == pid, "busy: the same process went on")
@@ -927,13 +961,15 @@ CASES = [("pointer", case_pointer), ("reload", case_reload), ("restart", case_re
 
 def main():
     args = sys.argv[1:]
-    build, daemon, keep, tmp, only = "build", None, False, None, None
+    build, daemon, keep, tmp, only, display = "build", None, False, None, None, None
     while args:
         a = args.pop(0)
         if a == "--build" and args:
             build = args.pop(0)
         elif a == "--daemon" and args:
             daemon = args.pop(0)
+        elif a == "--display" and args:
+            display = args.pop(0)
         elif a == "--keep":
             keep = True
         elif a == "--tmp" and args:
@@ -943,14 +979,19 @@ def main():
         else:
             sys.stderr.write(__doc__)
             return 2
-    if not shutil.which("Xvfb"):
-        print("lifecheck: skipped (needs Xvfb)")
-        return 77
+    display = displayenv.pick(display)
+    if not display:
+        sys.stderr.write(__doc__)
+        return 2
+    skip = displayenv.unusable(display, build)
+    if skip:
+        print("lifecheck: skipped (%s)" % skip[0])
+        return skip[1]
     for b in (daemon or os.path.join(build, "walpe-daemon"), os.path.join(build, "walpe-ctl")):
         if not os.path.exists(b):
             print(f"lifecheck: {b} not found")
             return 2
-    env = Env(build, daemon, keep, tmp)
+    env = Env(build, daemon, keep, tmp, display)
     try:
         if len(env.sock.encode()) > 107:
             print(f"lifecheck: {env.sock} is too long for a socket ({len(env.sock.encode())} > 107 bytes): "
@@ -969,8 +1010,8 @@ def main():
         gen_big_scene(W["big"])
         gen_bmp(W["pic"], (0, 200, 0), 1024, 576)
         if not env.start_x(1280, 360):
-            print("lifecheck: skipped (Xvfb did not start)")
-            return 77
+            print("lifecheck: skipped (the %s display did not start)" % display)
+            return displayenv.SKIP
         for name, fn in CASES:
             if only and name not in only:
                 continue

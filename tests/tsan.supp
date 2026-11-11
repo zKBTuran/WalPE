@@ -1,0 +1,32 @@
+# ThreadSanitizer suppressions for WalPE's test runs (TSAN_OPTIONS=suppressions=<this file>;
+# `meson test --setup=tsan` passes it). One suppression per line, `kind:pattern`, where the
+# pattern is matched against the function, file and library names of a report's stack:
+#   race:<pattern>            a data race report with a matching frame
+#   race_top:<pattern>        ... only when the top frame matches
+#   thread:<pattern>          a thread leak
+#   mutex:<pattern>           a destroyed locked mutex and the like
+#   deadlock:<pattern>        a lock-order inversion
+#   signal:<pattern>          a signal-unsafe call in a handler
+#   called_from_lib:<lib.so>  ignore everything intercepted while inside that library
+#
+# This is the one suppression file of the tree: the test setup `tsan` reads it, every other
+# thread-sanitizer run of the tree should too, and no other file is read.
+#
+# It is empty on purpose: every report is looked at first. A line is added only for
+# a report that is not this program's to fix (a library built without the sanitizer that
+# locks with a primitive the sanitizer cannot see), with the reason on the line above it,
+# so that a real race is never hidden by a pattern that happens to match. The rule for a
+# new line, all of it:
+#   - a real run printed the report (never a guess at what might turn up);
+#   - both stacks lie in a library that is not built with the sanitizer, or one does and
+#     the same report appears without any code of this tree involved (the
+#     race-shim test is the place to try that);
+#   - the line names the narrowest thing that silences it (one function of that library,
+#     or called_from_lib:<its file>), with the first lines of the report and the date as
+#     a comment above it.
+# A report with code of this tree on both sides is never suppressed: it is fixed, or
+# written down as open. Libraries known
+# for such reports, should they turn up: GLib's bit locks and one-time initialisation
+# (libglib-2.0, libgobject-2.0), Mesa's software rasteriser threads (libgallium, swrast_dri;
+# the test setup already runs it single-threaded with LP_NUM_THREADS=0), fontconfig's
+# cache objects, FFmpeg's frame threads.

@@ -31,6 +31,7 @@
 #include "clip.h"
 #include "cpuphase.h"
 #include "common/util.h"
+#include "common/lazy.h"
 #include "common/tex.h"
 #include "common/premult.h"
 #include <math.h>
@@ -504,7 +505,6 @@ static __thread int pt_scene_w, pt_scene_h;
 static gint pt_lowres_mode = WALPE_PT_LOWRES_AUTO;
 static gint pt_density_pct = 100;
 static gint pt_instancing = 1;
-static gint pt_env_read;
 static gint pt_env_lowres = -1, pt_env_density = -1, pt_env_inst = -1;
 /* How a refracting system gets its copy of the frame (the picture is the
  * same in all three): 0 = what is missing of the part it can read, 1 = that
@@ -517,9 +517,14 @@ static gint pt_refract_copy;
 static gint pt_settings_serial;
 static float pt_lowres_tol = 8.0f;     /* predicted error allowed, 1/255 units (lr_decide) */
 
+/* The environment is read once, by one thread; a render thread that
+ * arrives meanwhile waits for it (g_once_init_enter). A flag that was set
+ * when the reading was done let two monitors' threads both do it, and the
+ * tolerance is a plain float: one could read it while the other stored it. */
 static void pt_env (void)
 {
-    if (g_atomic_int_get (&pt_env_read))
+    static gsize once;
+    if (!g_once_init_enter (&once))
         return;
     const char *e = g_getenv ("WALPE_PT_LOWRES");
     if (e && *e)
@@ -538,7 +543,7 @@ static void pt_env (void)
     e = g_getenv ("WALPE_PT_REFRACT_COPY");
     if (e && (!strcmp (e, "whole") || !strcmp (e, "each")))
         g_atomic_int_set (&pt_refract_copy, *e == 'w' ? RC_WHOLE : RC_EACH);
-    g_atomic_int_set (&pt_env_read, 1);
+    g_once_init_leave (&once, 1);
 }
 
 /* every setting goes through here: a new value counts as a change of the
@@ -2213,8 +2218,10 @@ static void thread_gl_init (void)
     glBindVertexArray (0);
     /* soft round dot (premultiplied) for builtin WE particle textures
      * (particle/halo etc. live in the WE install's assets) */
+    /* (on the stack, 16 KiB: as a static it was one buffer that every
+     * monitor's render thread filled while another handed it to GL) */
     enum { D = 64 };
-    static guint8 px[D * D * 4];
+    guint8 px[D * D * 4];
     for (int y = 0; y < D; y++)
         for (int x = 0; x < D; x++) {
             float dx = (x + 0.5f) / D * 2 - 1, dy = (y + 0.5f) / D * 2 - 1;
@@ -2579,10 +2586,12 @@ static void frame_table (WeSys *s)
  * premultiplied at upload, as before */
 static gboolean sprite_dxt (void)
 {
-    static int on = -1;
+    static WalpeLazy on_cell = WALPE_LAZY_UNSET;   /* read once (common/lazy.h) */
+    int on = walpe_lazy_get (&on_cell);
     if (on < 0) {
         const char *e = g_getenv ("WALPE_TEX_DXT_SPRITES");
-        on = walpe_gl_has_s3tc () && !g_getenv ("WALPE_NO_DXT") && !(e && *e == '0');
+        on = walpe_lazy_set (&on_cell, walpe_gl_has_s3tc () && !g_getenv ("WALPE_NO_DXT") &&
+                                       !(e && *e == '0'));
     }
     return on;
 }
@@ -4368,13 +4377,13 @@ void walpe_weparticles_step (WalpeWeParticles *w, double dt)
     if (st)   /* the simulation runs in the scene's pre-step: its time is counted here */
         pt_stats.sim_ms += thread_cpu_ms () - t0;
     w->stepped = TRUE;
-    if (G_UNLIKELY (walpe_cph_level != 0)) {
+    if (G_UNLIKELY (walpe_cph_level_get () != 0)) {
         WalpeCphStats *cs = walpe_cph_stats ();
         if (cs) {
             walpe_cph_to (WALPE_CPH_NONE);   /* the hash is not simulation time */
             cs->pt_steps++;
             cs->pt_live += (guint64) sys_count (w->root);
-            if (walpe_cph_level >= 2)
+            if (walpe_cph_level_get () >= 2)
                 cs->pt_sim_hash = sys_state_hash (w->root, cs->pt_sim_hash);
         }
     }

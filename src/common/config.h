@@ -3,6 +3,8 @@
 #include <glib.h>
 #include "common/api.h"
 #include "common/quality.h"
+#include "common/backend.h"   /* WalpeBackend: the "backend" key */
+#include "common/resolution.h"
 
 /* "Skip hidden areas" (config skip_hidden, JSON "off" / "auto" / "always";
  * opt-in):
@@ -42,7 +44,11 @@ typedef struct WalpeConfig_ {
     int     fps_migrated_from; /* the value it replaced (for the log line) */
     char   *broken_copy;      /* config.json could not be read at this load: the
                                * damaged file was kept under this name (else NULL) */
-    double  volume;           /* 0..1 */
+    double  volume;           /* 0..1: the volume of wallpaper sound (0 until set) */
+    gboolean scene_sound;     /* scenes play their sound layers (engine/scenesound.h).
+                               * Off by default; a wallpaper's own switch (its
+                               * option "walpe_sound") wins over it */
+    gboolean mute;            /* wallpaper sound is silent; `volume` keeps its value */
     gboolean paused;
     gboolean pause_fullscreen;
     gboolean pause_dpms;      /* pause while the display is in a power-save state */
@@ -75,8 +81,15 @@ typedef struct WalpeConfig_ {
                                * a softer picture (scaled up when shown). */
     gboolean web_accel;       /* web pages: WebKit hardware acceleration (off by
                                * default; read at daemon start, see main.c) */
-    gboolean video_hwdec;     /* video wallpapers: decode on the GPU (NVDEC / VA-API /
-                               * VDPAU through FFmpeg) when it works; off = CPU */
+    gboolean video_hwdec;     /* videos: decode with a hardware decoder when one works
+                               * (engine/video.h); off = on the CPU, the default */
+    char    *video_hwdec_api; /* the one decoding API to use ("vaapi", "cuda", "vdpau",
+                               * "vulkan", "drm", "v4l2m2m", ...); NULL or "" = auto:
+                               * whatever the machine offers. The file's "video_hwdec"
+                               * is off | auto | <api> (false / true are read as before) */
+    gboolean video_zerocopy;  /* hardware-decoded pictures stay in GPU memory where
+                               * that is possible and exact (engine/video.h); off =
+                               * they are downloaded and uploaded, the default */
     char    *video_upload;    /* how video frames are uploaded (engine/video.h:
                                * legacy | pbo | pbodata | persist | direct, each
                                * also "+pingpong"); NULL = legacy, the default */
@@ -99,6 +112,25 @@ typedef struct WalpeConfig_ {
                                * (common/swrender.h); off by default */
     int     software_threads; /* llvmpipe rasteriser threads in that mode;
                                * 0 = automatic (half of the CPUs, 1..8) */
+    char   *gpu;              /* which GPU renders (common/gpusel.h): "auto" (the
+                               * default: the one that drives the displays),
+                               * "integrated", "discrete", or one device by PCI
+                               * address or name. Never NULL after a load.
+                               * WALPE_GPU in the daemon's environment wins. */
+    gboolean preset_follow_gpu; /* off (default): the quality preset is what the
+                               * user set. on: when the kind of GPU that renders
+                               * changes (first start with the switch on, another
+                               * `gpu`, "Render on CPU") the preset is set once
+                               * to the one that suits it (discrete: high,
+                               * integrated: balanced, CPU: low) */
+    char   *preset_gpu_class; /* the kind that preset was last set for
+                               * ("discrete", "integrated", "software", ...);
+                               * NULL = never. Written by the daemon. */
+    int     gl_api;           /* WalpeGlApiPref (common/glapi.h): 0 = auto
+                               * (desktop OpenGL 3.3 when the driver has it,
+                               * else OpenGL ES 3.2 / 3.1), 1 = gl, 2 = gles.
+                               * Saved as "gl_api": "gl" | "gles"; auto is
+                               * not written */
     gboolean vsync;
     gboolean audio;           /* video wallpaper audio output */
     char   *we_assets;        /* Wallpaper Engine install assets/ dir (or the
@@ -113,6 +145,11 @@ typedef struct WalpeConfig_ {
     int     focus_fps;        /* the frame rate limit of WALPE_FOCUS_LIMIT */
     gboolean pause_battery;   /* pause every wallpaper while on battery power */
     int     battery_fps;      /* frame rate limit while on battery (0 = none) */
+    int     pause_idle;       /* pause every wallpaper after this many seconds
+                               * without keyboard / pointer input; 0 = off (the
+                               * default). Needs something that reports idle
+                               * time: on Wayland the compositor's
+                               * ext-idle-notify-v1 (status "pause_rules") */
     int     preview_anim;     /* GUI, WALPE_PREVIEW_*: animated (GIF) previews */
     WalpeQuality quality;     /* quality-for-load knobs (quality.h); default High */
     int qsync_slack, qsync_scale; /* walpe_config_quality_sync: the values both
@@ -120,6 +157,11 @@ typedef struct WalpeConfig_ {
     GHashTable *wallpaper_quality; /* wallpaper path -> WalpeQualityOv (owned):
                                     * the knobs a wallpaper sets for itself
                                     * ("wallpaper_quality" in the JSON) */
+    GHashTable *features;     /* renderer feature switches that were set
+                               * ("features" in the JSON): name (owned) ->
+                               * GINT_TO_POINTER (1 = on, 2 = off); a name that
+                               * is absent keeps its default (engine/features.h).
+                               * NULL = none was set */
     GHashTable *props;        /* Tier 4 wallpaper user-property overrides:
                                  key "<wallpaper path>\x1f<propid>" -> string
                                  (owned; values are strings, coerced by the
@@ -149,13 +191,58 @@ typedef struct WalpeConfig_ {
                                  * edges; a moved window uncovers fresh pixels) */
     int     skip_hidden_inset;  /* under a compositing manager: pixels taken off
                                  * every side of a hiding window (rounded corners) */
+    /* ---- render resolution (common/resolution.h), format version 4 */
+    GHashTable *monitors;     /* output name -> WalpeMonitorConf (owned): the
+                               * render resolution and texture limit chosen
+                               * for that output ("monitors" in the JSON). An
+                               * output without an entry runs at native /
+                               * auto and has not been asked about yet */
+    gboolean resolution_prompt; /* the GUI may ask about outputs that were
+                               * not asked about yet (default on) */
+    gboolean resolution_migrate; /* the file was written by a version without
+                               * "monitors": the outputs connected when the
+                               * daemon next starts are entered as "asked,
+                               * native": an existing installation is not
+                               * asked about the screens it already had
+                               * (walpe_config_monitors_migrate). Kept in
+                               * the file until then */
+    int     scale_filter;     /* WALPE_SCALE_*: how a frame rendered at
+                               * another size than the output's is scaled */
+    WalpeVideoRes video_res;  /* "video_resolution": the size videos are
+                               * imported / converted to at most. auto on a
+                               * new install; a file of an older version
+                               * gets "1080p", the limit those had built in */
+    /* ---- the window system (common/backend.h); at the end, so no member
+     * above moves */
+    int     backend;          /* WalpeBackend the daemon draws on: auto (default),
+                               * x11 or wayland ("backend" in the JSON, written
+                               * only when not auto). Read when the daemon starts */
+    int     wayland_pointer;  /* Wayland: 0 = "auto", the wallpaper surface takes
+                               * pointer input while a wallpaper uses the pointer
+                               * (default); 1 = "off", it never does and every
+                               * click on the desktop stays with the compositor
+                               * ("wayland_pointer", written only when off) */
+    /* ---- simulation effects (Wallpaper Engine's Fluid Simulation;
+     * engine/fx_sim.h), at the end as well */
+    gboolean fluid_sim;       /* run them (default on); off: such an effect is
+                               * left out, its layer is shown without it */
+    int     fluid_quality;    /* WalpeFluidQuality (common/fluidsim.h): full
+                               * (default) | reduced | low; the presets set it */
 } WalpeConfig;
 
 /* config.json format: 1 = versions up to 0.11 (no "config_version" key),
  * 2 = version 0.12 (fps 30 can only be the user's choice),
  * 3 = the frame rate limit defaults to 60 (fps 200 can only be the user's
- *     choice) */
-#define WALPE_CONFIG_VERSION 3
+ *     choice),
+ * 4 = per-output render resolution ("monitors"); "video_resolution"
+ *     replaces the built-in 1920 x 1080 limit on imported and converted
+ *     videos and is always written (a file that has it has been of this
+ *     format, whatever version an older build stamped on it since: it is
+ *     not migrated again). A file of version <= 3 is read as: every output connected at
+ *     the daemon's next start has been asked and stays at native (see
+ *     resolution_migrate), video_resolution "1080p" - the picture and the
+ *     files written are what they were. */
+#define WALPE_CONFIG_VERSION 4
 /* the frame rate limit of a new install. 60, not the monitor's rate: at
  * the old default (200, i.e. the refresh rate) two 4K scenes on a 144 Hz
  * monitor were rendered 144 times a second and kept the GPU at 82 %.
@@ -197,6 +284,13 @@ guint        walpe_config_save_count (void);
 
 /* "particle_lowres" value <-> name; unknown names give `fallback` */
 int          walpe_particle_lowres_from_name (const char *name, int fallback);
+/* "video_hwdec" by word: off | auto | <api>. on / true / yes switch it on
+ * with the API that is stored (auto when there is none), so that the switch
+ * in the settings does not forget a choice made by name; "auto" forgets it;
+ * off keeps it for the next "on". FALSE = not such a word, nothing changed. */
+gboolean     walpe_config_set_hwdec (WalpeConfig *c, const char *word);
+/* the setting as one word: "off", "auto" or the API (not to be freed) */
+const char  *walpe_config_hwdec_word (const WalpeConfig *c);
 const char  *walpe_particle_lowres_name (int mode);
 
 WalpeConfig *walpe_config_load  (void);
@@ -207,6 +301,11 @@ WalpeConfig *walpe_config_load  (void);
 gboolean     walpe_config_save  (WalpeConfig *cfg);
 const char  *walpe_config_save_error (void);
 void         walpe_config_free  (WalpeConfig *cfg);
+/* renderer feature switches (engine/features.h): remember one for the
+ * next save / what the file says: 1 on, 0 off, -1 not set. Names are lower
+ * case letters, digits and '_'; anything else is not kept. */
+void         walpe_config_set_feature (WalpeConfig *cfg, const char *name, gboolean on);
+int          walpe_config_get_feature (const WalpeConfig *cfg, const char *name);
 /* wallpaper user-property override access. get returns a g_free() string
  * or NULL when unset; set with value=NULL removes the override. get uses
  * the config last loaded via walpe_config_load (the daemon's singleton). */
@@ -220,6 +319,20 @@ guint        walpe_config_clear_props (WalpeConfig *cfg, const char *path);
 const char  *walpe_config_monitor_path (WalpeConfig *cfg, const char *name);
 void         walpe_config_set_monitor_path (WalpeConfig *cfg, const char *name,
                                             const char *path);
+/* per-output render resolution. _monitor: the stored entry, NULL = none
+ * (native, auto, not asked yet); _monitor_get: the entry or those defaults;
+ * _set_monitor: mc NULL removes the entry. Main thread of the process that
+ * owns the config (the daemon); nothing here locks. */
+const WalpeMonitorConf *walpe_config_monitor (WalpeConfig *cfg, const char *name);
+void         walpe_config_monitor_get (WalpeConfig *cfg, const char *name, WalpeMonitorConf *out);
+void         walpe_config_set_monitor (WalpeConfig *cfg, const char *name,
+                                       const WalpeMonitorConf *mc);
+/* The upgrade step of format 4, run by the daemon once it knows its
+ * outputs: while resolution_migrate is set, every output in names[] that
+ * has no entry gets "native, auto, asked", and the flag is cleared.
+ * Returns TRUE when the config changed (the caller saves). Without the
+ * flag nothing happens. */
+gboolean     walpe_config_monitors_migrate (WalpeConfig *cfg, const char *const *names, guint n);
 /* a wallpaper's own quality settings: NULL = none; set with a mask of 0
  * (or ov NULL) removes them; _for = what the wallpaper runs with (global
  * + its own); _forget removes the entry, returns 1 when there was one */

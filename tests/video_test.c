@@ -19,6 +19,15 @@
  *    takes over, the pictures are the same and the status line says why. On
  *    a machine with a working device the pictures of the hardware decoder
  *    are compared instead and the result is printed.
+ *    Then the attempts are played through with two stand-in "hardware
+ *    decoders" (the software decoder behind the module's hardware path,
+ *    asked for by the name "fake"): the first refuses the stream before a
+ *    picture - the second is tried; that one delivers 40 pictures and then
+ *    fails for good - software decoding takes over in the middle of the
+ *    clip. Every picture is queued exactly once, in order, identical to the
+ *    plain decode, with unbroken presentation times, and the status line
+ *    says "hardware" while the stand-in decodes and names both failures
+ *    afterwards.
  * 5. With a GL context (EGL device or Mesa surfaceless; skipped without):
  *    the plane textures hold exactly the queued frame after an upload, and a
  *    scene-like viewer polled at 30 Hz is measured as such. */
@@ -39,6 +48,11 @@
 
 static void test_pushed (void *src, const void *frame);
 #define CV_TEST_PUSHED(src, f) test_pushed (src, f)
+/* two stand-in hardware decoders, tried by the name "fake" only, and what
+ * they do with each picture (test_hw_fake) */
+#define CV_TEST_HWFAKE 1
+static int test_hw_receive (void *src, int rc);
+#define CV_TEST_HW_RECEIVE(src, rc) test_hw_receive (src, rc)
 #include "../src/engine/video_custom.c"
 
 static int fails;
@@ -663,6 +677,120 @@ static void test_hw (const char *clip)
     g_free (note);
 }
 
+/* ---------------------- 4b. the attempts, played through with stand-ins */
+
+static gint fake_on;            /* the stand-ins act */
+static gint fake_pictures;      /* pictures the second one has delivered */
+static gint fake_fail_after;    /* ... before it fails for good */
+
+/* decode thread, after every receive call of a hardware decoder */
+static int test_hw_receive (void *srcp, int rc)
+{
+    CvSource *src = srcp;
+    if (!g_atomic_int_get (&fake_on) || !src->hw_name || strcmp (src->hw_name, "fake"))
+        return rc;
+    if (src->hw.cur == 0) {
+        /* the first stand-in does not take the stream: no picture comes
+         * out, and the flag is set that a hardware acceleration sets when
+         * its set-up for the stream fails */
+        if (rc >= 0)
+            av_frame_unref (src->frame);
+        g_atomic_int_set (&src->hw_refused, 1);
+        return AVERROR (EAGAIN);
+    }
+    if (rc >= 0 && g_atomic_int_add (&fake_pictures, 1) >= g_atomic_int_get (&fake_fail_after)) {
+        /* the second one worked for a while: from here on every picture fails */
+        av_frame_unref (src->frame);
+        return AVERROR (EIO);
+    }
+    return rc;
+}
+
+static int ref_index (gint64 ticks)
+{
+    for (guint i = 0; i < refs->len; i++)
+        if (g_array_index (refs, Ref, i).ticks == ticks)
+            return (int) i;
+    return -1;
+}
+
+static void test_hw_fake (const char *clip)
+{
+    const int hw_pictures = 40;
+    GError *err = NULL;
+    recs_clear ();
+    g_atomic_int_set (&fake_pictures, 0);
+    g_atomic_int_set (&fake_fail_after, hw_pictures);
+    g_atomic_int_set (&fake_on, 1);
+    CHECK (walpe_video_set_hwdec_name ("fake"), "the stand-in decoder is asked for by name");
+    CvViewer *vw = cv_attach (clip, 0, 0, &err);
+    if (!vw) {
+        CHECK (FALSE, "stand-in hardware: %s", err ? err->message : "no viewer");
+        g_clear_error (&err);
+        g_atomic_int_set (&fake_on, 0);
+        walpe_video_set_hwdec (0);
+        return;
+    }
+    double iv = vw->src->clip_iv;
+    /* long enough for the hardware part, the failure and a loop of the clip in software */
+    guint want = (guint) hw_pictures + refs->len + 20;
+    char *hw_note = NULL;
+    gint64 until = g_get_monotonic_time () + (gint64) 90 * slow * G_USEC_PER_SEC;
+    while (recs_len () < want && g_get_monotonic_time () < until) {
+        char *now = walpe_video_decoder_note ();
+        if (!hw_note && now && strstr (now, "hardware (fake") && !strstr (now, "no picture yet"))
+            hw_note = g_strdup (now);
+        g_free (now);
+        g_usleep (5000);
+    }
+    char *note = walpe_video_decoder_note ();
+    cvv_free (&vw->base);
+    g_atomic_int_set (&fake_on, 0);
+    walpe_video_set_hwdec (0);
+
+    CHECK (hw_note != NULL, "stand-in hardware: the status never said that the second stand-in decodes");
+    CHECK (!hw_note || (strstr (hw_note, "decoding hardware of its own") &&
+                        strstr (hw_note, "hands its pictures out in main memory")),
+           "stand-in hardware: status while it decoded: \"%s\"", hw_note ? hw_note : "(null)");
+    CHECK (note && strstr (note, ": software, ") && strstr (note, "asked for and is not in use: ") &&
+           strstr (note, "fake: stream refused") &&
+           strstr (note, "fake: decoding failed (8 decode calls in a row failed"),
+           "stand-in hardware: the status afterwards names both failures: \"%s\"", note ? note : "(null)");
+    CHECK (g_atomic_int_get (&fake_pictures) >= hw_pictures, "stand-in hardware: %d pictures came from it",
+           g_atomic_int_get (&fake_pictures));
+    g_mutex_lock (&rec_lock);
+    guint n = recs->len, same = 0, order_bad = 0, time_bad = 0;
+    for (guint i = 0; i < n; i++) {
+        const Rec *r = &g_array_index (recs, Rec, i);
+        const Ref *ref = ref_find (r->ticks);
+        if (ref && !strcmp (ref->md5[r->kind == CV_NV ? V_NV_FULL : V_FULL], r->md5))
+            same++;
+        if (i == 0)
+            continue;
+        const Rec *q = &g_array_index (recs, Rec, i - 1);
+        int a = ref_index (q->ticks), b = ref_index (r->ticks);
+        /* the next picture of the clip, also across the two decoder changes and the loop point */
+        if (a < 0 || b < 0 || b != (a + 1) % (int) refs->len)
+            order_bad++;
+        if (fabs (r->play - q->play - iv) > 1e-4)
+            time_bad++;
+    }
+    int first = n ? ref_index (g_array_index (recs, Rec, 0).ticks) : -1;
+    g_mutex_unlock (&rec_lock);
+    CHECK (n >= want, "stand-in hardware: %u frames queued, %u wanted", n, want);
+    CHECK (first == 0, "stand-in hardware: the first picture queued is picture %d of the clip", first);
+    CHECK (same == n, "stand-in hardware: %u of %u pictures identical to the plain decode", same, n);
+    CHECK (order_bad == 0, "stand-in hardware: %u pictures missing, repeated or out of order", order_bad);
+    CHECK (time_bad == 0, "stand-in hardware: %u presentation times not one frame interval after the one before",
+           time_bad);
+    printf ("stand-in hardware decoders: the first refused the stream, the second decoded %d pictures and failed, "
+            "software took over: %u pictures queued, %u identical, %u out of order, %u with a gap in time; status "
+            "while it decoded \"%s\"; afterwards \"%s\"\n", hw_pictures, n, same, order_bad, time_bad,
+            hw_note ? hw_note : "", note ? note : "");
+    g_free (hw_note);
+    g_free (note);
+}
+
 /* ----------------------------------------------------------- 5. GL part */
 
 static const char *gl_clip;
@@ -1026,6 +1154,7 @@ int main (int argc, char **argv)
             for (guint i = 0; i < G_N_ELEMENTS (cases); i++)
                 run_case (clip, &cases[i]);
             test_hw (clip);
+            test_hw_fake (clip);
             test_gl (clip);
         }
     }

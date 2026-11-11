@@ -32,13 +32,12 @@
  *    (the manager may still be fading or animating it). */
 #pragma once
 #include <glib.h>
-#include <X11/Xlib.h>
 #include "common/region.h"
 #include "common/config.h"   /* WalpeSkipHidden */
 
 typedef struct {
     int x, y, width, height;    /* the monitor in root coordinates */
-    Window xid;                 /* its wallpaper window */
+    unsigned long xid;          /* its wallpaper window (an X window id) */
 } WalpeVisMon;
 
 typedef struct WalpeVisTrack WalpeVisTrack;

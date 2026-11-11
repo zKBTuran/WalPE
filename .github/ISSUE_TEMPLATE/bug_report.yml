@@ -16,7 +16,7 @@ body:
       label: WalPE version
       description: |
         The daemon prints it when it starts: `grep 'walpe-daemon .* up' ~/.cache/walpe/daemon.log | tail -n 1` (that file exists when the library window started the daemon; otherwise look in the terminal or journal the daemon writes to). It is also the `version:` line of `meson.build`. If you built from git, add the commit: `git rev-parse --short HEAD`.
-      placeholder: "0.12.2, commit 1a2b3c4"
+      placeholder: "0.13.0, commit 1a2b3c4"
     validations:
       required: true
   - type: input

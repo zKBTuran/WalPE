@@ -35,6 +35,10 @@ written `key=value` are settings (`walpe-ctl set`), the others go in front of
 | Video layers of scenes at half size, pictures stored at the size they are shown at | `WALPE_VIDEO_FULLRES=1`, `WALPE_IMAGE_FULLRES=1` |
 | The mouse is followed by events instead of a query every frame | `WALPE_POINTER_POLL=1` |
 | The log file is cut back at 16 MiB | `WALPE_LOG_MAX_MB=0` |
+| Scenes get the bloom, camera shake, camera parallax, sprite sheets and script camera they ask for | `bloom=off`, `camera_shake=off`, `camera_parallax=off`, `sprite_sheets=off`, `script_texanim=off`, `script_camera=off`, or `WALPE_FEATURES=name=off,...` ([SCENE-FEATURES.md](SCENE-FEATURES.md)) |
+| The Fluid Simulation effect runs | `fluid_sim=off`, or `WALPE_FLUID=0` |
+| On Wayland a wallpaper that uses the pointer takes pointer input | `wayland_pointer=off` |
+| A profile samples the kernel's GPU statistics (not on the NVIDIA kernel driver) | `WALPE_GPU_PROFILE_KERNEL=0` |
 
 The other way round, `WALPE_MEM_STATS=1` switches memory numbers by kind in
 `walpe-ctl status` on.
@@ -47,6 +51,23 @@ The other way round, `WALPE_MEM_STATS=1` switches memory numbers by kind in
 | `WALPE_MODULE_DIR=dir` | the daemon's own directory, then `<prefix>/<libdir>/walpe` | where `walpe-web.so` / `walpe-video.so` are looked for first; must be an absolute path |
 | `WALPE_IMPORT_ENCODER=name` | `libx264` | ffmpeg encoder of the video importer (`h264_nvenc`, ...); falls back to libx264 when it fails |
 | `WALPE_TRAY_BACKEND=sni\|xembed` | `tray.ini` `backend` (auto) | `walpe-tray`: force one tray protocol (`--backend=` on its command line wins) |
+
+## Display backend, GPU and OpenGL API
+
+| Variable | Default | Effect |
+|---|---|---|
+| `WALPE_BACKEND=auto\|x11\|wayland` | config `backend` (auto) | the window system the daemon draws on, for this start; `walpe-daemon --backend` beats it. An unknown word is a warning and then `auto` ([WAYLAND.md](WAYLAND.md)) |
+| `WAYLAND_DISPLAY`, `WAYLAND_SOCKET`, `DISPLAY` | the session's | not WalPE's own: `auto` picks Wayland when one of the first two is set and the compositor has the layer shell, else X11 when `DISPLAY` is set. `XDG_CURRENT_DESKTOP` is read only to word the message on a compositor without layer shell; `XCURSOR_THEME` / `XCURSOR_SIZE` for the pointer image over an interactive wallpaper |
+| `WALPE_WAYLAND_RECONNECT=s` | `gpu.conf` `wayland_reconnect` (0) | seconds to wait, restarted in place, for a Wayland compositor that went away ([GPU-PRESENT.md](GPU-PRESENT.md)) |
+| `WALPE_WL_COVERED=all` | the focused window only | Wayland: count every fullscreen or maximized window on a monitor as covering it, not only the focused one. More monitors pause, but on compositors that keep reporting a window on its output while its workspace is hidden a wallpaper you are looking at can freeze |
+| `WALPE_LOGIND=0\|1\|sleep,lock,vt` | on Wayland: on; on X11: off | use logind for the display-sleep rule: not at all / on X11 as well / only the facts named (suspend, locked hint, active session) |
+| `WALPE_GPU=auto\|integrated\|discrete\|<device>` | config `gpu` (auto) | which GPU renders, for this run ([GPU.md](GPU.md)) |
+| `WALPE_GPU_QUERY=0` | on | do not ask EGL which device it uses (`EGL_EXT_device_query`); the device shown in status is then derived from the EGL vendor and the device list |
+| `WALPE_GPU_PCI_IDS=file\|none` | the system's `pci.ids` | another PCI id list for the device names, or none (devices are then named by vendor and ids) |
+| `WALPE_GL_API=auto\|gl\|gles` | config `gl_api` (auto) | desktop OpenGL or OpenGL ES, for this run; strict: `gl` / `gles` mean that API or nothing ([GPU.md](GPU.md)) |
+| `WALPE_GL_LACKS=ext[,ext...]` | none | treat the named OpenGL extensions as absent, to see a fallback on a driver that has everything (`WALPE_GL_LACKS=GL_EXT_texture_compression_s3tc`) |
+| `WALPE_GL_MAX_TEXTURE=n` | the driver's | a smaller "largest texture" than the driver's (1024 or more): oversized pictures are halved |
+| `WALPE_RESOLUTION=value` or `NAME:value,...` | config `monitors` | render resolution of every monitor / of named ones for this run; nothing is saved ([RESOLUTION.md](RESOLUTION.md)) |
 
 ## Limits and budgets
 
@@ -140,6 +161,18 @@ The other way round, `WALPE_MEM_STATS=1` switches memory numbers by kind in
 | `WALPE_BAKE=0` | on | composite every layer every frame instead of reusing the still ones |
 | `WALPE_RENDER_SCALE=n` | config `render_scale` (100) | render scale in per cent (25-100) for this run |
 
+## Scenes: features, bloom, camera shake, fluid simulation
+
+| Variable | Default | Effect |
+|---|---|---|
+| `WALPE_FEATURES=name=on\|off,...` | the `features` settings | fixes scene feature switches for one run (`camera_parallax`, `parallax_offset`, `script_camera`, `sprite_sheets`, `script_texanim`, `bloom`, `camera_shake`); wins over the settings, and `walpe-ctl set` then changes nothing for them. Status names them in `features_fixed` |
+| `WALPE_BLOOM_FORMAT=8\|16f` | 8-bit; half float for scenes that set `hdr` where the driver can | the format of bloom's buffers |
+| `WALPE_BLOOM_COPY=full` | half size | copy the picture 1:1 for bloom instead of at half size (the reference for comparisons) |
+| `WALPE_SHAKE_AMOUNT=f` / `WALPE_SHAKE_RATE=f` | 1 / 1 | factors (0-10) on how far / how fast the view sways with camera shake |
+| `WALPE_SHAKE_COVER=1` | off | zoom the view in by the reach of the sway, so that no edge of the canvas comes into view |
+| `WALPE_FLUID=0\|1` / `WALPE_FLUID_QUALITY=full\|reduced\|low` | config `fluid_sim` (on) / `fluid_quality` (full) | the Fluid Simulation effect off / on, and its level, for one run (status still shows the saved values) |
+| `WALPE_FLUID_POINTER_Y=up` | counted from the top | hand the pointer's height to the fluid shaders unflipped; for finding out which is right if the smoke is pushed at the mirrored height |
+
 ## Scenes: particles and scripts
 
 | Variable | Default | Effect |
@@ -165,7 +198,8 @@ The other way round, `WALPE_MEM_STATS=1` switches memory numbers by kind in
 
 | Variable | Default | Effect |
 |---|---|---|
-| `WALPE_VIDEO_HWDEC=0\|1\|cuda\|vaapi\|vdpau` | config `video_hwdec` (off) | hardware decoding off / on / one FFmpeg hwaccel only. Never used on software GL |
+| `WALPE_VIDEO_HWDEC=off\|auto\|<api>` (also `0` / `1`) | config `video_hwdec` (off) | hardware decoding off / what the machine offers / one API only (`vaapi`, `cuda`, `vdpau`, `vulkan`, `drm`, `v4l2m2m`). Never used on software GL ([VIDEO.md](VIDEO.md)) |
+| `WALPE_VIDEO_ZEROCOPY=0\|1` | config `video_zerocopy` (off) | hardware-decoded pictures stay in GPU memory where that is exact |
 | `WALPE_VIDEO_LIMIT=0\|1` | config `video_limit` (off) | videos follow the frame rate limit |
 | `WALPE_VIDEO_UPLOAD=mode` | config `video_upload` (legacy) | how frames reach their textures: `legacy`, `pbo`, `pbodata`, `persist`, `direct`, each also `+pingpong` |
 | `WALPE_VIDEO_THREADS=n` | by need, at most 1 up to 720p, 2 up to 1080p, 3 up to 1440p, 4 above | fixed number of decoder threads |
@@ -181,6 +215,7 @@ The other way round, `WALPE_MEM_STATS=1` switches memory numbers by kind in
 | Variable | Default | Effect |
 |---|---|---|
 | `WALPE_WEB_ACCEL=0\|1\|dmabuf\|force` | config `web_accel` (off) | WebKit hardware acceleration off / on (frames through shared memory) / on with WebKit's DMA-BUF path / on without the software-renderer check |
+| `WALPE_WEB_HOST=auto\|x11\|private` | auto | where the pages' hidden windows live: `auto` = an X window off screen whenever `DISPLAY` is set (on Wayland through Xwayland), the private Wayland display inside the daemon only without an X display; `private` asks for that one (experimental, [WAYLAND.md](WAYLAND.md)) |
 | `WALPE_WEB_INPUT=js\|native\|off` | real input events, script events as fallback | mouse input: script-dispatched events only / never fall back to script events / none |
 | `WALPE_WEB_OFFLINE=1` | off | no network access for any page (per wallpaper: its option "Allow network access") |
 | `WALPE_WEB_OPEN_LINKS=1` | off | an external http(s) link you clicked is handed to `xdg-open` (default: refused) |
@@ -210,6 +245,15 @@ The other way round, `WALPE_MEM_STATS=1` switches memory numbers by kind in
 | `WALPE_MEM_STATS=1` | off | `walpe-ctl status` also carries allocator and process memory numbers |
 | `WALPE_GPU_PROFILE=s`, `WALPE_GPU_PROFILE_DELAY=s`, `WALPE_GPU_PROFILE_EVERY=n`, `WALPE_GPU_PROFILE_SYNC=1`, `WALPE_GPU_PROFILE_TIMER=0`, `WALPE_GPU_PROFILE_HOOKS=0`, `WALPE_GL_DEBUG=1` | off | the GPU profiler: see [GPU-PROFILING.md](GPU-PROFILING.md) |
 
+| `WALPE_GPU_PROFILE_KERNEL=0\|self\|1` | everything; off on the NVIDIA kernel driver | the kernel's GPU statistics in a profile: none / only the daemon's own process and the device / everything ([GPU-PROFILING.md](GPU-PROFILING.md)) |
+
+## Sound
+
+| Variable | Default | Effect |
+|---|---|---|
+| `WALPE_SOUND_SINK=name` | the default sink | play wallpaper sound into this PulseAudio / PipeWire sink ([SOUND.md](SOUND.md)) |
+| `WALPE_SOUND_NULL=1` | off | play into nothing, paced by the clock (tests) |
+
 ## For developers and tests
 
 Not for daily use: test hooks, measuring aids and names the programs set for themselves.
@@ -218,6 +262,15 @@ Not for daily use: test hooks, measuring aids and names the programs set for the
 |---|---|---|
 | `WALPE_FAKE_VSYNC=1` | daemon | every swap waits for an emulated vertical blank (X servers without vsync, such as Xvfb) |
 | `WALPE_FAKE_DPMS=file` / `WALPE_FAKE_POWER=file` | daemon | the display's power state / the power source is read from a file instead of from X / the kernel |
+| `WALPE_WL_IGNORE=interface[,interface...]` | daemon (Wayland) | behave as if the compositor lacked these protocols (`wp_viewporter`, `zwlr_layer_shell_v1`, ...) |
+| `WALPE_WL_RECREATE=0` | daemon (Wayland) | when the compositor closes a wallpaper surface: always restart in place instead of giving the surface its role back |
+| `WALPE_SIG_WAYLAND_DISPLAY=name` | daemon | the Wayland pause providers (idle, window list) connect to this compositor socket instead of the session's |
+| `WALPE_LOGIND_BUS=session` | daemon | the login manager is looked for on the session bus, where a program of the user can stand in for it |
+| `WALPE_GPU_SYSFS_ROOT=dir` | daemon, `walpe-ctl` | another directory in place of `/sys` for the list of graphics devices: made-up machines |
+| `WALPE_DISPLAY_LOST` | daemon | set by the daemon for its restart in place after the display went away |
+| `WALPE_CHECK_DISPLAY=xvfb\|sway` | the end-to-end checks | the display of a check started by hand without `--display` (the registered tests name theirs) |
+| `WALPE_CHECK_STRICT=1` | the end-to-end checks | a check that cannot run for a missing program, or whose display does not start, fails instead of being skipped; a build without the backend still skips |
+| `WALPE_CHECK_WL_RENDERER=gles2` | the end-to-end checks | run the headless compositor on GLES 2 instead of pixman (needs a DRM render node) |
 | `WALPE_LOAD_DELAY_MS=n` | daemon | every wallpaper load takes at least `n` ms more (what must hold while a load runs) |
 | `WALPE_WS_API_BASE=http://127.0.0.1:PORT/` | Workshop client | a loopback stand-in for the Steam Web API; nothing but that spelling is accepted, so the variable cannot send the key elsewhere |
 | `WALPE_WS_TOTAL_TIMEOUT=n` | Workshop client | seconds one Workshop request may take in all (default 120) |
@@ -234,4 +287,4 @@ Not for daily use: test hooks, measuring aids and names the programs set for the
 | `WALPE_WS_FIXTURES=dir`, `WALPE_WS_LIVE=1` | `workshop-test` | another fixture directory / also run the calls against Steam's servers |
 | `WALPE_FX_HOSTILE_CORPUS=dir`, `WALPE_FX_HOSTILE_VERBOSE=1`, `WALPE_SCENE_HOSTILE_VERBOSE=1`, `WALPE_TEST_VERBOSE=1` | test programs | extra shader corpus and verbose output |
 | `WALPE_JOBS`, `WALPE_LOAD`, `WALPE_BUILDDIR` | `build.sh` | ninja's `-j` / `-l` and the build directory |
-| `LIFECHECK_PATIENCE=N` (or `RESTORECHECK_PATIENCE=N`), `VIDEO_TEST_SLOW=n`, `CLIP_TEST_DEVICE=n`, `CLIP_TEST_LAYOUTS=a,b`, `CLIP_TEST_WINDOW=x,y,w,h`, `WEBSEC_KEEP=1` | single tests | knobs without the `WALPE_` prefix: every wait of `daemon-life` N times as long, the video test's time limits n times as long (valgrind), another EGL device / only some window layouts / one more window for the clip test, keep the web security test's temporary directory |
+| `LIFECHECK_PATIENCE=N` (or `RESTORECHECK_PATIENCE=N`), `WAYLANDCHECK_PATIENCE=N`, `RESCHECK_PATIENCE=N`, `VIDEO_TEST_SLOW=n`, `CLIP_TEST_DEVICE=n`, `CLIP_TEST_LAYOUTS=a,b`, `CLIP_TEST_WINDOW=x,y,w,h`, `WEBSEC_KEEP=1` | single tests | knobs without the `WALPE_` prefix: every wait of `daemon-life` N times as long, the video test's time limits n times as long (valgrind), another EGL device / only some window layouts / one more window for the clip test, keep the web security test's temporary directory |

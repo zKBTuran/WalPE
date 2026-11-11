@@ -1,0 +1,38 @@
+Wayland protocol descriptions used by the Wayland backend of walpe-daemon.
+
+meson turns each <name>.xml into <name>-client-protocol.h and <name>-protocol.c
+with wayland-scanner (meson.build, wl_protocol_names). The files are unchanged
+copies; each one carries its own copyright and licence notice (MIT-style
+"permission to use, copy, modify, distribute" terms), which apply to that file
+and not to the rest of this tree. The notices are collected in
+licenses/Wayland-protocols.txt, which is installed with the programs.
+
+From wlr-protocols (https://gitlab.freedesktop.org/wlroots/wlr-protocols),
+branch master, directory unstable/:
+  wlr-layer-shell-unstable-v1.xml
+      sha256 87e0b9c837aecd6977f76f3c47d73088b7159871f5d979dc1840f6cadb5e2ed8
+  wlr-foreign-toplevel-management-unstable-v1.xml
+      sha256 a5a030786a9281e90542eb7c4084f0dbd6a50a7a2975cafa01fa848eebe6de15
+      (not in wl_protocol_names: for the pause-signal providers)
+
+From wayland-protocols (https://gitlab.freedesktop.org/wayland/wayland-protocols),
+release 1.45, as installed under /usr/share/wayland-protocols by the
+distribution package (Ubuntu 24.04: wayland-protocols 1.45-1~ubuntu0.24.04.2):
+  xdg-shell.xml                    (stable/xdg-shell/)
+      sha256 9d9e27038ca722f159a361293f8c6cd270dab907ab52de5b8ecfbb8d6b9651c2
+  xdg-output-unstable-v1.xml       (unstable/xdg-output/)
+      sha256 e20aa6f87bd8cc473b7ee1175604e2e09ce8227eadadc55ad8e3f9d003c251a3
+  viewporter.xml                   (stable/viewporter/)
+      sha256 dcb12279a03746301fe490aaed4b38a403485a925abfce2ccfceb644e104fe71
+  fractional-scale-v1.xml          (staging/fractional-scale/)
+      sha256 5941de5d28f427ecdadddc8623a6f6af0a30b0ab4726847236ba7a7652b81316
+  presentation-time.xml            (stable/presentation-time/)
+      sha256 dffac93bcb2bb1d8c385e72b8a8c2c0d4d79a336866322f3ba886dce2b27b1e2
+  linux-dmabuf-v1.xml              (stable/linux-dmabuf/)
+      sha256 bd6fdb35e7551ae98c4d7fc1b3c47dd3e22d184ab92b69f51787750ddbf2927d
+  ext-idle-notify-v1.xml           (staging/ext-idle-notify/)
+      sha256 e56a9c22684e6b46655f7221b798328e304c1efc8f63f01241a1cf8c070f4c30
+      (not in wl_protocol_names: for the pause-signal providers, src/signals)
+  ext-foreign-toplevel-list-v1.xml (staging/ext-foreign-toplevel-list/)
+      sha256 402d97291a4041e377d9cc3930af7507bd9752edfc19810c2b4c8cf34aac3a3d
+      (not in wl_protocol_names: for the pause-signal providers' tests)

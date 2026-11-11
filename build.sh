@@ -1,8 +1,13 @@
 #!/bin/sh
 # Configure (or reconfigure) and build WalPE.
 #   ./build.sh                      the generic build: runs on any CPU of this architecture
-#   ./build.sh --tuning=alderlake   the maintainer's make.conf flags (Alder Lake-class CPUs only)
+#                                   (x86-64 or aarch64, whichever this machine is)
+#   ./build.sh --tuning=alderlake   the maintainer's make.conf flags (Alder Lake-class CPUs only;
+#                                   x86-64: on another architecture the configure step refuses it)
+#   ./build.sh --tuning=native      the CPU of this machine (-march=native, on aarch64 -mcpu=native)
 #   --tuning=<generic|alderlake|native|auto> is passed on as -Dnative_tuning=<value>
+#   Building for arm64 on an x86-64 machine: see cross/aarch64-linux-gnu.ini (meson setup
+#   --cross-file ...; this script configures native builds only).
 #   WALPE_JOBS  parallel jobs   (ninja -j, default: the number of CPUs)
 #   WALPE_LOAD  max load avg    (ninja -l, default: the number of CPUs + 2)
 #               the maintainer's MAKEOPTS: WALPE_JOBS=16 WALPE_LOAD=18 ./build.sh --tuning=alderlake

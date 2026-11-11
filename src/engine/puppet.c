@@ -195,6 +195,8 @@ static gboolean anim_header_at (const guint8 *b, gsize n, gsize q)
     guint32 id, z;
     memcpy (&id, b + q, 4);
     memcpy (&z, b + q + 4, 4);
+    id = GUINT32_FROM_LE (id);
+    z = GUINT32_FROM_LE (z);
     if (id == 0 || id > 100000000u || z != 0)
         return FALSE;
     const guint8 *nm = b + q + 8;
@@ -248,12 +250,15 @@ WalpePuppet *walpe_puppet_load (const char *path)
     for (gsize q = r.p; q + 12 <= n && q < r.p + 512; q++) {
         guint32 w, vb, ib;
         memcpy (&w, b + q, 4);
+        w = GUINT32_FROM_LE (w);
         if ((w & 0xFFFF0000u) != 0x01800000u || (w & 0xF) != 0xF)
             continue;
         memcpy (&vb, b + q + 4, 4);
+        vb = GUINT32_FROM_LE (vb);
         if (vb == 0 || vb % VSTRIDE || q + 8 + vb + 4 > n)
             continue;
         memcpy (&ib, b + q + 8 + vb, 4);
+        ib = GUINT32_FROM_LE (ib);
         if (ib == 0 || ib % 6 || q + 12 + vb + ib > n)
             continue;
         vstart = q + 8;

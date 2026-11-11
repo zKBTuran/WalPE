@@ -1,10 +1,14 @@
 #!/bin/sh
-# gpu_report_test.sh <walpe-gpu-report.sh> <fake-nvidia-smi>
+# gpu_report_test.sh <walpe-gpu-report.sh> <fake-nvidia-smi> [<walpe-ctl> <fake-gpustat-tree.sh>]
 # scripts/walpe-gpu-report.sh against a stand-in nvidia-smi: all fields,
 # a laptop GPU's [N/A] fields and unknown field names, an old driver's
 # wording and no pmon, a tool that cannot reach the driver, no tool at
 # all, no daemon; then with a stand-in walpe-ctl of version 0.12 (status, no
 # profile command). The "daemon" is this shell (its /proc numbers are real).
+# With a built walpe-ctl and the tree generator (arguments 3 and 4) also
+# the kernel's statistics: `walpe-ctl gpu-stats` on fake /proc and /sys trees of
+# an AMD card, an Intel one, both vendors in one machine, the NVIDIA driver
+# with and without nvidia-smi, no GPU.
 script=$1
 fake=$2
 fails=0
@@ -210,6 +214,165 @@ want "$f" "this build has no GPU profiler (version 0.12 or older): skipped" "ctl
 if grep -F -q -e "/home" -e "usage:" -e "My Videos" "$f"; then
     fails=$((fails + 1))
     echo "FAIL: ctl: a path or walpe-ctl's usage text is in the report"
+fi
+
+# ---- the kernel's statistics (walpe-ctl gpu-stats) ----------------------------
+# The trees are written by tests/fake-gpustat-tree.sh (hand-written samples,
+# see there) and rewritten once a second while the report samples them. Only
+# what does not depend on the timing of the two is checked here; the exact
+# shares are tests/gpustat_test.c's.
+ctlbin=$3
+gentree=$4
+krun () {   # scenario, outfile, PATH for the report, arguments of the report...
+    scen=$1; out=$2; kpath=$3; shift 3
+    sh "$gentree" "$tmp/tree" clean
+    rm -rf "$tmp/tree"
+    sh "$gentree" "$tmp/tree" "$scen" 0 $$ || { fails=$((fails + 1)); echo "FAIL: $scen: no tree"; return; }
+    sh "$gentree" "$tmp/tree" "$scen" live 12 $$ &
+    genpid=$!
+    FAKE_SMI=full FAKE_SMI_PID=$$ PATH="$kpath" sh "$script" "$@" --no-profile --ctl "$ctlbin" \
+        --proc-root "$tmp/tree/proc" --sys-root "$tmp/tree/sys" > "$out" 2> "$out.err"
+    rc=$?
+    kill $genpid 2>/dev/null
+    wait $genpid 2>/dev/null
+    if [ $rc != 0 ] || [ -s "$out.err" ]; then
+        fails=$((fails + 1))
+        echo "FAIL: $scen: exit status $rc, stderr:"
+        cat "$out.err"
+    fi
+}
+if [ -n "$ctlbin" ] && [ -x "$ctlbin" ] && [ -f "$gentree" ]; then
+    # 11. an AMD card, no nvidia-smi anywhere
+    krun amdgpu "$tmp/k-amd.txt" "$tmp/nobin" 3 amd --pid $$
+    f=$tmp/k-amd.txt
+    want "$f" "GPU: AMD [1002:73df] at 0000:03:00.0 (card0, renderD128), driver amdgpu" "amd: the device and the driver"
+    want "$f" "GPU statistics from: fdinfo, amdgpu sysfs, hwmon (device chosen as: the process's DRM client)" "amd: the sources"
+    wantnot "$f" "nvidia-smi" "amd: nvidia-smi is not mentioned above the notes"
+    want "$f" "GPU busy                   %" "amd: GPU busy row"
+    want "$f" "(amdgpu sysfs: gpu_busy_percent)" "amd: its source"
+    want "$f" "GPU busy, visible clients  %" "amd: the clients' sum"
+    want "$f" "VRAM used                  MiB" "amd: VRAM"
+    want "$f" "of 8176 MiB" "amd: VRAM total"
+    want "$f" "power                      W            24.5      24.5      24.5" "amd: power from hwmon"
+    want "$f" "temperature                C            51.0" "amd: temperature"
+    want "$f" "highest 2575 MHz" "amd: the highest clock"
+    want "$f" "daemon GPU share           %" "amd: the daemon's share"
+    want "$f" "(fdinfo: engine gfx: its time on the engine / wall time)" "amd: where it is from"
+    want "$f" "daemon GPU memory          MiB         310.0     310.0     310.0" "amd: the daemon's memory"
+    want "$f" "(fdinfo: resident: vram 300.0 + gtt 8.0 + cpu 2.0)" "amd: memory by region"
+    want "$f" "programs on the GPU (kernel fdinfo; share = time on engine gfx" "amd: the programs"
+    want "$f" "  Xorg                    184.0 MiB" "amd: X among them"
+    want "$f" "  picom                    61.0 MiB" "amd: the compositor among them"
+    want "$f" "<- measured" "amd: the daemon is marked"
+    want "$f" "daemon RSS                 MiB" "amd: the /proc rows are still there"
+    want "$f" "\"GPU share\" from fdinfo is the time the kernel accounted" "amd: the reading notes of the kernel's table"
+    want "$f" "those rows mean the same on every driver" "amd: timer queries against kernel figures"
+    want "$f" "Compare runs made the same way" "amd: the general notes"
+    wantnot "$f" "not available" "amd: nothing is missing"
+    wantnot "$f" "utilization.gpu " "amd: no nvidia-smi rows"
+    wantnot "$f" "gave no samples" "amd: the sampler answered"
+    if grep -F -q -e "percent of time over the past sample" -e "nvidia-smi pmon" "$f"; then
+        fails=$((fails + 1))
+        echo "FAIL: amd: nvidia-smi's reading notes in a report without nvidia-smi"
+    fi
+
+    # 12. Intel: no whole-GPU figure, no power, no temperature - said so
+    krun i915 "$tmp/k-intel.txt" "$tmp/nobin" 3 intel --pid $$
+    f=$tmp/k-intel.txt
+    want "$f" "GPU: Intel [8086:46a6] at 0000:00:02.0 (card0, renderD128), driver i915" "intel: the device"
+    want "$f" "GPU busy                   %             n/a       n/a       n/a  -  (not available: the i915 driver has no whole-GPU figure" "intel: GPU busy not available, with the reason"
+    want "$f" "GPU busy, visible clients  %" "intel: the clients' sum instead"
+    want "$f" "(fdinfo: engine render, every client this user may read)" "intel: where it is from"
+    want "$f" "power                      W             n/a       n/a       n/a  -  (not available: no power sensor" "intel: power not available"
+    want "$f" "temperature                C             n/a" "intel: temperature not available"
+    want "$f" "clock                      MHz         650.0     650.0     650.0" "intel: the clock"
+    want "$f" "(Intel sysfs: highest 1300 MHz)" "intel: its source"
+    want "$f" "daemon GPU memory          MiB         240.0" "intel: the daemon's memory"
+    want "$f" "(fdinfo: resident: system0 240.0)" "intel: its region"
+    want "$f" "a clock of 0 MHz is a GPU that sleeps" "intel: the note about the clock"
+
+    # 13. both in one machine: nvidia-smi answers, the daemon draws on the Intel GPU
+    krun i915 "$tmp/k-both.txt" "$tmp/bin:$tmp/nobin" 3 both --pid $$
+    f=$tmp/k-both.txt
+    want "$f" "GPU 0: NVIDIA GeForce RTX 4050 Laptop GPU, 550.120, 6141 MiB" "both: nvidia-smi's GPU line"
+    want "$f" "GPU: Intel [8086:46a6]" "both: the kernel's GPU line"
+    want "$f" "utilization.gpu            %            20.0" "both: nvidia-smi's rows"
+    want "$f" "-- the kernel's statistics for the GPU named above --" "both: the divider"
+    want "$f" "daemon GPU share (sm)      %" "both: pmon's row"
+    want "$f" "daemon GPU share           %" "both: the kernel's row"
+    want "$f" "programs on the GPU (nvidia-smi pmon" "both: pmon's programs"
+    want "$f" "programs on the GPU (kernel fdinfo" "both: the kernel's programs"
+    want "$f" "percent of time over the past sample" "both: nvidia-smi's notes"
+    want "$f" "\"GPU share\" from fdinfo" "both: the kernel's notes"
+
+    # 14. the NVIDIA driver with a working nvidia-smi and the new walpe-ctl:
+    #     the report is what it was (no kernel table, no new header line)
+    krun nofdinfo "$tmp/k-nv.txt" "$tmp/bin:$tmp/nobin" 3 nv --pid $$
+    f=$tmp/k-nv.txt
+    want "$f" "GPU 0: NVIDIA GeForce RTX 4050 Laptop GPU, 550.120, 6141 MiB" "nvidia: GPU line as before"
+    want "$f" "daemon GPU share (sm)      %            10.0" "nvidia: pmon row as before"
+    want "$f" "daemon GPU memory          MiB         400.0" "nvidia: memory as before"
+    want "$f" " - n/a = this GPU, driver or nvidia-smi does not report the value; nothing is wrong." "nvidia: last note as before"
+    wantnot "$f" "GPU statistics from" "nvidia: no kernel header"
+    wantnot "$f" "kernel" "nvidia: no kernel table"
+    wantnot "$f" "not available" "nvidia: no kernel rows"
+    if grep -F -q -e "fdinfo" -e "those rows mean the same" "$f"; then
+        fails=$((fails + 1))
+        echo "FAIL: nvidia: kernel notes in an nvidia-smi report"
+    fi
+
+    # 15. the NVIDIA driver without nvidia-smi: named, every row says why
+    krun nofdinfo "$tmp/k-nvno.txt" "$tmp/nobin" 3 nvno --pid $$
+    f=$tmp/k-nvno.txt
+    want "$f" "GPU: nvidia-smi not found: GPU numbers skipped" "nvidia without the tool: said"
+    want "$f" "GPU: NVIDIA [10de:28a1] at 0000:01:00.0 (card0, renderD128), driver nvidia" "nvidia without the tool: the device is named"
+    want "$f" "GPU statistics from: none" "nvidia without the tool: no source"
+    want "$f" "daemon GPU share           %             n/a       n/a       n/a  -  (not available: nvidia-smi is not installed" "nvidia without the tool: why"
+    want "$f" "daemon RSS" "nvidia without the tool: /proc rows"
+
+    # 16. no GPU at all
+    krun empty "$tmp/k-none.txt" "$tmp/nobin" 2 none --pid $$
+    f=$tmp/k-none.txt
+    want "$f" "GPU: nvidia-smi not found: GPU numbers skipped" "no GPU: as before"
+    want "$f" "GPU: the kernel lists no GPU (nothing in /sys/class/drm): no kernel statistics either" "no GPU: said"
+    wantnot "$f" "GPU busy" "no GPU: no rows"
+    want "$f" "percent of time over the past sample" "no GPU: the notes as before"
+
+    # 17. --baseline on the AMD tree: the GPU and its programs, no daemon rows
+    krun amdgpu "$tmp/k-base.txt" "$tmp/nobin" 2 idle --baseline
+    f=$tmp/k-base.txt
+    want "$f" "daemon: not measured (--baseline: the desktop without WalPE)" "kernel baseline: said"
+    want "$f" "GPU statistics from: fdinfo, amdgpu sysfs, hwmon (device chosen as: the only GPU)" "kernel baseline: the device"
+    want "$f" "GPU busy                   %" "kernel baseline: GPU rows"
+    want "$f" "programs on the GPU (kernel fdinfo" "kernel baseline: programs"
+    want "$f" "  Xorg  " "kernel baseline: X"
+    wantnot "$f" "daemon GPU" "kernel baseline: no daemon rows"
+    wantnot "$f" "<- measured" "kernel baseline: nothing is marked"
+
+    # 18. walpe-ctl gpu-stats by itself: JSON, the script's sections, a wrong option
+    sh "$gentree" "$tmp/tree" clean; rm -rf "$tmp/tree"
+    sh "$gentree" "$tmp/tree" amdgpu 0 $$
+    "$ctlbin" gpu-stats --sample 0.4 --interval 0.2 --pid $$ --proc-root "$tmp/tree/proc" --sys-root "$tmp/tree/sys" --json > "$tmp/k.json" 2> "$tmp/k.json.err"
+    rc=$?
+    [ $rc = 0 ] && [ ! -s "$tmp/k.json.err" ] || { fails=$((fails + 1)); echo "FAIL: walpe-ctl gpu-stats --json: exit status $rc"; cat "$tmp/k.json.err"; }
+    want "$tmp/k.json" '"driver" : "amdgpu"' "json: the driver"
+    want "$tmp/k.json" '"pci_slot" : "0000:03:00.0"' "json: the device"
+    want "$tmp/k.json" '"process_memory_mib"' "json: values"
+    "$ctlbin" gpu-stats --probe --sections --pid $$ --proc-root "$tmp/tree/proc" --sys-root "$tmp/tree/sys" > "$tmp/k.probe" 2>&1
+    want "$tmp/k.probe" "@walpe-gpustat 1" "probe: marker"
+    want "$tmp/k.probe" "@found yes" "probe: a GPU"
+    want "$tmp/k.probe" "@stats yes" "probe: figures"
+    want "$tmp/k.probe" "@nvidia no" "probe: not the NVIDIA driver"
+    wantnot "$tmp/k.probe" "@rows" "probe: no table"
+    "$ctlbin" gpu-stats --sample 0.4 --interval 0.2 --no-process --proc-root "$tmp/tree/proc" --sys-root "$tmp/tree/sys" > "$tmp/k.plain" 2>&1
+    want "$tmp/k.plain" "process: none (no walpe-daemon runs: the GPU alone)" "plain: no process"
+    want "$tmp/k.plain" "metric                     unit          min       avg       max  samples" "plain: table head"
+    want "$tmp/k.plain" "how to read this" "plain: notes"
+    "$ctlbin" gpu-stats --no-such-option > "$tmp/k.bad" 2>&1
+    [ $? = 1 ] || { fails=$((fails + 1)); echo "FAIL: walpe-ctl gpu-stats: a wrong option is not exit status 1"; }
+    sh "$gentree" "$tmp/tree" clean
+else
+    echo "gpu-report: kernel statistics not tested (no walpe-ctl / tree generator given)"
 fi
 
 if [ $fails != 0 ]; then

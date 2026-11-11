@@ -29,6 +29,7 @@
 #pragma once
 #include <glib.h>
 #include "common/api.h"
+#include "common/gpustat.h"
 
 G_BEGIN_DECLS
 
@@ -113,6 +114,11 @@ typedef struct {
     int fx_count;
     guint fx_run, fx_cached; /* effect passes drawn / served from the static cache
                               * (running totals of this thread; deltas are taken) */
+    int render_w, render_h;  /* the size its wallpaper is rendered at (the render
+                              * resolution chosen for the output; 0 = w x h) */
+    gboolean render_target;  /* ... into a picture of that size of its own, which is
+                              * then scaled to the monitor (a scene at another
+                              * size than the monitor's) */
 } WalpeProfThreadInfo;
 
 /* render thread, between frames, its context current: at the start of a
@@ -195,6 +201,7 @@ typedef struct {
     int monitor;
     char name[32];
     int w, h;
+    int render_w, render_h;      /* what the wallpaper is rendered at (= w x h at native) */
     double hz;
     char type[16], wallpaper[32], role[24];
     /* context */
@@ -255,6 +262,11 @@ typedef struct {
     WalpeProfMsg *msgs;
     guint n_msgs;
     guint msgs_dropped;         /* distinct messages beyond the table size */
+    /* what the kernel and the driver accounted to the process and the GPU
+     * during the run (common/gpustat.h: fdinfo, sysfs, hwmon), NULL = not
+     * sampled. The rows above are GL timer queries and the same on every
+     * driver; these figures depend on what the driver publishes. */
+    WalpeGpuStatReport *kernel;
 } WalpeProfReport;
 
 #define WALPE_PROF_TOP_ROWS 15

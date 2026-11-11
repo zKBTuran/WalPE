@@ -18,6 +18,7 @@
 #include "scenenode_effects.h"
 #include "propprobe.h"
 #include "glutil.h"
+#include "glcaps.h"
 #include "clip.h"
 #include "gpuprof.h"   /* GPUPROF hooks: WALPE_PROF_PASS_* around the pass draws */
 #include "fxclass.h"
@@ -25,7 +26,9 @@
 #include "common/quality.h"
 #include "common/tex.h"
 #include "common/util.h"
+#include "common/lazy.h"
 #include "common/premult.h"
+#include "common/fluidsim.h"
 #include <json-glib/json-glib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -593,6 +596,12 @@ static const char *fx_prelude_common =
     "#define texSample3D texture\n"
     "#define texture2D texture\n";
 
+/* GLSL ES output (fx_essl.h, included further down): the language of the
+ * built sources - 0 = GLSL 3.30 - and the two parts of the head that differ */
+static int fx_essl (void);
+static void fx_essl_head (GString *s, int ver);
+static void fx_essl_prelude (GString *s);
+
 /* A combo is a macro of the shader: its name is an identifier. The names
  * come from the wallpaper's JSON (a material's and an effect instance's
  * "combos", the shader's own [COMBO] annotations) and are written into the
@@ -610,10 +619,16 @@ static gboolean fx_combo_name_ok (const char *k)
     return n <= FX_MAX_COMBO_NAME && !k[n];
 }
 
-/* build the compiled source: version + combos + prelude + body */
+/* build the compiled source: version + combos + prelude + body. On an
+ * OpenGL ES context the version line is GLSL ES's, followed by its default
+ * precisions, and the prelude gets the old texture function names GLSL ES
+ * dropped (fx_essl.h); everything else is the same text. */
 static char *fx_build_source (const char *body, GHashTable *combos, gboolean vertex)
 {
-    GString *s = g_string_new ("#version 330\n");
+    const int es = fx_essl ();
+    GString *s = g_string_new (es ? NULL : "#version 330\n");
+    if (es)
+        fx_essl_head (s, es);
     GHashTableIter it;
     gpointer k, v;
     g_hash_table_iter_init (&it, combos);
@@ -621,6 +636,8 @@ static char *fx_build_source (const char *body, GHashTable *combos, gboolean ver
         if (fx_combo_name_ok (k))
             g_string_append_printf (s, "#define %s %d\n", (char *) k, GPOINTER_TO_INT (v));
     g_string_append (s, fx_prelude_common);
+    if (es)
+        fx_essl_prelude (s);
     g_string_append (s, vertex
         ? "#define varying out\n#define attribute in\n"
         : "#define varying in\n"
@@ -1015,6 +1032,7 @@ static const char *fx_trim (const char *s)
 }
 
 #include "fx_srcrepair.h"
+#include "fx_essl.h"
 
 /* FxTryFn on a GL shader object */
 static gboolean fx_try_gl (const char *src, char *log, gsize logsize, gpointer user)
@@ -1300,10 +1318,11 @@ static __thread struct {
 
 static void fx_gls_begin (void)
 {
-    static int enabled = -1;
+    static WalpeLazy enabled_cell = WALPE_LAZY_UNSET;   /* read once (common/lazy.h) */
+    int enabled = walpe_lazy_get (&enabled_cell);
     if (enabled < 0) {
         const char *e = g_getenv ("WALPE_FX_STATE_CACHE");
-        enabled = !(e && *e == '0');
+        enabled = walpe_lazy_set (&enabled_cell, !(e && *e == '0'));
     }
     memset (&fx_gls, 0, sizeof (fx_gls));
     fx_gls.on = enabled;
@@ -1545,7 +1564,9 @@ static void fx_bind_layer_vao (float cx, float cy, float w, float h, float mvp[1
  * annotations for every pass on every frame) */
 typedef enum { FXU_TEXTURE, FXU_RESOLUTION, FXU_TIME, FXU_AUDIO, FXU_FRAMETIME,
                FXU_SCREEN, FXU_TEXEL, FXU_TEXEL_HALF, FXU_POINTER, FXU_DAYTIME,
-               FXU_MVP_INV } FxUKind;
+               FXU_MVP_INV,
+               /* simulation chains only (fx_sim.h) */
+               FXU_POINTER_LAST, FXU_POINTER_STATE, FXU_TEXPROJ_INV } FxUKind;
 
 /* render thread: the spectrum of the frame being drawn (NULL = silence);
  * set by the scene once per frame, read by every pass */
@@ -1586,6 +1607,7 @@ static __thread struct { int sw, sh; float px, py, dt; } fx_frame = { 1920, 1080
 
 static void fx_pool_new_frame (void);
 static inline void fxs_cost_new_frame (void);   /* fx_cost.h */
+static void fxsim_new_frame (float frametime);   /* fx_sim.h */
 /* render thread: fx_dyn_values() of this frame, per combination of inputs */
 static __thread struct { guint64 v[4]; guint have; } fx_dyn_memo;
 
@@ -1636,6 +1658,7 @@ void fx_set_frame_info (int screen_w, int screen_h, float pointer_x, float point
     fx_dyn_memo.have = 0;   /* new audio / pointer values: fx_dyn_values */
     fx_pool_new_frame ();
     fxs_cost_new_frame ();
+    fxsim_new_frame (frametime);
 }
 /* render thread: passes drawn / skipped (served from the static cache) */
 static __thread guint fx_passes_run, fx_passes_cached;
@@ -1794,6 +1817,11 @@ typedef struct {
     int rg_sup_levels;                   /* mip levels rg_sup was made for, -1 = not made */
     FxNeed rg_sup;                       /* where that map is strong (fxr_support) */
     guint8 kp_free;   /* kept passes: 0 = not looked at, 1 = no, 2 = reads nothing that changes */
+    guint8 sim_pass;  /* fx_sim.h: a pass of a simulation chain. Noted when its
+                       * uniforms are first classified (fx_cache_uniforms), so
+                       * that a program linked for it later, while the wallpaper
+                       * runs (fx_specialize.h, fxs_switch), is classified the
+                       * same way */
     guint rg_serial;
     FxNeed rg_need;
 } EffPass;
@@ -1818,6 +1846,14 @@ typedef struct {
     gboolean keep, kp_valid;
     guint kp_gen;
     GLuint kp_prog;
+    /* fx_sim.h, targets of simulation chains only: fbos[].fit (texels of
+     * the longer side, 0 = none; at most WALPE_FLUID_FIT_MAX, fit_asked =
+     * the number the file declared), fbos[].clear (what the target holds
+     * before the first step) and whether the format it names is a float
+     * format */
+    int fit, fit_asked;
+    float clear[4];
+    gboolean want_float;
 } EffTarget;
 
 typedef struct {
@@ -1865,7 +1901,11 @@ typedef struct {
     WalpeFxTime time;          /* g_Time terms of all its passes */
     double sharp;              /* largest walpe_fx_bounds_factor of its passes */
     gboolean kp_checked;       /* fx_keep_scan () looked at the passes */
+    struct FxSim *sim;         /* fx_sim.h: the chain carries a simulation from
+                                * frame to frame (NULL = it does not) */
 } EffectChain;
+
+#include "fx_sim_types.h"
 
 static void fx_clip_traits (EffPass *pass, const char *vsrc, const char *fsrc);
 
@@ -1889,6 +1929,7 @@ static void fx_chain_free (EffectChain *ch)
                 walpe_gl_tex_release (ch->passes[i].slot[u].tex);
     }
     fx_chain_drop_targets (ch, 0);
+    fxsim_chain_free (ch);
     g_free (ch);
 }
 
@@ -1914,10 +1955,12 @@ static GLuint fx_load_texture (const char *dir, const char *ref, int res[4], int
     /* A DXT file stays block compressed (it used to be decoded to RGBA8:
      * 4-8 times the memory); its mip chain is then the one stored in the
      * file. WALPE_TEX_DXT_FX=0 decodes as before. */
-    static int dxt = -1;
+    static WalpeLazy dxt_cell = WALPE_LAZY_UNSET;
+    int dxt = walpe_lazy_get (&dxt_cell);
     if (dxt < 0) {
         const char *e = g_getenv ("WALPE_TEX_DXT_FX");
-        dxt = walpe_gl_has_s3tc () && !g_getenv ("WALPE_NO_DXT") && !(e && *e == '0');
+        dxt = walpe_lazy_set (&dxt_cell, walpe_gl_has_s3tc () && !g_getenv ("WALPE_NO_DXT") &&
+                                         !(e && *e == '0'));
     }
     WalpeTexInfo ti;   /* shared with the other monitors' contexts */
     GLuint tex = walpe_gl_tex_cached (path, WALPE_TEX_LOAD_NATIVE_RG |
@@ -2033,6 +2076,13 @@ static void fx_cache_uniforms (EffPass *pass)
     pass->dyn = g_new0 (FxUniform, MAX (n, 1));
     pass->dyn_last = g_new0 (FxUniLast, MAX (n, 1));
     pass->n_dyn = 0;
+    /* (fx_sim.h) fxsim_building says "simulation chain" only while the
+     * chain is built; fx_specialize.h comes here again for a pass that
+     * changes programs in a running wallpaper, and the pass must get its
+     * pointer path, pointer state and frame-to-layer matrix then as well */
+    if (fxsim_building)
+        pass->sim_pass = 1;
+    const gboolean sim_pass = pass->sim_pass != 0;
     for (GLint u = 0; u < n; u++) {
         char name[128];
         GLsizei len = 0;
@@ -2067,7 +2117,14 @@ static void fx_cache_uniforms (EffPass *pass)
             pass->dyn[pass->n_dyn++] = (FxUniform) { loc, FXU_TEXEL_HALF, 0 };
         } else if (!strcmp (name, "g_PointerPosition") || !strcmp (name, "g_PointerPositionLast") ||
                    !strcmp (name, "g_ParallaxPosition")) {
-            pass->dyn[pass->n_dyn++] = (FxUniform) { loc, FXU_POINTER, 0 };
+            /* (a simulation chain is told where the pointer was at the
+             * step before, fx_sim.h; every other chain gets this frame's
+             * position under all three names, as before) */
+            const gboolean last = sim_pass && !strcmp (name, "g_PointerPositionLast");
+            pass->dyn[pass->n_dyn++] = (FxUniform) { loc, last ? FXU_POINTER_LAST : FXU_POINTER, 0 };
+        } else if (sim_pass && fxsim_uniform (pass, name, loc, type)) {
+            /* g_PointerState, g_EffectTextureProjectionMatrixInverse of a
+             * simulation chain (fx_sim.h) */
         } else if (!strcmp (name, "g_Daytime")) {
             pass->dyn[pass->n_dyn++] = (FxUniform) { loc, FXU_DAYTIME, 0 };
         } else if (!strncmp (name, "g_AudioSpectrum", 15)) {
@@ -2781,6 +2838,9 @@ static EffectChain *fx_chain_build_parsed (const char *dir, JsonObject *instance
     ch->n_passes = (int) npass;
     /* instance "passes" is an ARRAY parallel to effect.json's passes */
     JsonArray *instpasses = wpj_arr (instance, "passes");
+    /* a pass list with a swap is a simulation (fx_sim.h): its passes and
+     * targets may carry conditions, its targets a fit and a clear value */
+    const gboolean sim = fxsim_building;
 
     for (guint i = 0; i < npass; i++) {
         JsonObject *passdef = wpj_arr_obj (passes, i);
@@ -2796,6 +2856,15 @@ static EffectChain *fx_chain_build_parsed (const char *dir, JsonObject *instance
             cp->is_swap = swap;
             snprintf (cp->target, sizeof (cp->target), "%s", wpj_str (passdef, "target", ""));
             snprintf (cp->copy_src, sizeof (cp->copy_src), "%s", wpj_str (passdef, "source", ""));
+            continue;
+        }
+        if (sim && !fxsim_condition (passdef, instpasses)) {
+            /* left out by its "conditions" (the pass of a variant that is
+             * not in use): stands in the list as a command that does
+             * nothing, so the passes keep their numbers */
+            EffPass *np = &ch->passes[i];
+            memset (np, 0, sizeof (*np));
+            np->is_copy = TRUE;
             continue;
         }
         char *matref = g_strdup (wpj_str (passdef, "material", NULL));
@@ -2835,6 +2904,8 @@ static EffectChain *fx_chain_build_parsed (const char *dir, JsonObject *instance
         JsonObject *f = wpj_arr_obj (fbos, i);
         if (!f)
             continue;
+        if (sim && !fxsim_condition (f, instpasses))
+            continue;   /* (fx_sim.h) the target of a variant that is not in use */
         /* index by the count of VALID entries (a skipped non-object entry
          * used to leave a hole that hid every later target) */
         EffTarget *t = &ch->targets[ch->n_targets++];
@@ -2848,6 +2919,8 @@ static EffectChain *fx_chain_build_parsed (const char *dir, JsonObject *instance
         t->scale = CLAMP (walpe_d2i (wpj_num (f, "scale", 1.0)), 1, 16);
         /* fbos[].format: the target's pixel format (see FxRtFormat) */
         t->fmt = fx_rt_format_id (wpj_str (f, "format", NULL));
+        if (sim)
+            fxsim_target_parse (t, f);
     }
     /* WE runs a layer through two buffers (_rt_imageLayerComposite_<id>_a
      * and _b): a pass without "target" reads the layer as the pass before
@@ -2869,6 +2942,8 @@ static EffectChain *fx_chain_build_parsed (const char *dir, JsonObject *instance
         t->scale = 1;
         ch->alt_out = ch->n_targets++;
     }
+    if (sim)
+        fxsim_chain_built (ch, eo);
     json_node_unref (ej);
     ch->ready = TRUE;
     /* quality knobs: what the effect is by name, how fast it moves */
@@ -2921,7 +2996,10 @@ static EffectChain *fx_chain_build (const char *dir, JsonObject *instance,
     }
     const char *saved_root = fx_effroot;
     fx_effroot = effroot;
+    /* (fx_sim.h; looked up here because the build below frees ej) */
+    fxsim_building = fxsim_scan (wpj_arr (json_node_get_object (ej), "passes"));
     EffectChain *ch = fx_chain_build_parsed (dir, instance, ej, file, dbgname);
+    fxsim_building = FALSE;
     fxs_chain_built (ch, file);
     fx_effroot = saved_root;
     g_free (effroot);
@@ -2942,9 +3020,21 @@ static gboolean fx_rt_half_float (void)
 {
     /* WALPE_FX_RT16F=1: half-float targets (diagnostics: banding from
      * 8-bit intermediates; WE itself uses RGBA8 unless the scene is HDR) */
-    static int rt16 = -1;
-    if (rt16 < 0)
-        rt16 = g_getenv ("WALPE_FX_RT16F") && *g_getenv ("WALPE_FX_RT16F") == '1';
+    static WalpeLazy rt16_cell = WALPE_LAZY_UNSET;
+    int rt16 = walpe_lazy_get (&rt16_cell);
+    if (rt16 < 0) {
+        rt16 = g_getenv ("WALPE_FX_RT16F") && *g_getenv ("WALPE_FX_RT16F") == '1' &&
+               /* a driver without float targets keeps RGBA8 (logged once) */
+               walpe_gl_format (WALPE_FMT_RT_RGBA16F).how == WALPE_FMT_NATIVE;
+        /* OpenGL ES below 3.2 renders to float formats only with an
+         * extension; without it the targets stay RGBA8 */
+        if (rt16 && walpe_gl_feat_how (WALPE_GLF_FLOAT_TARGETS) == WALPE_GLF_REPLACED) {
+            g_message ("fx: WALPE_FX_RT16F: this OpenGL ES context cannot render to float "
+                       "targets; RGBA8 targets");
+            rt16 = 0;
+        }
+        walpe_lazy_set (&rt16_cell, rt16);
+    }
     return rt16;
 }
 
@@ -2983,6 +3073,17 @@ static const struct { const char *name; GLint ifmt; GLenum fmt, type; int bytes;
     [FX_FMT_CAPTURE] = { "(capture)", GL_RGB8,  GL_RGB,  GL_UNSIGNED_BYTE, 4 },
 };
 
+/* the same formats as the capability table names them (glcaps.h): a
+ * format the driver is known not to render to is not tried at all */
+static const WalpeFmtUse fx_fmt_use[FX_FMT_N] = {
+    [FX_FMT_RGBA8]   = WALPE_FMT_RT_RGBA8,
+    [FX_FMT_R8]      = WALPE_FMT_RT_R8,
+    [FX_FMT_RG8]     = WALPE_FMT_RT_RG8,
+    [FX_FMT_R16F]    = WALPE_FMT_RT_R16F,
+    [FX_FMT_RG16F]   = WALPE_FMT_RT_RG16F,
+    [FX_FMT_CAPTURE] = WALPE_FMT_RT_RGB8,
+};
+
 /* fx_region.h: can this target only hold finite values (an 8-bit
  * format)? t = NULL: the chain's output or its input */
 static gboolean fx_target_unorm8 (const EffTarget *t)
@@ -2994,10 +3095,11 @@ static gboolean fx_target_unorm8 (const EffTarget *t)
 /* fbos[].format -> FxRtFormat (RGBA8 for none / unknown / the back buffer) */
 static FxRtFormat fx_rt_format_from_name (const char *name)
 {
-    static int honour = -1;
+    static WalpeLazy honour_cell = WALPE_LAZY_UNSET;
+    int honour = walpe_lazy_get (&honour_cell);
     if (honour < 0) {
         const char *e = g_getenv ("WALPE_FX_RT_FORMATS");
-        honour = !(e && *e == '0');
+        honour = walpe_lazy_set (&honour_cell, !(e && *e == '0'));
     }
     if (!honour || !name || !*name)
         return FX_FMT_RGBA8;
@@ -3043,6 +3145,9 @@ static void fx_drop_rt (GLuint *fbo, GLuint *tex, int w, int h)
 static FxRtFormat fx_make_rt_fmt (GLuint *fbo, GLuint *tex, int w, int h, FxRtFormat fmt)
 {
     gboolean rt16 = fx_rt_half_float ();
+    if (fmt > FX_FMT_RGBA8 && fmt < FX_FMT_N && fx_fmt_ok[fmt] == 0 &&
+        walpe_gl_format (fx_fmt_use[fmt]).how != WALPE_FMT_NATIVE)
+        fx_fmt_ok[fmt] = 2;     /* the capability table knows already (and has logged it) */
     if (fmt < 0 || fmt >= FX_FMT_N || fx_fmt_ok[fmt] == 2)
         fmt = FX_FMT_RGBA8;
     fx_gls_forget_textures ();   /* binds the new texture on the active unit */
@@ -3055,8 +3160,12 @@ static FxRtFormat fx_make_rt_fmt (GLuint *fbo, GLuint *tex, int w, int h, FxRtFo
     glGenFramebuffers (1, fbo);
     glBindFramebuffer (GL_FRAMEBUFFER, *fbo);
     for (;;) {
+        /* (no pixels are handed over: the client format only has to be one
+         * the API pairs with the internal format - OpenGL ES pairs RGBA8
+         * with GL_RGBA alone) */
         if (fmt == FX_FMT_RGBA8)
-            glTexImage2D (GL_TEXTURE_2D, 0, rt16 ? GL_RGBA16F : GL_RGBA8, w, h, 0, GL_BGRA,
+            glTexImage2D (GL_TEXTURE_2D, 0, rt16 ? GL_RGBA16F : GL_RGBA8, w, h, 0,
+                          walpe_gl_feat_es () ? GL_RGBA : GL_BGRA,
                           rt16 ? GL_FLOAT : GL_UNSIGNED_BYTE, NULL);
         else
             glTexImage2D (GL_TEXTURE_2D, 0, fx_fmt_info[fmt].ifmt, w, h, 0, fx_fmt_info[fmt].fmt,
@@ -3246,10 +3355,11 @@ static void fx_pool_free (gint64 older_us)
  * frames: what it holds now and the most it ever held */
 static void fx_pool_log (void)
 {
-    static int on = -1;
+    static WalpeLazy on_cell = WALPE_LAZY_UNSET;
     static __thread guint frames;
+    int on = walpe_lazy_get (&on_cell);
     if (on < 0)
-        on = g_getenv ("WALPE_FX_POOL_LOG") != NULL;
+        on = walpe_lazy_set (&on_cell, g_getenv ("WALPE_FX_POOL_LOG") != NULL);
     if (!on || ++frames % 300 != 20 || !fx_pool)
         return;
     GString *ln = g_string_new (NULL);
@@ -3276,11 +3386,13 @@ static void fx_pool_new_frame (void)
     /* WALPE_FX_POOL_IDLE_MS=n: how long an unused pool target is kept
      * (default 5000; at least 50). Shorter = less memory after a scene
      * calms down, more allocations when layers come and go. */
-    static gint64 idle_us = -1;
-    if (idle_us < 0) {
+    static gint64 idle_us;
+    static gsize idle_once;   /* (a 64-bit value: g_once, see common/lazy.h) */
+    if (g_once_init_enter (&idle_once)) {
         const char *e = g_getenv ("WALPE_FX_POOL_IDLE_MS");
         gint64 ms = e && *e ? g_ascii_strtoll (e, NULL, 10) : 0;
         idle_us = ms > 0 ? MAX (ms, 50) * 1000 : FX_POOL_IDLE_US;
+        g_once_init_leave (&idle_once, 1);
     }
     /* a capture nobody handed back (the layer loop left early) */
     for (guint i = 0; fx_pool && i < fx_pool->len; i++)
@@ -3316,10 +3428,11 @@ static void fx_pool_new_frame (void)
  * the prefix cache keys by it today. */
 int fx_capture_get (int w, int h, guint *fbo, guint *tex, gboolean *opaque)
 {
-    static int rgba = -1;
+    static WalpeLazy rgba_cell = WALPE_LAZY_UNSET;
+    int rgba = walpe_lazy_get (&rgba_cell);
     if (rgba < 0) {
         const char *e = g_getenv ("WALPE_FX_CAPTURE_RGBA");
-        rgba = e && *e == '1';
+        rgba = walpe_lazy_set (&rgba_cell, e && *e == '1');
     }
     GLuint f = 0, t = 0;
     const FxRtFormat want = rgba ? FX_FMT_RGBA8 : FX_FMT_CAPTURE;
@@ -3504,10 +3617,11 @@ static EffTarget *fx_find_target (EffectChain *ch, const char *name);
 
 static gboolean fx_level_rule (void)
 {
-    static int on = -1;
+    static WalpeLazy on_cell = WALPE_LAZY_UNSET;
+    int on = walpe_lazy_get (&on_cell);
     if (on < 0) {
         const char *e = g_getenv ("WALPE_FX_POST_LEVEL");
-        on = !(e && *e == '0');
+        on = walpe_lazy_set (&on_cell, !(e && *e == '0'));
     }
     return on;
 }
@@ -3534,6 +3648,8 @@ static guint64 fx_chain_px (EffectChain *ch, int rw, int rh, int tdiv, guint *pa
 {
     guint64 px = 0;
     guint n = 0;
+    if (G_UNLIKELY (ch->sim != NULL))
+        return fxsim_chain_px (ch, rw, rh, passes);   /* (fx_sim.h) its grid has a size of its own */
     for (int i = 0; i < ch->n_passes; i++) {
         EffPass *ps = &ch->passes[i];
         EffTarget *t = ps->target[0] ? fx_find_target (ch, ps->target) : NULL;
@@ -3594,6 +3710,8 @@ static void fx_keep_scan (EffectChain *ch)
         EffPass *p = &ch->passes[i];
         EffTarget *t = p->target[0] ? fx_find_target (ch, p->target) : NULL;
         p->kp_free = 1;
+        if (ch->sim)
+            continue;   /* (fx_sim.h) no pass of a simulation is drawn only once */
         if (!t || p->is_copy || p->is_swap || p->moves_verts || !p->program)
             continue;
         gboolean ok = TRUE;
@@ -3642,7 +3760,21 @@ static GLuint fx_chain_run (EffectChain *ch, GLuint input, int w, int h,
     }
     if (!ch->kp_checked)
         fx_keep_scan (ch);   /* (before the targets are made: a kept pass owns its target) */
-    fx_ensure_targets (ch, w, h, k, own, fx_chain_tdiv (ch));
+    if (G_UNLIKELY (ch->sim != NULL)) {
+        /* a simulation (fx_sim.h): targets of its own for life, and as
+         * many steps as scene time has passed since the last frame */
+        fxsim_ensure_targets (ch, w, h, k);
+        if (fxsim_off (ch))
+            return input;   /* no float targets on this driver: left out */
+        if (fxsim_begin (ch, input, w, h, fullw, fullh, k) == FXSIM_RUN_REUSE) {
+            /* no step is due and nothing its picture is drawn from changed */
+            fx_passes_cached += (guint) ch->sim->n_present;
+            ch->planned = FALSE;
+            return ch->out_tex;
+        }
+    } else {
+        fx_ensure_targets (ch, w, h, k, own, fx_chain_tdiv (ch));
+    }
     GLuint previous = input;
     int prevres[4] = { fullw, fullh, w, h };
     const int inres[4] = { fullw, fullh, w, h };
@@ -3652,11 +3784,25 @@ static GLuint fx_chain_run (EffectChain *ch, GLuint input, int w, int h,
     EffTarget *alt = ch->alt_out >= 0 ? &ch->targets[ch->alt_out] : NULL;
     gboolean out_written = FALSE, to_alt = FALSE;
 
+sim_round:   /* (fx_sim.h) a simulation runs the list once per step that is due */
     for (int i = 0; i < ch->n_passes; i++) {
         EffPass *pass = &ch->passes[i];
         EffTarget *target = pass->target[0] ? fx_find_target (ch, pass->target) : NULL;
         if (pass->target[0] && !target)
             continue;
+        if (G_UNLIKELY (ch->sim != NULL) && fxsim_skips (ch, i)) {
+            /* (fx_sim.h) not part of this round; what a later pass reads
+             * by default is what this one drew when it last ran */
+            if (target && !pass->is_copy) {
+                previous = target->tex;
+                prevres[0] = prevres[2] = target->vw;
+                prevres[1] = prevres[3] = target->vh;
+                output = target->tex;
+            }
+            continue;
+        }
+        /* a pass of a simulation's step: it is told the step, not the frame */
+        const gboolean sim_step = ch->sim && ch->sim->mode == FXSIM_RUN_STEP && ch->sim->step_pass[i];
         /* "Skip hidden areas": only the part of the target a later pass
          * or the caller reads is filled (fx_chain_plan; never set unless
          * a clip is at work) */
@@ -3857,15 +4003,17 @@ static GLuint fx_chain_run (EffectChain *ch, GLuint input, int w, int h,
                 break;
             }
             case FXU_TIME: {
-                const float v = fx_shader_time (time);
+                const float v = G_UNLIKELY (sim_step) ? ch->sim->u_time : fx_shader_time (time);
                 if (fx_uniform_changed (ul, &v, 1))
                     glUniform1f (fu->loc, v);
                 break;
             }
-            case FXU_FRAMETIME:
-                if (fx_uniform_changed (ul, &fx_frame.dt, 1))
-                    glUniform1f (fu->loc, fx_frame.dt);
+            case FXU_FRAMETIME: {
+                const float v = G_UNLIKELY (sim_step) ? ch->sim->u_dt : fx_frame.dt;
+                if (fx_uniform_changed (ul, &v, 1))
+                    glUniform1f (fu->loc, v);
                 break;
+            }
             case FXU_SCREEN: {
                 const float v[3] = { (float) fx_frame.sw, (float) fx_frame.sh,
                                      (float) fx_frame.sw / (float) fx_frame.sh };
@@ -3907,11 +4055,38 @@ static GLuint fx_chain_run (EffectChain *ch, GLuint input, int w, int h,
                 break;
             }
             case FXU_POINTER: {
-                const float v[2] = { fx_frame.px, fx_frame.py };
+                float v[2] = { fx_frame.px, fx_frame.py };
+                if (G_UNLIKELY (ch->sim != NULL))
+                    fxsim_pointer (ch, i, v, NULL);
                 if (fx_uniform_changed (ul, v, 2))
                     glUniform2f (fu->loc, v[0], v[1]);
                 break;
             }
+            case FXU_POINTER_LAST: {
+                /* simulation chains only: the pointer at the step before */
+                float v[2] = { fx_frame.px, fx_frame.py }, l[2] = { fx_frame.px, fx_frame.py };
+                if (ch->sim)
+                    fxsim_pointer (ch, i, v, l);
+                if (fx_uniform_changed (ul, l, 2))
+                    glUniform2f (fu->loc, l[0], l[1]);
+                break;
+            }
+            case FXU_POINTER_STATE: {
+                /* simulation chains only. z = the left button is held (the
+                 * stock shader adds it to the strength of the pointer's
+                 * push); what the other three hold in Wallpaper Engine is
+                 * not known: 0. */
+                const float v[4] = { 0.0f, 0.0f,
+                                     fxsim_frame.ptr_down && !fxsim_frame.ptr_absent ? 1.0f : 0.0f, 0.0f };
+                if (fx_uniform_changed (ul, v, 4))
+                    glUniform4f (fu->loc, v[0], v[1], v[2], v[3]);
+                break;
+            }
+            case FXU_TEXPROJ_INV:
+                /* simulation chains only: the frame's clip space -> the layer's */
+                if (ch->sim)
+                    glUniformMatrix4fv (fu->loc, 1, GL_FALSE, ch->sim->map);
+                break;
             case FXU_DAYTIME: {
                 GDateTime *now = g_date_time_new_now_local ();
                 float d = (float) (g_date_time_get_hour (now) * 3600 + g_date_time_get_minute (now) * 60 +
@@ -3963,15 +4138,22 @@ static GLuint fx_chain_run (EffectChain *ch, GLuint input, int w, int h,
          * WALPE_FX_CLEAR=invalidate: tell the driver instead that the old
          * content is not needed (glInvalidateFramebuffer; nothing to gain
          * on desktop GPUs, a tile-based one saves the tile load). */
-        static int clear_mode = -1;   /* 0 = when needed, 1 = always, 2 = invalidate */
+        /* (worked out in a local and stored when final: the shared value
+         * used to be 2 for a moment on a GL that cannot invalidate, and
+         * another monitor's thread could take it) */
+        static WalpeLazy clear_cell = WALPE_LAZY_UNSET;   /* 0 = when needed, 1 = always, 2 = invalidate */
+        int clear_mode = walpe_lazy_get (&clear_cell);
         if (clear_mode < 0) {
             const char *e = g_getenv ("WALPE_FX_CLEAR");
             clear_mode = !e || !*e ? 0 : !strcmp (e, "invalidate") ? 2 : *e == '1' ? 1 : 0;
-            if (clear_mode == 2 && !(epoxy_is_desktop_gl ()
-                                     ? epoxy_gl_version () >= 43 ||
-                                       epoxy_has_gl_extension ("GL_ARB_invalidate_subdata")
-                                     : epoxy_gl_version () >= 30))
+            const WalpeGlCaps *gc = walpe_gl_caps ();
+            if (clear_mode == 2 && !(gc ? gc->invalidate_fb
+                                        : epoxy_is_desktop_gl ()
+                                              ? epoxy_gl_version () >= 43 ||
+                                                epoxy_has_gl_extension ("GL_ARB_invalidate_subdata")
+                                              : epoxy_gl_version () >= 30))
                 clear_mode = 0;
+            walpe_lazy_set (&clear_cell, clear_mode);
         }
         gboolean reads_own = FALSE;
         GLuint draw_tex = target ? target->tex : to_alt ? alt->tex : ch->out_tex;
@@ -4080,15 +4262,27 @@ pass_done:
         }
     }
 
-    static int fx_probe = -1;   /* read once: this runs per chain per frame */
+    if (G_UNLIKELY (ch->sim != NULL)) {
+        if (fxsim_next_round (ch)) {
+            /* the next step: it reads the chain's input as the first did */
+            previous = input;
+            memcpy (prevres, inres, sizeof (prevres));
+            output = input;
+            out_written = to_alt = FALSE;
+            goto sim_round;
+        }
+        fxsim_end (ch, input, output, w, h, fullw, fullh, k);
+    }
+
+    static WalpeLazy probe_cell = WALPE_LAZY_UNSET;   /* read once: this runs per chain per frame */
+    int fx_probe = walpe_lazy_get (&probe_cell);
     if (fx_probe < 0)
-        fx_probe = g_getenv ("WALPE_FX_PROBE") != NULL;
+        fx_probe = walpe_lazy_set (&probe_cell, g_getenv ("WALPE_FX_PROBE") != NULL);
     if (fx_probe) {
         /* debugging aid: corner + center of the chain output, and of the
          * input (straight alpha expected) */
-        static int nprobe;
-        if (nprobe < 200) {
-            nprobe++;
+        static atomic_int nprobe;
+        if (walpe_first_n (&nprobe, 200)) {
             guint8 oc[4] = { 0 }, oz[4] = { 0 };
             glReadPixels (0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, oc);
             glReadPixels (ch->out_w / 2, ch->out_h / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, oz);
@@ -4099,7 +4293,9 @@ pass_done:
             glGetTexLevelParameteriv (GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &iw);
             glGetTexLevelParameteriv (GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &ih);
             guint8 ic[4] = { 0 };
-            if (iw > 0 && ih > 0 && iw <= fullw && ih <= fullh) {
+            /* (OpenGL ES cannot read a texture back: the input's corner
+             * stays 0 in the probe line there) */
+            if (!walpe_gl_feat_es () && iw > 0 && ih > 0 && iw <= fullw && ih <= fullh) {
                 glGetTexImage (GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, buf);
                 memcpy (ic, buf, 4);
             }
@@ -4126,6 +4322,8 @@ pass_done:
  * the previous frame). Anything else is never cached. */
 static gboolean fx_chain_static (EffectChain *ch)
 {
+    if (fxsim_off (ch))
+        return TRUE;   /* (fx_sim.h) a simulation that is left out draws nothing */
     if (ch->cacheable >= 0)
         return ch->cacheable;
     gboolean ok = TRUE;
@@ -4172,6 +4370,8 @@ static gboolean fx_chain_feedback (EffectChain *ch);
  * constants and the target sizes (FX_DYN_*; 0 = fx_chain_static). */
 static guint fx_chain_dyn (EffectChain *ch)
 {
+    if (fxsim_off (ch))
+        return 0;   /* (fx_sim.h) left out */
     if (ch->dyn >= 0)
         return (guint) ch->dyn;
     guint m = 0;
@@ -4184,7 +4384,9 @@ static guint fx_chain_dyn (EffectChain *ch)
             case FXU_TIME:
             case FXU_FRAMETIME: m |= FX_DYN_TIME; break;
             case FXU_AUDIO:     m |= FX_DYN_AUDIO; break;
-            case FXU_POINTER:   m |= FX_DYN_POINTER; break;
+            case FXU_POINTER:
+            case FXU_POINTER_LAST:
+            case FXU_POINTER_STATE: m |= FX_DYN_POINTER; break;
             case FXU_DAYTIME:   m |= FX_DYN_DAYTIME; break;
             default: break;
             }
@@ -4304,6 +4506,10 @@ struct FxSet {
      * with the caller's draw of the result (the earlier build's order) */
     gboolean tinted, alpha_after;
     float tint[4];
+    /* the input is a sprite sheet: the part of it the material pass reads
+     * (fx_set_input_frame: origin, x axis, y axis) */
+    gboolean framed;
+    float frame_uv[6];
     GLuint pre_fbo, pre_tex;
     int pre_pool;       /* as EffTarget.pool */
     int pre_w, pre_h;
@@ -4339,9 +4545,14 @@ struct FxSet {
                                * drawn as one pass (fx_quality = fast) */
     guint fxs_mark;           /* fx_fuse.h (fxf_refresh / fxf_settle): passes */
     gboolean fxs_stale;       /* of this set changed programs in the last run */
+    /* fx_sim.h: a chain of the set is a simulation; sim_gen = the state of
+     * the switch / quality level the set's classification belongs to */
+    gboolean has_sim, sim_dirty;
+    guint sim_gen;
 };
 
 #include "fx_fuse.h"
+#include "fx_sim.h"
 
 /* The divisor (1 = redraw every frame) the set tolerates when `want` (2,
  * 3) is asked for. Never held: a chain that carries its own picture from
@@ -4362,6 +4573,8 @@ static int fx_chain_hold_div (EffectChain *c, int want, gboolean all, const char
     const char *dummy;
     if (!why)
         why = &dummy;
+    if (fxsim_off (c))
+        return 0;   /* (fx_sim.h) left out: nothing of it is drawn */
     if (c->feedback < 0)
         c->feedback = fx_chain_feedback (c);
     if (c->feedback == 1) {
@@ -4457,6 +4670,7 @@ gboolean fx_set_hold_epoch (gpointer fxset, guint *epoch)
      * redraws, and so does every run until one is kept */
     if (!set || set->n == 0 || fx_q.div <= 1 || !set->held || !set->key.out)
         return FALSE;
+    fxsim_sync (set, FALSE);
     int hold = fx_set_elig (set)[(fx_q.all ? 2 : 0) + (fx_q.div == 3 ? 1 : 0)];
     if (hold <= 1)
         return FALSE;
@@ -4529,16 +4743,59 @@ static void fx_tint_program (void)
     }
 }
 
+/* the same pass over one frame of a sprite sheet (fx_set_input_frame): a
+ * program of its own, built when the first sprite layer with effects is
+ * drawn - layers without a sheet run the program above, untouched */
+static __thread GLuint tint_uv_prog;
+static __thread GLint tint_uv_loc_tex, tint_uv_loc_col, tint_uv_loc_t, tint_uv_loc_r;
+
+static void fx_tint_uv_program (void)
+{
+    if (tint_uv_prog)
+        return;
+    static const char *vs_body =
+        "in vec3 a_pos;\nin vec2 a_uv;\nout vec2 v_uv;\nuniform vec2 u_t;\nuniform vec4 u_r;\n"
+        "void main(){ v_uv = u_t + a_uv.x * u_r.xy + a_uv.y * u_r.zw; gl_Position = vec4(a_pos, 1.0); }\n";
+    static const char *fs_body =
+        "in vec2 v_uv;\nuniform sampler2D u_tex;\nuniform vec4 u_col;\nout vec4 frag;\n"
+        "void main(){ vec4 c = texture(u_tex, v_uv); frag = vec4(c.rgb * u_col.rgb, c.a * u_col.a); }\n";
+    const char *src[2];
+    GLuint sh[2];
+    for (int i = 0; i < 2; i++) {
+        src[0] = i ? walpe_gl_shader_fs_header () : walpe_gl_shader_header ();
+        src[1] = i ? fs_body : vs_body;
+        sh[i] = glCreateShader (i ? GL_FRAGMENT_SHADER : GL_VERTEX_SHADER);
+        glShaderSource (sh[i], 2, src, NULL);
+        glCompileShader (sh[i]);
+    }
+    tint_uv_prog = glCreateProgram ();
+    glAttachShader (tint_uv_prog, sh[0]);
+    glAttachShader (tint_uv_prog, sh[1]);
+    glBindAttribLocation (tint_uv_prog, 0, "a_pos");
+    glBindAttribLocation (tint_uv_prog, 1, "a_uv");
+    glLinkProgram (tint_uv_prog);
+    glDeleteShader (sh[0]);
+    glDeleteShader (sh[1]);
+    tint_uv_loc_tex = glGetUniformLocation (tint_uv_prog, "u_tex");
+    tint_uv_loc_col = glGetUniformLocation (tint_uv_prog, "u_col");
+    tint_uv_loc_t = glGetUniformLocation (tint_uv_prog, "u_t");
+    tint_uv_loc_r = glGetUniformLocation (tint_uv_prog, "u_r");
+}
+
 static void fx_tint_pass (struct FxSet *set, GLuint input, int rw, int rh, gboolean own,
                           const FxNeed *need)
 {
-    fx_tint_program ();
+    const gboolean framed = set->framed;
+    if (framed)
+        fx_tint_uv_program ();
+    else
+        fx_tint_program ();
     /* the tinted copy is read by the first chain only: lent from the pool
      * unless a cache keeps it (a static prefix made of it alone) */
     fx_target_ensure (&set->pre_fbo, &set->pre_tex, &set->pre_pool, &set->pre_w, &set->pre_h,
                       rw, rh, own);
-    WALPE_PROF_PASS_BEGIN ("(layer colour)", -1, -1, rw, rh);   /* GPUPROF */
-    glUseProgram (tint_prog);
+    WALPE_PROF_PASS_BEGIN (framed ? "(layer colour, sprite frame)" : "(layer colour)", -1, -1, rw, rh);   /* GPUPROF */
+    glUseProgram (framed ? tint_uv_prog : tint_prog);
     fx_bind_pass_vao ();
     if (fx_gls.on) {
         fx_gls_pass_state ();
@@ -4547,8 +4804,16 @@ static void fx_tint_pass (struct FxSet *set, GLuint input, int rw, int rh, gbool
         glDisable (GL_BLEND);
     }
     fx_gls_bind_texture (0, input);
-    glUniform1i (tint_loc_tex, 0);
-    glUniform4f (tint_loc_col, set->tint[0], set->tint[1], set->tint[2], set->tint[3]);
+    if (framed) {
+        glUniform1i (tint_uv_loc_tex, 0);
+        glUniform4f (tint_uv_loc_col, set->tint[0], set->tint[1], set->tint[2], set->tint[3]);
+        glUniform2f (tint_uv_loc_t, set->frame_uv[0], set->frame_uv[1]);
+        glUniform4f (tint_uv_loc_r, set->frame_uv[2], set->frame_uv[3], set->frame_uv[4],
+                     set->frame_uv[5]);
+    } else {
+        glUniform1i (tint_loc_tex, 0);
+        glUniform4f (tint_loc_col, set->tint[0], set->tint[1], set->tint[2], set->tint[3]);
+    }
     glBindFramebuffer (GL_FRAMEBUFFER, set->pre_fbo);
     fx_gls_viewport (rw, rh);
     /* fx_region.h: only what the first chain reads of the tinted copy */
@@ -4687,6 +4952,23 @@ static void fx_level_probe (struct FxSet *set, EffectChain *ch, GLuint in, GLuin
     (void) set;
 }
 
+void fx_set_input_frame (gpointer fxset, const float uv[6])
+{
+    struct FxSet *set = fxset;
+    if (!set)
+        return;
+    /* (No generation is bumped here: this is called while a frame is
+     * drawn, after the frame was compared with the one on screen, and a
+     * bump at that point would have the next frame drawn once more. The
+     * caller invalidates when the frame changes, before it compares.) */
+    gboolean ok = uv != NULL;
+    for (int i = 0; ok && i < 6; i++)
+        ok = isfinite (uv[i]);
+    set->framed = ok;
+    if (ok)
+        memcpy (set->frame_uv, uv, sizeof (set->frame_uv));
+}
+
 void fx_set_input_tint (gpointer fxset, const float *rgb)
 {
     struct FxSet *set = fxset;
@@ -4799,6 +5081,7 @@ gpointer fx_build_for_object (const char *dir, JsonArray *effects, const char *d
             /* GPUPROF: "effects/blur/effect.json" -> "blur" */
             walpe_prof_effect_label (ch->prof_name, sizeof (ch->prof_name),
                                      wpj_str (inst, "file", ""));
+            set->has_sim |= ch->sim != NULL;   /* fx_sim.h */
         }
         set->chains[built++] = ch; /* NULLs kept: order matters */
         g_atomic_int_inc (ch ? &fx_stat_ok : &fx_stat_fail);
@@ -4837,7 +5120,7 @@ void fx_free_for_object (gpointer fxset)
  * draw (or the input when no effects). fullw/fullh = input's padded size */
 /* a chain that runs: visible (scripts) and not left out by the
  * post-processing level */
-#define FX_ON(c) ((c)->enabled && !fx_chain_dropped (c))
+#define FX_ON(c) ((c)->enabled && !fx_chain_dropped (c) && !fxsim_off (c))
 static __thread guint fx_passes_held;
 
 /* Who draws what a run keeps. fx_run_for_object keeps results over frames
@@ -4987,8 +5270,12 @@ static GLuint fx_run_for_object_1 (gpointer fxset, GLuint input, int w, int h,
      * run only (taken before the early returns, like the layer quad) */
     const FxNeed rg_caller = fxr_caller_need;
     fxr_caller_need.mode = FXR_NONE;
+    /* fx_sim.h: where the layer sits in the frame, for this run only too */
+    fxsim_frame.map_live = fxsim_frame.map_set;
+    fxsim_frame.map_set = FALSE;
     if (!set || set->n == 0)
         return input;
+    fxsim_sync (set, TRUE);
     if (!have_lay)
         memset (lay, 0, sizeof (lay));
     /* post-processing "off": "left out" belongs to the constants the
@@ -5099,10 +5386,11 @@ static GLuint fx_run_for_object_1 (gpointer fxset, GLuint input, int w, int h,
     if (use_cache && set->cached && key_same) {
         /* WALPE_FX_CACHE_CHECK=1 (diagnostics): every 20th hit, render the
          * chains anyway and compare with the cached image */
-        static int check = -1;
+        static WalpeLazy check_cell = WALPE_LAZY_UNSET;
         static __thread guint hits;
+        int check = walpe_lazy_get (&check_cell);
         if (check < 0)
-            check = g_getenv ("WALPE_FX_CACHE_CHECK") != NULL;
+            check = walpe_lazy_set (&check_cell, g_getenv ("WALPE_FX_CACHE_CHECK") != NULL);
         if (!check || ++hits % 20 != 0 || set->key.out == input) {
             for (int i = 0; i < set->n; i++)
                 if (set->chains[i] && FX_ON (set->chains[i]))
@@ -5144,7 +5432,9 @@ static GLuint fx_run_for_object_1 (gpointer fxset, GLuint input, int w, int h,
     for (int i = 0; i < set->n; i++)
         any |= set->chains[i] && FX_ON (set->chains[i]) &&
                !(set->fold_from >= 0 && i >= set->fold_from);
-    gboolean tint_pass = set->tinted && any;
+    /* (a sprite sheet as the input: the pass also picks the frame, so it
+     * runs whatever the colour is) */
+    gboolean tint_pass = (set->tinted || set->framed) && any;
     /* static prefix (see struct FxSet): the leading static chains of a
      * set that is not static as a whole, over a static input */
     int pfx_end = 0;
@@ -5344,7 +5634,7 @@ static GLuint fx_run_for_object_1 (gpointer fxset, GLuint input, int w, int h,
             set->rg.compose = fx_q.compose;
             set->rg.ext = ext;
             fxr_log_plan (set, ok, from, cw, chh);
-            for (int i = from; ok && fxr_log_on > 0 && i < set->n; i++)
+            for (int i = from; ok && fxr_log_wanted () && i < set->n; i++)
                 for (int q = 0; set->chains[i] && FX_ON (set->chains[i]) && q < set->chains[i]->n_passes; q++)
                     fxr_log_pass (i, q, &set->chains[i]->passes[q], fxr_serial);
         }
@@ -5570,6 +5860,13 @@ static GLuint fx_run_for_object_1 (gpointer fxset, GLuint input, int w, int h,
         gboolean hold_keep = (hold > 1 && i == last_run) || (hp_div >= 2 && i == hp_last);
         int own = ch->feedback == 1 ? FX_OWN_ALL : (keep || hold_keep) ? FX_OWN_RESULT : FX_OWN_NONE;
         GLuint before = current;
+        if (G_UNLIKELY (ch->sim != NULL)) {
+            /* fx_sim.h: in a frame without a step the picture drawn last may
+             * be shown again while the chain reads the layer's own, still
+             * texture and the set's inputs are what they were */
+            fxsim_frame.input_static = input_static && current == input;
+            fxsim_frame.set_gen = set->gen;
+        }
         current = fx_chain_run (ch, current, w, h, fullw, fullh, time, k,
                                 have_lay ? lay : NULL, own);
         /* post-processing "off": a chain of a cosmetic family runs until
@@ -5716,6 +6013,7 @@ gboolean fx_is_static (gpointer fxset)
     struct FxSet *set = fxset;
     if (!set || !set->n)
         return FALSE;
+    fxsim_sync (set, FALSE);
     if (set->cacheable < 0) {
         set->cacheable = 1;
         for (int i = 0; i < set->n; i++)
@@ -5731,6 +6029,8 @@ static gboolean fx_chain_feedback (EffectChain *ch)
 {
     char written[FX_MAX_TARGETS][64];
     int nw = 0;
+    if (fxsim_off (ch))
+        return FALSE;   /* (fx_sim.h) left out: it keeps nothing */
     for (int i = 0; i < ch->n_passes; i++) {
         EffPass *p = &ch->passes[i];
         if (p->is_swap)
@@ -5877,6 +6177,7 @@ void fx_quality_describe (gpointer fxset, const char *layer, GString *out)
         if (c->family)
             g_string_append_printf (out, " | %s", walpe_fx_family_name ((WalpeFxFamily) c->family));
         g_string_append_c (out, '\n');
+        fxsim_describe (set, c, layer, out);   /* fx_sim.h */
     }
     const char *why_slow = "", *why_all = "";
     fx_set_hold_eval (set, 3, FALSE, &why_slow);
@@ -5940,7 +6241,7 @@ static float fx_mask_coverage (GLuint tex, const int res[4], gboolean flow)
 static EffectChain *fx_first_chain (struct FxSet *set, int *ci)
 {
     for (int i = 0; set && i < set->n; i++)
-        if (set->chains[i] && set->chains[i]->enabled) {
+        if (set->chains[i] && set->chains[i]->enabled && !fxsim_off (set->chains[i])) {
             *ci = i;
             return set->chains[i];
         }
@@ -6179,6 +6480,7 @@ gboolean fx_cullable (gpointer fxset)
     struct FxSet *set = fxset;
     if (!set)
         return TRUE;
+    fxsim_sync (set, FALSE);
     if (!set->cullable) {
         set->cullable = 1;
         for (int i = 0; i < set->n; i++) {
@@ -6233,7 +6535,9 @@ gboolean fx_uses_pointer (gpointer fxset)
         EffectChain *ch = set->chains[i];
         for (int p = 0; ch && p < ch->n_passes; p++)
             for (int u = 0; u < ch->passes[p].n_dyn; u++)
-                if (ch->passes[p].dyn[u].kind == FXU_POINTER)
+                if (ch->passes[p].dyn[u].kind == FXU_POINTER ||
+                    ch->passes[p].dyn[u].kind == FXU_POINTER_LAST ||
+                    ch->passes[p].dyn[u].kind == FXU_POINTER_STATE)
                     return TRUE;
     }
     return FALSE;
@@ -6249,6 +6553,8 @@ guint fx_dynamic_inputs (gpointer fxset)
 {
     struct FxSet *set = fxset;
     guint m = 0;
+    if (set)
+        fxsim_sync (set, FALSE);
     for (int i = 0; set && i < set->n; i++)
         if (set->chains[i] && set->chains[i]->enabled)
             m |= fx_chain_dyn (set->chains[i]);

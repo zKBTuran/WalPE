@@ -165,6 +165,9 @@ static char *handler (const char *req, gpointer user)
         return g_strdup ("{\"ok\":false,\"error\":\"unknown cmd\"}");
     if (strstr (req, "\"refuse\""))
         return g_strdup ("{\"ok\":false,\"error\":\"no\"}");
+    /* a saved window system is not the running one: the daemon says so */
+    if (strstr (req, "\"backend\":\"wayland\""))
+        return g_strdup ("{\"ok\":true,\"restart_needed\":true}");
     return g_strdup ("{\"ok\":true}");
 }
 
@@ -223,6 +226,37 @@ static gpointer client_thread (gpointer u)
     CHECK (o && !walpe_set_check (o));      /* and the daemon would take all of it */
     if (n)
         json_node_unref (n);
+
+    /* the window system: `backend NAME` and `set backend=NAME` send the
+     * same member, as text ("on" / "off" stay text too: wayland_pointer) */
+    /* ... and walpe-ctl passes the daemon's "restart_needed" on as a note
+     * (it looked for it in the reply after freeing the reply: the note came
+     * or not by what the allocator had left there) */
+    CHECK (run_ctl (&err, "backend", "Wayland", NULL) == 0);
+    CHECK (err && strstr (err, "the setting is read when walpe-daemon starts"));
+    g_clear_pointer (&err, g_free);
+    n = sent ();
+    o = n ? json_node_get_object (n) : NULL;
+    CHECK (o && !g_strcmp0 (wpj_str (o, "cmd", ""), "set") && json_object_get_size (o) == 2);
+    CHECK (is_type (o, "backend", G_TYPE_STRING) && !g_strcmp0 (wpj_str (o, "backend", ""), "wayland"));
+    CHECK (o && !walpe_set_check (o));
+    if (n)
+        json_node_unref (n);
+    CHECK (run_ctl (&err, "set", "backend=x11", "wayland_pointer=off", NULL) == 0);
+    CHECK (err && !strstr (err, "walpe-daemon starts"));    /* no note without "restart_needed" */
+    g_clear_pointer (&err, g_free);
+    n = sent ();
+    o = n ? json_node_get_object (n) : NULL;
+    CHECK (is_type (o, "backend", G_TYPE_STRING) && !g_strcmp0 (wpj_str (o, "backend", ""), "x11"));
+    CHECK (is_type (o, "wayland_pointer", G_TYPE_STRING) &&
+           !g_strcmp0 (wpj_str (o, "wayland_pointer", ""), "off"));
+    CHECK (o && !walpe_set_check (o));
+    if (n)
+        json_node_unref (n);
+    /* a name that is none of the three is answered by walpe-ctl itself */
+    CHECK (run_ctl (&err, "backend", "mir", NULL) == 1);
+    CHECK (err && strstr (err, "auto, x11 or wayland"));
+    g_clear_pointer (&err, g_free);
 
     /* a key with a quote in it stays one member of a "set" (it used to
      * end the member and bring its own "cmd" along) */
@@ -332,6 +366,78 @@ static gpointer client_thread (gpointer u)
     n = sent ();
     o = n ? json_node_get_object (n) : NULL;
     CHECK (o && !g_strcmp0 (wpj_str (o, "action", ""), "scroll") && wpj_num (o, "dy", 0) == -3);
+    if (n)
+        json_node_unref (n);
+
+    /* resolution: the request per form; values go out canonical */
+    CHECK (run_ctl (NULL, "resolution", NULL) == 0);
+    n = sent ();
+    o = n ? json_node_get_object (n) : NULL;
+    CHECK (o && !g_strcmp0 (wpj_str (o, "cmd", ""), "resolution") && json_object_get_size (o) == 1);
+    if (n)
+        json_node_unref (n);
+    CHECK (run_ctl (NULL, "resolution", "HDMI-0", "2K", "texture_limit=4k", NULL) == 0);
+    n = sent ();
+    o = n ? json_node_get_object (n) : NULL;
+    CHECK (o && !g_strcmp0 (wpj_str (o, "cmd", ""), "resolution") && is_type (o, "monitor", G_TYPE_STRING) &&
+           !g_strcmp0 (wpj_str (o, "monitor", ""), "HDMI-0") && !g_strcmp0 (wpj_str (o, "value", ""), "1440p") &&
+           !g_strcmp0 (wpj_str (o, "texture_limit", ""), "4096") && !json_object_has_member (o, "asked"));
+    if (n)
+        json_node_unref (n);
+    CHECK (run_ctl (NULL, "resolution", "1", "1920X1200", NULL) == 0);     /* an index */
+    n = sent ();
+    o = n ? json_node_get_object (n) : NULL;
+    CHECK (o && is_type (o, "monitor", G_TYPE_INT64) && wpj_num (o, "monitor", -1) == 1 &&
+           !g_strcmp0 (wpj_str (o, "value", ""), "1920x1200"));
+    if (n)
+        json_node_unref (n);
+    CHECK (run_ctl (NULL, "resolution", "all", "native", NULL) == 0);       /* every connected one */
+    n = sent ();
+    o = n ? json_node_get_object (n) : NULL;
+    CHECK (o && !json_object_has_member (o, "monitor") && !g_strcmp0 (wpj_str (o, "value", ""), "native"));
+    if (n)
+        json_node_unref (n);
+    CHECK (run_ctl (NULL, "resolution", "--keep", NULL) == 0);
+    n = sent ();
+    o = n ? json_node_get_object (n) : NULL;
+    CHECK (o && is_type (o, "asked", G_TYPE_BOOLEAN) && wpj_bool (o, "asked", FALSE) &&
+           !json_object_has_member (o, "monitor") && !json_object_has_member (o, "value"));
+    if (n)
+        json_node_unref (n);
+    CHECK (run_ctl (NULL, "resolution", "DP-2", "--ask", NULL) == 0);
+    n = sent ();
+    o = n ? json_node_get_object (n) : NULL;
+    CHECK (o && !g_strcmp0 (wpj_str (o, "monitor", ""), "DP-2") && is_type (o, "asked", G_TYPE_BOOLEAN) &&
+           !wpj_bool (o, "asked", TRUE));
+    if (n)
+        json_node_unref (n);
+    CHECK (run_ctl (NULL, "resolution", "DP-2", "--forget", NULL) == 0);
+    n = sent ();
+    o = n ? json_node_get_object (n) : NULL;
+    CHECK (o && wpj_bool (o, "forget", FALSE) && !json_object_has_member (o, "value"));
+    if (n)
+        json_node_unref (n);
+    CHECK (run_ctl (NULL, "resolution", "--prompt", "off", NULL) == 0);
+    n = sent ();
+    o = n ? json_node_get_object (n) : NULL;
+    CHECK (o && is_type (o, "prompt", G_TYPE_BOOLEAN) && !wpj_bool (o, "prompt", TRUE) &&
+           !json_object_has_member (o, "monitor"));
+    if (n)
+        json_node_unref (n);
+    /* ... and through set: text stays text ("none", "off" as a resolution
+     * word), the switch is a switch, and the daemon's check takes it */
+    CHECK (run_ctl (NULL, "set", "resolution=HDMI-0:1080p,DP-2:native", "texture_limit=2048",
+                    "scale_filter=nearest", "video_resolution=none", "resolution_prompt=off", NULL) == 0);
+    n = sent ();
+    o = n ? json_node_get_object (n) : NULL;
+    CHECK (o && is_type (o, "resolution", G_TYPE_STRING) &&
+           !g_strcmp0 (wpj_str (o, "resolution", ""), "HDMI-0:1080p,DP-2:native") &&
+           !g_strcmp0 (wpj_str (o, "texture_limit", ""), "2048") &&
+           !g_strcmp0 (wpj_str (o, "scale_filter", ""), "nearest") &&
+           is_type (o, "video_resolution", G_TYPE_STRING) &&
+           !g_strcmp0 (wpj_str (o, "video_resolution", ""), "none") &&
+           is_type (o, "resolution_prompt", G_TYPE_BOOLEAN) && !wpj_bool (o, "resolution_prompt", TRUE));
+    CHECK (o && !walpe_set_check (o));
     if (n)
         json_node_unref (n);
 
@@ -472,6 +578,13 @@ static void scan_daemon (const char *path)
         "fx_rate", "fx_rate_mode", "fps_idle", "post_processing", "tex_res", "fx_res", "texture_slack",
         /* in status as "backend" */
         "video_backend",
+        /* written by the functions ipc_status calls: gpu_status_json
+         * (daemon/gpu_glue.h), status_backend */
+        "gpu", "preset_follow_gpu", "wayland_pointer",
+        /* the scene feature switches: members of "feature_switches", one
+         * per row of engine/features.h */
+        "camera_parallax", "parallax_offset", "script_camera", "sprite_sheets", "script_texanim",
+        "bloom", "camera_shake",
     };
     const char *sa = strstr (txt, "\nstatic void ipc_status (JsonBuilder *b)\n{");
     const char *sz = sa ? strstr (sa, "\n}\n") : NULL;
@@ -685,6 +798,21 @@ int main (int argc, char **argv)
     NODAEMON ("props", "--monitor", "1");
     NODAEMON ("quality");
     NODAEMON ("cancel-import");
+    /* resolution: a value that is not one never leaves walpe-ctl */
+    BAD ("is not one of", "resolution", "HDMI-0", "1081q");
+    BAD ("too small", "resolution", "HDMI-0", "10x10");
+    BAD ("too large", "resolution", "HDMI-0", "20000x1200");   /* (20000x100 is too small first: 100 < 200 lines) */
+    BAD ("which monitor", "resolution", "1080p");
+    BAD ("texture_limit", "resolution", "HDMI-0", "texture_limit=huge");
+    BAD ("out of range", "resolution", "HDMI-0", "texture_limit=7");
+    BAD ("one argument too many", "resolution", "HDMI-0", "1080p", "720p");
+    BAD ("unknown option", "resolution", "--frobnicate");
+    BAD ("--prompt needs", "resolution", "--prompt", "maybe");
+    BAD ("goes alone", "resolution", "HDMI-0", "1080p", "--forget");
+    BAD ("nothing to set", "resolution", "HDMI-0");
+    NODAEMON ("resolution");
+    NODAEMON ("resolution", "all", "native");
+    NODAEMON ("set", "resolution=1080p");
 
     /* ---- 2. what goes over the socket */
     loop = g_main_loop_new (NULL, FALSE);
@@ -706,8 +834,19 @@ table:
     REFUSED ("{\"cmd\":\"set\",\"fps\":\"30\"}", "fps needs a number");
     REFUSED ("{\"cmd\":\"set\",\"pause_covered\":\"yes\"}", "pause_covered is a switch");
     REFUSED ("{\"cmd\":\"set\",\"focus_action\":false}", "focus_action needs a name");
+    TAKEN ("{\"cmd\":\"set\",\"backend\":\"wayland\",\"wayland_pointer\":\"auto\"}");
+    REFUSED ("{\"cmd\":\"set\",\"backend\":true}", "backend needs a name");
+    REFUSED ("{\"cmd\":\"set\",\"wayland_pointer\":1}", "wayland_pointer needs a name");
     REFUSED ("{\"cmd\":\"set\",\"parallax\":[true]}", "parallax is a switch");
     REFUSED ("{\"cmd\":\"set\",\"particle_density\":{\"a\":1}}", "single value");
+    /* the render resolution keys */
+    TAKEN ("{\"cmd\":\"set\",\"resolution\":\"1080p\",\"texture_limit\":\"auto\",\"scale_filter\":\"nearest\"}");
+    TAKEN ("{\"cmd\":\"set\",\"texture_limit\":2048,\"video_resolution\":\"none\",\"resolution_prompt\":false}");
+    TAKEN ("{\"cmd\":\"set\",\"texture_limit\":false}");
+    REFUSED ("{\"cmd\":\"set\",\"resolution\":1080}", "resolution needs a name or text");
+    REFUSED ("{\"cmd\":\"set\",\"texture_limit\":[2048]}", "single value");
+    REFUSED ("{\"cmd\":\"set\",\"resolution_prompt\":\"yes\"}", "resolution_prompt is a switch");
+    REFUSED ("{\"cmd\":\"set\",\"video_resolution\":false}", "video_resolution needs a name");
     /* values of the right type that were answered with ok and changed nothing */
     REFUSED ("{\"cmd\":\"set\",\"skip_hidden\":\"alwys\"}", "skip_hidden: off, auto or always");
     REFUSED ("{\"cmd\":\"set\",\"skip_hidden\":\"7\"}", "skip_hidden: off, auto or always");

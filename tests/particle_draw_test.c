@@ -360,12 +360,14 @@ static void layer_case (const char *name, WalpeWeParticles **ps, guint want_comp
      * shorter chains and a composite here, each rounding by up to half a
      * step: about one step RMS (48 dB) between ANY two orders of doing
      * them, whatever the resolution. Measured with Mesa llvmpipe: max 4
-     * and 52 dB all additive, max 5 to 7 and 47 to 49 dB otherwise; the
-     * limits leave room for another GL's rounding and are far from what
-     * a wrong blend gives (max 52, 27 dB when a normal system was let
-     * into a layer holding additive ones). */
+     * and 52 dB all additive, max 5 to 7 and 47 to 49 dB otherwise; on
+     * its texture filter for CPUs other than x86 (aarch64), which
+     * truncates where the x86 one rounds: max 5 and 48.6 dB all additive,
+     * max 6 and 46 dB otherwise. The limits leave room for another GL's
+     * rounding and are far from what a wrong blend gives (max 52, 27 dB
+     * when a normal system was let into a layer holding additive ones). */
     gboolean all_add = want_composites == 1 && st.composites == 1 && ps_additive;
-    CHECK (d.max <= (all_add ? 8 : 12) && d.psnr >= (all_add ? 49.0 : 45.0),
+    CHECK (d.max <= (all_add ? 8 : 12) && d.psnr >= (all_add ? 47.0 : 45.0),
            "%s: reduced layer: max difference %d, PSNR %.1f dB", name, d.max, d.psnr);
     CHECK (d.differing > 0, "%s: the layer changed no pixel at all: was it used?", name);
     walpe_weparticles_set_lowres (WALPE_PT_LOWRES_OFF);

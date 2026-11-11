@@ -38,62 +38,127 @@ static gboolean have_arg (char **argv, const char *a, const char *next)
     return FALSE;
 }
 
+/* the box the importer had built in until the size became a setting
+ * (video_resolution): what "1080p" gives. Every decision below is the one
+ * of that fixed limit. */
+static const WalpeVideoBox hd = { 1920, 1080 };
+
+/* the box is the caller's: another one, and none */
+static void test_boxes (void)
+{
+    WalpeMediaInfo mi = { .has_video = TRUE, .codec = (char *) "h264", .pix_fmt = (char *) "yuv420p",
+                          .width = 3840, .height = 2160, .sar_num = 1, .sar_den = 1 };
+    const WalpeVideoBox none = { 0, 0 }, uhd = { 3840, 2160 }, qhd = { 2560, 1440 }, hdp = { 1280, 720 };
+    int w = 0, h = 0;
+    /* no limit: a 4K H.264 file is copied as it is */
+    CHECK (walpe_import_can_remux (&mi, &none) && walpe_import_can_remux (&mi, NULL));
+    walpe_import_target_size (&mi, &none, &w, &h);
+    CHECK (w == 3840 && h == 2160);
+    walpe_import_target_size (&mi, NULL, &w, &h);
+    CHECK (w == 3840 && h == 2160);
+    /* a 4K box holds it; 1440p and 720p boxes scale it down */
+    CHECK (walpe_import_can_remux (&mi, &uhd) && !walpe_import_can_remux (&mi, &qhd));
+    walpe_import_target_size (&mi, &qhd, &w, &h);
+    CHECK (w == 2560 && h == 1440);
+    walpe_import_target_size (&mi, &hdp, &w, &h);
+    CHECK (w == 1280 && h == 720);
+    /* never enlarged, whatever the box */
+    mi.width = 640; mi.height = 360;
+    walpe_import_target_size (&mi, &uhd, &w, &h);
+    CHECK (w == 640 && h == 360);
+    /* a stream without a size: something even, not 0, also without a box */
+    mi.width = mi.height = 0;
+    walpe_import_target_size (&mi, &none, &w, &h);
+    CHECK (w >= 2 && h >= 2 && !(w & 1) && !(h & 1));
+    /* the scale filter carries the box's result */
+    mi.width = 7680; mi.height = 4320; mi.codec = (char *) "hevc";
+    char **av = walpe_import_build_argv ("/in/a.mkv", "/out/a.mp4.part", &mi, "libx264", FALSE, &uhd);
+    CHECK (have_arg (av, "-vf", "scale=3840:2160:flags=bicubic,setsar=1,format=yuv420p"));
+    g_strfreev (av);
+    av = walpe_import_build_argv ("/in/a.mkv", "/out/a.mp4.part", &mi, "libx264", FALSE, &none);
+    CHECK (have_arg (av, "-vf", "scale=7680:4320:flags=bicubic,setsar=1,format=yuv420p"));
+    g_strfreev (av);
+
+    /* the converted copy's name: one per box, and the 1920 x 1080 box has
+     * the name copies had before there was a choice (no suffix) */
+    char *dir = g_dir_make_tmp ("walpe-import-box-XXXXXX", NULL);
+    char *src = g_build_filename (dir, "clip.webm", NULL);
+    g_file_set_contents (src, "x", 1, NULL);
+    char *a = walpe_video_cache_file (src, &hd), *b = walpe_video_cache_file (src, &uhd);
+    char *c = walpe_video_cache_file (src, &none), *d = walpe_video_cache_file (src, NULL);
+    CHECK (a && b && c && d && strcmp (a, b) && strcmp (a, c) && strcmp (b, c) && !strcmp (c, d));
+    CHECK (a && g_str_has_suffix (a, ".mp4") && !strstr (a, "-full") && !strstr (a, "x1080"));
+    CHECK (b && g_str_has_suffix (b, "-3840x2160.mp4") && c && g_str_has_suffix (c, "-full.mp4"));
+    {
+        /* same stem: only the box differs */
+        char *ba = a ? g_path_get_basename (a) : NULL, *bb = b ? g_path_get_basename (b) : NULL;
+        CHECK (ba && bb && strlen (ba) == 36 && !strncmp (ba, bb, 32));
+        g_free (ba);
+        g_free (bb);
+    }
+    g_free (a); g_free (b); g_free (c); g_free (d);
+    g_remove (src);
+    g_rmdir (dir);
+    g_free (src);
+    g_free (dir);
+}
+
 static void test_decisions (void)
 {
     WalpeMediaInfo mi = { .has_video = TRUE, .codec = (char *) "h264", .pix_fmt = (char *) "yuv420p",
                           .width = 1920, .height = 1080, .sar_num = 1, .sar_den = 1 };
     int w = 0, h = 0;
-    CHECK (walpe_import_can_remux (&mi));           /* already what the player reads */
-    walpe_import_target_size (&mi, &w, &h);
+    CHECK (walpe_import_can_remux (&mi, &hd));           /* already what the player reads */
+    walpe_import_target_size (&mi, &hd, &w, &h);
     CHECK (w == 1920 && h == 1080);
     mi.width = 640; mi.height = 360;                /* small: copied, never upscaled */
-    CHECK (walpe_import_can_remux (&mi));
-    walpe_import_target_size (&mi, &w, &h);
+    CHECK (walpe_import_can_remux (&mi, &hd));
+    walpe_import_target_size (&mi, &hd, &w, &h);
     CHECK (w == 640 && h == 360);
     mi.width = 3840; mi.height = 2160;              /* 4K: encoded down to the cap */
-    CHECK (!walpe_import_can_remux (&mi));
-    walpe_import_target_size (&mi, &w, &h);
+    CHECK (!walpe_import_can_remux (&mi, &hd));
+    walpe_import_target_size (&mi, &hd, &w, &h);
     CHECK (w == 1920 && h == 1080);
     mi.width = 3440; mi.height = 1440;              /* ultrawide: width decides */
-    walpe_import_target_size (&mi, &w, &h);
+    walpe_import_target_size (&mi, &hd, &w, &h);
     CHECK (w == 1920 && h == 802);
     mi.width = 1080; mi.height = 1920;              /* portrait: height decides */
-    walpe_import_target_size (&mi, &w, &h);
+    walpe_import_target_size (&mi, &hd, &w, &h);
     CHECK (w == 606 && h == 1080);
     mi.width = 1920; mi.height = 1080; mi.rotation = 90;    /* stored sideways */
-    CHECK (!walpe_import_can_remux (&mi));
-    walpe_import_target_size (&mi, &w, &h);
+    CHECK (!walpe_import_can_remux (&mi, &hd));
+    walpe_import_target_size (&mi, &hd, &w, &h);
     CHECK (w == 606 && h == 1080);
     mi.rotation = 0; mi.sar_num = 4; mi.sar_den = 3; mi.width = 1440;   /* anamorphic 1440x1080 */
-    CHECK (!walpe_import_can_remux (&mi));
-    walpe_import_target_size (&mi, &w, &h);
+    CHECK (!walpe_import_can_remux (&mi, &hd));
+    walpe_import_target_size (&mi, &hd, &w, &h);
     CHECK (w == 1920 && h == 1080);
     mi.sar_num = mi.sar_den = 1; mi.width = 1279; mi.height = 719;      /* odd sizes */
-    CHECK (!walpe_import_can_remux (&mi));
-    walpe_import_target_size (&mi, &w, &h);
+    CHECK (!walpe_import_can_remux (&mi, &hd));
+    walpe_import_target_size (&mi, &hd, &w, &h);
     CHECK (w == 1278 && h == 718);
     mi.width = 1280; mi.height = 720;
     mi.pix_fmt = (char *) "yuv420p10le";
-    CHECK (!walpe_import_can_remux (&mi));
+    CHECK (!walpe_import_can_remux (&mi, &hd));
     mi.pix_fmt = (char *) "yuvj420p";
-    CHECK (walpe_import_can_remux (&mi));
+    CHECK (walpe_import_can_remux (&mi, &hd));
     mi.codec = (char *) "hevc";
-    CHECK (!walpe_import_can_remux (&mi));
+    CHECK (!walpe_import_can_remux (&mi, &hd));
     mi.width = mi.height = 0;                       /* unknown size: the cap, never 0 */
-    walpe_import_target_size (&mi, &w, &h);
+    walpe_import_target_size (&mi, &hd, &w, &h);
     CHECK (w >= 2 && h >= 2 && w <= 1920 && h <= 1080);
 
     /* the argument vector: names can never be options or protocols, the
      * source may only be a local container file, no audio, +faststart */
     mi.width = 3840; mi.height = 2160; mi.codec = (char *) "vp9"; mi.pix_fmt = (char *) "yuv420p";
-    char **av = walpe_import_build_argv ("/in/-i evil.webm", "/out/x.mp4.part", &mi, "libx264", FALSE);
+    char **av = walpe_import_build_argv ("/in/-i evil.webm", "/out/x.mp4.part", &mi, "libx264", FALSE, &hd);
     CHECK (have_arg (av, "-i", "file:/in/-i evil.webm") && have_arg (av, "file:/out/x.mp4.part", NULL));
     CHECK (have_arg (av, "-protocol_whitelist", "file") && have_arg (av, "-an", NULL));
     CHECK (have_arg (av, "-c:v", "libx264") && have_arg (av, "-movflags", "+faststart"));
     CHECK (have_arg (av, "-vf", "scale=1920:1080:flags=bicubic,setsar=1,format=yuv420p"));
     CHECK (have_arg (av, "-f", "mp4") && have_arg (av, "-nostdin", NULL));
     g_strfreev (av);
-    av = walpe_import_build_argv ("/in/a.mp4", "/out/a.mp4.part", &mi, "libx264", TRUE);
+    av = walpe_import_build_argv ("/in/a.mp4", "/out/a.mp4.part", &mi, "libx264", TRUE, &hd);
     CHECK (have_arg (av, "-c:v", "copy") && !have_arg (av, "-vf", NULL));
     g_strfreev (av);
 
@@ -206,7 +271,7 @@ static Result run_import (const char *src, const char *dest, int secs)
 {
     Result r = { 0 };
     GError *err = NULL;
-    WalpeImport *imp = walpe_import_start (src, dest, "libx264", done_cb, &r, &err);
+    WalpeImport *imp = walpe_import_start (src, dest, "libx264", &hd, done_cb, &r, &err);
     if (!imp) {
         r.error = g_strdup (err ? err->message : "?");
         g_clear_error (&err);
@@ -338,7 +403,7 @@ static void test_runs (void)
     /* cancelled in the middle of the encode: no output, no ".part", no callback */
     {
         Result c = { 0 };
-        WalpeImport *imp = walpe_import_start (lng, lib, "libx264", done_cb, &c, NULL);
+        WalpeImport *imp = walpe_import_start (lng, lib, "libx264", &hd, done_cb, &c, NULL);
         CHECK (imp != NULL);
         char *part = g_build_filename (lib, "long.mp4.part", NULL), *dst = g_build_filename (lib, "long.mp4", NULL);
         /* wait until ffmpeg writes (or the run ended, on a very fast machine) */
@@ -392,6 +457,7 @@ int main (void)
     g_unsetenv ("WALPE_IMPORT_ENCODER");
     loop = g_main_loop_new (NULL, FALSE);
     test_decisions ();
+    test_boxes ();
     test_tidy ();
     test_runs ();
     g_rmdir (tmp);

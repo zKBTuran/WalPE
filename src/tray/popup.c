@@ -1,4 +1,4 @@
-/* popup.c - the tray menu and tooltip drawn by walpe-tray itself (X11)
+/* popup.c - the tray menu and tooltip drawn by walpe-tray itself
  *
  * XEmbed trays have no menu protocol: like Windows tray icons, the app
  * shows its own menu. This is a small GTK4 window made override-redirect
@@ -11,12 +11,24 @@
  * from the GTK theme's public named colours, so a dark theme (settings.ini
  * gtk-application-prefer-dark-theme, GTK_THEME=...:dark or the desktop
  * portal's color-scheme) gives a dark menu.
+ *
+ * Off X11 (a Wayland session) a client can neither place a window nor
+ * grab the pointer, and no XEmbed tray exists. The menu is still needed
+ * there for StatusNotifierItem hosts that call ContextMenu instead of
+ * reading the menu over D-Bus (swaybar before 1.10) and for
+ * `walpe-tray --menu`: it then opens as an ordinary small window that the
+ * compositor places (fixed size, so tiling compositors float it), with the
+ * same keys, and closes when it loses the focus. The tooltip window is
+ * X11 only (StatusNotifierItem hosts draw the tooltip themselves).
  */
 #include <gtk/gtk.h>
 #include <string.h>
 #include "tray.h"
 
-#ifdef GDK_WINDOWING_X11
+/* the X11 parts need GTK's X11 backend and, for Xlib itself, a build with
+ * the XEmbed tray (meson defines WALPE_TRAY_XEMBED when libX11 / libXrender
+ * are there) */
+#if defined (GDK_WINDOWING_X11) && defined (WALPE_TRAY_XEMBED)
 #include <gdk/x11/gdkx.h>
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
@@ -77,7 +89,8 @@ static const char *css =
     "  padding: 5px 9px; border: 1px solid rgba(255,255,255,0.12); }\n"
     ".walpe-composited .walpe-tip-frame { border-radius: 6px; }\n";
 
-gboolean tray_popup_available (void)
+/* the toolkit runs on X11: override-redirect, placement and grabs exist */
+static gboolean on_x11 (void)
 {
 #ifdef HAVE_GDK_X11
     GdkDisplay *d = gdk_display_get_default ();
@@ -85,6 +98,11 @@ gboolean tray_popup_available (void)
 #else
     return FALSE;
 #endif
+}
+
+gboolean tray_popup_available (void)
+{
+    return gdk_display_get_default () != NULL;
 }
 
 static void dark_from_portal (void)
@@ -159,7 +177,7 @@ static void make_override_redirect (GtkWidget *w, const char *type)
 
 gboolean tray_x11_raise_class (const char *res_name)
 {
-    if (!tray_popup_available ())
+    if (!on_x11 ())
         return FALSE;
     Display *d = xdpy ();
     Window root = DefaultRootWindow (d);
@@ -437,12 +455,16 @@ static void popup_place (void)
     g_debug ("menu: %dx%d at %d,%d", w, h, x, y);
     gtk_window_set_default_size (GTK_WINDOW (P.win), w, h);
 #ifdef HAVE_GDK_X11
-    Window xw = xid_of (P.win);
-    if (xw) {
-        XMoveResizeWindow (xdpy (), xw, x, y, w, h);
-        XRaiseWindow (xdpy (), xw);
-        XFlush (xdpy ());
+    if (on_x11 ()) {
+        Window xw = xid_of (P.win);
+        if (xw) {
+            XMoveResizeWindow (xdpy (), xw, x, y, w, h);
+            XRaiseWindow (xdpy (), xw);
+            XFlush (xdpy ());
+        }
     }
+#else
+    (void) x; (void) y;
 #endif
 }
 
@@ -577,9 +599,11 @@ static void on_map (GtkWidget *w, gpointer u)
     (void) w; (void) u;
     popup_place ();
 #ifdef HAVE_GDK_X11
-    P.grab_tries = 0;
-    if (!P.grab_timer && try_grab (NULL) == G_SOURCE_CONTINUE)
-        P.grab_timer = g_timeout_add (20, try_grab, NULL);
+    if (on_x11 ()) {
+        P.grab_tries = 0;
+        if (!P.grab_timer && try_grab (NULL) == G_SOURCE_CONTINUE)
+            P.grab_timer = g_timeout_add (20, try_grab, NULL);
+    }
 #endif
     page_show (P.page_id);
 }
@@ -637,6 +661,14 @@ static void on_active (GObject *o, GParamSpec *ps, gpointer u)
         g_idle_add_once ((GSourceOnceFunc) tray_popup_hide, NULL);
 }
 
+/* the compositor's close button / shortcut on the plain-window menu */
+static gboolean on_close_request (GtkWindow *w, gpointer u)
+{
+    (void) w; (void) u;
+    g_idle_add_once ((GSourceOnceFunc) tray_popup_hide, NULL);
+    return TRUE;    /* tray_popup_hide destroys it */
+}
+
 void tray_popup_show (int x, int y)
 {
     if (!tray_popup_available ())
@@ -649,7 +681,7 @@ void tray_popup_show (int x, int y)
     }
     tray_tooltip_hide ();
 #ifdef HAVE_GDK_X11
-    if (x < 0 || y < 0) {
+    if (on_x11 () && (x < 0 || y < 0)) {
         Window r, c;
         int wx, wy;
         unsigned int mask;
@@ -665,6 +697,8 @@ void tray_popup_show (int x, int y)
     gtk_window_set_decorated (GTK_WINDOW (P.win), FALSE);
     gtk_window_set_resizable (GTK_WINDOW (P.win), FALSE);
     gtk_window_set_title (GTK_WINDOW (P.win), "WalPE menu");
+    if (!on_x11 ())     /* a window like any other there: let Alt+F4 and friends work */
+        g_signal_connect (P.win, "close-request", G_CALLBACK (on_close_request), NULL);
     gtk_widget_add_css_class (P.win, "walpe-menu");
     if (gdk_display_is_composited (gdk_display_get_default ()))
         gtk_widget_add_css_class (P.win, "walpe-composited");
@@ -686,7 +720,8 @@ void tray_popup_show (int x, int y)
 
     gtk_widget_realize (P.win);
 #ifdef HAVE_GDK_X11
-    make_override_redirect (P.win, "_NET_WM_WINDOW_TYPE_POPUP_MENU");
+    if (on_x11 ())
+        make_override_redirect (P.win, "_NET_WM_WINDOW_TYPE_POPUP_MENU");
 #endif
     popup_place ();
     gtk_window_present (GTK_WINDOW (P.win));
@@ -697,7 +732,8 @@ void tray_popup_hide (void)
     if (!P.win)
         return;
 #ifdef HAVE_GDK_X11
-    ungrab ();
+    if (on_x11 ())
+        ungrab ();
 #endif
     GtkWidget *w = P.win;
     P.win = NULL;
@@ -726,7 +762,8 @@ void tray_popup_refresh (void)
 
 void tray_tooltip_show (int ax, int ay, int aw, int ah)
 {
-    if (!tray_popup_available () || P.win)
+    /* XEmbed trays only (they draw no tooltip); it has to be placed */
+    if (!on_x11 () || P.win)
         return;
     ensure_css ();
     const char *title = tray_tooltip_title (), *text = tray_tooltip_text ();

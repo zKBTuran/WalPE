@@ -1,7 +1,9 @@
-/* walpe-daemon: renders the active wallpaper on one "desktop" window per
- * monitor. X11-only, no GTK in the render path: each monitor gets an
- * override-redirect window (invisible to window managers — dwm cannot tile
- * or raise it) that is directly an EGL surface.
+/* walpe-daemon: renders the active wallpaper on one "desktop" surface per
+ * monitor, with EGL, no GTK in the render path. The window system is
+ * behind platform/platform.h: on X11 each monitor gets an override-redirect
+ * window (invisible to window managers — dwm cannot tile or raise it) that
+ * is directly an EGL surface; on Wayland a layer-shell surface of the
+ * background layer. This file holds no window-system call.
  *
  * Threading model: every monitor owns a dedicated EGL context and a render
  * thread that keeps that context current for the thread's entire lifetime —
@@ -16,18 +18,6 @@
 #include <sys/stat.h>
 #include <signal.h>
 #include <json-glib/json-glib.h>
-#include <X11/Xlib.h>
-#include <X11/Xatom.h>
-#include <X11/Xutil.h> /* XGetClassHint */
-#include <X11/extensions/shape.h>
-#include <X11/extensions/Xinerama.h>
-#include <X11/extensions/dpms.h>
-#ifdef HAVE_XRANDR
-#include <X11/extensions/Xrandr.h>   /* output names of the monitors */
-#endif
-#ifdef HAVE_XI2
-#include <X11/extensions/XInput2.h>
-#endif
 #include <epoxy/gl.h>
 #include <epoxy/egl.h>
 #include <dlfcn.h>
@@ -49,15 +39,20 @@
 #include <linux/netlink.h>
 #include <sys/eventfd.h>
 
+#include "common/lazy.h"
 #include "engine/content.h"
 #include "engine/glutil.h"
 #include "engine/scenenode_effects.h" /* fx_set_cache_enabled */
+#include "common/fluidsim.h"           /* fluid_quality: the level names */
 #include "engine/gpuprof.h"           /* GPUPROF: walpe-ctl profile */
 #include "engine/weparticles.h"       /* particle settings */
 #include "engine/modules.h"           /* walpe_modules_status */
+#include "engine/features.h"          /* renderer feature switches */
+#include "engine/scenesound.h"        /* wallpaper sound: allowed in this program only */
 #include "engine/mp4demux.h"          /* open: can this video be played? */
 #include "common/config.h"
 #include "common/ipc.h"
+#include "signals/providers.h"        /* the idle rule: walpe_signal_get, its timeout */
 #include "common/util.h"
 #include "common/import.h"
 #include "common/library.h"   /* walpe_config_forget_path */
@@ -66,18 +61,24 @@
 #include "common/workshop.h"
 #include "common/weassets.h"
 #include "common/swrender.h"
+#include "common/gpusel.h"    /* which GPU renders */
+#include "engine/glcaps.h"    /* what its driver offers */
+#include "common/glapi.h"
+#include "engine/glfeat.h"
 #include "common/pace.h"
 #include "common/restore.h"
 #include "common/present.h"
 #include "common/region.h"
 #include "engine/clip.h"
 #include "daemon/vistrack.h"
+#include "platform/platform.h"
+#include "signals/providers.h"        /* logind and the compositor's idle / window-list providers */
 #ifdef HAVE_WEB
 #include "engine/web.h"
 #endif
 
 
-/* pointer position, one XQueryPointer per tick, only while a visible
+/* pointer position, one query of the window system per tick, only while a visible
  * wallpaper follows the pointer AND the pointer moves: at the frame rate
  * (30..144 Hz). At the old fixed 30 Hz, parallax and cursor effects moved
  * in 30 steps a second however fast the scene rendered. */
@@ -88,7 +89,10 @@ typedef struct { int x, y, width, height; } WalpeRect;
 
 typedef struct Mon {
     int index;
-    Window xid;              /* override-redirect window = render target */
+    WalpeSurface *ps;        /* the platform's surface: the native window `surf` is
+                              * on (set once, before the render thread starts) */
+    guint32 out_id;          /* WalpeOutput.id of its output: per-output pause
+                              * signals are reported under it */
     EGLSurface surf;
     EGLContext ctx;          /* owned by the render thread */
     WalpeContent *content;   /* touched ONLY by the render thread */
@@ -270,6 +274,20 @@ typedef struct Mon {
                               * and including the one with the uncovered pixels
                               * (1 = the very next one; 2 = one was being drawn
                               * when the window moved) */
+    /* render resolution (common/resolution.h): the size this output's
+     * wallpaper is rendered at, the texture limit it is loaded with and
+     * the box of its video's converted copy */
+    int res_w, res_h;        /* main -> thread (lock): the render size (the output's
+                              * own mode at "native") */
+    int tex_limit;           /* main -> thread (lock): WALPE_TEXLIMIT_* / pixels, as
+                              * it holds for the wallpaper it shows (res_texlimit_for) */
+    gboolean res_changed;    /* main -> thread (lock): one of them changed for the
+                              * running wallpaper: a frame now */
+    WalpeVideoBox load_box;  /* main -> thread (lock), with load_path */
+    int rt_res_w, rt_res_h;  /* render thread: as last taken */
+    int rt_tex_limit;
+    WalpeVideoBox rt_box;
+    char *res_note;          /* main: why the chosen size is not used (NULL = it is) */
 } Mon;
 
 typedef struct { int kind; float x, y; } PtrMsg;
@@ -277,20 +295,16 @@ typedef struct { int kind; float x, y; } PtrMsg;
 static struct {
     WalpeConfig *cfg;
     GList *mons;
-    Display *xd;             /* main thread: events, queries, the windows */
-    Display *egl_xd;         /* EGL / the render threads (= xd with WALPE_ONE_XCONN) */
-    Window root;
+    int backend;             /* WalpeBackend: the window system in use (fixed at start-up) */
     EGLDisplay egl_dpy;
     EGLConfig egl_conf;
     gboolean fs_active;      /* fullscreen window has focus */
     gboolean asleep;         /* DPMS power-save or screensaver active */
+    gboolean idle;           /* main: no user input for a while (a provider's
+                              * report; no rule of this file reads it) */
+    gboolean display_lost;   /* main: the connection to the window system is gone */
     gboolean on_battery;     /* running on battery (followed only while a battery rule is on) */
-    gboolean has_wm;         /* EWMH manager present (checked at startup) */
     gint egl_is_es;          /* set by monitor threads after ctx creation */
-    Window watched_win;      /* active window we subscribed to */
-    guint cover_timer_id;    /* debounced coverage recompute (main thread) */
-    gboolean stack_dirty;    /* a window may have got below a wallpaper window */
-    GHashTable *watched_clients; /* client windows with PropertyChangeMask selected */
     gboolean probe;          /* WALPE_PROBE (read once at startup) */
     gboolean cadence;        /* WALPE_CADENCE */
     GMainLoop *loop;
@@ -333,6 +347,17 @@ static struct {
 } Sw;
 static void sw_note_gl (void);
 static void sw_schedule_restart (void);
+/* the GPU choice (gpu_glue.h, included below init_egl) */
+static void gpu_note_egl (EGLDisplay dpy);
+static void gpu_note_software_renderer (void);
+static void gpu_status_json (JsonBuilder *b);
+static gboolean gpu_ipc_set (JsonObject *o, gboolean busy, gboolean *restart, char **note,
+                             char **err);
+static void gpu_schedule_restart (void);
+/* (the --gpu-probe child opens its display as the --sw-probe child does) */
+static gboolean probe_open (int argc, char **argv, char **err);
+static void res_note_gl (void);     /* render resolution: what the GL can be asked for */
+static gboolean res_gl_known_cb (gpointer user);
 
 /* forward decls */
 static void request_redraw (gpointer user);
@@ -345,13 +370,30 @@ static void pointer_repace (void);
 static void follow_pace_update (void);
 static void vis_push (void);          /* "Skip hidden areas" */
 static void state_touch (void);
-/* XInput2 raw events on the root, selected only while something needs
- * them: desktop clicks (cursor scripts, web pages), pointer motion (a
- * wallpaper that follows the pointer, pointer at rest), any input (display
- * asleep by DPMS on a server without DPMS events: the wake-up) */
-static gboolean xi_want_buttons, xi_want_motion, xi_want_wake;
-static int xi2_opcode = -1;
-static void xi2_apply_mask (void);
+/* What the daemon asks the window system to tell it about, each only
+ * while something needs it (every event wakes the daemon): button events
+ * while a wallpaper takes clicks (cursor scripts, web pages), and one
+ * motion event when a pointer that was at rest moves again (a wallpaper
+ * that follows it). How is the backend's business (X11: XInput2 raw
+ * events on the root window). */
+static gboolean in_want_buttons, in_want_motion;
+static void input_apply (void)
+{
+    walpe_platform_input_select (in_want_buttons, in_want_motion);
+}
+
+/* which window system this process draws on (common/backend.h): decided
+ * once at start-up, before anything connects (backend_decide) */
+static struct {
+    const char *source;     /* who asked: "--backend", "WALPE_BACKEND", "config", "default" */
+    char *why;              /* the sentence of the log line and of `status` */
+    char *lost;             /* this image was started in place after the display
+                             * went away: the backend the image before ran on
+                             * (NULL = any other start) */
+    char *display_node;     /* Wayland, when the compositor told: the DRM device
+                             * it composes with (NULL = unknown) */
+    int ipc_fd;             /* the control socket handed over by the image before, -1 = none */
+} Bk = { .ipc_fd = -1 };
 
 /* ---- log guard
  * The daemon runs for weeks and its output usually ends in a file
@@ -462,14 +504,13 @@ static struct {
     char *spec;              /* present = "MODE[,NAME=MODE]..." (NULL = vsync) */
     char *sync_device;       /* __GL_SYNC_DISPLAY_DEVICE as the driver sees it */
     gboolean composited;     /* main: a compositing manager owns _NET_WM_CM_Sn */
-    Atom cm_atom;
     int min_iv, max_iv;      /* EGL_MIN/MAX_SWAP_INTERVAL of the config */
     gboolean has_damage;     /* EGL_KHR/EXT_swap_buffers_with_damage */
     gboolean damage_khr;
     gboolean swap_damage;    /* swap_damage=on: swaps carry their damage */
     gint64 idle_release_us;  /* idle_release (seconds), 0 = off */
     gboolean own_display;    /* egl_display=own: what this build does by default
-                              * (D.egl_xd); kept as a known key */
+                              * (the X11 backend's EGL connection); kept as a known key */
     gint warned_iv;          /* render threads: eglSwapInterval failure logged once */
 } P = { .max_iv = 1 };
 
@@ -579,6 +620,12 @@ static void present_egl_probe (void)
         lo = 0;
         hi = MAX (hi, 1);
     }
+    if (walpe_platform_paces ()) {
+        /* the backend paces frames itself (Wayland: frame callbacks), so
+         * both intervals exist whatever the EGL config offers */
+        lo = 0;
+        hi = MAX (hi, 1);
+    }
     P.min_iv = lo;
     P.max_iv = hi;
     P.damage_khr = epoxy_has_egl_extension (D.egl_dpy, "EGL_KHR_swap_buffers_with_damage");
@@ -588,7 +635,7 @@ static void present_egl_probe (void)
     const char *version = eglQueryString (D.egl_dpy, EGL_VERSION);
     g_message ("present: EGL %s (%s)%s, swap interval %d..%d%s, swap with damage: %s, buffer age: %s",
                version ? version : "?", vendor ? vendor : "?",
-               D.egl_xd != D.xd ? ", own X connection" : "", (int) lo, (int) hi,
+               walpe_platform_egl_note (), (int) lo, (int) hi,
                D.fake_vsync ? " (WALPE_FAKE_VSYNC: emulated)" : "",
                P.has_damage ? (P.swap_damage ? "yes (used)" : "yes (not used: swap_damage=on)")
                             : "no",
@@ -608,7 +655,7 @@ static void present_egl_probe (void)
 
 static gboolean present_composited (void)
 {
-    return P.cm_atom != None && XGetSelectionOwner (D.xd, P.cm_atom) != None;
+    return walpe_platform_composited ();
 }
 
 /* main: the swap interval of every monitor from its mode and what is
@@ -624,6 +671,9 @@ static void present_update (gboolean all)
         Mon *m = l->data;
         const char *why = NULL;
         int iv = walpe_present_interval (m->present_mode, m->name, &e, &why);
+        if (walpe_platform_paces ())
+            why = iv ? "the next frame waits until the compositor took this one (frame callback)"
+                     : "the frame clock paces, frame callbacks are not waited for";
         if (all || iv != g_atomic_int_get (&m->present_iv))
             g_message ("present: mon%d %s: swap interval %d (%s)", m->index, m->name, iv, why);
         g_atomic_int_set (&m->present_iv, iv);   /* applied before its next swap */
@@ -659,7 +709,7 @@ static char *present_apply_spec (const char *spec)
     }
     present_update (TRUE);
     /* auto follows the compositing manager: one X request every 2 s */
-    if (any_auto && !present_timer) {
+    if (any_auto && !present_timer && D.backend == WALPE_BACKEND_X11) {
         present_timer = g_timeout_add_seconds (2, present_tick, NULL);
     } else if (!any_auto && present_timer) {
         g_source_remove (present_timer);
@@ -672,19 +722,7 @@ static char *present_apply_spec (const char *spec)
  * the X server's presentation-related extensions, each monitor's mode */
 static void present_init (void)
 {
-    char an[32];
-    g_snprintf (an, sizeof an, "_NET_WM_CM_S%d", DefaultScreen (D.xd));
-    P.cm_atom = XInternAtom (D.xd, an, False);
-    static const char *const xext[] = { "NV-GLX", "NV-CONTROL", "DRI3", "Present", "Composite" };
-    GString *s = g_string_new (NULL);
-    for (guint i = 0; i < G_N_ELEMENTS (xext); i++) {
-        int op = 0, ev = 0, er = 0;
-        g_string_append_printf (s, "%s%s %s", i ? ", " : "", xext[i],
-                                XQueryExtension (D.xd, xext[i], &op, &ev, &er) ? "yes" : "no");
-    }
-    g_message ("present: X server: %s; compositing manager: %s", s->str,
-               present_composited () ? "running" : "none");
-    g_string_free (s, TRUE);
+    walpe_platform_present_log ();
     char *bad = present_apply_spec (P.spec);
     if (bad)
         g_warning ("present: \"%s\" in the present setting is not understood (vsync, limiter, "
@@ -715,8 +753,12 @@ static void mon_present_apply (Mon *m)
     int iv = g_atomic_int_get (&m->present_iv);
     if (iv == m->present_iv_applied)
         return;
-    if (!eglSwapInterval (D.egl_dpy, iv) && g_atomic_int_compare_and_exchange (&P.warned_iv, 0, 1))
-        g_warning ("eglSwapInterval (%d) failed on monitor %d: 0x%x", iv, m->index, eglGetError ());
+    /* what an interval means is the backend's: on X11 it is EGL's own swap
+     * interval; a backend that paces itself has EGL never wait and does
+     * the wait of interval 1 in walpe_surface_swapped */
+    int egl_iv = walpe_surface_set_interval (m->ps, iv);
+    if (!eglSwapInterval (D.egl_dpy, egl_iv) && g_atomic_int_compare_and_exchange (&P.warned_iv, 0, 1))
+        g_warning ("eglSwapInterval (%d) failed on monitor %d: 0x%x", egl_iv, m->index, eglGetError ());
     m->present_iv_applied = iv;
 }
 
@@ -728,6 +770,7 @@ static void mon_present_apply (Mon *m)
 static EGLBoolean mon_swap (Mon *m)
 {
     mon_present_apply (m);
+    walpe_surface_pre_swap (m->ps);
     if (P.swap_damage && P.has_damage) {
         EGLint r[4] = { 0, 0, m->geom.width, m->geom.height };
         return P.damage_khr ? eglSwapBuffersWithDamageKHR (D.egl_dpy, m->surf, r, 1)
@@ -837,38 +880,15 @@ static void sf_retire (Mon *m)
     sf_unref (sf);
 }
 
-/* XCheckIfEvent predicate: any event (mon_swapped throws them all away) */
-static Bool egl_any_event (Display *d, XEvent *e, XPointer arg)
-{
-    (void) d; (void) e; (void) arg;
-    return True;
-}
-
 /* render thread, after a swap. WALPE_FAKE_VSYNC=1 (testing): block until
  * the monitor's next vertical blank, as a swap does on a real display with
  * vsync; Xvfb has none and returns at once, which hides what a slow
  * monitor does to the pacing. Monitors of unknown rate do not block. */
 static void mon_swapped (Mon *m)
 {
-    /* the EGL connection has no event loop: whatever the server sent it
-     * anyway (MappingNotify, ...) would pile up in Xlib's queue. No
-     * request, no system call: the queue is only looked at */
-    if (D.egl_xd != D.xd && XEventsQueued (D.egl_xd, QueuedAlready) > 0) {
-        /* Every monitor's thread comes by here on the one EGL connection.
-         * Looking at the queue and taking an event were two calls
-         * (XEventsQueued, XNextEvent): two threads that both saw the last
-         * event both asked for it, and the one that came second waited
-         * inside XNextEvent for the next event of a connection that hardly
-         * ever gets one - its monitor stood still, and the daemon's quit
-         * waited for the thread. XCheckIfEvent takes an event if there is
-         * one and returns if there is none, in one call under Xlib's lock.
-         * The look above is what a swap cost before; only when something
-         * is queued does the last call here read the connection once
-         * (without waiting). */
-        XEvent e;
-        while (XCheckIfEvent (D.egl_xd, &e, egl_any_event, NULL)) {
-        }
-    }
+    /* the backend's part: on X11 the EGL connection's event queue is
+     * emptied; a backend that paces itself waits here for interval 1 */
+    walpe_surface_swapped (m->ps);
     if (!D.fake_vsync || m->hz < 1.0 || m->present_iv_applied < 1)
         return;   /* (swap interval 0: the swap does not wait) */
     gint64 period = (gint64) (1e6 / m->hz), now = g_get_monotonic_time ();
@@ -1027,8 +1047,10 @@ static gboolean sf_present (Mon *m, guint64 need)
     if (!mon_swap (m)) {
         g_warning ("eglSwapBuffers failed: 0x%x", eglGetError ());
         glFlush ();   /* the fence must still reach the GPU */
+    } else {
+        mon_swapped (m);   /* after a swap that went through only: a backend that paces
+                            * itself would wait here for a frame it was never given */
     }
-    mon_swapped (m);
     if (prof)
         walpe_prof_frame_end (TRUE);             /* GPUPROF */
     g_atomic_int_inc (&m->render_count);
@@ -1190,7 +1212,11 @@ static void mon_load_failed_frame (Mon *m, gboolean keep)
     glClear (GL_COLOR_BUFFER_BIT);
     if (m->lead_sf)
         (void) sf_publish (m, w, h, G_MAXUINT64);   /* drawn in full: it serves any clip */
-    eglSwapBuffers (D.egl_dpy, m->surf);
+    /* through the platform's hooks like every other frame (a backend
+     * that paces itself keeps its own commits apart from this one) */
+    walpe_surface_pre_swap (m->ps);
+    if (eglSwapBuffers (D.egl_dpy, m->surf))
+        walpe_surface_swapped (m->ps);
     /* neither the window nor the followers' slot holds a frame of a
      * content any more (frame skipping) */
     m->win_has_frame = m->sf_has_frame = FALSE;
@@ -1270,7 +1296,9 @@ static void mon_do_load_ex (Mon *m, const char *path, gboolean paused, int fps,
         glViewport (0, 0, MAX (1, m->geom.width), MAX (1, m->geom.height));
         glClearColor (0.0f, 0.0f, 0.0f, 1.0f);
         glClear (GL_COLOR_BUFFER_BIT);
-        eglSwapBuffers (D.egl_dpy, m->surf);
+        walpe_surface_pre_swap (m->ps);
+        if (eglSwapBuffers (D.egl_dpy, m->surf))
+            walpe_surface_swapped (m->ps);
         malloc_trim (0);
         mon_load_note (m, path, NULL, FALSE, tag);
         return;
@@ -1285,7 +1313,17 @@ static void mon_do_load_ex (Mon *m, const char *path, gboolean paused, int fps,
         .no_tex_slack = quality->tex_slack == 0,
         .render_scale = quality->render_scale,
         .quality = quality,
+        .video_box_w = m->rt_box.w,
+        .video_box_h = m->rt_box.h,
     };
+    /* texture_limit (resolution.h): "none" keeps file sizes like
+     * tex_downscale off, a number is a cap the content applies */
+    int tex_cap = 0;
+    {
+        gboolean none = FALSE;
+        walpe_texlimit_effective (m->rt_tex_limit, !opts.no_tex_downscale, &none, &tex_cap);
+        opts.no_tex_downscale = none;
+    }
     /* WALPE_LOAD_DELAY_MS (tests, scripts/lifecheck.py): a load that takes a
      * while whatever the machine, for what has to hold while one runs (a
      * setting that arrives meanwhile, a restart, a signal). Here: the
@@ -1342,6 +1380,15 @@ static void mon_do_load_ex (Mon *m, const char *path, gboolean paused, int fps,
     g_free (restore);
     c->request_redraw = request_redraw;
     c->request_user = m;
+    /* the render size chosen for this output (0 = its own mode), the way a
+     * frame of another size is scaled and the texture cap: before gl_init,
+     * and again before every frame (mon_do_render_frame) */
+    const gboolean own_size = m->rt_res_w > 0 && m->rt_res_h > 0 &&
+                              (m->rt_res_w != m->geom.width || m->rt_res_h != m->geom.height);
+    c->render_w = own_size ? m->rt_res_w : 0;
+    c->render_h = own_size ? m->rt_res_h : 0;
+    c->scale_filter = g_atomic_int_get (&D.cfg->scale_filter);
+    c->tex_limit = tex_cap;
 
     /* free the old wallpaper with our context current */
     mon_free_content (m);
@@ -1424,6 +1471,24 @@ static void mon_do_render_frame (Mon *m, gboolean paused, gboolean force, gboole
         m->content->set_render_scale (m->content, m->rt_render_scale > 0
                                           ? m->rt_render_scale
                                           : g_atomic_int_get (&D.cfg->render_scale));
+    {
+        /* render resolution: the size chosen for this output when it is
+         * not the window's own (0, 0: everything is as without the setting),
+         * the scaling filter and the texture cap. The content scales its
+         * frame into the window itself, which works on every window system.
+         * Where the window system can give the surface buffers of the
+         * render size and scale them (a compositor with a viewport), this
+         * is the place to ask for that instead: w and h are then the
+         * render size and these fields stay 0. */
+        const gboolean own_size = m->rt_res_w > 0 && m->rt_res_h > 0 &&
+                                  (m->rt_res_w != w || m->rt_res_h != h);
+        int cap = 0;
+        walpe_texlimit_effective (m->rt_tex_limit, TRUE, NULL, &cap);
+        m->content->render_w = own_size ? m->rt_res_w : 0;
+        m->content->render_h = own_size ? m->rt_res_h : 0;
+        m->content->scale_filter = g_atomic_int_get (&D.cfg->scale_filter);
+        m->content->tex_limit = cap;
+    }
     /* the frame must be drawn whatever the content thinks of it when the
      * window that is to show it, or the followers' slot, lacks its last one */
     if (g_atomic_int_compare_and_exchange (&m->exposed, 1, 0)) {
@@ -1461,9 +1526,10 @@ static void mon_do_render_frame (Mon *m, gboolean paused, gboolean force, gboole
      * their frame. A forced frame is always drawn: surface_lost.) */
     if ((!drew || m->content->frame_unchanged) && !force)
         return;
-    static int gpumem = -1;
+    static WalpeLazy gpumem_cell = WALPE_LAZY_UNSET;   /* every monitor's thread: common/lazy.h */
+    int gpumem = walpe_lazy_get (&gpumem_cell);
     if (gpumem < 0)
-        gpumem = g_getenv ("WALPE_GPU_MEM") != NULL;
+        gpumem = walpe_lazy_set (&gpumem_cell, g_getenv ("WALPE_GPU_MEM") != NULL);
     if (gpumem && (m->render_count % 300) == 10) {
         char tag[16];
         g_snprintf (tag, sizeof tag, "mon%d", m->index);
@@ -1540,6 +1606,13 @@ static void mon_prof_sync (Mon *m)
         .path = m->content_path,
         .role = role,
         .hz = m->hz,
+        /* the size its wallpaper is rendered at (the output's own unless
+         * another was chosen); a scene of its own keeps one more picture
+         * of that size, the target it is scaled from */
+        .render_w = m->rt_res_w > 0 ? m->rt_res_w : m->geom.width,
+        .render_h = m->rt_res_h > 0 ? m->rt_res_h : m->geom.height,
+        .render_target = m->content && m->content->type == WALPE_TYPE_SCENE && m->rt_res_w > 0 &&
+                         (m->rt_res_w != m->geom.width || m->rt_res_h != m->geom.height),
     };
     fx_targets_stats (&info.fx_bytes, &info.fx_count);
     fx_pass_stats (&info.fx_run, &info.fx_cached, FALSE);
@@ -1559,17 +1632,29 @@ static void prof_wake_all (gpointer user)
     }
 }
 
-/* GL version ladder per thread: desktop 3.3, then GLES 3.2/3.0 */
-static const struct { int maj, min; gboolean es; } ctx_ladder[] = {
-    { 3, 3, FALSE }, { 3, 2, TRUE }, { 3, 0, TRUE },
-};
+/* Desktop OpenGL or OpenGL ES (common/glapi.h): the setting gl_api (auto |
+ * gl | gles; WALPE_GL_API overrides it for one run), the rung of the
+ * ladder OpenGL 3.3 -> OpenGL ES 3.2 -> OpenGL ES 3.1 that gave a context,
+ * and why. Decided once in init_egl (), before a window or surface
+ * exists; every context of the process is of that rung. With `auto` on a
+ * driver that has desktop OpenGL 3.3 the first context asked for is the
+ * one that was always asked for, with the same attributes. A change of
+ * the setting restarts the daemon in place, as "Render on CPU" does. */
+static struct {
+    WalpeGlApiPref pref;        /* WALPE_GL_API, else the config */
+    gboolean env_forced;        /* WALPE_GL_API decides */
+    gboolean decided;           /* choice.got is the rung in use */
+    WalpeGlApiChoice choice;
+    EGLContext first;           /* the context the walk made */
+    EGLConfig conf0;            /* the window config as init_egl () chose it, */
+    int iv0[2];                 /* its swap intervals (P.min_iv, P.max_iv) */
+} Ga;
 /* share-group root: monitor contexts share its textures, so the
  * wallpaper's images exist once, not once per monitor. The first monitor
  * thread renders with the root itself (it used to be an extra context
  * that was never current: with N monitors N + 1 contexts were kept, each
  * with its own driver state - 28 MiB apiece on llvmpipe). */
 static EGLContext share_root = EGL_NO_CONTEXT;
-static int share_rung = -1;
 static gint share_root_taken;
 /* no context of the share group is current while another one is created:
  * every monitor thread waits here until all of them have theirs */
@@ -1577,13 +1662,13 @@ static GMutex ctx_lock;
 static GCond ctx_cond;
 static int ctx_expected, ctx_created;
 
-static EGLContext ladder_context (guint i, EGLContext share)
+static EGLContext ladder_context (const WalpeGlRung *rung, EGLContext share)
 {
-    if (!eglBindAPI (ctx_ladder[i].es ? EGL_OPENGL_ES_API : EGL_OPENGL_API))
+    if (!eglBindAPI (rung->es ? EGL_OPENGL_ES_API : EGL_OPENGL_API))
         return EGL_NO_CONTEXT;
     EGLint ca[] = {
-        EGL_CONTEXT_MAJOR_VERSION, ctx_ladder[i].maj,
-        EGL_CONTEXT_MINOR_VERSION, ctx_ladder[i].min,
+        EGL_CONTEXT_MAJOR_VERSION, rung->major,
+        EGL_CONTEXT_MINOR_VERSION, rung->minor,
         EGL_NONE, EGL_NONE,
         EGL_NONE
     };
@@ -1607,18 +1692,73 @@ static EGLContext ladder_context (guint i, EGLContext share)
     return eglCreateContext (D.egl_dpy, D.egl_conf, share, ca);
 }
 
-/* main thread, before any monitor thread: WALPE_NO_SHARE=1 disables */
-static void create_share_root (void)
+static gboolean egl_config_for_es (void);
+
+/* WalpeGlTryFn: a context of this rung, kept in Ga.first */
+static gboolean gl_api_try (const WalpeGlRung *rung, gpointer user)
 {
-    if (g_getenv ("WALPE_NO_SHARE"))
-        return;
-    for (guint i = 0; i < G_N_ELEMENTS (ctx_ladder); i++) {
-        share_root = ladder_context (i, EGL_NO_CONTEXT);
-        if (share_root != EGL_NO_CONTEXT) {
-            share_rung = (int) i;
-            return;
-        }
+    (void) user;
+    /* (the OpenGL rung comes first and uses the window config as chosen;
+     * an ES rung may need another one) */
+    if (rung->es && !egl_config_for_es ())
+        return FALSE;
+    if (!rung->es && D.egl_conf != Ga.conf0) {
+        /* only after a saved gl_api = gles found no context and its rungs
+         * had taken another config: the OpenGL rung gets the window config
+         * it always got, and the swap intervals read from it */
+        D.egl_conf = Ga.conf0;
+        P.min_iv = Ga.iv0[0];
+        P.max_iv = Ga.iv0[1];
+        g_message ("EGL config: the first one again, for desktop OpenGL");
     }
+    Ga.first = ladder_context (rung, EGL_NO_CONTEXT);
+    if (Ga.first == EGL_NO_CONTEXT) {
+        (void) eglGetError ();
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/* main thread, in init_egl (), before any monitor thread: which API
+ * renders. The context the walk made becomes the share-group root
+ * (WALPE_NO_SHARE=1: it is given back, every monitor makes its own of the
+ * same rung). FALSE: the driver has no context WalPE can use. */
+static gboolean gl_api_decide (void)
+{
+    int ov = walpe_gl_api_env_override (g_getenv ("WALPE_GL_API"));
+    Ga.env_forced = ov >= 0;
+    Ga.pref = ov >= 0 ? (WalpeGlApiPref) ov
+            : D.cfg ? (WalpeGlApiPref) D.cfg->gl_api : WALPE_GL_API_AUTO;
+    if (g_getenv ("WALPE_GL_API") && ov < 0)
+        g_warning ("WALPE_GL_API: auto, gl or gles expected; the gl_api setting decides");
+    WalpeGlEglFacts facts = { eglQueryString (D.egl_dpy, EGL_CLIENT_APIS), FALSE, FALSE, FALSE };
+    Ga.first = EGL_NO_CONTEXT;
+    Ga.conf0 = D.egl_conf;
+    Ga.iv0[0] = P.min_iv;
+    Ga.iv0[1] = P.max_iv;
+    /* WALPE_GL_API is strict: that API or nothing (a diagnostic for one
+     * run). A saved gl / gles this machine has no context for runs as auto
+     * would: the daemon must start, or walpe-ctl - which talks to it -
+     * could never set another value. Ga.pref and the config keep the saved
+     * value; the log and "gl_api_note" say what runs instead. */
+    Ga.decided = walpe_gl_api_choose_for (Ga.pref, Ga.env_forced, &facts, gl_api_try, NULL,
+                                          &Ga.choice);
+    if (!Ga.decided) {
+        g_warning ("%s [%s]", Ga.choice.why, Ga.choice.tried);
+        return FALSE;
+    }
+    if (Ga.choice.setting_fallback)
+        g_warning ("gl_api: %s [%s]", Ga.choice.why, Ga.choice.tried);
+    else
+        g_message ("gl_api: %s%s [%s]", Ga.choice.why,
+                   Ga.env_forced ? " (WALPE_GL_API)" : "", Ga.choice.tried);
+    if (g_getenv ("WALPE_NO_SHARE")) {
+        eglDestroyContext (D.egl_dpy, Ga.first);
+        Ga.first = EGL_NO_CONTEXT;
+    } else {
+        share_root = Ga.first;
+    }
+    return TRUE;
 }
 
 static EGLContext create_thread_context (void)
@@ -1626,14 +1766,14 @@ static EGLContext create_thread_context (void)
     if (share_root != EGL_NO_CONTEXT) {
         gboolean first = g_atomic_int_compare_and_exchange (&share_root_taken, 0, 1);
         /* the root was made on the main thread: the API binding is per thread */
-        EGLContext ctx = !first ? ladder_context ((guint) share_rung, share_root)
-                       : eglBindAPI (ctx_ladder[share_rung].es ? EGL_OPENGL_ES_API : EGL_OPENGL_API)
+        const WalpeGlRung *rung = &Ga.choice.got;
+        EGLContext ctx = !first ? ladder_context (rung, share_root)
+                       : eglBindAPI (rung->es ? EGL_OPENGL_ES_API : EGL_OPENGL_API)
                              ? share_root : EGL_NO_CONTEXT;
         if (ctx) {
             walpe_gl_set_shared (TRUE);
             g_message ("monitor context: %s %d.%d (textures shared across monitors)",
-                       ctx_ladder[share_rung].es ? "GLES" : "GL", ctx_ladder[share_rung].maj,
-                       ctx_ladder[share_rung].min);
+                       rung->es ? "GLES" : "GL", rung->major, rung->minor);
             return ctx;
         }
         /* all monitors must agree: without a share group no cache */
@@ -1641,11 +1781,13 @@ static EGLContext create_thread_context (void)
         walpe_gl_set_shared (FALSE);
         g_atomic_int_set (&D.share_failed, 1);
     }
-    for (guint i = 0; i < G_N_ELEMENTS (ctx_ladder); i++) {
-        EGLContext ctx = ladder_context (i, EGL_NO_CONTEXT);
+    if (Ga.decided) {
+        /* no share group: a context of its own, of the rung decided */
+        const WalpeGlRung *rung = &Ga.choice.got;
+        EGLContext ctx = ladder_context (rung, EGL_NO_CONTEXT);
         if (ctx) {
-            g_message ("monitor context: %s %d.%d",
-                       ctx_ladder[i].es ? "GLES" : "GL", ctx_ladder[i].maj, ctx_ladder[i].min);
+            g_message ("monitor context: %s %d.%d", rung->es ? "GLES" : "GL", rung->major,
+                       rung->minor);
             return ctx;
         }
     }
@@ -1665,9 +1807,10 @@ static gboolean shared_fallback_cb (gpointer user);
  * shared like any other scene; see pointer_sample. Off by default. */
 static gboolean pointer_share_on (void)
 {
-    static int env = -1;
+    static WalpeLazy env_cell = WALPE_LAZY_UNSET;   /* leaders' threads and main: common/lazy.h */
+    int env = walpe_lazy_get (&env_cell);
     if (env < 0)
-        env = g_getenv ("WALPE_POINTER_SHARE") != NULL;
+        env = walpe_lazy_set (&env_cell, g_getenv ("WALPE_POINTER_SHARE") != NULL);
     return env || g_atomic_int_get (&D.cfg->pointer_share);
 }
 
@@ -1720,6 +1863,7 @@ static gpointer mon_thread (gpointer data)
         g_mutex_unlock (&glutil_init_lock);
     }
     sw_note_gl ();        /* GL_VENDOR / GL_RENDERER: logged once, in `status` */
+    res_note_gl ();       /* the largest render size this GL can be asked for */
     g_atomic_int_set (&D.egl_is_es, epoxy_is_desktop_gl () ? 0 : 1);
 
     g_mutex_lock (&m->lock);
@@ -1742,6 +1886,14 @@ static gpointer mon_thread (gpointer data)
         m->rt_render_scale = quality.render_scale;
         gboolean quality_changed = m->quality_changed;
         m->quality_changed = FALSE;
+        /* render resolution: what the next load and the next frame use */
+        m->rt_res_w = m->res_w;
+        m->rt_res_h = m->res_h;
+        m->rt_tex_limit = m->tex_limit;
+        if (load)
+            m->rt_box = m->load_box;
+        gboolean res_changed = m->res_changed;
+        m->res_changed = FALSE;
         gboolean stats_wanted = m->stats_until_us > g_get_monotonic_time ();
         gboolean describe_req = m->describe_req;
         m->describe_req = FALSE;
@@ -1821,7 +1973,7 @@ static gpointer mon_thread (gpointer data)
         const gint64 first_due = m->first_path ? m->first_tick_us + FIRST_TICK_US : 0;
         const gboolean first_tick = first_due && g_get_monotonic_time () >= first_due;
         if (!load && !render && !role && !fps_changed && !settle && !prof_sync && !blank &&
-            !quality_changed && !describe_req && !stats_req && !first_tick) {
+            !quality_changed && !describe_req && !stats_req && !first_tick && !res_changed) {
             /* sleep until woken, or until the content's next frame is due */
             gint64 due = (m->content && !paused && m->pause_applied == paused)
                              ? m->content->next_frame_us : 0;
@@ -1971,6 +2123,11 @@ static gpointer mon_thread (gpointer data)
             if (m->content->set_quality || m->content->set_render_scale)
                 render = TRUE;
         }
+        /* another render size or texture limit for the running wallpaper:
+         * shown with one frame (a paused monitor takes it when it resumes;
+         * a scene is loaded again by the main thread besides) */
+        if (res_changed && !load && m->content)
+            render = TRUE;
         if (m->content)
             m->content->stats_wanted = stats_wanted;
         if (ptr) {
@@ -2166,6 +2323,148 @@ static Mon *mon_at (int rx, int ry)
 
 static void apply_pause_state (void);
 
+/* ---- render resolution (common/resolution.h) ---------------------------
+ * Every output has a choice of its own in config.json "monitors": the size
+ * its wallpaper is rendered at (native = the output's mode, the default)
+ * and the largest texture kept for it. The main thread turns the choices
+ * into numbers (res_refresh, res_texlimit_for, video_box_for) and hands
+ * them to the render threads through Mon, under its lock; a render thread
+ * gives them to its content before every frame (WalpeContent.render_w /
+ * render_h / tex_limit). An output without an entry runs at native and is
+ * "not asked yet": the daemon never waits for an answer, the GUI asks. */
+static gint gl_max_side;        /* atomic: the largest texture side the render
+                                 * threads' GL takes (0 = not known yet) */
+static GPtrArray *res_env;      /* WALPE_RESOLUTION (WalpeResAssign): choices that
+                                 * replace the stored ones for this run, not saved */
+static gboolean res_no_ask;     /* --windowed: its one window is not an output */
+
+/* render thread, context current */
+static void res_note_gl (void)
+{
+    GLint mx = 0;
+    glGetIntegerv (GL_MAX_TEXTURE_SIZE, &mx);
+    while (mx > 0) {
+        int have = g_atomic_int_get (&gl_max_side);
+        if (have > 0 && have <= mx)
+            break;
+        if (g_atomic_int_compare_and_exchange (&gl_max_side, have, mx)) {
+            /* The render sizes were worked out before any context existed
+             * (main (), res_refresh: the limit was not known, every stored
+             * size passed). Now it is known, or smaller than thought: the
+             * main thread looks at the sizes again. */
+            g_idle_add (res_gl_known_cb, NULL);
+            break;
+        }
+    }
+}
+
+/* main: the choice that holds for output `name`: WALPE_RESOLUTION when it
+ * names the output (or all), else its entry, else the defaults.
+ * The entry is found by the exact name the output list gives (the key of
+ * "monitor_current" too). This is the one place a lookup under another
+ * spelling of the same connector belongs, should the output list offer
+ * one (the same output under another window system). */
+static void res_conf_for (const char *name, WalpeMonitorConf *mc)
+{
+    walpe_config_monitor_get (D.cfg, name, mc);
+    for (guint i = 0; res_env && i < res_env->len; i++) {
+        const WalpeResAssign *a = g_ptr_array_index (res_env, i);
+        if (!a->monitor || !g_strcmp0 (a->monitor, name))
+            walpe_res_parse (a->value, &mc->res, NULL);
+    }
+}
+
+/* main: the size the wallpaper of m is rendered at. *note (g_free; may be
+ * NULL): why it is not the chosen one, when it is not. */
+static void mon_res_size (Mon *m, int *w, int *h, char **note)
+{
+    WalpeMonitorConf mc;
+    res_conf_for (m->name, &mc);
+    int rw = m->geom.width, rh = m->geom.height;
+    walpe_res_size (&mc.res, m->geom.width, m->geom.height, &rw, &rh);
+    const int mx = g_atomic_int_get (&gl_max_side);
+    if (note)
+        *note = NULL;
+    if (rw < 1 || rh < 1) {
+        rw = m->geom.width;
+        rh = m->geom.height;
+    } else if (mx > 0 && (rw > mx || rh > mx)) {
+        if (note)
+            *note = g_strdup_printf ("%d x %d is more than the largest picture this GPU "
+                                     "renders to (%d pixels a side): rendered at the output's "
+                                     "own %d x %d", rw, rh, mx, m->geom.width, m->geom.height);
+        rw = m->geom.width;
+        rh = m->geom.height;
+    }
+    *w = rw;
+    *h = rh;
+}
+
+/* main: the texture limit a wallpaper is loaded with on m - the least
+ * strict of the monitors that show `path` (resolution.h
+ * walpe_texlimit_merge: they share its textures) */
+static int res_texlimit_for (Mon *m, const char *path)
+{
+    WalpeMonitorConf mc;
+    res_conf_for (m->name, &mc);
+    int lim = mc.tex_limit;
+    for (GList *l = D.mons; path && *path && l; l = l->next) {
+        Mon *o = l->data;
+        if (o == m || g_strcmp0 (o->want_path, path))
+            continue;
+        res_conf_for (o->name, &mc);
+        lim = walpe_texlimit_merge (lim, mc.tex_limit);
+    }
+    return lim;
+}
+
+/* main: has anybody been asked about m's output (mc: its stored entry, or
+ * what res_conf_for gave). Also TRUE where the question could never be
+ * answered: the --windowed window, and an output whose name cannot be a key
+ * of "monitors" (walpe_monitor_name_ok: longer than 64 bytes, control
+ * characters, not UTF-8). Output names are whatever the X server has, and
+ * `xrandr --setmonitor` takes any text. No choice can be stored for such an
+ * output, it runs at native; reported as "not asked" it stayed so after
+ * every answer, and the window asked again at every start. */
+static gboolean mon_res_asked (const Mon *m, const WalpeMonitorConf *mc)
+{
+    return res_no_ask || !walpe_monitor_name_ok (m->name) || (mc && mc->asked);
+}
+
+/* main: connected outputs nobody has been asked about yet */
+static int res_unasked (void)
+{
+    int n = 0;
+    for (GList *l = D.mons; !res_no_ask && l; l = l->next) {
+        const Mon *m = l->data;
+        n += !mon_res_asked (m, walpe_config_monitor (D.cfg, m->name));
+    }
+    return n;
+}
+
+/* main: the box the converted copy of video wallpaper `path` is made for
+ * (config video_resolution; resolution.h walpe_video_box). auto looks at
+ * the render sizes of the monitors that show the video: those whose
+ * wallpaper it is, plus `also` (an `open` on that monitor is under way),
+ * or all of them (everyone: an `open` for every monitor; and when nobody
+ * shows it: an import into the library). */
+static void video_box_for (const char *path, Mon *also, gboolean everyone, WalpeVideoBox *box)
+{
+    enum { MAXN = 32 };
+    int sizes[2 * MAXN];
+    guint n = 0;
+    for (int pass = 0; pass < 2 && !n; pass++)
+        for (GList *l = D.mons; l && n < MAXN; l = l->next) {
+            Mon *m = l->data;
+            if (!pass && !everyone && m != also && (!path || g_strcmp0 (m->want_path, path)))
+                continue;
+            sizes[2 * n] = m->res_w > 0 ? m->res_w : m->geom.width;
+            sizes[2 * n + 1] = m->res_h > 0 ? m->res_h : m->geom.height;
+            n++;
+        }
+    walpe_video_box (&D.cfg->video_res, sizes, n, box);
+}
+
 /* main thread: give a monitor thread its next wallpaper (path, or NULL =
  * keep the content) and role: sf + idx -1 = lead sf, idx >= 0 = follow
  * sf, sf NULL = render on its own. keep: should that load fail, a monitor
@@ -2185,6 +2484,10 @@ static void mon_assign (Mon *m, const char *path, SharedFrame *sf, int idx, gboo
         /* the knobs this wallpaper runs with (global + its own) */
         walpe_config_quality_for (D.cfg, path, &m->quality);
         m->fps = m->fps_cap = mon_fps_cap (m);
+        /* its texture limit (shared with the other monitors that show it)
+         * and, a video, the box of its converted copy */
+        m->tex_limit = res_texlimit_for (m, path);
+        video_box_for (path, NULL, FALSE, &m->load_box);
     } else if (sf && idx >= 0) {
         /* it follows another monitor from now on: a load queued by an
          * earlier apply_wallpapers that its thread has not taken yet (it
@@ -2458,6 +2761,100 @@ static void reload_flush (void)
         }
 }
 
+/* ---- render resolution: the choices become numbers ----------------------
+ * main thread. res_refresh: every monitor's render size from its choice. A
+ * monitor whose size changed gets it at once (its thread draws a frame at
+ * it); a scene it shows is marked to load again - what a scene keeps of
+ * each texture follows the size it is rendered at, and only a load makes
+ * that smaller (scenes_reload_mark's convention: the caller ends with
+ * res_commit ()). Videos, web pages and pictures follow with their next
+ * frame. Returns TRUE when a size changed. */
+static gboolean res_refresh (void)
+{
+    gboolean any = FALSE;
+    for (GList *l = D.mons; l; l = l->next) {
+        Mon *m = l->data;
+        int w = 0, h = 0;
+        char *note = NULL;
+        mon_res_size (m, &w, &h, &note);
+        if (note && g_strcmp0 (note, m->res_note))
+            g_warning ("monitor %s: %s", m->name, note);
+        g_free (m->res_note);
+        m->res_note = note;
+        if (w == m->res_w && h == m->res_h)
+            continue;
+        any = TRUE;
+        g_mutex_lock (&m->lock);
+        m->res_w = w;
+        m->res_h = h;
+        m->res_changed = TRUE;
+        g_cond_signal (&m->cond);
+        g_mutex_unlock (&m->lock);
+        if (mon_shows_scene (m))
+            m->reload_wanted = TRUE;
+    }
+    return any;
+}
+
+/* main: the texture limit of every monitor's wallpaper again (a monitor's
+ * choice changed). Where it differs from what the wallpaper was loaded
+ * with: handed over, and a scene loads again. TRUE when one changed. */
+static gboolean res_texlimits_refresh (void)
+{
+    gboolean any = FALSE;
+    for (GList *l = D.mons; l; l = l->next) {
+        Mon *m = l->data;
+        if (m->leader)
+            continue;   /* shows its leader's frames: no textures of its own */
+        int lim = res_texlimit_for (m, m->want_path);
+        if (lim == m->tex_limit)
+            continue;
+        any = TRUE;
+        g_mutex_lock (&m->lock);
+        m->tex_limit = lim;
+        m->res_changed = TRUE;
+        g_cond_signal (&m->cond);
+        g_mutex_unlock (&m->lock);
+        if (mon_shows_scene (m))
+            m->reload_wanted = TRUE;
+    }
+    return any;
+}
+
+static void video_boxes_refresh (void);
+
+/* main, at the end of a request that changed a render size, a texture
+ * limit or video_resolution: the groups of monitors that share one
+ * rendering depend on the render size (formed again), the marked scenes
+ * load, and a video whose converted copy is for another box now gets the
+ * one for this box. */
+static void res_commit (gboolean sizes_changed)
+{
+    gboolean marked = FALSE;
+    for (GList *l = D.mons; l; l = l->next)
+        marked = marked || ((Mon *) l->data)->reload_wanted;
+    if (sizes_changed)
+        apply_wallpapers (NULL, NULL, FALSE, TRUE);    /* regroup; takes every mark */
+    else if (marked)
+        apply_wallpapers (NULL, NULL, FALSE, FALSE);
+    video_boxes_refresh ();
+    fps_refresh ();
+    state_touch ();
+}
+
+/* main (idle, queued by res_note_gl): the largest picture the GL renders to
+ * is known now. A stored size beyond it was handed to the render threads at
+ * start as it was; here it falls back to the output's own (mon_res_size)
+ * and status says why ("resolution_note"). Nothing happens when every size
+ * fits - the usual case. */
+static gboolean res_gl_known_cb (gpointer user)
+{
+    (void) user;
+    if (res_refresh ())
+        res_commit (TRUE);
+    return G_SOURCE_REMOVE;
+}
+
 /* ---- quality knobs (common/quality.h) ----------------------------------
  * main thread: knobs changed (`changed`: WALPE_Q_* bits; path = one
  * wallpaper's own settings, NULL = the global ones). Every monitor gets
@@ -2557,8 +2954,10 @@ static void apply_wallpapers (const char *force_path, Mon *force_mon, gboolean f
         ghz[ng++] = m->hz;
         for (guint j = i + 1; j < n && ng <= SF_MAX_FOLLOWERS; j++) {
             Mon *o = ms[j];
+            /* (and rendered at the same size: one frame cannot be two) */
             if (!lead[j] && !grouped[j] && !g_strcmp0 (o->want_path, m->want_path) &&
-                o->geom.width == m->geom.width && o->geom.height == m->geom.height) {
+                o->geom.width == m->geom.width && o->geom.height == m->geom.height &&
+                o->res_w == m->res_w && o->res_h == m->res_h) {
                 grp[ng] = j;
                 ghz[ng++] = o->hz;
             }
@@ -2805,135 +3204,6 @@ static Mon *mon_route (Mon *m)
     return m && m->leader ? m->leader : m;
 }
 
-/* --------------------------------------------------- display sleep checks */
-
-/* Display sleep is noticed by events where the server has them, not by
- * asking it every second:
- *  - screensaver (blank / lock): MIT-SCREEN-SAVER ScreenSaverNotify;
- *  - DPMS: DPMSInfoNotify (DPMS 1.2: newer servers + libXext >= 1.3.6,
- *    looked up at run time). Older servers have no DPMS event at all:
- *    there the state is asked every 10 s (`xset dpms force off` and the
- *    idle timeout are both noticed within that), and while the display is
- *    off raw input events are selected (XInput2), so the wake-up - which
- *    only input causes - is seen at once instead of at the next poll.
- * WALPE_FAKE_DPMS=<file> (tests; Xvfb has no DPMS): the DPMS state is the
- * file's content ("off..." = asleep), handled like a server without DPMS
- * events. */
-static int ss_event_base = -1;      /* ScreenSaverNotify selected: first event code */
-static int dpms_opcode = -1;        /* DPMSInfoNotify selected: the extension's opcode */
-static gboolean dpms_poll;          /* DPMS without events: slow poll + wake watch */
-static guint sleep_poll_id, sleep_poll_secs;
-static guint sleep_kick_id;
-static int sleep_kick_n;
-static const char *fake_dpms;
-
-/* DPMS (libXext, already linked): power-save states standby/suspend/off */
-static gboolean dpms_asleep (void)
-{
-    static int probed = FALSE, ok = FALSE, evb = 0, errb = 0;
-    if (fake_dpms) {
-        char *s = NULL;
-        gboolean off = g_file_get_contents (fake_dpms, &s, NULL, NULL) && s &&
-                       g_str_has_prefix (s, "off");
-        g_free (s);
-        return off;
-    }
-    if (!probed) {
-        probed = TRUE;
-        ok = DPMSQueryExtension (D.xd, &evb, &errb);
-        if (ok)
-            g_message ("DPMS extension present");
-    }
-    if (!ok)
-        return FALSE;
-    CARD16 level = DPMSModeOn;
-    BOOL enabled = False;
-    DPMSInfo (D.xd, &level, &enabled);
-    return enabled && level != DPMSModeOn;
-}
-
-/* screensaver active = screen locked/blanked. libXss is optional here:
- * dlopened at runtime (no build dep); silently unavailable if missing. */
-typedef struct {
-    Window window;
-    int state, kind;
-    unsigned long til_or_since, idle, eventMask;
-} XScreenSaverInfo; /* layout-identical to <X11/extensions/scrnsaver.h> */
-#define SCREENSAVER_ON 1 /* ScreenSaverOn in scrnsaver.h */
-#define SCREENSAVER_NOTIFY_MASK 0x00000001L /* ScreenSaverNotifyMask */
-
-static struct {
-    int probed, ok, evb, errb;
-    Bool (*qext) (Display *, int *, int *);
-    XScreenSaverInfo *(*alloc_info) (void);
-    Bool (*query_info) (Display *, Drawable, XScreenSaverInfo *);
-    void (*select_input) (Display *, Drawable, unsigned long);
-    XScreenSaverInfo *info;
-} Xss;
-
-static gboolean screensaver_probe (void)
-{
-    if (!Xss.probed) {
-        Xss.probed = TRUE;
-        void *lib = dlopen ("libXss.so.1", RTLD_LAZY);
-        if (lib) {
-            Xss.qext = (Bool (*)(Display *, int *, int *))
-                dlsym (lib, "XScreenSaverQueryExtension");
-            Xss.alloc_info = (XScreenSaverInfo * (*) (void))
-                dlsym (lib, "XScreenSaverAllocInfo");
-            Xss.query_info = (Bool (*) (Display *, Drawable, XScreenSaverInfo *))
-                dlsym (lib, "XScreenSaverQueryInfo");
-            Xss.select_input = (void (*) (Display *, Drawable, unsigned long))
-                dlsym (lib, "XScreenSaverSelectInput");
-            Xss.ok = Xss.qext && Xss.alloc_info && Xss.query_info &&
-                     Xss.qext (D.xd, &Xss.evb, &Xss.errb);
-        }
-        if (Xss.ok)
-            g_message ("XScreenSaver extension present (libXss dlopened)");
-    }
-    return Xss.ok;
-}
-
-static gboolean screensaver_active (void)
-{
-    if (!screensaver_probe ())
-        return FALSE;
-    if (!Xss.info)
-        Xss.info = Xss.alloc_info ();
-    if (!Xss.info || !Xss.query_info (D.xd, D.root, Xss.info))
-        return FALSE;
-    return Xss.info->state == SCREENSAVER_ON;
-}
-
-/* once at start-up: ask for the events */
-static void sleep_watch_init (void)
-{
-    fake_dpms = g_getenv ("WALPE_FAKE_DPMS");
-    if (screensaver_probe () && Xss.select_input) {
-        Xss.select_input (D.xd, D.root, SCREENSAVER_NOTIFY_MASK);
-        ss_event_base = Xss.evb;
-    }
-    int evb = 0, errb = 0;
-    if (fake_dpms) {
-        dpms_poll = TRUE;
-    } else if (DPMSQueryExtension (D.xd, &evb, &errb)) {
-        int maj = 0, min = 0, op = 0, e1 = 0, e2 = 0;
-        void (*sel) (Display *, unsigned long) = NULL;
-        if (DPMSGetVersion (D.xd, &maj, &min) && (maj > 1 || (maj == 1 && min >= 2)))
-            sel = (void (*) (Display *, unsigned long)) dlsym (RTLD_DEFAULT, "DPMSSelectInput");
-        if (sel && XQueryExtension (D.xd, "DPMS", &op, &e1, &e2)) {
-            sel (D.xd, 1UL /* DPMSInfoNotifyMask */);
-            dpms_opcode = op;
-        } else {
-            dpms_poll = TRUE;
-        }
-    }
-    g_message ("display sleep: screensaver %s, DPMS %s",
-               ss_event_base >= 0 ? "events" : Xss.ok ? "present, no events (not followed)" : "absent",
-               dpms_opcode >= 0 ? "events" : dpms_poll ? "polled every 10 s (no DPMS events here)"
-                                                       : "absent");
-}
-
 /* one central place deciding whether a monitor's wallpaper should be
  * paused (decode + render). Per-monitor: each monitor owns its own
  * content/decoder instance, so covered monitors stop while others play. */
@@ -2949,10 +3219,12 @@ static gboolean want_pause_mon (Mon *m)
            (D.cfg->pause_covered && m->vis_none) ||
            /* opt-in rules (off by default) */
            (D.cfg->focus_action == WALPE_FOCUS_PAUSE && m->focus_app) ||
-           (D.cfg->pause_battery && D.on_battery);
+           (D.cfg->pause_battery && D.on_battery) ||
+           /* nobody has touched keyboard or pointer for pause_idle seconds
+            * (off by default; reported where the session can: status
+            * "pause_rules") */
+           (D.cfg->pause_idle > 0 && walpe_signal_get (WALPE_SIG_IDLE, 0));
 }
-
-static void sleep_arm (void);
 
 /* GPUPROF: why a monitor is paused, for the profile report (the
  * first rule that applies, in want_pause_mon's order) */
@@ -2970,6 +3242,8 @@ static const char *pause_reason_mon (Mon *m)
         return "focus rule";
     if (D.cfg->pause_battery && D.on_battery)
         return "on battery";
+    if (D.cfg->pause_idle > 0 && walpe_signal_get (WALPE_SIG_IDLE, 0))
+        return "no input for a while";
     return "";
 }
 
@@ -3011,24 +3285,6 @@ static void apply_pause_state (void)
     pointer_update ();
     state_touch ();
 }
-
-static void sleep_recheck (void)
-{
-    gboolean asleep = dpms_asleep () || screensaver_active ();
-    if (asleep != D.asleep) {
-        D.asleep = asleep;
-        if (asleep) {
-            g_message ("display asleep (dpms/screensaver): pausing render + decode");
-            malloc_trim (0);
-        } else {
-            g_message ("display awake: resuming");
-        }
-        apply_pause_state ();
-    }
-    sleep_arm ();
-}
-
-static int walpe_xio_error (Display *d);
 
 /* The GUI starts the daemon with stdout / stderr appended to
  * ~/.cache/walpe/daemon.log and rotates that file only when it starts a
@@ -3073,52 +3329,6 @@ static gboolean log_cap_now (void)   /* TRUE = the file was cut back */
     }
     g_free (tail);
     return TRUE;
-}
-
-static gboolean sleep_tick (gpointer user)
-{
-    (void) user;
-    sleep_recheck ();
-    return G_SOURCE_CONTINUE;
-}
-
-/* the poll (servers without DPMS events only) and the wake watch follow
- * the state */
-static void sleep_arm (void)
-{
-    gboolean poll = dpms_poll && D.cfg->pause_dpms;
-    /* asleep without XInput2: nothing announces the wake-up */
-    guint secs = !poll ? 0 : (D.asleep && xi2_opcode < 0) ? 2 : 10;
-    if (secs != sleep_poll_secs) {
-        if (sleep_poll_id)
-            g_source_remove (sleep_poll_id);
-        sleep_poll_secs = secs;
-        sleep_poll_id = secs ? g_timeout_add_seconds (secs, sleep_tick, NULL) : 0;
-    }
-    xi_want_wake = poll && D.asleep && !sleep_kick_id;
-    xi2_apply_mask ();
-}
-
-static gboolean sleep_kick_cb (gpointer user)
-{
-    (void) user;
-    sleep_kick_id = 0;
-    /* the server may report the display on a moment after the input that
-     * woke it: look again, then wait for the next input */
-    if (D.asleep && ++sleep_kick_n < 3)
-        sleep_kick_id = g_timeout_add (1000, sleep_kick_cb, NULL);
-    sleep_recheck ();
-    return G_SOURCE_REMOVE;
-}
-
-/* raw input arrived while the display was off */
-static void sleep_wake_kick (void)
-{
-    if (sleep_kick_id)
-        return;
-    sleep_kick_n = 0;
-    sleep_kick_id = g_timeout_add (150, sleep_kick_cb, NULL);
-    sleep_recheck ();   /* also drops the raw input selection (sleep_arm) */
 }
 
 /* ------------------------------------------------------ power source
@@ -3249,354 +3459,36 @@ static void power_watch_update (void)
     }
 }
 
-/* -------------------------------------------------- covered detection
- * dwm has no MAXIMIZED EWMH atoms and tiled layouts cover a monitor even
- * when the active window is only half of it, so "covered" is decided by
- * GEOMETRY: union of all visible client windows rasterized on a coarse
- * grid per monitor (exact enough, no rectangle-union algebra). Event
- * driven only — recomputed after map/unmap/configure/property changes,
- * debounced. */
-
-#define COVER_GRID 24           /* raster cells per axis per monitor */
-#define COVER_THRESHOLD 0.85f   /* covered area fraction that pauses */
-
-static gboolean window_is_wallpaper (Window w)
-{
-    for (GList *l = D.mons; l; l = l->next)
-        if (((Mon *) l->data)->xid == w)
-            return TRUE;
-    return FALSE;
-}
-
-/* windows that never count as covering: the wallpaper is visible through
- * them (WM_CLASS matched against cfg->transparent_windows, e.g. "st" —
- * suckless terminal's alpha patch shows the wallpaper behind it) */
-static gboolean window_is_translucent (Window w)
-{
-    if (!D.cfg->transparent_windows || !*D.cfg->transparent_windows)
-        return FALSE;
-    XClassHint ch = { NULL, NULL };
-    if (!XGetClassHint (D.xd, w, &ch))
-        return FALSE;
-    gboolean hit = FALSE;
-    char **tokens = g_strsplit (D.cfg->transparent_windows, ",", -1);
-    for (guint i = 0; tokens && tokens[i]; i++) {
-        const char *t = g_strstrip (tokens[i]);
-        if (*t && ((ch.res_name && !g_ascii_strcasecmp (t, ch.res_name)) ||
-                   (ch.res_class && !g_ascii_strcasecmp (t, ch.res_class)))) {
-            hit = TRUE;
-            break;
-        }
-    }
-    g_strfreev (tokens);
-    if (ch.res_name)
-        XFree (ch.res_name);
-    if (ch.res_class)
-        XFree (ch.res_class);
-    return hit;
-}
-
-/* property helper: up to max 32-bit items of type `type` (XFree *out).
- * Every property the daemon reads as an array of longs goes through
- * here: any X client can set e.g. _NET_CLIENT_LIST with format 8, Xlib
- * then hands back nitems BYTES, and indexing that as Window[] read far
- * past the buffer (ASan: heap-buffer-overflow in the cover scan). */
-static gulong window_prop32 (Window w, Atom prop, Atom type, gulong max, guchar **out)
-{
-    Atom rt = None;
-    int fmt = 0;
-    gulong n = 0, left = 0;
-    *out = NULL;
-    if (prop == None ||
-        XGetWindowProperty (D.xd, w, prop, 0, (long) max, False, type, &rt, &fmt, &n, &left,
-                            out) != Success || !*out)
-        return 0;
-    if (fmt != 32 || rt != type) {
-        XFree (*out);
-        *out = NULL;
-        return 0;
-    }
-    return MIN (n, max);
-}
-
-/* a window that can hide the wallpaper: a normal (or dialog / untyped)
- * client that is not minimized. Docks, desktop icon windows, menus,
- * tooltips, notifications and splash screens never count; neither do
- * iconic (WM_STATE) or _NET_WM_STATE_HIDDEN windows. dwm keeps the windows
- * of other tags mapped but moves them off-screen, so the geometry test
- * already ignores them. */
-static gboolean window_is_normal_visible (Window w)
-{
-    static Atom a_type, a_normal, a_dialog, a_state, a_hidden, a_wmstate;
-    if (!a_type) {
-        a_type = XInternAtom (D.xd, "_NET_WM_WINDOW_TYPE", False);
-        a_normal = XInternAtom (D.xd, "_NET_WM_WINDOW_TYPE_NORMAL", False);
-        a_dialog = XInternAtom (D.xd, "_NET_WM_WINDOW_TYPE_DIALOG", False);
-        a_state = XInternAtom (D.xd, "_NET_WM_STATE", False);
-        a_hidden = XInternAtom (D.xd, "_NET_WM_STATE_HIDDEN", False);
-        a_wmstate = XInternAtom (D.xd, "WM_STATE", False);
-    }
-    guchar *d = NULL;
-    gulong n = window_prop32 (w, a_type, XA_ATOM, 16, &d);
-    if (d) {
-        gboolean normal = FALSE;
-        for (gulong i = 0; i < n; i++)
-            normal |= ((Atom *) d)[i] == a_normal || ((Atom *) d)[i] == a_dialog;
-        XFree (d);
-        if (n > 0 && !normal)
-            return FALSE;
-    }
-    n = window_prop32 (w, a_state, XA_ATOM, 32, &d);
-    if (d) {
-        gboolean hidden = FALSE;
-        for (gulong i = 0; i < n; i++)
-            hidden |= ((Atom *) d)[i] == a_hidden;
-        XFree (d);
-        if (hidden)
-            return FALSE;
-    }
-    n = window_prop32 (w, a_wmstate, a_wmstate, 2, &d);
-    if (d) {
-        gboolean iconic = n >= 1 && ((long *) d)[0] == IconicState;
-        XFree (d);
-        if (iconic)
-            return FALSE;
-    }
-    return TRUE;
-}
-
-/* is a compositing manager running? (_NET_WM_CM_Sn selection owner) */
-static gboolean compositor_running (void)
-{
-    static Atom a_cm;
-    if (!a_cm) {
-        char name[32];
-        g_snprintf (name, sizeof name, "_NET_WM_CM_S%d", DefaultScreen (D.xd));
-        a_cm = XInternAtom (D.xd, name, False);
-    }
-    return XGetSelectionOwner (D.xd, a_cm) != None;
-}
-
-/* see-through: listed in transparent_windows, a compositor opacity below
- * 100 % (_NET_WM_WINDOW_OPACITY, set by transset / some picom set-ups), or
- * - under a compositing manager - a 32-bit (ARGB) window that does not
- * declare itself opaque: toolkits set _NET_WM_OPAQUE_REGION on windows
- * they paint solid, and leave it off (or small) on translucent ones (a
- * terminal with background alpha, a GTK window with a translucent theme).
- * picom's own opacity rules leave no trace on the window: such windows
- * need their WM_CLASS in transparent_windows.
- * depth / w / h: the window's (already asked for by the scan); cm: a
- * compositing manager runs. */
-static gboolean window_is_see_through (Window w, int depth, int ww, int wh, gboolean cm)
-{
-    if (window_is_translucent (w))
-        return TRUE;
-    static Atom a_op, a_opaque;
-    if (!a_op) {
-        a_op = XInternAtom (D.xd, "_NET_WM_WINDOW_OPACITY", False);
-        a_opaque = XInternAtom (D.xd, "_NET_WM_OPAQUE_REGION", False);
-    }
-    guchar *d = NULL;
-    gulong n = window_prop32 (w, a_op, XA_CARDINAL, 1, &d);
-    gboolean see = d && n == 1 && (((unsigned long *) d)[0] & 0xffffffffUL) < 0xffffffffUL;
-    if (d)
-        XFree (d);
-    if (see || !cm || depth != 32 || ww < 1 || wh < 1)
-        return see;
-    /* opaque part of the window (rectangles x, y, w, h; overlap between
-     * them is rare and only errs towards "opaque") */
-    n = window_prop32 (w, a_opaque, XA_CARDINAL, 4 * 64, &d);
-    double opaque = 0.0;
-    for (gulong i = 0; d && i + 3 < n; i += 4) {
-        long x = (long) ((unsigned long *) d)[i], y = (long) ((unsigned long *) d)[i + 1];
-        long rw = (long) ((unsigned long *) d)[i + 2], rh = (long) ((unsigned long *) d)[i + 3];
-        long x1 = CLAMP (x, 0, ww), y1 = CLAMP (y, 0, wh);
-        long x2 = CLAMP (x + rw, 0, ww), y2 = CLAMP (y + rh, 0, wh);
-        if (x2 > x1 && y2 > y1)
-            opaque += (double) (x2 - x1) * (double) (y2 - y1);
-    }
-    if (d)
-        XFree (d);
-    return opaque < 0.85 * (double) ww * (double) wh;
-}
-
-/* fraction of monitor g hidden by the given window rectangles (root px) */
-static float monitor_coverage (const WalpeRect *g, const WalpeRect *wins, guint n)
-{
-    guchar grid[COVER_GRID * COVER_GRID] = { 0 };
-    float cw = (float) g->width / COVER_GRID;
-    float ch = (float) g->height / COVER_GRID;
-    guint marked = 0;
-
-    for (guint i = 0; i < n && marked < COVER_GRID * COVER_GRID; i++) {
-        const WalpeRect *r = &wins[i];
-        if (r->x >= g->x + g->width || r->y >= g->y + g->height || r->x + r->width <= g->x ||
-            r->y + r->height <= g->y)
-            continue;   /* no overlap with this monitor */
-        for (int cy = 0; cy < COVER_GRID; cy++)
-            for (int cx = 0; cx < COVER_GRID; cx++) {
-                if (grid[cy * COVER_GRID + cx])
-                    continue;
-                float px = g->x + (cx + 0.5f) * cw;
-                float py = g->y + (cy + 0.5f) * ch;
-                if (px >= r->x && px < r->x + r->width && py >= r->y && py < r->y + r->height) {
-                    grid[cy * COVER_GRID + cx] = 1;
-                    marked++;
-                }
-            }
-    }
-    return (float) marked / (COVER_GRID * COVER_GRID);
-}
-
-/* Property changes of the clients (state: hidden / iconic / fullscreen,
- * opacity, type) decide whether they cover: the daemon asks for them on
- * every client of _NET_CLIENT_LIST once, when it first sees it, instead
- * of re-scanning all windows every 2 s "in case" one changed. A window
- * that is gone needs no clean-up (its event selection went with it). */
-static void clients_watch (const Window *w, guint n)
-{
-    GHashTable *now = g_hash_table_new (NULL, NULL);
-    for (guint i = 0; i < n; i++) {
-        if (w[i] == None || w[i] == D.root || window_is_wallpaper (w[i]))
-            continue;
-        g_hash_table_add (now, GSIZE_TO_POINTER (w[i]));
-        if (!D.watched_clients || !g_hash_table_contains (D.watched_clients, GSIZE_TO_POINTER (w[i])))
-            XSelectInput (D.xd, w[i], PropertyChangeMask);
-    }
-    if (D.watched_clients)
-        g_hash_table_unref (D.watched_clients);
-    D.watched_clients = now;
-}
-
-static gboolean client_is_watched (Window w)
-{
-    return D.watched_clients && g_hash_table_contains (D.watched_clients, GSIZE_TO_POINTER (w));
-}
-
-static void recompute_covered (void)
-{
-    /* client list: dwm maintains _NET_CLIENT_LIST; XQueryTree fallback */
-    Window *clients = NULL;
-    guint n = 0;
-    Atom prop = XInternAtom (D.xd, "_NET_CLIENT_LIST", True);
-    guchar *data = NULL;
-    if (prop != None) {
-        gulong cnt = window_prop32 (D.root, prop, XA_WINDOW, 1024, &data);
-        if (data && cnt > 0) {
-            clients = (Window *) data;
-            n = (guint) cnt;
-        }
-    }
-    clients_watch (clients, n);
-    Window *tree_clients = NULL;
-    if (!clients) {
-        Window r2, parent;
-        guint tn = 0;
-        if (XQueryTree (D.xd, D.root, &r2, &parent, &tree_clients, &tn) && tree_clients) {
-            clients = tree_clients;
-            n = tn;
-        }
-    }
-
-    /* each client is asked about once per scan (attributes, root position,
-     * type / state / opacity), not once per monitor: the windows that can
-     * hide a wallpaper, as rectangles in root coordinates */
-    WalpeRect *wins = g_new (WalpeRect, n ? n : 1);
-    guint nw = 0;
-    WalpeRect focus = { 0, 0, 0, 0 };   /* the focused application window */
-    gboolean have_focus = FALSE;
-    gboolean cm = !D.cfg->cover_transparent && compositor_running ();
-    for (guint i = 0; i < n; i++) {
-        XWindowAttributes wa;
-        if (!XGetWindowAttributes (D.xd, clients[i], &wa))
-            continue;
-        if (wa.map_state != IsViewable || wa.class == InputOnly ||
-            wa.override_redirect || window_is_wallpaper (clients[i]))
-            continue;
-        Window junk0;
-        int ox, oy;     /* root coords (attrs x/y are parent-relative) */
-        if (!XTranslateCoordinates (D.xd, clients[i], D.root, 0, 0, &ox, &oy, &junk0))
-            continue;
-        /* cheap rejection first: on no monitor at all (dwm parks the
-         * windows of other tags off-screen) */
-        gboolean on_any = FALSE;
-        for (GList *l = D.mons; l && !on_any; l = l->next) {
-            const WalpeRect *g = &((Mon *) l->data)->geom;
-            on_any = !(ox >= g->x + g->width || oy >= g->y + g->height || ox + wa.width <= g->x ||
-                       oy + wa.height <= g->y);
-        }
-        if (!on_any)
-            continue;
-        if (!window_is_normal_visible (clients[i]))
-            continue;
-        if (clients[i] == D.watched_win) {
-            focus = (WalpeRect) { ox, oy, wa.width, wa.height };
-            have_focus = TRUE;
-        }
-        if (!D.cfg->cover_transparent &&
-            window_is_see_through (clients[i], wa.depth, wa.width, wa.height, cm))
-            continue;
-        wins[nw++] = (WalpeRect) { ox, oy, wa.width, wa.height };
-    }
-
-    gboolean changed = FALSE;
-    for (GList *l = D.mons; l; l = l->next) {
-        Mon *m = l->data;
-        float cov = nw > 0 ? monitor_coverage (&m->geom, wins, nw) : 0.0f;
-        gboolean now = cov >= COVER_THRESHOLD;
-        if (now != m->covered) {
-            m->covered = now;
-            changed = TRUE;
-            g_message ("mon%d %s by windows (coverage %.2f) -> %s",
-                       m->index, now ? "covered" : "exposed", cov,
-                       now ? "pausing" : "resuming");
-        }
-        /* an application's window on this monitor has the focus (the
-         * focus_action rule; the desktop itself focused = none) */
-        const WalpeRect *g = &m->geom;
-        gboolean fa = have_focus &&
-                      !(focus.x >= g->x + g->width || focus.y >= g->y + g->height ||
-                        focus.x + focus.width <= g->x || focus.y + focus.height <= g->y);
-        if (fa != m->focus_app) {
-            m->focus_app = fa;
-            changed = TRUE;
-            if (D.cfg->focus_action != WALPE_FOCUS_RUN)
-                g_debug ("mon%d: %s", m->index, fa ? "an application has the focus"
-                                                   : "no application focused");
-        }
-    }
-    g_free (wins);
-    if (data)
-        XFree (data);
-    if (tree_clients)
-        XFree (tree_clients);
-
-    if (changed)
-        apply_pause_state ();
-}
-
-static void restack_check (void);
-static void pointer_rest_sample (void);
-
-static gboolean cover_recompute_tick (gpointer user)
+/* -------------------------------------------------------- pause signals
+ * Whether a fullscreen window has the focus, the displays sleep, windows
+ * cover a monitor or an application has the focus on it is found out by
+ * the providers of the platform layer (platform/signals.h: on X11 from
+ * EWMH properties, DPMS and the screensaver extension, as ever). Their
+ * combined values land here, in the fields the pause rules read; the
+ * registry calls this once per change (once per scan of the windows). */
+static void signals_changed (guint mask, gpointer user)
 {
     (void) user;
-    D.cover_timer_id = 0;
-    restack_check ();
-    recompute_covered ();
-    pointer_rest_sample ();   /* another window may be under a resting pointer now */
-    return G_SOURCE_REMOVE;
+    if (mask & WALPE_SIG_BIT (WALPE_SIG_FULLSCREEN))
+        D.fs_active = walpe_signal_get (WALPE_SIG_FULLSCREEN, 0);
+    if (mask & WALPE_SIG_BIT (WALPE_SIG_ASLEEP))
+        D.asleep = walpe_signal_get (WALPE_SIG_ASLEEP, 0);
+    if (mask & WALPE_SIG_BIT (WALPE_SIG_IDLE))
+        D.idle = walpe_signal_get (WALPE_SIG_IDLE, 0);
+    if (mask & WALPE_SIG_PER_OUTPUT)
+        for (GList *l = D.mons; l; l = l->next) {
+            Mon *m = l->data;
+            m->covered = walpe_signal_get (WALPE_SIG_COVERED, m->out_id);
+            /* an application's window on this monitor has the focus (the
+             * focus_action rule; the desktop itself focused = none) */
+            m->focus_app = walpe_signal_get (WALPE_SIG_FOCUS_APP, m->out_id);
+        }
+    apply_pause_state ();
 }
 
-/* coalesce bursts (window drags fire ConfigureNotify continuously). There
- * is no periodic re-scan any more: geometry / visibility changes arrive as
- * SubstructureNotify events of the root, state / opacity / type changes as
- * PropertyNotify of the watched clients (clients_watch). */
-static void cover_schedule (void)
-{
-    if (!D.cover_timer_id)
-        D.cover_timer_id = g_timeout_add (80, cover_recompute_tick, NULL);
-}
+static const WalpeSignalSink signal_sink = { signals_changed };
+
+static void pointer_rest_sample (void);
 
 /* diagnostics: visible with G_MESSAGES_DEBUG=all */
 static gboolean stats_tick (gpointer user)
@@ -3608,7 +3500,7 @@ static gboolean stats_tick (gpointer user)
                  m->index, g_atomic_int_get (&m->render_count),
                  walpe_type_name (g_atomic_int_get (&m->content_type)),
                  g_atomic_int_get (&m->last_w), g_atomic_int_get (&m->last_h),
-                 (unsigned long) m->xid);
+                 walpe_surface_native_id (m->ps));
         g_debug ("stats:   geom=%dx%d at %d,%d fs=%d covered=%d paused_cfg=%d",
                  m->geom.width, m->geom.height, m->geom.x, m->geom.y,
                  D.fs_active, m->covered, D.cfg->paused);
@@ -3729,6 +3621,15 @@ static void vis_apply_setting (void)
     int mode = walpe_skip_hidden_parse (g_getenv ("WALPE_SKIP_HIDDEN"), D.cfg->skip_hidden);
     if (D.windowed || !D.mons)
         mode = WALPE_SKIP_OFF;
+    if (mode != WALPE_SKIP_OFF && D.backend != WALPE_BACKEND_X11) {
+        /* the tracker reads the X window tree (daemon/vistrack.h); other
+         * window systems do not tell a client where other windows are */
+        static gboolean said;
+        if (!said)
+            g_message ("skip hidden areas: only on X11; everything is rendered");
+        said = TRUE;
+        mode = WALPE_SKIP_OFF;
+    }
     if (mode == WALPE_SKIP_OFF) {
         if (D.vis) {
             walpe_vistrack_free (D.vis);
@@ -3751,9 +3652,10 @@ static void vis_apply_setting (void)
         for (GList *l = D.mons; l; l = l->next, i++) {
             Mon *m = l->data;
             D.vis_mons[i] = m;
-            vm[i] = (WalpeVisMon) { m->geom.x, m->geom.y, m->geom.width, m->geom.height, m->xid };
+            vm[i] = (WalpeVisMon) { m->geom.x, m->geom.y, m->geom.width, m->geom.height,
+                                       walpe_surface_native_id (m->ps) };
         }
-        XSync (D.xd, False);    /* the tracker's connection must see our windows */
+        walpe_platform_sync (); /* the tracker's connection must see our windows */
         D.vis = walpe_vistrack_new (vm, n, mode, vis_changed, NULL);
         g_free (vm);
         if (!D.vis) {
@@ -3780,377 +3682,9 @@ static int vis_percent (Mon *m)
     return (int) ((walpe_region_area (&m->vis) * 100 + a / 2) / a);
 }
 
-/* ------------------------------------------------------------- X11 */
-
-#ifdef HAVE_XI2
-static void xi2_event (XEvent *e);
-#endif
-
-static gboolean xdata_ready (gint fd, GIOCondition cond, gpointer user);
-static void layout_schedule (void);
-#ifdef HAVE_XRANDR
-static int rr_event_base;
-#endif
-
-/* the X server went away (logging out, X killed): Xlib calls this and
- * exits the process. That end is not the wallpaper's fault: remove the
- * crash-loop marker and the socket first, or the next session would start
- * without wallpaper / find a dead socket. Only async-signal-safe calls
- * (this may run on any thread, inside Xlib); the paths are prepared at
- * start-up. GDK installs its own handler when the web module starts:
- * the X event source puts this one back (xsrc_prepare). */
-static char *xio_marker_path, *xio_sock_path;
-
-static int walpe_xio_error (Display *d)
-{
-    (void) d;
-    static const char msg[] = "walpe-daemon: lost the X server connection; exit\n";
-    if (xio_marker_path)
-        unlink (xio_marker_path);
-    if (xio_sock_path)
-        unlink (xio_sock_path);
-    if (write (2, msg, sizeof (msg) - 1) < 0) { /* nothing to do about it */ }
-    _exit (1);
-    return 0;
-}
-
-/* non-fatal X error handler: BadWindow races (selecting input on a window
- * that just died) must never take the daemon down */
-static int walpe_xerror (Display *d, XErrorEvent *e)
-{
-    g_debug ("X error %d on resource 0x%lx (request %lu)",
-             e->error_code, (unsigned long) e->resourceid, (unsigned long) e->serial);
-    return 0;
-}
-
-static gboolean have_shape = FALSE; /* probed at startup */
-
-static void shape_away_input (Window w)
-{
-    if (have_shape)
-        XShapeCombineRectangles (D.xd, w, ShapeInput, 0, 0, NULL, 0, ShapeSet, 0);
-}
-
-/* the wallpaper window: override-redirect so no WM (dwm tiles root children,
- * desktops restack) can manage, tile or raise it; input shaped away so
- * clicks/keys reach whatever is below. This window IS the EGL surface. */
-static Window create_desktop_window (const WalpeRect *g, gboolean or_mode)
-{
-    XSetWindowAttributes swa = {
-        .override_redirect = or_mode ? True : False,
-        .background_pixel = 0x000000, /* black until the first frame lands */
-        /* Expose: without a compositor the server paints a part that
-         * comes into view with the background; a scene that skips
-         * unchanged frames (or has no frame clock) must draw it again */
-        .event_mask = ExposureMask,
-        .save_under = False,
-        .backing_store = NotUseful,
-    };
-    Window w = XCreateWindow (D.xd, D.root, g->x, g->y, g->width, g->height, 0,
-                              CopyFromParent, InputOutput, CopyFromParent,
-                              CWOverrideRedirect | CWBackPixel | CWEventMask |
-                              CWSaveUnder | CWBackingStore, &swa);
-    if (or_mode) {
-        shape_away_input (w);
-        XMapWindow (D.xd, w);
-        XLowerWindow (D.xd, w);
-    } else {
-        XStoreName (D.xd, w, "walpe (preview)");
-        XMapWindow (D.xd, w);
-    }
-    XFlush (D.xd);
-    return w;
-}
-
-/* keep the wallpaper window at the bottom of the stack; re-assert often */
-static void sink_desktop_window (Mon *m)
-{
-    if (m->xid == None)
-        return;
-    shape_away_input (m->xid);
-    XLowerWindow (D.xd, m->xid);
-}
-
-/* are the wallpaper windows the lowest children of the root already?
- * (XQueryTree lists them bottom first) */
-static gboolean wallpapers_at_bottom (void)
-{
-    Window r, p, *kids = NULL;
-    guint n = 0, nm = g_list_length (D.mons);
-    if (!XQueryTree (D.xd, D.root, &r, &p, &kids, &n))
-        return FALSE;
-    gboolean ok = n >= nm;
-    for (guint i = 0; ok && i < nm; i++)
-        ok = window_is_wallpaper (kids[i]);
-    if (kids)
-        XFree (kids);
-    return ok;
-}
-
-/* Lowering unconditionally restacked for nothing: with two monitors each
- * XLowerWindow puts its window below the other one, so every tick both
- * monitor-sized windows changed places, the WM / a compositor / our own
- * cover scan were woken by the ConfigureNotify events, and the input
- * shape was re-sent. Now only when something got below a wallpaper - and
- * that is looked at (one XQueryTree) only after an event that can mean it
- * (stack_event), not every 5 s. */
-static void restack_check (void)
-{
-    if (!D.stack_dirty)
-        return;
-    D.stack_dirty = FALSE;
-    if (wallpapers_at_bottom ())
-        return;
-    g_debug ("a window got below the wallpaper: lowering the wallpaper windows");
-    for (GList *l = D.mons; l; l = l->next)
-        sink_desktop_window (l->data);
-}
-
-/* a root child was restacked: can a window be below a wallpaper window
- * now? `above` = the sibling directly below the window (None: lowest).
- * Our own lowering (wallpaper above None / above a wallpaper) is not. */
-static void stack_event (Window w, Window above)
-{
-    gboolean wp = window_is_wallpaper (w);
-    if (wp ? (above != None && !window_is_wallpaper (above))
-           : (above == None || window_is_wallpaper (above)))
-        D.stack_dirty = TRUE;
-}
-
-static gboolean window_is_fullscreen (Window w)
-{
-    if (w == None)
-        return FALSE;
-    Atom type = XInternAtom (D.xd, "_NET_WM_STATE", True);
-    if (type == None)
-        return FALSE;
-    Atom fs = XInternAtom (D.xd, "_NET_WM_STATE_FULLSCREEN", True);
-    guchar *data = NULL;
-    gboolean found = FALSE;
-    gulong n = window_prop32 (w, type, XA_ATOM, 64, &data);
-    if (data) {
-        Atom *atoms = (Atom *) data;
-        for (gulong i = 0; i < n; i++)
-            if (atoms[i] == fs)
-                found = TRUE;
-        XFree (data);
-    }
-    return found;
-}
-
-static void update_active_window (void)
-{
-    Atom prop = XInternAtom (D.xd, "_NET_ACTIVE_WINDOW", True);
-    if (prop == None)
-        return;
-    guchar *data = NULL;
-    Window active = None;
-    gulong n = window_prop32 (D.root, prop, XA_WINDOW, 1, &data);
-    if (data) {
-        if (n == 1)
-            active = *(Window *) data;
-        XFree (data);
-    }
-    gboolean fs = window_is_fullscreen (active);
-    gboolean changed = active != D.watched_win;
-    if (fs != D.fs_active) {
-        D.fs_active = fs;
-        changed = TRUE;
-        g_debug ("fullscreen %s", fs ? "engaged -> pausing" : "left -> resuming");
-        apply_pause_state ();
-    }
-    if (active != D.watched_win) {
-        /* clients of _NET_CLIENT_LIST are watched anyway (clients_watch) */
-        if (D.watched_win != None && !client_is_watched (D.watched_win))
-            XSelectInput (D.xd, D.watched_win, 0);
-        if (active != None && active != D.root && !client_is_watched (active))
-            XSelectInput (D.xd, active, PropertyChangeMask);
-        D.watched_win = active;
-    }
-    /* focus changes usually accompany stack/geometry churn (a property of
-     * the same window that changed nothing here does not). The scan also
-     * looks at a resting pointer again: window managers that warp the
-     * pointer to the focused window send no raw motion for it */
-    if (changed)
-        cover_schedule ();
-}
-
-static gboolean xdata_ready (gint fd, GIOCondition cond, gpointer user)
-{
-    (void) fd; (void) cond; (void) user;
-    while (XPending (D.xd)) {
-        XEvent e;
-        XNextEvent (D.xd, &e);
-        if (e.type == PropertyNotify) {
-            static Atom a_active, a_clients, a_state, a_wmstate, a_opacity, a_wtype, a_opaque;
-            if (!a_active) {
-                a_active = XInternAtom (D.xd, "_NET_ACTIVE_WINDOW", False);
-                a_clients = XInternAtom (D.xd, "_NET_CLIENT_LIST", False);
-                a_state = XInternAtom (D.xd, "_NET_WM_STATE", False);
-                a_wmstate = XInternAtom (D.xd, "WM_STATE", False);
-                a_opacity = XInternAtom (D.xd, "_NET_WM_WINDOW_OPACITY", False);
-                a_wtype = XInternAtom (D.xd, "_NET_WM_WINDOW_TYPE", False);
-                a_opaque = XInternAtom (D.xd, "_NET_WM_OPAQUE_REGION", False);
-            }
-            Atom at = e.xproperty.atom;
-            if (e.xproperty.window == D.root) {
-                if (at == a_active)
-                    update_active_window ();
-                else if (at == a_clients)
-                    cover_schedule (); /* clients appeared/vanished */
-                /* anything else on the root (a status bar text set with
-                 * xsetroot -name every second, ...) costs this wake-up and
-                 * nothing more */
-            } else if (at == a_state || at == a_wmstate) {
-                /* a client's state: fullscreen (the focused window), hidden,
-                 * iconic. Titles, _NET_WM_USER_TIME (set on every key press
-                 * / click), icons ... are ignored: no round trip, no scan */
-                if (e.xproperty.window == D.watched_win)
-                    update_active_window ();
-                cover_schedule ();
-            } else if (at == a_opacity || at == a_wtype || at == a_opaque) {
-                cover_schedule ();
-            }
-        }
-        else if (ss_event_base >= 0 && e.type == ss_event_base) {
-            sleep_recheck ();       /* ScreenSaverNotify: blanked / unblanked */
-        }
-        else if (e.type == GenericEvent) {
-            if (dpms_opcode >= 0 && e.xcookie.extension == dpms_opcode)
-                sleep_recheck ();   /* DPMSInfoNotify */
-#ifdef HAVE_XI2
-            else
-                xi2_event (&e);
-#endif
-        }
-#ifdef HAVE_XRANDR
-        else if (rr_event_base >= 0 && e.type == rr_event_base + RRScreenChangeNotify) {
-            XRRUpdateConfiguration (&e);
-            layout_schedule ();     /* monitors changed? */
-        }
-#endif
-        else if (e.type == Expose) {
-            /* a part of a wallpaper window lost its pixels: its next frame
-             * is drawn whatever the content thinks of it (a follower of a
-             * shared scene presents the leader's newest frame again). A
-             * window dragged across the wallpaper sends these at the
-             * pointer's rate: one answer per frame interval of the fps
-             * setting (expose_fire). */
-            for (GList *l = D.mons; l; l = l->next) {
-                Mon *m = l->data;
-                if (m->xid == e.xexpose.window && !m->expose_timer_id)
-                    m->expose_timer_id = g_timeout_add ((guint) MAX (1, 1000 / CLAMP (D.cfg->fps, 5, 200)),
-                                                        expose_fire, m);
-            }
-        }
-        else if (e.type == MapNotify || e.type == UnmapNotify ||
-                   e.type == ConfigureNotify || e.type == CirculateNotify ||
-                   e.type == DestroyNotify || e.type == ReparentNotify) {
-            if (e.type == ConfigureNotify && e.xconfigure.window == D.root)
-                layout_schedule (); /* the screen was resized */
-            if (e.type == ConfigureNotify && e.xconfigure.event == D.root)
-                stack_event (e.xconfigure.window, e.xconfigure.above);
-            else if (e.type == CirculateNotify &&
-                     (e.xcirculate.place == PlaceOnBottom ||
-                      window_is_wallpaper (e.xcirculate.window)))
-                D.stack_dirty = TRUE;
-            cover_schedule (); /* window geometry/visibility changed */
-        }
-    }
-    return G_SOURCE_CONTINUE;
-}
-
-/* The X connection as a main-loop source that also looks at Xlib's own
- * queue. A plain fd watch is not enough: every round trip on the Display
- * (XQueryPointer in the pointer poll, the cover queries, a render thread's
- * eglSwapBuffers) reads whatever the server sent and parks the events
- * that came before its reply in Xlib's memory. The socket is empty then,
- * an fd watch never fires, and those events - desktop clicks above all -
- * waited for the next unrelated X event: releases seconds late, double
- * clicks lost, drags stuck. prepare / check ask Xlib (as GDK's event
- * source does), so a parked event is dispatched in the same main-loop
- * iteration when the main thread's own round trip parked it. (Render
- * threads no longer use this connection: EGL has its own, D.egl_xd.) */
-typedef struct {
-    GSource src;
-    GPollFD pfd;
-} XEventSource;
-
-static gboolean xsrc_prepare (GSource *src, gint *timeout)
-{
-    (void) src;
-    *timeout = -1;
-    /* GDK (the web module) installs its own I/O error handler when it
-     * opens its display. Putting ours back here - every main-loop
-     * iteration, i.e. right after GDK did it - costs no request and no
-     * timer (it used to ride on a 1 s tick) */
-    XSetIOErrorHandler (walpe_xio_error);
-    return XEventsQueued (D.xd, QueuedAlready) > 0;
-}
-
-static gboolean xsrc_check (GSource *src)
-{
-    XEventSource *x = (XEventSource *) src;
-    return (x->pfd.revents & (G_IO_IN | G_IO_HUP | G_IO_ERR)) != 0 ||
-           XEventsQueued (D.xd, QueuedAlready) > 0;
-}
-
-static gboolean xsrc_dispatch (GSource *src, GSourceFunc cb, gpointer user)
-{
-    (void) src; (void) cb; (void) user;
-    return xdata_ready (0, 0, NULL);
-}
-
-static GSourceFuncs xsrc_funcs = { xsrc_prepare, xsrc_check, xsrc_dispatch, NULL, NULL, NULL };
-
-static void x_event_source_add (void)
-{
-    XEventSource *x = (XEventSource *) g_source_new (&xsrc_funcs, sizeof (XEventSource));
-    x->pfd.fd = ConnectionNumber (D.xd);
-    x->pfd.events = G_IO_IN | G_IO_HUP | G_IO_ERR;
-    g_source_add_poll (&x->src, &x->pfd);
-    g_source_set_name (&x->src, "walpe X events");
-    g_source_attach (&x->src, NULL);
-}
-
 /* ------------------------------------------------------------- mouse */
 
-/* is the pointer on the desktop, i.e. over no client window? child = the
- * root child XQueryPointer reports (input shapes respected: our wallpaper
- * windows are input-shaped away, so the bare desktop gives None); desktop
- * icon windows (_NET_WM_WINDOW_TYPE_DESKTOP: pcmanfm, xfdesktop, ...)
- * count as desktop. Like WE: clicks on the desktop reach the wallpaper,
- * clicks on windows (and on bars/panels) do not. */
-static gboolean pointer_on_desktop (Window child)
-{
-    if (child == None || child == D.root)
-        return TRUE;
-    for (GList *l = D.mons; l; l = l->next)
-        if (((Mon *) l->data)->xid == child)
-            return TRUE;
-    static Window last_w = None;
-    static gboolean last_r = FALSE;
-    if (child == last_w)
-        return last_r;
-    gboolean desk = FALSE;
-    Atom type = XInternAtom (D.xd, "_NET_WM_WINDOW_TYPE", True);
-    Atom dt = XInternAtom (D.xd, "_NET_WM_WINDOW_TYPE_DESKTOP", True);
-    if (type != None && dt != None) {
-        guchar *data = NULL;
-        gulong n = window_prop32 (child, type, XA_ATOM, 16, &data);
-        if (data) {
-            for (gulong i = 0; i < n; i++)
-                if (((Atom *) data)[i] == dt)
-                    desk = TRUE;
-            XFree (data);
-        }
-    }
-    last_w = child;
-    last_r = desk;
-    return desk;
-}
-
-/* a left press/release somewhere on screen (XI2 raw event or IPC): goes to
+/* a left press/release somewhere on screen (a button event or IPC): goes to
  * the monitor under the pointer when that spot is desktop */
 static void pointer_button (gboolean down, int rx, int ry, gboolean on_desktop)
 {
@@ -4225,7 +3759,7 @@ G_GNUC_UNUSED static gboolean any_web_input (void)
 }
 
 /* button 1-3 press/release or a wheel click (4 up, 5 down, 6 left, 7
- * right) at root position rx, ry (XI2 raw event or IPC) */
+ * right) at position rx, ry (a button event or IPC) */
 G_GNUC_UNUSED static void web_button (int button, gboolean down, int rx, int ry, gboolean on_desktop,
                                         guint32 time)
 {
@@ -4271,112 +3805,19 @@ static gboolean any_wants_pointer (void)
 
 static void pointer_motion (void);
 
-#ifdef HAVE_XI2
-/* raw button events on the root: any client may select them (a plain
- * ButtonPress on the root is owned by the window manager).
- * XInput 2.1, not 2.0: a 2.0 client gets no raw events while another
- * client holds a grab, and a window manager that selects ButtonPress on
- * the root (dwm does, to focus the monitor clicked on) holds the implicit
- * grab from every desktop press to its release - the daemon saw the press
- * and never the release, so no click ever completed (cursorClick fires on
- * the release). From 2.1 on raw events are sent whatever the grab state. */
-static void xi2_init (void)
-{
-    int ev, err, maj = 2, min = 1;
-    if (!XQueryExtension (D.xd, "XInputExtension", &xi2_opcode, &ev, &err) ||
-        XIQueryVersion (D.xd, &maj, &min) != Success) {
-        xi2_opcode = -1;
-        g_message ("pointer: no XInput2, desktop clicks do not reach wallpapers");
-        return;
-    }
-}
-
-/* Raw events are selected only while something needs them (each one wakes
- * the daemon): buttons while a wallpaper takes clicks (SceneScript cursor
- * events, or a web page), motion while a wallpaper follows a pointer that
- * is at rest (pointer_set_mode), any input while the display is off on a
- * server without DPMS events (sleep_arm). One request per change. */
-static void xi2_apply_mask (void)
-{
-    static int cur = -1;
-    if (xi2_opcode < 0)
-        return;
-    int want = (xi_want_buttons ? 1 : 0) | (xi_want_motion ? 2 : 0) | (xi_want_wake ? 4 : 0);
-    if (want == cur)
-        return;
-    gboolean clicks_changed = cur < 0 || ((cur ^ want) & 1);
-    cur = want;
-    unsigned char mask[XIMaskLen (XI_LASTEVENT)] = { 0 };
-    if (want & 1) {
-        XISetMask (mask, XI_RawButtonPress);
-        XISetMask (mask, XI_RawButtonRelease);
-    }
-    if (want & 2)
-        XISetMask (mask, XI_RawMotion);
-    if (want & 4) {
-        XISetMask (mask, XI_RawMotion);
-        XISetMask (mask, XI_RawKeyPress);
-        XISetMask (mask, XI_RawButtonPress);
-    }
-    XIEventMask em = { XIAllMasterDevices, sizeof (mask), mask };
-    XISelectEvents (D.xd, D.root, &em, 1);
-    XFlush (D.xd);
-    if (clicks_changed)
-        g_message ("pointer: desktop clicks %s",
-                   (want & 1) ? "selected (cursor events / web input)" : "not selected");
-}
-
-static void xi2_event (XEvent *e)
-{
-    if (e->xcookie.extension != xi2_opcode)
-        return;
-    int t = e->xcookie.evtype;
-    if (xi_want_wake && (t == XI_RawMotion || t == XI_RawKeyPress || t == XI_RawButtonPress))
-        sleep_wake_kick ();     /* input while the display was off */
-    if (t == XI_RawMotion) {
-        pointer_motion ();      /* the pointer left its resting place */
-        return;                 /* the event's data is not needed */
-    }
-    if (t != XI_RawButtonPress && t != XI_RawButtonRelease)
-        return;
-    if (!xi_want_buttons || !XGetEventData (D.xd, &e->xcookie))
-        return;
-    XIRawEvent *re = e->xcookie.data;
-    /* scenes: left button; web pages: left/middle/right and the wheel (4-7) */
-    gboolean scene = re->detail == 1 && any_wants_pointer ();
-    gboolean web = re->detail >= 1 && re->detail <= 7 && any_web_input ();
-    if (scene || web) {
-        Window r, c;
-        int rx, ry, wx, wy;
-        unsigned mask = 0;
-        if (XQueryPointer (D.xd, D.root, &r, &c, &rx, &ry, &wx, &wy, &mask)) {
-            gboolean desk = pointer_on_desktop (c);
-            if (scene)
-                pointer_button (t == XI_RawButtonPress, rx, ry, desk);
-            if (web)
-                web_button (re->detail, t == XI_RawButtonPress, rx, ry, desk,
-                            (guint32) re->time);
-        }
-    }
-    XFreeEventData (D.xd, &e->xcookie);
-}
-#else
-static void xi2_apply_mask (void)
-{
-}
-#endif
-
 /* ---- pointer position
  * OFF:   nothing shown uses the pointer: no events, no timer.
- * TRACK: one XQueryPointer per frame interval (30..144 Hz, as before)
- *        while the pointer moves.
+ * TRACK: one query of the pointer per frame interval (30..144 Hz, as
+ *        before) while the pointer moves (X11: XQueryPointer).
  * ARMED: the pointer has not moved for PTR_REST_MS: the timer is gone and
- *        XI_RawMotion is selected on the root. The first motion event goes
- *        back to TRACK and deselects motion again (a 1000 Hz mouse would
- *        otherwise wake the daemon a thousand times a second).
+ *        motion events are asked for (X11: XI_RawMotion on the root). The
+ *        first one goes back to TRACK and deselects motion again (a
+ *        1000 Hz mouse would otherwise wake the daemon a thousand times a
+ *        second).
  * So a pointer at rest costs nothing; it used to cost one round trip per
- * frame interval for as long as such a wallpaper was visible. Without
- * XInput2 the rest state polls every PTR_SLOW_MS instead. */
+ * frame interval for as long as such a wallpaper was visible. Where the
+ * window system has no input events (X11 without XInput2) the rest state
+ * polls every PTR_SLOW_MS instead. */
 #define PTR_REST_MS 400
 #define PTR_SLOW_MS 100
 enum { PTR_OFF, PTR_ARMED, PTR_TRACK };
@@ -4384,7 +3825,7 @@ static int ptr_mode = PTR_OFF;
 static guint ptr_timer;
 static gint64 ptr_moved_us;
 static int ptr_seen_x = G_MININT, ptr_seen_y = G_MININT;
-static Window ptr_seen_child = None;
+static guintptr ptr_seen_child;
 static guint ptr_poll_ms;            /* interval of the running TRACK timer */
 static gboolean ptr_always_wake;     /* WALPE_PTR_WAKE=1: wake the render thread for
                                       * every pointer move, as before (A/B) */
@@ -4410,6 +3851,20 @@ static gboolean mouse_needed (void)
             return TRUE;
     }
     return FALSE;
+}
+
+/* does the wallpaper shown on m (its own, or its leader's) use the pointer
+ * right now - its position or its clicks? wayland_pointer = off (config):
+ * never on Wayland, so that the wallpaper surface takes no input at all and
+ * every click on the desktop stays with the compositor. */
+static gboolean mon_uses_pointer (Mon *m)
+{
+    Mon *r = mon_route (m);
+    int t = g_atomic_int_get (&r->content_type);
+    if (m->own_paused || (D.backend == WALPE_BACKEND_WAYLAND && D.cfg->wayland_pointer))
+        return FALSE;
+    return (t == WALPE_TYPE_SCENE && D.cfg->parallax && g_atomic_int_get (&r->uses_ptr_pos)) ||
+           t == WALPE_TYPE_WEB || g_atomic_int_get (&r->wants_pointer);
 }
 
 /* the tracking rate: the frame rate, 30..144 Hz */
@@ -4456,10 +3911,10 @@ static void pointer_set_mode (int mode)
     ptr_mode = mode;
     if (mode == PTR_TRACK)
         ptr_timer = g_timeout_add ((ptr_poll_ms = MOUSE_POLL_MS), pointer_tick, NULL);
-    else if (mode == PTR_ARMED && xi2_opcode < 0)
+    else if (mode == PTR_ARMED && !walpe_platform_has_input_events ())
         ptr_timer = g_timeout_add (PTR_SLOW_MS, pointer_tick, NULL);
-    xi_want_motion = mode == PTR_ARMED && xi2_opcode >= 0;
-    xi2_apply_mask ();
+    in_want_motion = mode == PTR_ARMED && walpe_platform_has_input_events ();
+    input_apply ();
 }
 
 static gboolean pointer_tick (gpointer user)
@@ -4485,7 +3940,7 @@ static gboolean pointer_tick (gpointer user)
         pointer_set_mode (PTR_ARMED);
         return G_SOURCE_REMOVE;
     }
-    if (ptr_mode == PTR_ARMED && moved) {   /* no XInput2: the slow poll saw it move */
+    if (ptr_mode == PTR_ARMED && moved) {   /* no input events: the slow poll saw it move */
         ptr_timer = 0;
         pointer_set_mode (PTR_TRACK);
         return G_SOURCE_REMOVE;
@@ -4493,7 +3948,7 @@ static gboolean pointer_tick (gpointer user)
     return G_SOURCE_CONTINUE;
 }
 
-/* XI_RawMotion while at rest */
+/* a motion event while at rest */
 static void pointer_motion (void)
 {
     if (ptr_mode != PTR_ARMED)
@@ -4507,7 +3962,7 @@ static void pointer_motion (void)
  * another window now (hover of cursor scripts / web pages) */
 static void pointer_rest_sample (void)
 {
-    if (ptr_mode == PTR_ARMED && xi2_opcode >= 0)
+    if (ptr_mode == PTR_ARMED && walpe_platform_has_input_events ())
         pointer_sample ();
 }
 
@@ -4520,7 +3975,7 @@ static void pointer_update (void)
         env_read = TRUE;
         ptr_always_wake = g_getenv ("WALPE_PTR_WAKE") != NULL;
     }
-    xi_want_buttons = any_wants_pointer () || any_web_input ();
+    in_want_buttons = any_wants_pointer () || any_web_input ();
 #ifdef HAVE_WEB
     for (GList *l = D.mons; l; l = l->next) {
         Mon *m = l->data;
@@ -4540,18 +3995,28 @@ static void pointer_update (void)
         ptr_moved_us = g_get_monotonic_time ();
         pointer_set_mode (PTR_TRACK);   /* the current position first, then rest */
     }
-    xi2_apply_mask ();
+    input_apply ();
+    /* which monitors' wallpapers use the pointer at all: a window system
+     * that shows the pointer to a surface only while it takes input
+     * (Wayland) is told per surface; X11 reads the pointer from the root
+     * window and needs nothing */
+    for (GList *l = D.mons; l; l = l->next)
+        walpe_surface_want_pointer (((Mon *) l->data)->ps, mon_uses_pointer (l->data));
 }
 
-/* one XQueryPointer, handed to every monitor that uses it; TRUE = the
+/* one query of the pointer, handed to every monitor that uses it; TRUE = the
  * pointer (or the window under it) is not where it was last time */
 static gboolean pointer_sample (void)
 {
-    Window r, c;
-    int rx, ry, wx, wy;
-    unsigned mask = 0;
-    if (!XQueryPointer (D.xd, D.root, &r, &c, &rx, &ry, &wx, &wy, &mask))
+    WalpePointer ptr;
+    if (!walpe_platform_pointer (&ptr))
         return FALSE;
+    /* inside = FALSE: the pointer is where the window system does not show
+     * it to this program (Wayland: over another program's window). It is
+     * then on no monitor as far as the wallpapers are concerned: pages and
+     * cursor scripts are told that it left. (X11 always knows.) */
+    const int rx = ptr.inside ? ptr.x : G_MININT / 2, ry = ptr.inside ? ptr.y : G_MININT / 2;
+    const guintptr c = ptr.under;
     gboolean moved = rx != ptr_seen_x || ry != ptr_seen_y || c != ptr_seen_child;
     ptr_seen_x = rx;
     ptr_seen_y = ry;
@@ -4585,7 +4050,7 @@ static gboolean pointer_sample (void)
         if (g_atomic_int_get (&m->wants_pointer) && !m->leader) {
             /* hover/move for SceneScript cursor events: on the desktop of
              * this monitor (or of a monitor following it), else "left" once */
-            gboolean desk = pointer_on_desktop (c) || m->ptr_pressed;
+            gboolean desk = walpe_platform_on_desktop (c) || m->ptr_pressed;
             Mon *on = NULL;
             for (GList *l2 = D.mons; desk && l2 && !on; l2 = l2->next) {
                 Mon *o = l2->data;
@@ -4603,6 +4068,9 @@ static gboolean pointer_sample (void)
                 mon_queue_pointer (m, WALPE_PTR_MOVE, nx, ny);
             }
         }
+        /* a pointer that cannot be seen leaves parallax where it was */
+        if (!ptr.inside)
+            continue;
         if (t != WALPE_TYPE_SCENE || !D.cfg->parallax || m->leader ||
             !g_atomic_int_get (&m->uses_ptr_pos))
             continue;
@@ -4636,12 +4104,129 @@ static gboolean pointer_sample (void)
     return moved;
 }
 
+/* ------------------------------------------------------ platform events
+ * What the window system tells the daemon (platform.h,
+ * WalpePlatformEvents); all on the main thread. */
+static void layout_schedule (void);
+static void layout_surface_lost (void);
+
+static void plat_outputs_changed (gpointer user)
+{
+    (void) user;
+    layout_schedule ();     /* monitors changed? */
+}
+
+/* A part of a wallpaper window lost its pixels: its next frame is drawn
+ * whatever the content thinks of it (a follower of a shared scene presents
+ * the leader's newest frame again). A window dragged across the wallpaper
+ * sends these at the pointer's rate: one answer per frame interval of the
+ * fps setting (expose_fire). */
+static void plat_surface_exposed (gpointer surface_user, gpointer user)
+{
+    (void) user;
+    Mon *m = surface_user;
+    if (m && !m->expose_timer_id)
+        m->expose_timer_id = g_timeout_add ((guint) MAX (1, 1000 / CLAMP (D.cfg->fps, 5, 200)),
+                                            expose_fire, m);
+}
+
+/* The window system took a surface away (Wayland: its output is gone, or
+ * the compositor closed the layer surface). Nothing can be shown on it any
+ * more; a restart in place makes the surfaces again for the outputs there
+ * are then. A closed --windowed window ends the daemon, as closing a
+ * program's only window does. */
+static void plat_surface_closed (gpointer surface_user, gpointer user)
+{
+    (void) user;
+    Mon *m = surface_user;
+    if (D.windowed) {
+        g_message ("the window was closed: shutting down");
+        g_main_loop_quit (D.loop);
+        return;
+    }
+    g_message ("monitor %d (%s): the window system took its surface away", m ? m->index : -1,
+               m && m->name ? m->name : "?");
+    layout_surface_lost ();
+}
+
+static void plat_pointer_motion (gpointer user)
+{
+    (void) user;
+    pointer_motion ();      /* the pointer left its resting place */
+}
+
+static void plat_windows_changed (gpointer user)
+{
+    (void) user;
+    pointer_rest_sample (); /* another window may be under a resting pointer now */
+}
+
+/* scenes: left button; web pages: left/middle/right and the wheel (4-7) */
+static gboolean plat_button_wanted (int button, gpointer user)
+{
+    (void) user;
+    return (button == 1 && any_wants_pointer ()) ||
+           (button >= 1 && button <= 7 && any_web_input ());
+}
+
+static void plat_button (int button, gboolean down, int x, int y, gboolean on_desktop,
+                         guint32 time_ms, gpointer user)
+{
+    (void) user;
+    gboolean scene = button == 1 && any_wants_pointer ();
+    gboolean web = button >= 1 && button <= 7 && any_web_input ();
+    if (scene)
+        pointer_button (down, x, y, on_desktop);
+    if (web)
+        web_button (button, down, x, y, on_desktop, time_ms);
+}
+
+static int reconnect_wait_s (void);
+
+/* The connection to the window system is gone for good (Wayland: the
+ * compositor went away; on X11 Xlib ends the process before anything
+ * could be told). The daemon stops the normal way - socket, crash-loop
+ * marker, running imports - and exits with status 1, as it does when the
+ * X server goes away. With wayland_reconnect = <seconds> (gpu.conf /
+ * WALPE_WAYLAND_RECONNECT; default 0) it restarts in place instead and
+ * the new image waits that long for the display to come back. */
+static void plat_connection_lost (gpointer user)
+{
+    (void) user;
+    if (D.display_lost)
+        return;
+    D.display_lost = TRUE;
+    int wait = D.windowed ? 0 : reconnect_wait_s ();
+    if (wait > 0) {
+        g_message ("the display connection is gone: restarting in place, waiting up to %d s "
+                   "for it to come back (wayland_reconnect)", wait);
+        D.restart = TRUE;
+    } else {
+        g_message ("the display connection is gone: shutting down");
+    }
+    if (D.loop)
+        g_main_loop_quit (D.loop);
+}
+
+static const WalpePlatformEvents plat_events = {
+    .outputs_changed = plat_outputs_changed,
+    .surface_exposed = plat_surface_exposed,
+    .surface_closed = plat_surface_closed,
+    .pointer_motion = plat_pointer_motion,
+    .windows_changed = plat_windows_changed,
+    .button_wanted = plat_button_wanted,
+    .button = plat_button,
+    .connection_lost = plat_connection_lost,
+};
+
 /* ------------------------------------------------------------- import
  * `walpe-ctl add` / GUI import: common/import.c runs ffmpeg as a child
  * process (async on this main loop) and normalizes any video into H.264
- * High yuv420p <=1080p MP4 (+faststart, no audio: the renderer is silent)
- * in <wallpapers_dir>/imported/, plus a <stem>.jpg grid thumbnail. One
- * import runs at a time; status reports progress. */
+ * High yuv420p MP4 (+faststart, no audio: the renderer is silent) in
+ * <wallpapers_dir>/imported/, plus a <stem>.jpg grid thumbnail. Its size:
+ * the source's, fitted into the box of the setting video_resolution
+ * (video_box_for: by default the largest render size of the monitors).
+ * One import runs at a time; status reports progress. */
 
 static struct {
     WalpeImport *job;        /* running (or finished, kept for status) */
@@ -4679,7 +4264,10 @@ static GError *start_import (const char *abs)
     char *impdir = g_build_filename (dir, "imported", NULL);
     g_free (dir);
     GError *err = NULL;
-    WalpeImport *job = walpe_import_start (abs, impdir, NULL, import_done, NULL, &err);
+    /* nobody shows it yet: as large as any monitor could */
+    WalpeVideoBox box;
+    video_box_for (NULL, NULL, TRUE, &box);
+    WalpeImport *job = walpe_import_start (abs, impdir, NULL, &box, import_done, NULL, &err);
     g_free (impdir);
     if (!job)
         return err;
@@ -4702,9 +4290,10 @@ static GError *start_import (const char *abs)
  * (WebM, HEVC, AV1, MKV, fragmented MP4: Workshop items of type video
  * come in those too) used to fail to load. Such a file now goes through
  * the import pipeline (ffprobe -> ffmpeg, the same rules as `walpe-ctl
- * add`: H.264 High yuv420p, at most 1920x1080, no audio) once, into
- * ~/.cache/walpe/video/<hash of path + size + mtime>.mp4, and the player
- * shows that copy (engine/video.c) while the wallpaper keeps its own path
+ * add`: H.264 High yuv420p, no audio, fitted into the box of the monitors
+ * that show it: video_box_for) once, into ~/.cache/walpe/video/<hash of
+ * path + size + mtime>[-<box>].mp4, and the player shows that copy
+ * (engine/video.c) while the wallpaper keeps its own path
  * in the config, the options and status. Asynchronous on the main loop:
  * the wallpaper on screen stays until the copy is ready; status shows the
  * progress through the import fields ("import_purpose": "convert"). One
@@ -4723,8 +4312,11 @@ static void convert_scan (void);
  * Non-video content: yes. *src (g_free) = the video file when it cannot;
  * *why (g_free) = the reason; *soft = the file itself plays, but sideways
  * or stretched (display matrix / pixel aspect ratio, which the player does
- * not apply): worth converting, yet usable as it is when that fails. */
-static gboolean video_playable (const char *abs, char **src, char **why, gboolean *soft)
+ * not apply): worth converting, yet usable as it is when that fails.
+ * box: the box a converted copy has to be made for to count
+ * (video_box_for; a copy for another box is another file). */
+static gboolean video_playable (const char *abs, const WalpeVideoBox *box, char **src, char **why,
+                                gboolean *soft)
 {
     char *media = NULL;
     if (src)
@@ -4747,7 +4339,7 @@ static gboolean video_playable (const char *abs, char **src, char **why, gboolea
         g_clear_pointer (&dm, mp4_demux_free);
     }
     if (!dm) {
-        char *cf = walpe_video_cache_file (file);
+        char *cf = walpe_video_cache_file (file, box);
         if (cf && g_file_test (cf, G_FILE_TEST_IS_REGULAR))
             dm = mp4_demux_open (cf, NULL);     /* converted earlier */
         g_free (cf);
@@ -4796,17 +4388,20 @@ static void convert_done (WalpeImport *job, gboolean ok, const char *dst, const 
 }
 
 /* start converting video file src for wallpaper wp (shown on monitor mon,
- * NULL = all, when done). NULL = started, else why not. */
-static GError *convert_start (const char *src, const char *wp, const char *mon, gboolean commit)
+ * NULL = all, when done) into the copy for box. NULL = started, else why
+ * not. */
+static GError *convert_start (const char *src, const char *wp, const char *mon, gboolean commit,
+                              const WalpeVideoBox *box)
 {
     if (Imp.active)
         return g_error_new (G_IO_ERROR, G_IO_ERROR_BUSY, "%s of %s is still running; open the "
                             "wallpaper again when it is done",
                             !g_strcmp0 (Imp.purpose, "convert") ? "the conversion" : "the import",
                             Imp.label ? Imp.label : "a video");
-    char *dst = walpe_video_cache_file (src);
+    char *dst = walpe_video_cache_file (src, box);
     GError *err = NULL;
-    WalpeImport *job = dst ? walpe_import_start_to (src, dst, NULL, convert_done, g_strdup (src), &err)
+    WalpeImport *job = dst ? walpe_import_start_to (src, dst, NULL, box, convert_done,
+                                                    g_strdup (src), &err)
                            : NULL;
     g_free (dst);
     if (!job)
@@ -4828,9 +4423,14 @@ static GError *convert_start (const char *src, const char *wp, const char *mon, 
     Conv.commit = commit;
     if (conv_failed)
         g_hash_table_remove (conv_failed, src);
-    g_message ("video: %s cannot be shown as it is (not H.264 in MP4 / MOV, or stored rotated): "
-               "converting it once (ffmpeg, at most 1920x1080), the wallpaper changes when the "
-               "copy is ready", src);
+    {
+        char *lim = box && box->w > 0 && box->h > 0 ? g_strdup_printf ("at most %dx%d", box->w, box->h)
+                                                    : g_strdup ("at its own size");
+        g_message ("video: %s cannot be shown as it is (not H.264 in MP4 / MOV, or stored "
+                   "rotated): converting it once (ffmpeg, %s), the wallpaper changes when the "
+                   "copy is ready", src, lim);
+        g_free (lim);
+    }
     return NULL;
 }
 
@@ -4871,9 +4471,12 @@ static void convert_scan (void)
     for (GList *l = D.mons; l && !Imp.active; l = l->next) {
         Mon *m = l->data;
         char *src = NULL;
-        if (m->want_path && *m->want_path && !video_playable (m->want_path, &src, NULL, NULL) && src &&
+        WalpeVideoBox box;
+        video_box_for (m->want_path, NULL, FALSE, &box);
+        if (m->want_path && *m->want_path &&
+            !video_playable (m->want_path, &box, &src, NULL, NULL) && src &&
             !(conv_failed && g_hash_table_contains (conv_failed, src))) {
-            GError *e = convert_start (src, m->want_path, NULL, FALSE);
+            GError *e = convert_start (src, m->want_path, NULL, FALSE, &box);
             if (e) {
                 g_warning ("video: %s cannot be converted: %s", src, e->message);
                 if (!conv_failed)
@@ -4884,6 +4487,46 @@ static void convert_scan (void)
         }
         g_free (src);
     }
+}
+
+/* main: a render size or video_resolution changed. A monitor showing a
+ * video from a converted copy was given the copy for the box of then
+ * (Mon.load_box); when the box is another one now, the wallpaper is loaded
+ * again with the copy for it - at once when that copy exists, else when
+ * convert_scan () has made it (the picture on screen stays until then). A
+ * video the player reads itself has no copy and is left alone. */
+static void video_boxes_refresh (void)
+{
+    gboolean reload = FALSE;
+    for (GList *l = D.mons; l; l = l->next) {
+        Mon *m = l->data;
+        if (m->leader || !m->want_path || !*m->want_path ||
+            (g_atomic_int_get (&m->content_type) != WALPE_TYPE_VIDEO && !m->loading))
+            continue;
+        WalpeVideoBox box;
+        video_box_for (m->want_path, NULL, FALSE, &box);
+        if (box.w == m->load_box.w && box.h == m->load_box.h)
+            continue;
+        char *media = NULL;
+        if (walpe_detect_type (m->want_path, &media) == WALPE_TYPE_VIDEO) {
+            const char *file = media ? media : m->want_path;
+            char *was = walpe_video_cache_file (file, &m->load_box);
+            char *now = walpe_video_cache_file (file, &box);
+            /* it plays from a copy (the one of the old box exists) and
+             * the one for the new box is there too */
+            if (was && now && g_file_test (was, G_FILE_TEST_IS_REGULAR) &&
+                g_file_test (now, G_FILE_TEST_IS_REGULAR)) {
+                m->reload_wanted = TRUE;
+                reload = TRUE;
+            }
+            g_free (was);
+            g_free (now);
+        }
+        g_free (media);
+    }
+    if (reload)
+        apply_wallpapers (NULL, NULL, FALSE, FALSE);
+    convert_scan ();    /* copies that do not exist for their box yet */
 }
 
 /* --------------------------------------------- workshop install (steamcmd) */
@@ -4964,6 +4607,16 @@ static void jb_int (JsonBuilder *b, const char *k, gint64 v)
 {
     json_builder_set_member_name (b, k);
     json_builder_add_int_value (b, v);
+}
+
+/* "k": [w, h] */
+static void jb_size (JsonBuilder *b, const char *k, int w, int h)
+{
+    json_builder_set_member_name (b, k);
+    json_builder_begin_array (b);
+    json_builder_add_int_value (b, w);
+    json_builder_add_int_value (b, h);
+    json_builder_end_array (b);
 }
 
 static void jb_fail (JsonBuilder *b, const char *error)
@@ -5078,7 +4731,8 @@ static void ipc_props_note (JsonBuilder *b, const char *wp, GPtrArray *keys)
     JsonObject *defs = root && JSON_NODE_HOLDS_OBJECT (root) ? json_node_get_object (root) : NULL;
     GString *unknown = g_string_new (NULL);
     for (guint i = 0; defs && i < keys->len; i++)
-        if (!json_object_has_member (defs, keys->pdata[i]))
+        if (!json_object_has_member (defs, keys->pdata[i]) &&
+            strcmp (keys->pdata[i], "walpe_sound") != 0)   /* WalPE's own: a scene's sound switch */
             g_string_append_printf (unknown, "%s%s", unknown->len ? ", " : "",
                                     (const char *) keys->pdata[i]);
     if (unknown->len) {
@@ -5133,6 +4787,92 @@ static void ipc_props (JsonBuilder *b, const char *wp)
         json_node_unref (root2);
 }
 
+/* status: the window system in use, how it was chosen, what this build
+ * holds, and for every pause signal who reports it in this session ("" =
+ * nobody: the rule that reads it cannot fire) */
+static WalpeOutputList layout_now;   /* (the layout code further down fills it) */
+
+static void status_backend (JsonBuilder *b)
+{
+    jb_str (b, "display_backend", walpe_backend_name (D.backend));
+    jb_str (b, "display_backend_setting", walpe_backend_name (D.cfg->backend));
+    jb_str (b, "display_backend_source", Bk.source);
+    jb_str (b, "display_backend_why", Bk.why);
+    jb_str (b, "display_backends_built",
+            walpe_backends_built (walpe_platform_built (WALPE_BACKEND_X11),
+                                  walpe_platform_built (WALPE_BACKEND_WAYLAND)));
+    jb_str (b, "wayland_pointer", D.cfg->wayland_pointer ? "off" : "auto");
+    json_builder_set_member_name (b, "pause_signals");
+    json_builder_begin_object (b);
+    for (int s = 0; s < WALPE_SIG_N; s++) {
+        json_builder_set_member_name (b, walpe_signal_name (s));
+        json_builder_begin_object (b);
+        jb_str (b, "from", walpe_signal_sources (s));
+        jb_str (b, "missing", walpe_signal_missing (s));
+        json_builder_end_object (b);
+    }
+    json_builder_end_object (b);
+    jb_bool (b, "idle", D.idle);
+    /* per pause setting: does anything in this session drive it, and if
+     * not, why (signals/rules.h; the GUI prints the note under the switch) */
+    walpe_sigprov_status_json (b, D.cfg);
+}
+
+/* the output a monitor is on, NULL = none (--windowed) */
+static const WalpeOutput *mon_output (Mon *m)
+{
+    for (int i = 0; i < layout_now.n; i++)
+        if (layout_now.o[i].id == m->out_id && !g_strcmp0 (layout_now.o[i].name, m->name))
+            return &layout_now.o[i];
+    return NULL;
+}
+
+/* status, per monitor: what the window system says about its output beyond
+ * name and rectangle, and (where the backend counts them) what became of
+ * the frames it was given */
+static void status_monitor_output (JsonBuilder *b, Mon *m)
+{
+    const WalpeOutput *o = mon_output (m);
+    if (o) {
+        jb_str (b, "canon", o->canon);
+        if (o->make)
+            jb_str (b, "make", o->make);
+        if (o->model)
+            jb_str (b, "model", o->model);
+        if (o->serial)
+            jb_str (b, "serial", o->serial);
+        if (o->description)
+            jb_str (b, "description", o->description);
+        if (o->scale < 0.999 || o->scale > 1.001) {
+            json_builder_set_member_name (b, "scale");
+            json_builder_add_double_value (b, o->scale);
+        }
+        if (o->transform)
+            jb_int (b, "transform", o->transform);
+        if (o->logical_x != o->x || o->logical_y != o->y || o->logical_width != o->width ||
+            o->logical_height != o->height) {
+            json_builder_set_member_name (b, "logical");
+            json_builder_begin_array (b);
+            json_builder_add_int_value (b, o->logical_x);
+            json_builder_add_int_value (b, o->logical_y);
+            json_builder_add_int_value (b, o->logical_width);
+            json_builder_add_int_value (b, o->logical_height);
+            json_builder_end_array (b);
+        }
+    }
+    WalpePresentStats ps;
+    if (walpe_surface_present_stats (m->ps, &ps)) {
+        jb_int (b, "presented", (gint64) ps.presented);
+        jb_int (b, "discarded", (gint64) ps.discarded);
+        jb_int (b, "wait_timeouts", (gint64) ps.wait_timeouts);
+        jb_bool (b, "hidden", ps.hidden);
+        if (ps.refresh_hz > 0.0) {
+            json_builder_set_member_name (b, "refresh_feedback");
+            json_builder_add_double_value (b, ps.refresh_hz);
+        }
+    }
+}
+
 static void ipc_status (JsonBuilder *b)
 {
     Mon *m0 = D.mons ? D.mons->data : NULL;
@@ -5143,12 +4883,16 @@ static void ipc_status (JsonBuilder *b)
     jb_str (b, "type", m0 ? walpe_type_name (g_atomic_int_get (&m0->content_type)) : "none");
     jb_bool (b, "paused", D.cfg->paused);
     jb_bool (b, "fullscreen_pause", D.cfg->pause_fullscreen && D.fs_active);
+    /* a fullscreen window has the focus, whatever the pause setting says
+     * (a client that wants to show something waits until it has not) */
+    jb_bool (b, "fullscreen", D.fs_active);
     jb_bool (b, "dpms_pause", D.cfg->pause_dpms && D.asleep);
     jb_bool (b, "covered_pause", D.cfg->pause_covered && m0 && m0->covered);
     /* the opt-in rules */
     jb_str (b, "focus_action", walpe_focus_action_name (D.cfg->focus_action));
     jb_bool (b, "on_battery", D.on_battery);
     jb_bool (b, "battery_pause", D.cfg->pause_battery && D.on_battery);
+    jb_bool (b, "idle_pause", D.cfg->pause_idle > 0 && walpe_signal_get (WALPE_SIG_IDLE, 0));
     /* The saved settings themselves, under their config.json names. Status
      * had what results from them at the moment ("fullscreen_pause" = the
      * setting AND a fullscreen window) but not the settings: after
@@ -5156,6 +4900,7 @@ static void ipc_status (JsonBuilder *b)
     jb_bool (b, "pause_fullscreen", D.cfg->pause_fullscreen);
     jb_bool (b, "pause_dpms", D.cfg->pause_dpms);
     jb_bool (b, "pause_covered", D.cfg->pause_covered);
+    jb_int (b, "pause_idle", D.cfg->pause_idle);     /* seconds; "idle_pause" above = it applies now */
     jb_bool (b, "cover_transparent", D.cfg->cover_transparent);
     jb_str (b, "transparent_windows", D.cfg->transparent_windows ? D.cfg->transparent_windows : "");
     jb_int (b, "focus_fps", D.cfg->focus_fps);
@@ -5235,6 +4980,14 @@ static void ipc_status (JsonBuilder *b)
             jb_int (b, "fx_rejected", fr);
         }
         jb_bool (b, "video_hwdec", D.cfg->video_hwdec);
+        /* the same setting as its word (off | auto | the one API asked for);
+         * what really decodes is "video_decoder" below */
+        jb_str (b, "video_hwdec_api", walpe_config_hwdec_word (D.cfg));
+        jb_bool (b, "video_zerocopy", D.cfg->video_zerocopy);
+        /* simulation effects (fx_sim.h): the saved settings; WALPE_FLUID /
+         * WALPE_FLUID_QUALITY in the daemon's environment override them */
+        jb_bool (b, "fluid_sim", D.cfg->fluid_sim);
+        jb_str (b, "fluid_quality", walpe_fluid_quality_name ((WalpeFluidQuality) D.cfg->fluid_quality));
         jb_bool (b, "video_limit", D.cfg->video_limit);
         jb_str (b, "video_upload", D.cfg->video_upload ? D.cfg->video_upload : "legacy");
         {
@@ -5256,6 +5009,29 @@ static void ipc_status (JsonBuilder *b)
         jb_str (b, "particle_lowres", walpe_particle_lowres_name (D.cfg->particle_lowres));
         jb_int (b, "particle_density", D.cfg->particle_density);
         jb_bool (b, "particle_instancing", D.cfg->particle_instancing);
+        {
+            /* renderer features (engine/features.h) as they are now: one
+             * line for people, one object for programs (a settings window
+             * shows the switches from it); "features_fixed" names the ones
+             * WALPE_FEATURES in the daemon's environment decides */
+            GString *fs = g_string_new (NULL), *fx = g_string_new (NULL);
+            for (int f = 0; walpe_feature_name (f); f++) {
+                g_string_append_printf (fs, "%s%s=%s", f ? " " : "", walpe_feature_name (f),
+                                        walpe_feature ((WalpeFeature) f) ? "on" : "off");
+                if (walpe_feature_fixed (f))
+                    g_string_append_printf (fx, "%s%s", fx->len ? " " : "", walpe_feature_name (f));
+            }
+            jb_str (b, "features", fs->str);
+            if (fx->len)
+                jb_str (b, "features_fixed", fx->str);
+            g_string_free (fs, TRUE);
+            g_string_free (fx, TRUE);
+            json_builder_set_member_name (b, "feature_switches");
+            json_builder_begin_object (b);
+            for (int f = 0; walpe_feature_name (f); f++)
+                jb_bool (b, walpe_feature_name (f), walpe_feature ((WalpeFeature) f));
+            json_builder_end_object (b);
+        }
         char *ms = walpe_modules_status ();
         jb_str (b, "modules", ms);
         g_free (ms);
@@ -5276,7 +5052,40 @@ static void ipc_status (JsonBuilder *b)
         jb_str (b, "gl_vendor", Sw.gl_vendor);
         jb_str (b, "gl_renderer", Sw.gl_renderer);
         jb_str (b, "gl_version", Sw.gl_version);
+        walpe_gpustat_set_gl_vendor (Sw.gl_vendor);
         g_mutex_unlock (&Sw.lock);
+    }
+    /* which GPU: the setting, the device in use, the candidates */
+    gpu_status_json (b);
+    {
+        /* the daemon on the GPU as the kernel accounts it (common/gpustat.h):
+         * device and driver, where the figures come from, the daemon's GPU
+         * memory and its share of the GPU since the status request before.
+         * This process's own fdinfo only, read at most once a second; a
+         * figure the driver does not publish is left out and "note" says
+         * why (the NVIDIA driver publishes none: walpe-ctl gpu-stats asks
+         * nvidia-smi). */
+        WalpeGpuSelfStat gs;
+        walpe_gpustat_self (&gs);
+        json_builder_set_member_name (b, "gpu_stats");
+        json_builder_begin_object (b);
+        jb_str (b, "driver", gs.driver);
+        jb_str (b, "vendor", gs.vendor_name);
+        jb_str (b, "pci_slot", gs.pci_slot);
+        jb_str (b, "card", gs.card);
+        jb_str (b, "sources", gs.sources);
+        if (gs.has_busy) {
+            json_builder_set_member_name (b, "daemon_busy_percent");
+            json_builder_add_double_value (b, gs.busy_pct);
+            json_builder_set_member_name (b, "busy_seconds");
+            json_builder_add_double_value (b, gs.busy_window_s);
+            jb_str (b, "engine", gs.engine);
+        }
+        if (gs.mem_kb >= 0)
+            jb_int (b, "daemon_memory_kib", gs.mem_kb);
+        if (gs.note[0])
+            jb_str (b, "note", gs.note);
+        json_builder_end_object (b);
     }
     jb_int (b, "fps", D.cfg->fps);
     jb_int (b, "render_scale", g_atomic_int_get (&D.cfg->render_scale));
@@ -5289,6 +5098,15 @@ static void ipc_status (JsonBuilder *b)
     jb_int (b, "fps_now", m0 ? m0->fps : D.cfg->fps);
     json_builder_set_member_name (b, "volume");
     json_builder_add_double_value (b, D.cfg->volume);
+    /* wallpaper sound: the two switches, and in one line what is heard or
+     * why nothing is (engine/scenesound.h) */
+    jb_bool (b, "scene_sound", D.cfg->scene_sound);
+    jb_bool (b, "mute", D.cfg->mute);
+    {
+        char *snd = walpe_sound_status ();
+        jb_str (b, "sound", snd);
+        g_free (snd);
+    }
     jb_str (b, "backend", D.cfg->video_backend);
     /* per monitor (version 0.11.1): index (for open/props "monitor"), output
      * name (config key), geometry, the wallpaper it shows, own pause */
@@ -5316,6 +5134,23 @@ static void ipc_status (JsonBuilder *b)
         jb_int (b, "fps_limit", m->fps_cap);            /* what its render thread was given */
         json_builder_set_member_name (b, "refresh");   /* Hz, 0 = unknown */
         json_builder_add_double_value (b, m->hz);
+        {
+            /* render resolution: the output's mode, the choice for it, the
+             * size its wallpaper is rendered at, and whether anybody was
+             * asked ({"cmd":"resolution"} has the rest) */
+            WalpeMonitorConf mc;
+            res_conf_for (m->name, &mc);
+            char *rs = walpe_res_format (&mc.res), *tl = walpe_texlimit_format (mc.tex_limit);
+            jb_size (b, "mode", m->geom.width, m->geom.height);
+            jb_str (b, "resolution", rs);
+            jb_size (b, "render_size", m->res_w, m->res_h);
+            jb_bool (b, "resolution_asked", mon_res_asked (m, &mc));
+            jb_str (b, "texture_limit", tl);
+            if (m->res_note)
+                jb_str (b, "resolution_note", m->res_note);
+            g_free (rs);
+            g_free (tl);
+        }
         jb_str (b, "type", walpe_type_name (g_atomic_int_get (&m->content_type)));
         if (m->loading || (m->leader && m->leader->loading))
             /* the wallpaper it was given is still being loaded (by its own
@@ -5338,21 +5173,74 @@ static void ipc_status (JsonBuilder *b)
         jb_int (b, "wakeups", (guint) g_atomic_int_get (&m->wakeups));
         if (g_atomic_int_get (&m->idle_released))
             jb_bool (b, "idle_released", TRUE);
+        status_monitor_output (b, m);
         json_builder_end_object (b);
     }
     json_builder_end_array (b);
     jb_int (b, "monitor_count", g_list_length (D.mons));
-    jb_bool (b, "compositor", present_composited ());   /* asked now: one X request */
+    /* render resolution: outputs nobody was asked about yet (the GUI asks
+     * while resolution_prompt is on), and the global settings */
+    jb_int (b, "resolution_unasked", res_unasked ());
+    jb_bool (b, "resolution_prompt", D.cfg->resolution_prompt);
+    jb_str (b, "scale_filter", walpe_scale_filter_name (g_atomic_int_get (&D.cfg->scale_filter)));
+    {
+        char *vr = walpe_vidres_format (&D.cfg->video_res);
+        jb_str (b, "video_resolution", vr);
+        g_free (vr);
+    }
+    if (res_env)    /* WALPE_RESOLUTION decides the sizes while it is set */
+        jb_bool (b, "resolution_env", TRUE);
+    /* asked now (X11: one request; a Wayland compositor always composes) */
+    jb_bool (b, "compositor", D.backend == WALPE_BACKEND_WAYLAND || present_composited ());
     jb_bool (b, "frame_align", walpe_frame_align_get ());
-    /* requests the main thread has sent to the X server since
-     * start (its own connection; this status call adds a few) */
-    jb_int (b, "x_requests", (gint64) NextRequest (D.xd) - 1);
+    /* the backend's own keys (X11: "x_requests", the requests the main
+     * thread has sent to the X server since start; this status call adds
+     * a few) */
+    walpe_platform_status (b);
+    status_backend (b);     /* which window system, who reports the pause signals */
     /* props/setprop/setprops/resetprops take an optional "path" (any
      * wallpaper, shown or not) besides "monitor" */
     jb_bool (b, "props_by_path", TRUE);
     /* "layers" / "layeradj" requests exist ("Adjust layers") */
     jb_bool (b, "layer_adjust", TRUE);
     jb_str (b, "gl", g_atomic_int_get (&D.egl_is_es) ? "gles" : "gl");
+    {
+        /* which OpenGL API renders and why; on OpenGL ES, what the path
+         * does differently: every item of the table (common/glapi.h) that
+         * is replaced or off, and the off ones by name */
+        char ver[32] = "";
+        if (Ga.decided)
+            walpe_gl_rung_name (&Ga.choice.got, ver, sizeof ver);
+        /* the saved setting (or WALPE_GL_API while it is set): a change
+         * shows here at once, in "gl" after the restart */
+        jb_str (b, "gl_api", walpe_gl_api_name (Ga.env_forced ? Ga.pref
+                                                              : (WalpeGlApiPref) D.cfg->gl_api));
+        jb_bool (b, "gl_api_env", Ga.env_forced);
+        jb_str (b, "gl_context", ver);     /* the version asked for; "gl_version" is the driver's string */
+        jb_str (b, "gl_api_note", Ga.choice.why);
+        jb_str (b, "gl_api_tried", Ga.choice.tried);
+        jb_int (b, "glsl_es", walpe_gl_feat_essl ());
+        const WalpeGlfItem *plan = walpe_gl_feat_plan ();
+        json_builder_set_member_name (b, "gl_features");
+        json_builder_begin_array (b);
+        for (int i = 0; i < WALPE_GLF_N; i++) {
+            if (plan[i].how != WALPE_GLF_REPLACED && plan[i].how != WALPE_GLF_OFF)
+                continue;
+            json_builder_begin_object (b);
+            jb_str (b, "name", plan[i].name);
+            jb_str (b, "state", walpe_glf_how_name (plan[i].how));
+            jb_str (b, "via", plan[i].via);
+            jb_str (b, "effect", plan[i].effect);
+            json_builder_end_object (b);
+        }
+        json_builder_end_array (b);
+        json_builder_set_member_name (b, "gl_features_off");
+        json_builder_begin_array (b);
+        for (int i = 0; i < WALPE_GLF_N; i++)
+            if (plan[i].how == WALPE_GLF_OFF)
+                json_builder_add_string_value (b, plan[i].name);
+        json_builder_end_array (b);
+    }
 #ifdef HAVE_WEB
     char *mm = walpe_web_media_missing ();
     if (*mm)
@@ -5367,6 +5255,11 @@ static void ipc_status (JsonBuilder *b)
     if (*wi)
         jb_str (b, "web_input", wi);
     g_free (wi);
+    /* where the pages' windows live: "x11" or "private" (engine/webhostsel.h) */
+    char *wh = walpe_web_host ();
+    if (*wh)
+        jb_str (b, "web_host", wh);
+    g_free (wh);
     /* how pages are rendered, and what WebGL runs on inside them */
     jb_bool (b, "web_accel", D.cfg->web_accel);
     if (web_render_state)
@@ -5714,6 +5607,412 @@ static gboolean ipc_fx_keys (JsonObject *o, gboolean *given, const char **err)
     return reload;
 }
 
+/* ---- {"cmd":"resolution"}: the render resolution per output ------------
+ * Without other members: the listing (res_describe). With "monitor" (an
+ * index, an output name, "all") and "value" / "texture_limit" / "asked" /
+ * "forget", or with "set": [ such objects ]: every element is checked
+ * first, then all are applied, saved once and followed by one reload per
+ * scene; one element that is not right and nothing is changed. "prompt":
+ * may the GUI ask. The reply to a change is the listing again. */
+typedef struct {
+    char *name;         /* output name (connected or not) */
+    gboolean has_res, has_tex, forget;
+    WalpeRes res;
+    int tex;
+    int asked;          /* -1 = as it follows from the rest */
+} ResChange;
+
+static void res_change_clear (gpointer p)
+{
+    g_free (((ResChange *) p)->name);
+}
+
+static Mon *mon_by_name (const char *name)
+{
+    for (GList *l = D.mons; name && l; l = l->next)
+        if (!g_strcmp0 (((Mon *) l->data)->name, name))
+            return l->data;
+    return NULL;
+}
+
+/* a "texture_limit" member: text, a number of pixels, or a switch (off =
+ * none, on = auto) */
+static gboolean res_texlimit_node (JsonNode *n, int *out, char **err)
+{
+    if (!n || !JSON_NODE_HOLDS_VALUE (n)) {
+        *err = g_strdup ("texture_limit needs auto, none or a number of pixels");
+        return FALSE;
+    }
+    GType t = json_node_get_value_type (n);
+    if (t == G_TYPE_BOOLEAN) {
+        *out = json_node_get_boolean (n) ? WALPE_TEXLIMIT_AUTO : WALPE_TEXLIMIT_NONE;
+        return TRUE;
+    }
+    if (t == G_TYPE_STRING)
+        return walpe_texlimit_parse (json_node_get_string (n), out, err);
+    char num[32];
+    double v = json_node_get_double (n);
+    g_snprintf (num, sizeof (num), "%.0f", v >= 0.0 && v < 1e9 ? v : 1e9);
+    return walpe_texlimit_parse (num, out, err);
+}
+
+/* one element of a request into changes (one per output it names).
+ * FALSE + *err: nothing was added that the caller keeps. notes: sentences
+ * for the reply. */
+static gboolean res_parse_element (JsonObject *e, GArray *out, GString *notes, char **err)
+{
+    /* which outputs */
+    GPtrArray *names = g_ptr_array_new_with_free_func (g_free);
+    JsonNode *mn = e ? json_object_get_member (e, "monitor") : NULL;
+    gboolean all = !mn || JSON_NODE_HOLDS_NULL (mn);
+    if (mn && JSON_NODE_HOLDS_VALUE (mn)) {
+        GType t = json_node_get_value_type (mn);
+        if (t == G_TYPE_STRING) {
+            const char *nm = json_node_get_string (mn);
+            if (!strcmp (nm, "*") || !g_ascii_strcasecmp (nm, "all"))
+                all = TRUE;
+            else if (walpe_monitor_name_ok (nm))
+                g_ptr_array_add (names, g_strdup (nm));
+            else
+                *err = g_strdup ("resolution: \"monitor\" is not an output name (1 to 64 "
+                                 "characters; see walpe-ctl resolution)");
+        } else if (t == G_TYPE_INT64 || t == G_TYPE_DOUBLE) {
+            Mon *m = mon_by_index ((int) CLAMP (json_node_get_double (mn), -1.0, 100000.0));
+            if (m)
+                g_ptr_array_add (names, g_strdup (m->name));
+            else
+                *err = g_strdup ("resolution: no such monitor (walpe-ctl resolution lists them)");
+        } else {
+            *err = g_strdup ("resolution: \"monitor\" is an index, an output name or \"all\"");
+        }
+    } else if (mn && !all) {
+        *err = g_strdup ("resolution: \"monitor\" is an index, an output name or \"all\"");
+    }
+    for (GList *l = D.mons; all && !*err && l; l = l->next)
+        g_ptr_array_add (names, g_strdup (((Mon *) l->data)->name));
+    /* what to set */
+    ResChange c = { NULL, FALSE, FALSE, FALSE, { WALPE_RES_NATIVE, 0, 0, 0 }, 0, -1 };
+    if (!*err && e && json_object_has_member (e, "value")) {
+        JsonNode *vn = json_object_get_member (e, "value");
+        if (JSON_NODE_HOLDS_VALUE (vn) && json_node_get_value_type (vn) == G_TYPE_STRING)
+            c.has_res = walpe_res_parse (json_node_get_string (vn), &c.res, err);
+        else
+            *err = g_strdup ("resolution: \"value\" is native, 720p, 1080p, 1440p, 4k or "
+                             "\"<width>x<height>\"");
+    }
+    if (!*err && e && json_object_has_member (e, "texture_limit"))
+        c.has_tex = res_texlimit_node (json_object_get_member (e, "texture_limit"), &c.tex, err);
+    if (!*err && e && json_object_has_member (e, "asked")) {
+        JsonNode *an = json_object_get_member (e, "asked");
+        if (JSON_NODE_HOLDS_VALUE (an) && json_node_get_value_type (an) == G_TYPE_BOOLEAN)
+            c.asked = json_node_get_boolean (an) ? 1 : 0;
+        else
+            *err = g_strdup ("resolution: \"asked\" is true or false");
+    }
+    c.forget = !*err && e && wpj_bool (e, "forget", FALSE);
+    if (!*err && !c.has_res && !c.has_tex && c.asked < 0 && !c.forget)
+        *err = g_strdup ("resolution: nothing to set (\"value\", \"texture_limit\", "
+                         "\"asked\" or \"forget\")");
+    if (!*err && c.forget && (c.has_res || c.has_tex || c.asked >= 0))
+        *err = g_strdup ("resolution: \"forget\" goes alone (it drops the stored choice)");
+    for (guint i = 0; !*err && i < names->len; i++) {
+        const char *nm = g_ptr_array_index (names, i);
+        Mon *m = mon_by_name (nm);
+        if (!walpe_monitor_name_ok (nm)) {
+            /* (only through "all" or an index: a name in the request was
+             * checked above.) Nothing can be stored under such a name
+             * (walpe_config_set_monitor): say so instead of answering as
+             * if the choice had been taken. */
+            g_string_append_printf (notes, "%smonitor %d: its output name cannot be stored "
+                                    "(longer than 64 bytes or not plain text): it stays at "
+                                    "its own resolution", notes->len ? "; " : "",
+                                    m ? m->index : -1);
+            continue;
+        }
+        if (c.has_res && m) {
+            /* the size on this output: one the GL can make a picture of */
+            int w = 0, h = 0;
+            const int mx = g_atomic_int_get (&gl_max_side);
+            walpe_res_size (&c.res, m->geom.width, m->geom.height, &w, &h);
+            if (mx > 0 && (w > mx || h > mx)) {
+                *err = g_strdup_printf ("resolution: %d x %d on %s is more than the largest "
+                                        "picture this GPU renders to (%d pixels a side); nothing "
+                                        "was changed", w, h, nm, mx);
+                break;
+            }
+            if ((gint64) w * h > 2 * (gint64) m->geom.width * m->geom.height)
+                g_string_append_printf (notes, "%s%s: %d x %d is %.1f times the pixels of its "
+                                        "%d x %d mode - scenes cost about that much more GPU "
+                                        "work and video memory", notes->len ? "; " : "", nm, w, h,
+                                        walpe_res_percent (w, h, m->geom.width, m->geom.height) /
+                                            100.0, m->geom.width, m->geom.height);
+        } else if (!m && !c.forget) {
+            /* stored ahead for an output that is not there: these entries
+             * are the ones that can pile up (any name will do), and each is
+             * in every listing and every save */
+            guint stored = D.cfg->monitors ? g_hash_table_size (D.cfg->monitors) : 0;
+            for (guint q = 0; q < out->len; q++) {
+                const ResChange *p = &g_array_index (out, ResChange, q);
+                stored += !p->forget && !mon_by_name (p->name) &&
+                          !walpe_config_monitor (D.cfg, p->name);
+            }
+            if (!walpe_config_monitor (D.cfg, nm) && stored >= WALPE_MONITORS_MAX) {
+                *err = g_strdup_printf ("resolution: %d choices are stored already, no more for "
+                                        "an output that is not connected (%s); `walpe-ctl "
+                                        "resolution <output> --forget` drops one; nothing was "
+                                        "changed", WALPE_MONITORS_MAX, nm);
+                break;
+            }
+            g_string_append_printf (notes, "%s%s is not connected now: stored for when it is",
+                                    notes->len ? "; " : "", nm);
+        }
+        ResChange one = c;
+        one.name = g_strdup (nm);
+        g_array_append_val (out, one);
+    }
+    g_ptr_array_unref (names);
+    return *err == NULL;
+}
+
+/* main: the checked changes go into the config; sizes and limits reach
+ * the monitors. Saves. */
+static void res_changes_apply (GArray *ch)
+{
+    for (guint i = 0; ch && i < ch->len; i++) {
+        const ResChange *c = &g_array_index (ch, ResChange, i);
+        if (c->forget) {
+            walpe_config_set_monitor (D.cfg, c->name, NULL);
+            continue;
+        }
+        WalpeMonitorConf mc;
+        walpe_config_monitor_get (D.cfg, c->name, &mc);
+        if (c->has_res)
+            mc.res = c->res;
+        if (c->has_tex)
+            mc.tex_limit = c->tex;
+        /* a choice was made (or confirmed): the output has been asked about */
+        mc.asked = c->asked >= 0 ? c->asked != 0 : TRUE;
+        walpe_config_set_monitor (D.cfg, c->name, &mc);
+    }
+    gboolean sizes = res_refresh ();
+    res_texlimits_refresh ();
+    walpe_config_save (D.cfg);
+    res_commit (sizes);
+}
+
+/* the members of the listing ({"cmd":"resolution"}) */
+static void res_describe (JsonBuilder *b)
+{
+    const int mx = g_atomic_int_get (&gl_max_side);
+    guint np = 0;
+    const WalpeResPreset *pr = walpe_res_presets (&np);
+    jb_bool (b, "ok", TRUE);
+    jb_bool (b, "prompt", D.cfg->resolution_prompt);
+    jb_int (b, "unasked", res_unasked ());
+    json_builder_set_member_name (b, "limits");
+    json_builder_begin_object (b);
+    jb_int (b, "min_width", WALPE_RES_MIN_W);
+    jb_int (b, "min_height", WALPE_RES_MIN_H);
+    jb_int (b, "max_side", mx > 0 ? MIN (mx, WALPE_RES_MAX_SIDE) : WALPE_RES_MAX_SIDE);
+    jb_int (b, "max_pixels", WALPE_RES_MAX_PIXELS);
+    json_builder_end_object (b);
+    json_builder_set_member_name (b, "presets");
+    json_builder_begin_array (b);
+    for (guint i = 0; i < np; i++) {
+        json_builder_begin_object (b);
+        jb_str (b, "name", pr[i].name);
+        jb_int (b, "lines", pr[i].lines);
+        json_builder_end_object (b);
+    }
+    json_builder_end_array (b);
+    jb_str (b, "scale_filter", walpe_scale_filter_name (g_atomic_int_get (&D.cfg->scale_filter)));
+    {
+        char *vr = walpe_vidres_format (&D.cfg->video_res);
+        WalpeVideoBox box;
+        video_box_for (NULL, NULL, TRUE, &box);
+        jb_str (b, "video_resolution", vr);
+        jb_size (b, "video_box", box.w, box.h);
+        g_free (vr);
+    }
+    if (res_env)
+        jb_bool (b, "env", TRUE);   /* WALPE_RESOLUTION decides the sizes while it is set */
+    json_builder_set_member_name (b, "monitors");
+    json_builder_begin_array (b);
+    for (GList *l = D.mons; l; l = l->next) {
+        Mon *m = l->data;
+        const int mw = m->geom.width, mh = m->geom.height;
+        WalpeMonitorConf mc;
+        res_conf_for (m->name, &mc);
+        char *rs = walpe_res_format (&mc.res), *tl = walpe_texlimit_format (mc.tex_limit);
+        int cap = 0;
+        walpe_texlimit_effective (m->tex_limit, TRUE, NULL, &cap);
+        json_builder_begin_object (b);
+        jb_int (b, "index", m->index);
+        jb_str (b, "name", m->name);    /* (what else the output list knows of the
+                                         * output - a description, make, model -
+                                         * goes next to it, here and in status) */
+        jb_bool (b, "connected", TRUE);
+        jb_size (b, "mode", mw, mh);
+        json_builder_set_member_name (b, "refresh");
+        json_builder_add_double_value (b, m->hz);
+        jb_str (b, "resolution", rs);
+        jb_size (b, "render_size", m->res_w, m->res_h);
+        jb_int (b, "render_percent", walpe_res_percent (m->res_w, m->res_h, mw, mh));
+        jb_bool (b, "asked", mon_res_asked (m, &mc));
+        jb_str (b, "texture_limit", tl);
+        jb_int (b, "texture_limit_px", cap);
+        if (m->res_note)
+            jb_str (b, "note", m->res_note);
+        /* what to offer for this output: native, then every preset that
+         * is not larger than its mode */
+        json_builder_set_member_name (b, "choices");
+        json_builder_begin_array (b);
+        json_builder_begin_object (b);
+        jb_str (b, "value", "native");
+        jb_size (b, "size", mw, mh);
+        jb_int (b, "percent", 100);
+        json_builder_end_object (b);
+        for (guint i = 0; i < np; i++) {
+            if (pr[i].lines > MIN (mw, mh))
+                continue;
+            WalpeRes r = { WALPE_RES_LINES, pr[i].lines, 0, 0 };
+            int w = 0, h = 0;
+            walpe_res_size (&r, mw, mh, &w, &h);
+            json_builder_begin_object (b);
+            jb_str (b, "value", pr[i].name);
+            jb_size (b, "size", w, h);
+            jb_int (b, "percent", walpe_res_percent (w, h, mw, mh));
+            json_builder_end_object (b);
+        }
+        json_builder_end_array (b);
+        json_builder_end_object (b);
+        g_free (rs);
+        g_free (tl);
+    }
+    /* stored choices of outputs that are not connected now */
+    GList *ks = D.cfg->monitors ? g_list_sort (g_hash_table_get_keys (D.cfg->monitors),
+                                               (GCompareFunc) strcmp) : NULL;
+    for (GList *k = ks; k; k = k->next) {
+        if (mon_by_name (k->data))
+            continue;
+        const WalpeMonitorConf *mc = g_hash_table_lookup (D.cfg->monitors, k->data);
+        char *rs = walpe_res_format (&mc->res), *tl = walpe_texlimit_format (mc->tex_limit);
+        json_builder_begin_object (b);
+        jb_str (b, "name", k->data);
+        jb_bool (b, "connected", FALSE);
+        jb_str (b, "resolution", rs);
+        jb_str (b, "texture_limit", tl);
+        jb_bool (b, "asked", mc->asked);
+        json_builder_end_object (b);
+        g_free (rs);
+        g_free (tl);
+    }
+    g_list_free (ks);
+    json_builder_end_array (b);
+}
+
+static void ipc_resolution (JsonBuilder *b, JsonObject *o)
+{
+    GArray *ch = g_array_new (FALSE, TRUE, sizeof (ResChange));
+    g_array_set_clear_func (ch, res_change_clear);
+    GString *notes = g_string_new (NULL);
+    char *err = NULL;
+    gboolean prompt_given = FALSE, prompt = TRUE;
+    JsonNode *sn = json_object_get_member (o, "set");
+    if (sn && !JSON_NODE_HOLDS_ARRAY (sn)) {
+        err = g_strdup ("resolution: \"set\" is a list of {\"monitor\", \"value\", ...} objects");
+    } else if (sn) {
+        JsonArray *arr = json_node_get_array (sn);
+        const guint n = json_array_get_length (arr);
+        if (n > 256)
+            err = g_strdup ("resolution: too many elements in \"set\"");
+        for (guint i = 0; !err && i < n; i++) {
+            JsonNode *en = json_array_get_element (arr, i);
+            if (!JSON_NODE_HOLDS_OBJECT (en))
+                err = g_strdup ("resolution: every element of \"set\" is an object");
+            else
+                res_parse_element (json_node_get_object (en), ch, notes, &err);
+        }
+    }
+    if (!err && (json_object_has_member (o, "monitor") || json_object_has_member (o, "value") ||
+                 json_object_has_member (o, "texture_limit") ||
+                 json_object_has_member (o, "asked") || json_object_has_member (o, "forget")))
+        res_parse_element (o, ch, notes, &err);
+    if (!err && json_object_has_member (o, "prompt")) {
+        JsonNode *pn = json_object_get_member (o, "prompt");
+        if (JSON_NODE_HOLDS_VALUE (pn) && json_node_get_value_type (pn) == G_TYPE_BOOLEAN) {
+            prompt_given = TRUE;
+            prompt = json_node_get_boolean (pn);
+        } else {
+            err = g_strdup ("resolution: \"prompt\" is true or false");
+        }
+    }
+    if (err) {
+        jb_fail (b, err);
+    } else {
+        if (prompt_given && prompt != D.cfg->resolution_prompt) {
+            D.cfg->resolution_prompt = prompt;
+            if (!ch->len)
+                walpe_config_save (D.cfg);
+        }
+        if (ch->len)
+            res_changes_apply (ch);     /* saves */
+        res_describe (b);
+        if (notes->len)
+            jb_str (b, "note", notes->str);
+    }
+    g_free (err);
+    g_string_free (notes, TRUE);
+    g_array_unref (ch);
+}
+
+/* the "resolution" / "texture_limit" members of a "set" request ("VALUE"
+ * for every connected output or "NAME:VALUE,NAME:VALUE"; texture_limit also
+ * a number or a switch) into changes, and the other render resolution keys
+ * checked: FALSE + *err when one is not right (nothing was changed). */
+static gboolean res_set_parse (JsonObject *o, GArray *ch, GString *notes, char **err)
+{
+    static const char *const keys[2] = { "resolution", "texture_limit" };
+    for (int k = 0; k < 2 && !*err; k++) {
+        JsonNode *n = json_object_get_member (o, keys[k]);
+        if (!n)
+            continue;
+        if (!JSON_NODE_HOLDS_VALUE (n) || json_node_get_value_type (n) != G_TYPE_STRING) {
+            /* (texture_limit as a number or a switch: every output) */
+            JsonObject *e = json_object_new ();
+            json_object_set_member (e, k ? "texture_limit" : "value", json_node_copy (n));
+            res_parse_element (e, ch, notes, err);
+            json_object_unref (e);
+            continue;
+        }
+        GPtrArray *as = walpe_res_assign_parse (json_node_get_string (n), err);
+        if (!as && *err) {
+            char *full = g_strdup_printf ("%s: %s", keys[k], *err);
+            g_free (*err);
+            *err = full;
+        }
+        for (guint i = 0; as && !*err && i < as->len; i++) {
+            const WalpeResAssign *a = g_ptr_array_index (as, i);
+            JsonObject *e = json_object_new ();
+            if (a->monitor)
+                json_object_set_string_member (e, "monitor", a->monitor);
+            json_object_set_string_member (e, k ? "texture_limit" : "value", a->value);
+            res_parse_element (e, ch, notes, err);
+            json_object_unref (e);
+        }
+        if (as)
+            g_ptr_array_unref (as);
+    }
+    if (!*err && json_object_has_member (o, "scale_filter") &&
+        walpe_scale_filter_parse (wpj_str (o, "scale_filter", NULL)) < 0)
+        *err = g_strdup ("scale_filter: bilinear or nearest");
+    if (!*err && json_object_has_member (o, "video_resolution")) {
+        WalpeVideoRes vr;
+        walpe_vidres_parse (wpj_str (o, "video_resolution", ""), &vr, err);
+    }
+    return *err == NULL;
+}
+
 static void ipc_set_keys (JsonBuilder *b, JsonObject *o);
 
 static void ipc_set (JsonBuilder *b, JsonObject *o)
@@ -5727,6 +6026,7 @@ static void ipc_set (JsonBuilder *b, JsonObject *o)
 static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
 {
     gboolean changed = FALSE;
+    gboolean backend_saved = FALSE;     /* "backend" changed: in force at the next start */
     {
         /* a member this build does not know (a typo, a newer client) or a
          * value of the wrong type for its key: refused as a whole, before
@@ -5739,6 +6039,22 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
             return;
         }
     }
+    /* render resolution (resolution, texture_limit, scale_filter,
+     * video_resolution): checked here, before anything is changed, applied
+     * below once the quality knobs are in place */
+    GArray *res_ch = g_array_new (FALSE, TRUE, sizeof (ResChange));
+    g_array_set_clear_func (res_ch, res_change_clear);
+    GString *res_notes = g_string_new (NULL);
+    {
+        char *rerr = NULL;
+        if (!res_set_parse (o, res_ch, res_notes, &rerr)) {
+            jb_fail (b, rerr ? rerr : "resolution setting not allowed");
+            g_free (rerr);
+            g_array_unref (res_ch);
+            g_string_free (res_notes, TRUE);
+            return;
+        }
+    }
     {
         /* quality knobs (quality_preset, fx_rate, fx_rate_mode, fx_res,
          * fps_idle, post_processing, render_scale, tex_res, texture_slack):
@@ -5748,6 +6064,8 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
         if (!walpe_quality_ipc_set (D.cfg, o, &given, &diff, &qerr)) {
             jb_fail (b, qerr ? qerr : "quality setting not allowed");
             g_free (qerr);
+            g_array_unref (res_ch);
+            g_string_free (res_notes, TRUE);
             return;
         }
         if (given) {
@@ -5789,6 +6107,46 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
             quality_apply (diff, NULL, fx_keys);   /* (marks; ipc_set flushes) */
         }
     }
+    gboolean changed_res = FALSE;   /* a render resolution key was given and applied */
+    /* (freed wherever this function ends: the keys below still refuse and return) */
+    g_autofree char *res_note = res_notes->len ? g_strdup (res_notes->str) : NULL;
+    {
+        /* render resolution: the choices per output (they were checked
+         * above; saved here), then the three global keys */
+        gboolean sizes = FALSE, commit = FALSE;
+        if (res_ch->len) {
+            res_changes_apply (res_ch);     /* sizes and limits to the monitors; saves */
+            changed_res = TRUE;
+        }
+        if (json_object_has_member (o, "scale_filter")) {
+            /* a scene whose frame is scaled shows it with its next frame */
+            int f = walpe_scale_filter_parse (wpj_str (o, "scale_filter", NULL));
+            if (f >= 0) {
+                g_atomic_int_set (&D.cfg->scale_filter, f);
+                for (GList *l = D.mons; l; l = l->next)
+                    request_redraw (l->data);
+                changed_res = TRUE;
+            }
+        }
+        if (json_object_has_member (o, "video_resolution")) {
+            /* imports and conversions from now on; a video on screen whose
+             * converted copy is for another box is given the one for this */
+            WalpeVideoRes vr;
+            if (walpe_vidres_parse (wpj_str (o, "video_resolution", ""), &vr, NULL)) {
+                commit = !walpe_vidres_equal (&vr, &D.cfg->video_res);
+                D.cfg->video_res = vr;
+                changed_res = TRUE;
+            }
+        }
+        if (json_object_has_member (o, "resolution_prompt")) {
+            D.cfg->resolution_prompt = wpj_bool (o, "resolution_prompt", D.cfg->resolution_prompt);
+            changed_res = TRUE;
+        }
+        if (commit)
+            res_commit (sizes);
+    }
+    g_array_unref (res_ch);
+    g_string_free (res_notes, TRUE);
     /* presentation, for an A/B on the running wallpaper: `walpe-ctl set
      * present=limiter` (vsync | limiter | auto, NAME=mode per monitor)
      * applies at the next swap and is not saved - gpu.conf holds the
@@ -5860,11 +6218,53 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
         gboolean differs = (!Sw.env_forced && sr != Sw.wanted) ||
                            (Sw.active && !g_getenv ("LP_NUM_THREADS") &&
                             walpe_sw_threads (st, (int) g_get_num_processors ()) != Sw.threads);
-        if (!differs && Sw.restart_id) {
+        /* (a restart that a change of gl_api asked for stays due) */
+        if (!differs && Sw.restart_id &&
+            (Ga.env_forced || (WalpeGlApiPref) D.cfg->gl_api == Ga.pref)) {
             g_source_remove (Sw.restart_id);
             Sw.restart_id = 0;
             g_message ("software rendering setting is back to what runs: no restart");
         }
+    }
+    gboolean gpu_restart = FALSE;
+    if (json_object_has_member (o, "gpu") || json_object_has_member (o, "preset_follow_gpu")) {
+        /* which GPU renders: saved, and the daemon restarts in place when
+         * another device has to render (the drivers read their variables
+         * when EGL starts) */
+        char *gnote = NULL, *gerr = NULL;
+        if (!gpu_ipc_set (o, (Imp.job && Imp.active) || (Ws.job && Ws.active), &gpu_restart,
+                          &gnote, &gerr)) {
+            jb_fail (b, gerr ? gerr : "gpu: not allowed");
+            g_free (gerr);
+            return;
+        }
+        if (gnote)
+            jb_str (b, "gpu_note", gnote);
+        g_free (gnote);
+        changed = TRUE;
+    }
+    if (json_object_has_member (o, "gl_api")) {
+        /* desktop OpenGL or OpenGL ES: saved, and the daemon restarts in
+         * place when what runs was decided by another value (the API of
+         * the contexts is fixed when the first one is made) */
+        WalpeGlApiPref ga;
+        if (!walpe_gl_api_parse (wpj_str (o, "gl_api", ""), &ga)) {
+            jb_fail (b, "gl_api: auto, gl or gles");
+            return;
+        }
+        gboolean need = !Ga.env_forced && ga != Ga.pref;
+        if (need && ((Imp.job && Imp.active) || (Ws.job && Ws.active))) {
+            jb_fail (b, "gl_api: the engine has to restart for this and an import / "
+                        "Workshop download is running; change it when that has finished");
+            return;
+        }
+        if ((int) ga != D.cfg->gl_api) {
+            D.cfg->gl_api = (int) ga;
+            changed = TRUE;
+        } else {
+            live = TRUE;        /* nothing to save: not "nothing to set" */
+        }
+        restart |= need;
     }
     if (ipc_has_num (o, "fps")) {
         D.cfg->fps = (int) CLAMP (wpj_num (o, "fps", D.cfg->fps), 5.0, 200.0);
@@ -5874,32 +6274,46 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
         changed = TRUE;
     }
     if (ipc_has_num (o, "volume")) {
-        /* persisted only: the renderer has no audio output path */
+        /* the volume of wallpaper sound (scene sound layers; nothing else
+         * makes a sound): heard at once */
         D.cfg->volume = CLAMP (wpj_num (o, "volume", D.cfg->volume), 0.0, 1.0);
+        walpe_sound_set_master (D.cfg->volume);
+        changed = TRUE;
+    }
+    if (json_object_has_member (o, "scene_sound")) {
+        /* scenes play their sound layers; takes effect at once, nothing is
+         * loaded again. A wallpaper's own switch (setprop walpe_sound) wins. */
+        D.cfg->scene_sound = wpj_bool (o, "scene_sound", D.cfg->scene_sound);
+        walpe_sound_set_enabled (D.cfg->scene_sound);
+        changed = TRUE;
+    }
+    if (json_object_has_member (o, "mute")) {
+        D.cfg->mute = wpj_bool (o, "mute", D.cfg->mute);
+        walpe_sound_set_muted (D.cfg->mute);
         changed = TRUE;
     }
     if (json_object_has_member (o, "pause_fullscreen")) {
         D.cfg->pause_fullscreen = wpj_bool (o, "pause_fullscreen", D.cfg->pause_fullscreen);
         changed = TRUE;
-        update_active_window ();
+        walpe_signals_recheck (WALPE_SIG_FULLSCREEN, TRUE);
         apply_pause_state ();
     }
     if (json_object_has_member (o, "pause_dpms")) {
         D.cfg->pause_dpms = wpj_bool (o, "pause_dpms", D.cfg->pause_dpms);
         changed = TRUE;
-        sleep_recheck ();
+        walpe_signals_recheck (WALPE_SIG_ASLEEP, TRUE);
         apply_pause_state ();
     }
     if (json_object_has_member (o, "pause_covered")) {
         D.cfg->pause_covered = wpj_bool (o, "pause_covered", D.cfg->pause_covered);
         changed = TRUE;
-        recompute_covered ();
+        walpe_signals_recheck (WALPE_SIG_COVERED, TRUE);
         apply_pause_state ();
     }
     if (json_object_has_member (o, "cover_transparent")) {
         D.cfg->cover_transparent = wpj_bool (o, "cover_transparent", D.cfg->cover_transparent);
         changed = TRUE;
-        cover_schedule ();
+        walpe_signals_recheck (WALPE_SIG_COVERED, FALSE);
     }
     /* ---- opt-in resource rules */
     if (ipc_has_str (o, "focus_action")) {
@@ -5928,6 +6342,14 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
         D.cfg->battery_fps = (int) CLAMP (wpj_num (o, "battery_fps", D.cfg->battery_fps), 0.0, 200.0);
         changed = TRUE;
         power_watch_update ();
+    }
+    if (ipc_has_num (o, "pause_idle")) {
+        /* seconds without input after which every wallpaper pauses; 0 = off */
+        D.cfg->pause_idle = (int) CLAMP (wpj_num (o, "pause_idle", D.cfg->pause_idle), 0.0, 86400.0);
+        walpe_sigprov_set_idle_timeout ((guint) D.cfg->pause_idle);
+        walpe_signals_recheck (WALPE_SIG_IDLE, TRUE);
+        changed = TRUE;
+        apply_pause_state ();   /* switched off while idle: run again */
     }
     if (json_object_has_member (o, "preview_anim")) {
         /* a GUI setting, kept here because the daemon owns config.json;
@@ -6004,6 +6426,42 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
         particles_apply ();   /* the next draw of every system */
         changed = TRUE;
     }
+    {
+        /* renderer features (engine/features.h): `walpe-ctl set
+         * <name>=on|off` for every feature that common/setkeys.h lists as
+         * a setting. Running scenes take a switch up with their next frame
+         * (asked for here: a still scene shows it now); a feature that a
+         * scene decides when it loads gets what is shown loaded again. */
+        gboolean feat_frame = FALSE, feat_reload = FALSE;
+        const char *feat_env = NULL;
+        for (int f = 0; walpe_feature_name (f); f++) {
+            const char *fname = walpe_feature_name (f);
+            if (!walpe_set_key_find (fname) || !json_object_has_member (o, fname))
+                continue;
+            gboolean was = walpe_feature ((WalpeFeature) f);
+            gboolean on = wpj_bool (o, fname, was);
+            walpe_feature_set (fname, on);
+            walpe_config_set_feature (D.cfg, fname, on);   /* saved also when the environment decides now */
+            changed = TRUE;
+            if (walpe_feature_fixed (f))
+                feat_env = fname;
+            if (walpe_feature ((WalpeFeature) f) != was) {
+                if (walpe_feature_reloads (f))
+                    feat_reload = TRUE;
+                else
+                    feat_frame = TRUE;
+                g_message ("feature %s: %s", fname, on ? "on" : "off");
+            }
+        }
+        if (feat_reload)
+            scenes_reload_mark (NULL);   /* (ipc_set flushes) */
+        if (feat_frame)
+            for (GList *l = D.mons; l; l = l->next)
+                request_redraw (l->data);
+        if (feat_env)
+            g_message ("feature %s: saved; WALPE_FEATURES in the daemon's environment decides while "
+                       "it is set", feat_env);
+    }
     if (json_object_has_member (o, "tex_downscale")) {
         g_atomic_int_set (&D.cfg->tex_downscale, wpj_bool (o, "tex_downscale", D.cfg->tex_downscale));
         changed = TRUE;   /* next wallpaper load */
@@ -6035,8 +6493,31 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
         changed = TRUE;
     }
     if (json_object_has_member (o, "video_hwdec")) {
-        D.cfg->video_hwdec = wpj_bool (o, "video_hwdec", D.cfg->video_hwdec);
-        walpe_video_set_hwdec (D.cfg->video_hwdec);   /* the next video that is opened */
+        /* a switch (on = with the API that is stored), or off | auto | the
+         * name of one decoding API; videos that are playing follow */
+        JsonNode *hn = json_object_get_member (o, "video_hwdec");
+        const char *hs = wpj_str (o, "video_hwdec", NULL);
+        gboolean ok = TRUE;
+        if (hs)
+            ok = walpe_config_set_hwdec (D.cfg, hs);
+        else if (JSON_NODE_HOLDS_VALUE (hn))
+            D.cfg->video_hwdec = wpj_bool (o, "video_hwdec", D.cfg->video_hwdec);
+        else
+            ok = FALSE;
+        if (!ok) {
+            if (changed)    /* the keys before this one were applied: keep them */
+                walpe_config_save (D.cfg);
+            jb_fail (b, "video_hwdec: off, auto, or the name of one decoding API (vaapi, cuda, "
+                        "vdpau, vulkan, drm, v4l2m2m, ...)");
+            return;
+        }
+        walpe_video_set_hwdec_name (walpe_config_hwdec_word (D.cfg));
+        changed = TRUE;
+    }
+    if (json_object_has_member (o, "video_zerocopy")) {
+        /* read by the video module with the next picture it hands over */
+        D.cfg->video_zerocopy = wpj_bool (o, "video_zerocopy", D.cfg->video_zerocopy);
+        walpe_video_set_zerocopy (D.cfg->video_zerocopy);
         changed = TRUE;
     }
     if (ipc_has_str (o, "video_upload")) {
@@ -6078,6 +6559,28 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
             jb_fail (b, fx_err);
             return;
         }
+    }
+    if (json_object_has_member (o, "fluid_sim") || json_object_has_member (o, "fluid_quality")) {
+        /* simulation effects (engine/fx_sim.h): the switch and the quality
+         * level. Both reach the running wallpapers with their next frame;
+         * nothing is loaded again. */
+        WalpeFluidQuality fq = (WalpeFluidQuality) D.cfg->fluid_quality;
+        if (json_object_has_member (o, "fluid_quality") &&
+            !walpe_fluid_quality_parse (wpj_str (o, "fluid_quality", ""), &fq)) {
+            if (changed)
+                walpe_config_save (D.cfg);
+            jb_fail (b, "fluid_quality: full, reduced or low");
+            return;
+        }
+        D.cfg->fluid_quality = (int) fq;
+        fx_sim_set_quality (walpe_fluid_quality_name (fq));
+        if (json_object_has_member (o, "fluid_sim")) {
+            D.cfg->fluid_sim = wpj_bool (o, "fluid_sim", D.cfg->fluid_sim);
+            fx_sim_set_enabled (D.cfg->fluid_sim);
+        }
+        changed = TRUE;
+        for (GList *l = D.mons; l; l = l->next)
+            request_redraw (l->data);
     }
     if (json_object_has_member (o, "skip_hidden") || json_object_has_member (o, "skip_hidden_margin") ||
         json_object_has_member (o, "skip_hidden_inset")) {
@@ -6131,7 +6634,8 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
         g_free (D.cfg->transparent_windows);
         D.cfg->transparent_windows = g_strdup (tw);
         changed = TRUE;
-        cover_schedule (); /* re-evaluate coverage with the new list */
+        walpe_sigprov_set_see_through (tw);   /* Wayland: the same list, by app id */
+        walpe_signals_recheck (WALPE_SIG_COVERED, FALSE); /* coverage with the new list */
         if (D.vis)
             walpe_vistrack_set_see_through (D.vis, tw);
     }
@@ -6175,6 +6679,45 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
             apply_wallpapers (NULL, NULL, FALSE, TRUE);
         }
     }
+    /* the window system (common/backend.h): saved; the running daemon keeps
+     * the one it started on, the next start reads the setting */
+    if (ipc_has_str (o, "backend")) {
+        int bk = walpe_backend_parse (wpj_str (o, "backend", ""), -1);
+        if (bk < 0) {
+            if (changed)
+                walpe_config_save (D.cfg);
+            jb_fail (b, "backend: auto, x11 or wayland");
+            return;
+        }
+        if (bk != WALPE_BACKEND_AUTO && !walpe_platform_built (bk)) {
+            if (changed)
+                walpe_config_save (D.cfg);
+            char *msg = g_strdup_printf (
+                "backend: this build has no %s backend (built: %s)", walpe_backend_name (bk),
+                walpe_backends_built (walpe_platform_built (WALPE_BACKEND_X11),
+                                      walpe_platform_built (WALPE_BACKEND_WAYLAND)));
+            jb_fail (b, msg);
+            g_free (msg);
+            return;
+        }
+        backend_saved = bk != D.cfg->backend;
+        D.cfg->backend = bk;
+        changed = TRUE;
+    }
+    /* Wayland: may the wallpaper surface take pointer input while a
+     * wallpaper uses the pointer ("auto"), or never ("off")? */
+    if (ipc_has_str (o, "wayland_pointer")) {
+        const char *wp = wpj_str (o, "wayland_pointer", "");
+        if (g_ascii_strcasecmp (wp, "auto") && g_ascii_strcasecmp (wp, "off")) {
+            if (changed)
+                walpe_config_save (D.cfg);
+            jb_fail (b, "wayland_pointer: auto or off");
+            return;
+        }
+        D.cfg->wayland_pointer = !g_ascii_strcasecmp (wp, "off");
+        changed = TRUE;
+        pointer_update ();
+    }
     if (ipc_has_str (o, "video_backend")) {
         const char *bk = wpj_str (o, "video_backend", "ffmpeg");
         if (!g_strcmp0 (bk, "mpv") || !g_strcmp0 (bk, "ffmpeg")) {
@@ -6185,14 +6728,28 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
             changed = TRUE;
         }
     }
+    changed = changed || changed_res;
     if (changed) {
         walpe_config_save (D.cfg);
         jb_bool (b, "ok", TRUE);
+        if (backend_saved) {
+            /* nothing changes under the running daemon */
+            jb_bool (b, "restart_needed", TRUE);
+            jb_str (b, "backend_now", walpe_backend_name (D.backend));
+        }
+        if (res_note)
+            jb_str (b, "note", res_note);
         if (restart) {
             jb_bool (b, "restarting", TRUE);   /* after this reply is out */
             sw_schedule_restart ();
+        } else if (gpu_restart) {
+            jb_bool (b, "restarting", TRUE);
+            gpu_schedule_restart ();
         } else if (Sw.env_forced && json_object_has_member (o, "software_render")) {
             jb_str (b, "note", "saved; WALPE_SOFTWARE in the daemon's environment decides "
+                               "while it is set");
+        } else if (Ga.env_forced && json_object_has_member (o, "gl_api")) {
+            jb_str (b, "note", "saved; WALPE_GL_API in the daemon's environment decides "
                                "while it is set");
         }
     } else if (live) {
@@ -6415,12 +6972,19 @@ static char *ipc_handler (const char *req, gpointer user)
             WalpeType t = walpe_detect_type (abs, NULL);
             char *vsrc = NULL, *vwhy = NULL;
             gboolean vsoft = FALSE, now = TRUE;
+            /* the box of a video's converted copy: by the monitors that
+             * will show it once this request is carried out (open_commit:
+             * that monitor besides those that have it already; all of them
+             * without --monitor, and when it becomes the default) */
+            WalpeVideoBox vbox = { 0, 0 };
+            if (t == WALPE_TYPE_VIDEO)
+                video_box_for (abs, tm, !tm || !D.cfg->current || !*D.cfg->current, &vbox);
             if (t == WALPE_TYPE_NONE || t == WALPE_TYPE_UNSUPPORTED) {
                 char *msg = g_strdup_printf ("unsupported content at %s", abs);
                 jb_fail (b, msg);
                 g_free (msg);
                 now = FALSE;
-            } else if (t == WALPE_TYPE_VIDEO && !video_playable (abs, &vsrc, &vwhy, &vsoft)) {
+            } else if (t == WALPE_TYPE_VIDEO && !video_playable (abs, &vbox, &vsrc, &vwhy, &vsoft)) {
                 /* a video the player cannot read (WebM, HEVC / AV1, MKV,
                  * fragmented MP4 ...) or would show sideways / stretched:
                  * converted once, shown when ready. (The load runs later
@@ -6429,7 +6993,7 @@ static char *ipc_handler (const char *req, gpointer user)
                  * the next start.) */
                 GError *ce = vsoft && conv_failed && g_hash_table_contains (conv_failed, vsrc)
                     ? g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "its conversion failed before")
-                    : convert_start (vsrc, abs, tm ? tm->name : NULL, TRUE);
+                    : convert_start (vsrc, abs, tm ? tm->name : NULL, TRUE, &vbox);
                 if (ce && vsoft) {
                     /* the file itself plays: shown as stored, like before */
                     g_message ("video: %s, not converted (%s): shown as stored",
@@ -6651,6 +7215,8 @@ static char *ipc_handler (const char *req, gpointer user)
         }
     } else if (!g_strcmp0 (cmd, "props")) {
         ipc_props (b, ipc_target_path (o));
+    } else if (!g_strcmp0 (cmd, "resolution")) {
+        ipc_resolution (b, o);
     } else if (!g_strcmp0 (cmd, "quality")) {
         ipc_quality (b, o);
     } else if (!g_strcmp0 (cmd, "setquality")) {
@@ -6738,7 +7304,7 @@ static char *ipc_handler (const char *req, gpointer user)
  * otherwise the first match as before.
  * WALPE_EGL_CONFIG=first: the first match as before (A/B);
  * WALPE_EGL_CONFIG=0x<id>: the config with that EGL_CONFIG_ID. */
-static int egl_config_cost (EGLConfig c, VisualID want_visual)
+static int egl_config_cost (EGLConfig c, unsigned long want_visual)
 {
     EGLint r = 0, g = 0, b = 0, a = 0, d = 0, st = 0, sb = 0, sm = 0, vid = 0, cav = EGL_NONE;
     eglGetConfigAttrib (D.egl_dpy, c, EGL_RED_SIZE, &r);
@@ -6752,7 +7318,9 @@ static int egl_config_cost (EGLConfig c, VisualID want_visual)
     eglGetConfigAttrib (D.egl_dpy, c, EGL_NATIVE_VISUAL_ID, &vid);
     eglGetConfigAttrib (D.egl_dpy, c, EGL_CONFIG_CAVEAT, &cav);
     int cost = 0;
-    if ((VisualID) vid != want_visual)
+    /* (a backend that names no visual - 0 - has no such preference; X11
+     * always names the root window's) */
+    if ((want_visual || D.backend == WALPE_BACKEND_X11) && (unsigned long) vid != want_visual)
         cost += 100000;                     /* the surface may be refused */
     if (cav != EGL_NONE)
         cost += 50000;                      /* slow or non-conformant */
@@ -6781,25 +7349,6 @@ static void egl_config_describe (EGLConfig c, char *buf, gsize n)
                 r, g, b, a, d, st, sm, (unsigned) vid, (unsigned) id);
 }
 
-/* can a window of the root visual get a surface with this config? */
-static gboolean egl_config_usable (EGLConfig c)
-{
-    XSetWindowAttributes swa = { .override_redirect = True };
-    Window w = XCreateWindow (D.xd, D.root, 0, 0, 1, 1, 0, CopyFromParent, InputOutput,
-                              CopyFromParent, CWOverrideRedirect, &swa);
-    if (w == None)
-        return FALSE;
-    EGLSurface sf = eglCreateWindowSurface (D.egl_dpy, c, (EGLNativeWindowType) w, NULL);
-    gboolean ok = sf != EGL_NO_SURFACE;
-    if (ok)
-        eglDestroySurface (D.egl_dpy, sf);
-    else
-        (void) eglGetError ();
-    XDestroyWindow (D.xd, w);
-    XSync (D.xd, False);
-    return ok;
-}
-
 static EGLConfig egl_pick_config (EGLConfig *all, EGLint n)
 {
     EGLConfig first = all[0];
@@ -6816,9 +7365,7 @@ static EGLConfig egl_pick_config (EGLConfig *all, EGLint n)
         }
         g_warning ("WALPE_EGL_CONFIG=%s: no such window config; choosing one", e);
     }
-    XWindowAttributes ra;
-    VisualID vis = XGetWindowAttributes (D.xd, D.root, &ra) && ra.visual
-                 ? XVisualIDFromVisual (ra.visual) : 0;
+    unsigned long vis = walpe_platform_egl_visual ();
     EGLint best = 0;
     int best_cost = egl_config_cost (all[0], vis);
     for (EGLint i = 1; i < n; i++) {
@@ -6833,7 +7380,7 @@ static EGLConfig egl_pick_config (EGLConfig *all, EGLint n)
      * is made) */
     if (best == 0 || best_cost >= 100000)
         return first;
-    if (!egl_config_usable (all[best])) {
+    if (!walpe_platform_egl_config_usable (D.egl_dpy, all[best])) {
         g_message ("EGL: the cheapest window config cannot make a surface here; "
                    "using the first match");
         return first;
@@ -6844,11 +7391,59 @@ static EGLConfig egl_pick_config (EGLConfig *all, EGLint n)
     return all[best];
 }
 
+/* The window config for OpenGL ES contexts. The config chosen in
+ * init_egl () is asked for without EGL_RENDERABLE_TYPE (as it always was:
+ * the desktop OpenGL path must get the config it always got). When that
+ * one is an OpenGL ES 3 config it serves; else the choice is made again
+ * among the configs that are, by the same rule. FALSE: there is none. */
+static gboolean egl_config_for_es (void)
+{
+    EGLint rt = 0;
+    if (eglGetConfigAttrib (D.egl_dpy, D.egl_conf, EGL_RENDERABLE_TYPE, &rt) &&
+        (rt & EGL_OPENGL_ES3_BIT))
+        return TRUE;
+    const EGLint attrs[] = {
+        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8,
+        EGL_ALPHA_SIZE, EGL_DONT_CARE,
+        EGL_DEPTH_SIZE, 0,
+        EGL_STENCIL_SIZE, 0,
+        EGL_NONE
+    };
+    EGLConfig all[512];
+    EGLint n = 0;
+    if (!eglChooseConfig (D.egl_dpy, attrs, all, G_N_ELEMENTS (all), &n) || n < 1) {
+        (void) eglGetError ();
+        return FALSE;
+    }
+    D.egl_conf = egl_pick_config (all, n);
+    char desc[160];
+    egl_config_describe (D.egl_conf, desc, sizeof desc);
+    g_message ("EGL config for OpenGL ES: %s", desc);
+    {
+        /* present_egl_probe () has read the swap intervals of the config
+         * chosen first: the pacing has to know those of the one in use */
+        EGLint lo = 0, hi = 1;
+        eglGetConfigAttrib (D.egl_dpy, D.egl_conf, EGL_MIN_SWAP_INTERVAL, &lo);
+        eglGetConfigAttrib (D.egl_dpy, D.egl_conf, EGL_MAX_SWAP_INTERVAL, &hi);
+        if (D.fake_vsync) {
+            lo = 0;
+            hi = MAX (hi, 1);
+        }
+        if (lo != P.min_iv || hi != P.max_iv)
+            g_message ("present: swap interval %d..%d with this config", (int) lo, (int) hi);
+        P.min_iv = lo;
+        P.max_iv = hi;
+    }
+    return TRUE;
+}
+
 static gboolean init_egl (void)
 {
-    /* (the gpu.conf key egl_display=own and the daemon's own EGL connection are
-     * one thing here: D.egl_xd, on by default, WALPE_ONE_XCONN=1 = shared) */
-    D.egl_dpy = eglGetDisplay ((EGLNativeDisplayType) D.egl_xd);
+    /* the display of the window-system connection (X11: on a connection
+     * of EGL's own by default, WALPE_ONE_XCONN=1 = the main thread's) */
+    D.egl_dpy = walpe_platform_egl_display ();
     if (D.egl_dpy == EGL_NO_DISPLAY) {
         g_warning ("eglGetDisplay failed");
         return FALSE;
@@ -6857,6 +7452,10 @@ static gboolean init_egl (void)
         g_warning ("eglInitialize failed");
         return FALSE;
     }
+    /* GPU choice: hand-over point for the window-system layer (call 2 of
+     * 2, gpu_glue.h; the display is initialised): which device this
+     * display renders on */
+    gpu_note_egl (D.egl_dpy);
     const EGLint cfg_attrs[] = {
         EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
         EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8,
@@ -6881,9 +7480,10 @@ static gboolean init_egl (void)
         g_message ("EGL config: %s", desc);
     }
     present_egl_probe ();
-    create_share_root ();
-    return TRUE;
+    return gl_api_decide ();
 }
+
+#include "gpu_glue.h"     /* gpu_setup, gpu_note_egl, --gpu-probe, status, set */
 
 /* ------------------------------------------------ "Render on CPU" set-up */
 
@@ -6898,6 +7498,9 @@ static void sw_note_gl (void)
         Sw.gl_vendor = g_strdup (v ? v : "?");
         Sw.gl_renderer = g_strdup (r ? r : "?");
         Sw.gl_version = g_strdup (ver ? ver : "?");
+        /* which driver renders, for common/gpustat.h (a profile asks it
+         * before any render thread has attached to the profiler) */
+        walpe_gpustat_set_gl_vendor (v);
         gboolean cpu = walpe_sw_renderer_is_software (Sw.gl_renderer);
         g_message ("renderer: %s | %s | %s - rendering on the %s%s", Sw.gl_vendor, Sw.gl_renderer,
                    Sw.gl_version, cpu ? "CPU" : "GPU",
@@ -6906,26 +7509,46 @@ static void sw_note_gl (void)
         if (Sw.active && !cpu)
             g_warning ("software rendering is switched on but the GL context is not Mesa's "
                        "software renderer");
+        if (cpu && !Sw.active)
+            gpu_note_software_renderer ();   /* no device renders: say so in `status` */
     }
     g_mutex_unlock (&Sw.lock);
 }
 
+/* Test children (`--sw-probe`): the daemon's own way to its display once,
+ * without events or pause signals. The parent hands its choice of window
+ * system down with --backend; a child started by hand decides as the
+ * daemon would (the saved setting is not read: no config is loaded here). */
+static gboolean backend_decide (const char *cli, gboolean windowed, gboolean quiet, char **err);
+
+static gboolean probe_open (int argc, char **argv, char **err)
+{
+    const char *cli = NULL;
+    for (int i = 1; i + 1 < argc; i++)
+        if (!g_strcmp0 (argv[i], "--backend"))
+            cli = argv[i + 1];
+    if (!backend_decide (cli, FALSE, TRUE, err))
+        return FALSE;
+    WalpePlatformOpts po = { .probe = TRUE };
+    return walpe_platform_open (D.backend, &po, err);
+}
+
 /* `walpe-daemon --sw-probe`, run by sw_setup() in a child that has the
- * software environment: the daemon's own path once - EGL on the X display,
- * its config, a context from its ladder, a window with the root's visual
- * as create_desktop_window() makes them (never mapped), one frame. Reports
- * key=value lines on stdout (walpe_sw_parse_probe). An X error ends the
- * child through Xlib's default handler: no "drew=1". */
-static int sw_probe_run (void)
+ * software environment: the daemon's own path once - EGL on the display,
+ * its config, a context from its ladder, a surface as the wallpaper
+ * windows have them (never shown), one frame. Reports key=value lines on
+ * stdout (walpe_sw_parse_probe). On X11 an X error ends the child through
+ * Xlib's default handler: no "drew=1". */
+static int sw_probe_run (int argc, char **argv)
 {
     alarm (10);   /* never hold up the daemon's start */
-    D.xd = XOpenDisplay (NULL);
-    if (!D.xd) {
-        g_print ("fail=cannot open the X display\n");
+    char *err = NULL;
+    if (!probe_open (argc, argv, &err)) {
+        g_print ("fail=%s\n", err ? err : "cannot open the display");
         return 1;
     }
-    D.root = DefaultRootWindow (D.xd);
-    if (eglGetDisplay ((EGLNativeDisplayType) D.xd) == EGL_NO_DISPLAY) {
+    const char *where = D.backend == WALPE_BACKEND_WAYLAND ? "Wayland compositor" : "X server";
+    if (walpe_platform_egl_display () == EGL_NO_DISPLAY) {
         /* libglvnd had nothing to ask: the library named by the vendor
          * file did not load */
         const char *vf = g_getenv ("__EGL_VENDOR_LIBRARY_FILENAMES");
@@ -6934,21 +7557,20 @@ static int sw_probe_run (void)
         return 1;
     }
     if (!init_egl ()) {
-        g_print ("fail=Mesa's EGL does not start on this X server\n");
+        g_print ("fail=Mesa's EGL does not start on this %s\n", where);
         return 1;
     }
     const char *ev = eglQueryString (D.egl_dpy, EGL_VENDOR);
     g_print ("egl=%s\n", ev ? ev : "?");
-    XSetWindowAttributes swa = { .override_redirect = True };
-    Window w = XCreateWindow (D.xd, D.root, 0, 0, 64, 64, 0, CopyFromParent, InputOutput,
-                              CopyFromParent, CWOverrideRedirect, &swa);
-    XSync (D.xd, False);
-    EGLSurface surf = eglCreateWindowSurface (D.egl_dpy, D.egl_conf, (EGLNativeWindowType) w, NULL);
-    EGLContext ctx = surf != EGL_NO_SURFACE ? create_thread_context () : EGL_NO_CONTEXT;
-    if (surf == EGL_NO_SURFACE || ctx == EGL_NO_CONTEXT ||
+    WalpeSurfaceSpec spec = { .kind = WALPE_SURFACE_PROBE, .width = 64, .height = 64 };
+    EGLSurface surf = EGL_NO_SURFACE;
+    int pw = 0, ph = 0;
+    WalpeSurface *ps = walpe_surface_new (&spec, D.egl_dpy, D.egl_conf, &surf, &pw, &ph);
+    EGLContext ctx = ps ? create_thread_context () : EGL_NO_CONTEXT;
+    if (!ps || ctx == EGL_NO_CONTEXT ||
         !eglMakeCurrent (D.egl_dpy, surf, surf, ctx)) {
         g_print ("fail=Mesa's EGL cannot make a window surface or a GL 3.3 / GLES 3 context "
-                 "on this X server (EGL error 0x%x)\n", eglGetError ());
+                 "on this %s (EGL error 0x%x)\n", where, eglGetError ());
         return 1;
     }
     const char *v = (const char *) glGetString (GL_VENDOR);
@@ -6959,7 +7581,7 @@ static int sw_probe_run (void)
     glClearColor (0, 0, 0, 1);
     glClear (GL_COLOR_BUFFER_BIT);
     gboolean drew = eglSwapBuffers (D.egl_dpy, surf) && glGetError () == GL_NO_ERROR;
-    XSync (D.xd, False);   /* an X error of the presentation arrives here */
+    walpe_platform_sync ();   /* an X error of the presentation arrives here */
     g_print ("drew=%d\n", drew ? 1 : 0);
     return 0;
 }
@@ -6985,7 +7607,9 @@ static void sw_setup (void)
     } else {
         char **pairs = walpe_sw_env_pairs (json, Sw.threads, lp && *lp);
         char **envp = walpe_sw_environ (g_get_environ (), pairs);
-        char *pargv[] = { Sw.exe, (char *) "--sw-probe", NULL };
+        /* the child draws on the window system this daemon chose */
+        char *pargv[] = { Sw.exe, (char *) "--sw-probe", (char *) "--backend",
+                          (char *) walpe_backend_name (D.backend), NULL };
         char *out = NULL, *errout = NULL;
         GError *e = NULL;
         if (!g_spawn_sync (NULL, pargv, envp, G_SPAWN_DEFAULT, NULL, NULL, &out, &errout, NULL,
@@ -7142,6 +7766,11 @@ static void restart_exec (gboolean layout_stamp)
         g_snprintf (now, sizeof now, "%" G_GINT64_FORMAT, g_get_monotonic_time ());
         env = g_environ_setenv (env, "WALPE_LAYOUT_RESTARTED", now, TRUE);
     }
+    /* the display went away and this restart waits for it: the new image
+     * goes back to the same window system instead of choosing anew while
+     * nothing answers */
+    if (D.display_lost)
+        env = g_environ_setenv (env, "WALPE_DISPLAY_LOST", walpe_backend_name (D.backend), TRUE);
     sw_end_children ();
     /* nothing else may leak into the new image */
     exec_close_others (lfd);
@@ -7175,14 +7804,25 @@ static void restart_exec (gboolean layout_stamp)
  * seconds) and execs; a signal in that time was caught, never dispatched
  * and gone with the exec - `pkill walpe-daemon` or a session ending while
  * the monitors change left a daemon running that had been told to stop.
- * main() looks at term_signal before the exec (term_pending). */
-static volatile sig_atomic_t term_signal;   /* the signal that arrived (0 = none) */
-static int term_fd = -1;
+ * main() looks at term_signal before the exec (term_pending).
+ *
+ * The note is an atomic: a signal sent to the process is handled by
+ * whichever thread does not block it - a render thread, a decoder, one of
+ * GLib's or the GL driver's - while the main thread reads the note.
+ * `volatile sig_atomic_t` only covers a handler that interrupts the thread
+ * that reads. A lock-free atomic may be stored from a signal handler
+ * (C11 7.14.1.1); the default ordering (sequentially consistent) because
+ * the one reader that is not woken through term_fd, term_pending (), must
+ * see a store that came before its look. Nothing here is on a frame's path. */
+#include <stdatomic.h>
+_Static_assert (ATOMIC_INT_LOCK_FREE == 2, "term_signal is stored from a signal handler");
+static atomic_int term_signal;   /* the signal that arrived (0 = none) */
+static int term_fd = -1;         /* set before the handler is installed */
 
 static void term_handler (int sig)
 {
     int e = errno;
-    term_signal = sig;
+    atomic_store (&term_signal, sig);
     if (term_fd >= 0) {
         guint64 one = 1;
         if (write (term_fd, &one, sizeof one) < 0) { /* the flag is set: enough */ }
@@ -7237,7 +7877,7 @@ static gboolean term_pending (void)
     static const int sigs[] = { SIGTERM, SIGINT, SIGHUP };
     for (guint i = 0; i < G_N_ELEMENTS (sigs); i++)
         signal (sigs[i], SIG_DFL);
-    return term_signal != 0;
+    return atomic_load (&term_signal) != 0;
 }
 
 /* WALPE_FPS_LOG=<seconds>: one line every <seconds> with the frames each
@@ -7286,67 +7926,43 @@ static gboolean fpslog_tick (gpointer user)
     return G_SOURCE_CONTINUE;
 }
 
-#ifdef HAVE_XRANDR
-/* refresh rate of the output(s) lit at a monitor's rectangle: the CRTC
- * whose area is that rectangle (else the one containing its centre); the
- * fastest when several show it (mirrored outputs). 0 = none found. */
-static double randr_refresh (const WalpeRect *g)
-{
-    int ev = 0, er = 0;
-    if (!XRRQueryExtension (D.xd, &ev, &er))
-        return 0.0;
-    XRRScreenResources *res = XRRGetScreenResourcesCurrent (D.xd, D.root);
-    if (!res)
-        return 0.0;
-    double exact = 0.0, inside = 0.0;
-    int cx = g->x + g->width / 2, cy = g->y + g->height / 2;
-    for (int c = 0; c < res->ncrtc; c++) {
-        XRRCrtcInfo *ci = XRRGetCrtcInfo (D.xd, res, res->crtcs[c]);
-        if (!ci)
-            continue;
-        if (ci->mode != None && ci->noutput > 0) {
-            double hz = 0.0;
-            for (int k = 0; k < res->nmode; k++)
-                if (res->modes[k].id == ci->mode)
-                    hz = walpe_mode_refresh (res->modes[k].dotClock, res->modes[k].hTotal,
-                                             res->modes[k].vTotal,
-                                             (res->modes[k].modeFlags & RR_Interlace) != 0,
-                                             (res->modes[k].modeFlags & RR_DoubleScan) != 0);
-            if (ci->x == g->x && ci->y == g->y && (int) ci->width == g->width &&
-                (int) ci->height == g->height)
-                exact = MAX (exact, hz);
-            else if (cx >= ci->x && cx < ci->x + (int) ci->width && cy >= ci->y &&
-                     cy < ci->y + (int) ci->height)
-                inside = MAX (inside, hz);
-        }
-        XRRFreeCrtcInfo (ci);
-    }
-    XRRFreeScreenResources (res);
-    return exact > 0.0 ? exact : inside;
-}
-#endif
-
-static Mon *make_monitor (const WalpeRect *g, int idx, gboolean or_mode, const char *name)
+/* One monitor: its record and the surface it is rendered to (the
+ * platform makes the native window and the EGL surface on it). out: the
+ * output it covers (NULL: the --windowed window of g's size). */
+static Mon *make_monitor (const WalpeOutput *out, const WalpeRect *g, int idx, gboolean or_mode,
+                          const char *name)
 {
     Mon *m = g_new0 (Mon, 1);
     m->name = name && *name ? g_strdup (name) : g_strdup_printf ("mon%d", idx);
     m->ptr_lx = m->ptr_ly = -2.0f;
     m->index = idx;
     m->geom = *g;
-    m->xid = create_desktop_window (g, or_mode);
     m->present_iv_applied = -1;
     m->present_iv = 1;
-    if (D.egl_xd != D.xd)
-        XSync (D.xd, False);    /* EGL names the window on its own connection */
-    m->surf = eglCreateWindowSurface (D.egl_dpy, D.egl_conf,
-                                      (EGLNativeWindowType) m->xid, NULL);
-    if (m->surf == EGL_NO_SURFACE) {
+    WalpeSurfaceSpec spec = {
+        .kind = or_mode ? WALPE_SURFACE_WALLPAPER : WALPE_SURFACE_WINDOW,
+        .output = or_mode ? out : NULL,
+        .width = g->width,
+        .height = g->height,
+        .title = "walpe (preview)",
+        .user = m,
+    };
+    int sw = 0, sh = 0;
+    m->ps = walpe_surface_new (&spec, D.egl_dpy, D.egl_conf, &m->surf, &sw, &sh);
+    if (!m->ps) {
         g_warning ("eglCreateWindowSurface failed for monitor %d (0x%x)",
                    idx, eglGetError ());
-        XDestroyWindow (D.xd, m->xid);
-        m->xid = None;
+        g_free (m->name);
         g_free (m);
         return NULL;
+    }
+    m->out_id = walpe_surface_output (m->ps);
+    /* what is rendered and presented is the surface: on X11 it always has
+     * the monitor's size; a window system that sizes surfaces itself may
+     * have made it another */
+    if (sw > 0 && sh > 0) {
+        m->geom.width = sw;
+        m->geom.height = sh;
     }
     {
         /* every frame is drawn in full before it is swapped: the back
@@ -7379,165 +7995,18 @@ static Mon *make_monitor (const WalpeRect *g, int idx, gboolean or_mode, const c
 }
 
 /* ------------------------------------------------------ monitor layout
- * Rectangles (Xinerama, else the whole screen; WALPE_MONITORS overrides),
- * output names (RandR 1.5 monitors matched by geometry, else "monN") and
- * refresh rates (WALPE_MONITORS "@HZ", else the RandR mode). Read at
- * start-up and again whenever the X screen changes. */
-typedef struct {
-    int n;
-    WalpeRect *geom;
-    char **name;        /* n entries, never NULL */
-    double *hz;
-} Layout;
-
-static Layout layout_now;       /* the layout this daemon runs with */
+ * The outputs as the platform lists them (platform.h, WalpeOutput):
+ * rectangles, output names and refresh rates. On X11: Xinerama, else the
+ * whole screen, WALPE_MONITORS overrides; RandR 1.5 monitor names matched
+ * by geometry, else "monN"; WALPE_MONITORS "@HZ", else the RandR mode.
+ * Read at start-up and again whenever the window system says they
+ * changed. */
+/* layout_now (declared above, with the status code): the layout this
+ * daemon runs with */
 static gboolean layout_watch;   /* follow changes (not in --windowed) */
 static guint layout_timer;
-#ifdef HAVE_XRANDR
-static int rr_event_base = -1;
-#endif
-
-static void layout_free (Layout *l)
-{
-    for (int i = 0; l->name && i < l->n; i++)
-        g_free (l->name[i]);
-    g_free (l->name);
-    g_free (l->geom);
-    g_free (l->hz);
-    memset (l, 0, sizeof (*l));
-}
-
-static void layout_detect (Layout *out)
-{
-    WalpeRect *geoms = NULL;
-    int nmon = 0;
-    int evb = 0, errb = 0;
-    if (XineramaQueryExtension (D.xd, &evb, &errb)) {
-        int nscr = 0;
-        XineramaScreenInfo *scr = XineramaQueryScreens (D.xd, &nscr);
-        if (scr && nscr > 0) {
-            nmon = nscr;
-            geoms = g_new0 (WalpeRect, nmon);
-            for (int i = 0; i < nmon; i++) {
-                geoms[i].x = scr[i].x_org;
-                geoms[i].y = scr[i].y_org;
-                geoms[i].width = scr[i].width;
-                geoms[i].height = scr[i].height;
-            }
-        }
-        if (scr)
-            XFree (scr);
-    }
-    /* WALPE_MONITORS="WxH+X+Y,...": override the monitor layout (testing on
-     * a server without Xinerama, e.g. Xvfb with one wide screen) */
-    const char *mon_env = g_getenv ("WALPE_MONITORS");
-    char *mon_file = NULL;
-    if (mon_env && mon_env[0] == '@') {
-        /* WALPE_MONITORS=@FILE: the list is read from FILE at every
-         * detection, so a test can change the layout under a running
-         * daemon (then any RandR / root resize event makes it look) */
-        if (g_file_get_contents (mon_env + 1, &mon_file, NULL, NULL))
-            mon_env = g_strstrip (mon_file);
-        else
-            mon_env = NULL;
-    }
-    char **env_names = NULL;   /* "NAME=WxH+X+Y" entries name their monitor */
-    double *env_hz = NULL;     /* "...@HZ": its refresh rate (testing the pacing) */
-    if (mon_env && *mon_env) {
-        char **parts = g_strsplit (mon_env, ",", -1);
-        int n = 0;
-        WalpeRect *g = g_new0 (WalpeRect, g_strv_length (parts) + 1);
-        env_names = g_new0 (char *, g_strv_length (parts) + 1);
-        env_hz = g_new0 (double, g_strv_length (parts) + 1);
-        for (int i = 0; parts[i]; i++) {
-            const char *eq = strchr (parts[i], '=');
-            const char *geo = eq ? eq + 1 : parts[i];
-            if (sscanf (geo, "%dx%d+%d+%d", &g[n].width, &g[n].height, &g[n].x,
-                        &g[n].y) == 4 && g[n].width > 0 && g[n].height > 0) {
-                env_names[n] = eq ? g_strndup (parts[i], (gsize) (eq - parts[i])) : NULL;
-                env_hz[n] = walpe_monitor_spec_hz (geo);
-                n++;
-            }
-        }
-        g_strfreev (parts);
-        if (n > 0) {
-            g_free (geoms);
-            geoms = g;
-            nmon = n;
-        } else {
-            g_free (g);
-            g_clear_pointer (&env_names, g_free);
-            g_clear_pointer (&env_hz, g_free);
-        }
-    }
-    if (nmon < 1) {
-        nmon = 1;
-        g_free (geoms);
-        geoms = g_new0 (WalpeRect, 1);
-        Window rw;
-        int wx, wy;
-        unsigned ww = 0, wh = 0, wb, wd;
-        XGetGeometry (D.xd, D.root, &rw, &wx, &wy, &ww, &wh, &wb, &wd);
-        geoms[0].width = (int) ww;
-        geoms[0].height = (int) wh;
-    }
-
-    /* output names (config keys for per-monitor wallpapers): RandR 1.5
-     * monitors matched by geometry ("HDMI-0", "DP-2"), else "monN" */
-    char **names = g_new0 (char *, nmon + 1);
-    for (int i = 0; i < nmon; i++)
-        names[i] = env_names ? env_names[i] : NULL;   /* ownership moves */
-    g_free (env_names);     /* the array only: unnamed entries are NULL holes */
-#ifdef HAVE_XRANDR
-    {
-        int rev = 0, rerr = 0, nm = 0;
-        XRRMonitorInfo *mi = XRRQueryExtension (D.xd, &rev, &rerr)
-                                 ? XRRGetMonitors (D.xd, D.root, True, &nm) : NULL;
-        for (int i = 0; i < nmon; i++)
-            for (int k = 0; mi && k < nm && !names[i]; k++)
-                if (mi[k].x == geoms[i].x && mi[k].y == geoms[i].y &&
-                    mi[k].width == geoms[i].width && mi[k].height == geoms[i].height) {
-                    char *an = XGetAtomName (D.xd, mi[k].name);
-                    if (an) {
-                        names[i] = g_strdup (an);
-                        XFree (an);
-                    }
-                }
-        if (mi)
-            XRRFreeMonitors (mi);
-    }
-#endif
-    for (int i = 0; i < nmon; i++)
-        if (!names[i])
-            names[i] = g_strdup_printf ("mon%d", i);
-    /* refresh rates (pacing, shared-rendering leader): WALPE_MONITORS
-     * "@HZ", else the RandR mode of the output */
-    double *hzs = g_new0 (double, nmon + 1);
-    for (int i = 0; i < nmon; i++) {
-        hzs[i] = env_hz ? env_hz[i] : 0.0;
-#ifdef HAVE_XRANDR
-        if (hzs[i] <= 0.0 && !env_hz)
-            hzs[i] = randr_refresh (&geoms[i]);
-#endif
-    }
-    g_free (env_hz);
-    g_free (mon_file);
-    out->n = nmon;
-    out->geom = geoms;
-    out->name = names;
-    out->hz = hzs;
-}
-
-static gboolean layout_equal (const Layout *a, const Layout *b)
-{
-    if (a->n != b->n)
-        return FALSE;
-    for (int i = 0; i < a->n; i++)
-        if (memcmp (&a->geom[i], &b->geom[i], sizeof (WalpeRect)) ||
-            g_strcmp0 (a->name[i], b->name[i]) || fabs (a->hz[i] - b->hz[i]) > 0.5)
-            return FALSE;
-    return TRUE;
-}
+static gboolean layout_force;   /* a surface was taken away: restart even when the
+                                 * list reads the same as at start-up */
 
 /* The X screen changed (monitor connected / removed / switched off with
  * xrandr, another resolution, position or refresh rate). Monitor
@@ -7555,42 +8024,46 @@ static gboolean layout_equal (const Layout *a, const Layout *b)
  * LAYOUT_RESTART_GAP_S apart (WALPE_LAYOUT_RESTARTED carries the time of
  * the last one across the exec). */
 #define LAYOUT_RESTART_GAP_S 10
-static Layout layout_pending;   /* a different layout, seen once */
+static WalpeOutputList layout_pending;   /* a different layout, seen once */
 
 static gboolean layout_check (gpointer user)
 {
     (void) user;
     layout_timer = 0;
-    Layout l = { 0 };
-    layout_detect (&l);
-    gboolean same = layout_equal (&l, &layout_now);
-    if (same) {
-        layout_free (&layout_pending);      /* it was a passing state */
-        layout_free (&l);
-        return G_SOURCE_REMOVE;
-    }
+    WalpeOutputList l = { 0 };
+    walpe_platform_outputs (&l);
     gint64 last = g_ascii_strtoll (g_getenv ("WALPE_LAYOUT_RESTARTED") ? g_getenv ("WALPE_LAYOUT_RESTARTED") : "0",
                                    NULL, 10);
-    gboolean settled = layout_pending.n && layout_equal (&l, &layout_pending);
     gboolean too_soon = last > 0 && g_get_monotonic_time () - last < LAYOUT_RESTART_GAP_S * G_USEC_PER_SEC &&
                         g_get_monotonic_time () >= last;
-    if (!settled || too_soon || Imp.active || Ws.active) {
-        layout_free (&layout_pending);
+    gboolean settled = FALSE;
+    /* (layout_force: a surface is gone - the layout this daemon runs with
+     * is not on screen any more, whatever the list says) */
+    switch (walpe_layout_verdict (&layout_now, &l, &layout_pending, layout_force, too_soon,
+                                  Imp.active || Ws.active, &settled)) {
+    case WALPE_LAYOUT_SAME:
+        walpe_output_list_free (&layout_pending);      /* it was a passing state */
+        walpe_output_list_free (&l);
+        return G_SOURCE_REMOVE;
+    case WALPE_LAYOUT_WAIT:
+        walpe_output_list_free (&layout_pending);
         layout_pending = l;                 /* look again: it has to hold */
         layout_timer = g_timeout_add (settled ? 2000 : 1000, layout_check, NULL);
         return G_SOURCE_REMOVE;
+    case WALPE_LAYOUT_RESTART:
+        break;
     }
     {
         GString *d = g_string_new (NULL);
         for (int i = 0; i < l.n; i++)
-            g_string_append_printf (d, "%s%s %dx%d+%d+%d", i ? ", " : "", l.name[i],
-                                    l.geom[i].width, l.geom[i].height, l.geom[i].x, l.geom[i].y);
+            g_string_append_printf (d, "%s%s %dx%d+%d+%d", i ? ", " : "", l.o[i].name,
+                                    l.o[i].width, l.o[i].height, l.o[i].x, l.o[i].y);
         g_message ("monitor layout changed (now: %s): restarting to follow it", d->str);
         g_string_free (d, TRUE);
         D.restart = TRUE;
         g_main_loop_quit (D.loop);
     }
-    layout_free (&l);
+    walpe_output_list_free (&l);
     return G_SOURCE_REMOVE;
 }
 
@@ -7601,6 +8074,13 @@ static void layout_schedule (void)
     if (layout_timer)
         g_source_remove (layout_timer);
     layout_timer = g_timeout_add (800, layout_check, NULL);
+}
+
+/* a surface was taken away by the window system (plat_surface_closed) */
+static void layout_surface_lost (void)
+{
+    layout_force = TRUE;
+    layout_schedule ();
 }
 
 #ifdef HAVE_WEB
@@ -7674,6 +8154,15 @@ static gboolean web_accel_probe (char **renderer, char **why)
     }
     char *argv[] = { exe, "--web-probe", NULL };
     char **envp = g_environ_setenv (g_get_environ (), "WALPE_WEB_PROBE_ACCEL", "1", TRUE);
+    /* The child opens no display backend (it only starts the page engine):
+     * it is told the one this daemon draws on, in the variable the daemon
+     * itself reads, so that a web module that keeps its pages on another
+     * host per window system tests the host it will be given here - in a
+     * Wayland session whose compositor has no layer shell the daemon is on
+     * X11 through Xwayland while WAYLAND_DISPLAY is still set. Only in the
+     * child's environment, never in this process's own. */
+    if (D.backend == WALPE_BACKEND_X11 || D.backend == WALPE_BACKEND_WAYLAND)
+        envp = g_environ_setenv (envp, "WALPE_BACKEND", walpe_backend_name (D.backend), TRUE);
     {
         /* the test ends with this process (web.c, walpe_web_probe_run) */
         char self[24];
@@ -7874,19 +8363,156 @@ static gboolean web_accel_restart (gpointer user)
 }
 #endif
 
+/* ------------------------------------------------------ display backend
+ * Which window system the daemon draws on (common/backend.h has the
+ * rules and the wording): --backend, else WALPE_BACKEND, else the saved
+ * setting, else automatic - Wayland when WAYLAND_DISPLAY is set and the
+ * compositor offers the layer shell, else X11 when DISPLAY is set. Decided
+ * once, before anything connects; the answer is logged and shown by
+ * `status`. An image restarted because the display went away goes back
+ * to the window system it had. */
+static void backend_env_fill (WalpeBackendEnv *e, const char *cli, gboolean windowed)
+{
+    memset (e, 0, sizeof (*e));
+    e->built_x11 = walpe_platform_built (WALPE_BACKEND_X11);
+    e->built_wayland = walpe_platform_built (WALPE_BACKEND_WAYLAND);
+    e->cli = cli;
+    e->env = g_getenv ("WALPE_BACKEND");
+    e->cfg = D.cfg ? D.cfg->backend : WALPE_BACKEND_AUTO;
+    const char *wd = g_getenv ("WAYLAND_DISPLAY"), *ws = g_getenv ("WAYLAND_SOCKET");
+    const char *xd = g_getenv ("DISPLAY");
+    e->wayland_display = (wd && *wd) || (ws && *ws);
+    e->x_display = xd && *xd;
+    e->layer_shell = -1;
+    e->windowed = windowed;
+}
+
+/* quiet: no log lines (the test children). FALSE: *err says what is
+ * missing (g_free). */
+static gboolean backend_decide (const char *cli, gboolean windowed, gboolean quiet, char **err)
+{
+    WalpeBackendEnv e;
+    WalpeBackendChoice ch;
+    backend_env_fill (&e, Bk.lost ? Bk.lost : cli, windowed);
+    if (walpe_backend_wants_probe (&e)) {
+        /* automatic, in a Wayland session: can the compositor show a
+         * wallpaper at all? A short connection of its own, no EGL */
+        WalpePlatformProbe pr;
+        walpe_platform_probe_wayland (&pr);
+        e.layer_shell = !pr.connected ? -1 : pr.layer_shell ? 1 : 0;
+        e.windowed = windowed && pr.xdg_shell;
+        g_free (Bk.display_node);
+        Bk.display_node = pr.display_node;
+    }
+    walpe_backend_choose (&e, &ch);
+    if (ch.warn && !quiet)
+        g_warning ("%s", ch.warn);
+    if (ch.backend == WALPE_BACKEND_AUTO) {
+        if (err)
+            *err = g_steal_pointer (&ch.why);
+        walpe_backend_choice_clear (&ch);
+        return FALSE;
+    }
+    D.backend = ch.backend;
+    Bk.source = Bk.lost ? "restart after the display went away" : ch.source;
+    g_free (Bk.why);
+    Bk.why = g_steal_pointer (&ch.why);
+    if (!quiet)
+        g_message ("display backend: %s", Bk.why);
+    /* automatic, a Wayland compositor that answers but cannot show a
+     * wallpaper, and X11 reached through Xwayland: an X window is not a
+     * desktop background there - whether it stays below the session's own
+     * windows is the compositor's choice. Said once, not decided here. */
+    if (!quiet && ch.asked == WALPE_BACKEND_AUTO && ch.backend == WALPE_BACKEND_X11 &&
+        e.wayland_display && e.layer_shell == 0)
+        g_warning ("this is a Wayland session whose compositor has no layer shell: the X11 "
+                   "backend draws through Xwayland, where the wallpaper window may not stay "
+                   "below other windows. On GNOME use the X11 session; backend = x11 or "
+                   "wayland (walpe-ctl backend) makes the choice explicit");
+    walpe_backend_choice_clear (&ch);
+    return TRUE;
+}
+
+/* wayland_reconnect (gpu.conf, WALPE_WAYLAND_RECONNECT): seconds a daemon
+ * that lost its display waits for it to come back; 0 (default) = it ends */
+static int reconnect_wait_s (void)
+{
+    const char *s = present_setting ("wayland_reconnect");
+    double v = s ? g_ascii_strtod (s, NULL) : 0.0;
+    return v >= 1.0 ? (int) MIN (v, 3600.0) : 0;
+}
+
+/* The start ends before the control socket is served. An image that was
+ * restarted in place holds the socket of the image before: without this
+ * its file would stay behind with nobody listening. Returns main's exit
+ * status. */
+static int start_failed (void)
+{
+    if (Bk.ipc_fd >= 0) {
+        char *sp = walpe_socket_path ();
+        walpe_ipc_release (sp);
+        g_free (sp);
+    }
+    return 1;
+}
+
+/* For pause-signal providers that know outputs by their connector name
+ * (a provider on a connection of its own): the id per-output signals are
+ * reported under, 0 = no monitor of this daemon. name = NULL: the provider
+ * was told no name (a compositor whose wl_output is older than version 4)
+ * and means "the output": the one this layout has when it has exactly one
+ * and a wallpaper of this daemon is on it; with several outputs nobody can
+ * tell which one is meant, and the answer is 0. */
+G_GNUC_UNUSED static guint32 sig_output_lookup (const char *name, gpointer user)
+{
+    (void) user;
+    if (!name) {
+        guint32 only = walpe_output_list_only_id (&layout_now);
+        for (GList *l = D.mons; only && l; l = l->next) {
+            Mon *m = l->data;
+            if (m->out_id == only && mon_output (m))    /* (not the --windowed window) */
+                return only;
+        }
+        return 0;
+    }
+    for (GList *l = D.mons; l; l = l->next) {
+        Mon *m = l->data;
+        if (walpe_output_name_same (m->name, name))
+            return m->out_id;
+    }
+    return 0;
+}
+
+/* for the modules (walpe-web.so): WALPE_BACKEND_X11 / WALPE_BACKEND_WAYLAND,
+ * 0 before the choice was made */
+WALPE_API int walpe_backend_in_use (void);
+int walpe_backend_in_use (void)
+{
+    return D.backend;
+}
+
 int main (int argc, char **argv)
 {
     gboolean monitor_all = TRUE;
     int monitor_idx = 0;
     gboolean windowed = FALSE;
+    const char *cli_backend = NULL;     /* --backend NAME */
     g_mutex_init (&Sw.lock);
     {
         /* restarted in place: the control socket of the previous image.
          * Before any thread exists (unsetenv) and before orig_env is taken */
         const char *lf = g_getenv ("WALPE_IPC_FD");
-        if (lf && *lf)
-            walpe_ipc_adopt_fd (atoi (lf));
+        if (lf && *lf) {
+            Bk.ipc_fd = atoi (lf);
+            walpe_ipc_adopt_fd (Bk.ipc_fd);
+        }
         g_unsetenv ("WALPE_IPC_FD");
+        /* ... and, when that image lost its display and this one is to
+         * wait for it: the window system it ran on (restart_exec) */
+        const char *dl = g_getenv ("WALPE_DISPLAY_LOST");
+        if (dl && *dl)
+            Bk.lost = g_strdup (dl);
+        g_unsetenv ("WALPE_DISPLAY_LOST");
         Sw.orig_env = g_get_environ ();
         Sw.argv = g_strdupv (argv);
         /* by its real path, so that the restarted process is still called
@@ -7901,7 +8527,14 @@ int main (int argc, char **argv)
     for (int i = 1; i < argc; i++)
         if (!g_strcmp0 (argv[i], "--sw-probe")) {
             /* the software rendering test, run by sw_setup() in a child */
-            int rc = sw_probe_run ();
+            int rc = sw_probe_run (argc, argv);
+            fflush (NULL);
+            _exit (rc);
+        }
+    for (int i = 1; i < argc; i++)
+        if (!g_strcmp0 (argv[i], "--gpu-probe")) {
+            /* the test of a GPU choice, run by gpu_setup() in a child */
+            int rc = gpu_probe_run (argc, argv);
             fflush (NULL);
             _exit (rc);
         }
@@ -7913,11 +8546,20 @@ int main (int argc, char **argv)
             monitor_idx = atoi (argv[++i]);
         } else if (!g_strcmp0 (argv[i], "--fps") && i + 1 < argc)
             ; /* read after config load */
+        else if (!g_strcmp0 (argv[i], "--backend") && i + 1 < argc)
+            cli_backend = argv[++i];
         else if (!g_strcmp0 (argv[i], "-h") || !g_strcmp0 (argv[i], "--help")) {
-            g_print ("usage: walpe-daemon [--windowed] [--monitor N] [--fps N]\n"
+            g_print ("usage: walpe-daemon [--windowed] [--monitor N] [--fps N] "
+                     "[--backend auto|x11|wayland]\n"
+                     "  --backend / WALPE_BACKEND / the saved setting (walpe-ctl set backend=...):\n"
+                     "  the window system to draw on; auto = Wayland where the compositor has\n"
+                     "  the layer shell, else X11\n"
                      "  WALPE_SOFTWARE=1|0 in the environment: render on the CPU (Mesa llvmpipe)\n"
                      "  or on the GPU, whatever the saved setting says "
-                     "(walpe-ctl set software=on|off)\n");
+                     "(walpe-ctl set software=on|off)\n"
+                     "  WALPE_GL_API=auto|gl|gles in the environment: desktop OpenGL 3.3, or\n"
+                     "  OpenGL ES 3.2 / 3.1, whatever the saved setting says "
+                     "(walpe-ctl set gl_api=...)\n");
             return 0;
         }
     }
@@ -7959,7 +8601,8 @@ int main (int argc, char **argv)
             g_chmod (cd, 0700);
         g_free (cd);
     }
-    walpe_video_set_hwdec (D.cfg->video_hwdec);
+    walpe_video_set_hwdec_name (walpe_config_hwdec_word (D.cfg));
+    walpe_video_set_zerocopy (D.cfg->video_zerocopy);
     walpe_video_set_limit (D.cfg->video_limit);
     if (D.cfg->video_upload && !walpe_video_set_upload (D.cfg->video_upload))
         g_warning ("config: video_upload \"%s\" is not a known upload path: legacy is used",
@@ -8009,8 +8652,25 @@ int main (int argc, char **argv)
         gboolean web_probe = FALSE;
         for (int i = 1; i < argc; i++)
             web_probe |= !g_strcmp0 (argv[i], "--web-probe");
-        if (!web_probe)
+        if (!web_probe) {
+            /* which window system: decided here, before the software
+             * rendering test (its child draws on the same one) and before
+             * anything connects to a display */
+            char *berr = NULL;
+            if (!backend_decide (cli_backend, windowed, FALSE, &berr)) {
+                g_printerr ("walpe-daemon: %s\n", berr ? berr : "no display to draw on");
+                return start_failed ();
+            }
             sw_setup ();
+            /* GPU choice: hand-over point for the window-system layer
+             * (call 1 of 2, gpu_glue.h). After the software decision
+             * (which wins), before the first EGL call: D.backend is known,
+             * nothing has connected to it yet, no thread exists; the
+             * outputs are not known yet here; Bk.display_node names the
+             * compositor's device when a Wayland compositor told it */
+            gpu_setup (D.backend == WALPE_BACKEND_WAYLAND ? WALPE_GPU_WS_WAYLAND : WALPE_GPU_WS_X11,
+                       NULL, Bk.display_node);
+        }
     }
 
 #ifdef HAVE_WEB
@@ -8029,37 +8689,32 @@ int main (int argc, char **argv)
 #endif
     /* a peer that closes a socket/pipe mid-write must not kill the daemon */
     signal (SIGPIPE, SIG_IGN);
-    /* render threads present through EGL on the same Display the main
-     * thread polls (XPending/XQueryPointer): Xlib must be thread-safe */
-    XInitThreads ();
-    XSetErrorHandler (walpe_xerror); /* never let a BadWindow kill us */
-    xio_sock_path = walpe_socket_path ();
-    xio_marker_path = loadmark_file ();
-    XSetIOErrorHandler (walpe_xio_error);
-    D.xd = XOpenDisplay (NULL);
-    /* the software rendering test was an X client of its own. Where it was
-     * the only one (nothing else running yet, Xvfb in tests), a server
-     * without -noreset resets itself when that client leaves and refuses
-     * connections for a moment */
-    for (int i = 0; !D.xd && Sw.wanted && i < 30; i++) {
-        g_usleep (100 * 1000);
-        D.xd = XOpenDisplay (NULL);
+    {
+        /* The display: its connections and error handling, and what the
+         * window system offers (platform/). Should the connection die
+         * under the process (X11: the server went away), the control
+         * socket and the crash-loop marker are removed first. After a
+         * software rendering test the X server may refuse connections for
+         * a moment; an image restarted because the display went away
+         * waits for it to come back. */
+        char *xs = walpe_socket_path (), *xm = loadmark_file (), *perr = NULL;
+        WalpePlatformOpts po = {
+            .cfg = D.cfg,
+            .windowed = windowed,
+            .wait_for_display = Sw.wanted,
+            .reconnect_wait_s = Bk.lost ? reconnect_wait_s () : 0,
+            .crash_marker_path = xm,
+            .socket_path = xs,
+            .events = &plat_events,
+        };
+        gboolean opened = walpe_platform_open (D.backend, &po, &perr);
+        g_free (xs);
+        g_free (xm);
+        if (!opened) {
+            g_printerr ("%s\n", perr ? perr : "cannot open the display");
+            return start_failed ();
+        }
     }
-    if (!D.xd) {
-        g_printerr ("cannot open X display\n");
-        return 1;
-    }
-    D.root = DefaultRootWindow (D.xd);
-    /* EGL and the render threads get an X connection of their own. On a
-     * shared one every buffer swap's traffic (replies, events of the GL
-     * driver) made the socket readable and woke the main loop, which then
-     * found nothing of its own: ~200 wake-ups a second with one scene at
-     * 60 fps on two monitors, and the swaps' round trips parked main-loop
-     * events in Xlib's queue (late clicks). WALPE_ONE_XCONN=1 = one
-     * connection for everything, as before. */
-    D.egl_xd = g_getenv ("WALPE_ONE_XCONN") ? NULL : XOpenDisplay (NULL);
-    if (!D.egl_xd)
-        D.egl_xd = D.xd;
     D.loop = g_main_loop_new (NULL, FALSE);
     /* systemctl --user stop / Ctrl+C: the same clean shutdown as `quit`
      * (kills a running ffmpeg import / steamcmd and their partial output,
@@ -8069,35 +8724,24 @@ int main (int argc, char **argv)
      * process with the socket and the crash-loop marker left behind. */
     /* (SIGHUP: the terminal the daemon was started from was closed) */
     term_signals_init ();
-    int shape_ev, shape_err;
-    have_shape = XShapeQueryExtension (D.xd, &shape_ev, &shape_err);
-    Atom wmcheck = XInternAtom (D.xd, "_NET_SUPPORTING_WM_CHECK", True);
-    if (wmcheck != None) {
-        guchar *data = NULL;
-        gulong n = window_prop32 (D.root, wmcheck, XA_WINDOW, 1, &data);
-        if (data) {
-            Window w = n == 1 ? *(Window *) data : None;
-            XFree (data);
-            XWindowAttributes wa;
-            D.has_wm = (w != None && XGetWindowAttributes (D.xd, w, &wa));
-        }
+    {
+        char *desc = walpe_platform_describe ();
+        g_message ("walpe-daemon %s \"%s\" up (%s, backend=%s)", WALPE_VERSION, WALPE_CODENAME,
+                   desc, D.cfg->video_backend);
+        g_free (desc);
     }
-    g_message ("walpe-daemon %s \"%s\" up (wm=%s, backend=%s)", WALPE_VERSION, WALPE_CODENAME,
-               D.has_wm ? "yes" : "no", D.cfg->video_backend);
 
     /* monitor layout: rectangles, output names, refresh rates */
-    layout_detect (&layout_now);
+    walpe_platform_outputs (&layout_now);
     int nmon = layout_now.n;
-    WalpeRect *geoms = layout_now.geom;
-    char **names = layout_now.name;
-    double *hzs = layout_now.hz;
     for (int i = 0; i < nmon; i++) {
-        if (hzs[i] > 0.0)
-            g_message ("monitor %d: %s %dx%d+%d+%d, %.2f Hz", i, names[i], geoms[i].width,
-                       geoms[i].height, geoms[i].x, geoms[i].y, hzs[i]);
+        const WalpeOutput *o = &layout_now.o[i];
+        if (o->refresh_hz > 0.0)
+            g_message ("monitor %d: %s %dx%d+%d+%d, %.2f Hz", i, o->name, o->width,
+                       o->height, o->x, o->y, o->refresh_hz);
         else
-            g_message ("monitor %d: %s %dx%d+%d+%d, refresh rate unknown", i, names[i],
-                       geoms[i].width, geoms[i].height, geoms[i].x, geoms[i].y);
+            g_message ("monitor %d: %s %dx%d+%d+%d, refresh rate unknown", i, o->name,
+                       o->width, o->height, o->x, o->y);
     }
 
     char *sock = walpe_socket_path ();
@@ -8116,18 +8760,69 @@ int main (int argc, char **argv)
 
     if (windowed) {
         WalpeRect g = { .width = 960, .height = 540 };
-        make_monitor (&g, 0, FALSE, "windowed"); /* normal window: WM tiles it, on top */
+        make_monitor (NULL, &g, 0, FALSE, "windowed"); /* normal window: WM tiles it, on top */
     } else {
         for (int i = 0; i < nmon; i++)
             if (monitor_all || i == monitor_idx) {
-                Mon *nm = make_monitor (&geoms[i], i, TRUE, names[i]);
+                const WalpeOutput *o = &layout_now.o[i];
+                WalpeRect g = { o->x, o->y, o->width, o->height };
+                Mon *nm = make_monitor (o, &g, i, TRUE, o->name);
                 if (nm) {
-                    nm->hz = hzs[i];
-                    D.max_hz = MAX (D.max_hz, hzs[i]);
+                    nm->hz = o->refresh_hz;
+                    D.max_hz = MAX (D.max_hz, o->refresh_hz);
                 }
             }
     }
 
+    {
+        /* render resolution (common/resolution.h), before any thread and
+         * any load. A config.json written by a version that had no choice
+         * per output: the outputs connected now are entered as "asked,
+         * native" - the user of that version is not asked about the
+         * screens that were there, and they keep their picture. Then every
+         * monitor's render size from its choice; an output without one
+         * runs at native and stays "not asked yet" until the GUI or
+         * walpe-ctl says otherwise (nothing here waits for an answer). */
+        res_no_ask = windowed;
+        const char *re = g_getenv ("WALPE_RESOLUTION");
+        if (re && *re) {
+            char *rerr = NULL;
+            res_env = walpe_res_assign_parse (re, &rerr);
+            for (guint i = 0; res_env && !rerr && i < res_env->len; i++) {
+                WalpeRes r;
+                walpe_res_parse (((WalpeResAssign *) g_ptr_array_index (res_env, i))->value, &r,
+                                 &rerr);
+            }
+            if (rerr) {
+                g_warning ("WALPE_RESOLUTION is not used: %s", rerr);
+                g_clear_pointer (&res_env, g_ptr_array_unref);
+                g_free (rerr);
+            } else {
+                g_message ("WALPE_RESOLUTION decides the render sizes of this run; the saved "
+                           "choices are not changed");
+            }
+        }
+        if (!windowed) {
+            /* the names of ALL detected outputs (also with --monitor N), as
+             * the output list of the platform layer spells them */
+            const char **names = g_new0 (const char *, (gsize) nmon + 1);
+            for (int i = 0; i < nmon; i++)
+                names[i] = layout_now.o[i].name;
+            if (walpe_config_monitors_migrate (D.cfg, names, (guint) nmon)) {
+                g_message ("config: written before a render resolution could be chosen per "
+                           "monitor: the %d connected monitor(s) stay at their own resolution and "
+                           "count as asked (walpe-ctl resolution, or the settings window, to "
+                           "choose another)", nmon);
+                walpe_config_save (D.cfg);
+            }
+            g_free (names);
+        }
+        res_refresh ();
+        const int un = res_unasked ();
+        if (un)
+            g_message ("resolution: %d monitor(s) not asked about yet: rendered at their own "
+                       "resolution (walpe-ctl resolution lists them; the window asks once)", un);
+    }
     present_init ();   /* swap interval per monitor, before its thread starts */
     /* one render thread per monitor: owns its EGL context for life */
     ctx_expected = (int) g_list_length (D.mons);
@@ -8143,9 +8838,27 @@ int main (int argc, char **argv)
         m->thread = g_thread_new (tname, mon_thread, m);
     }
     fx_set_cache_enabled (D.cfg->fx_cache);
+    if (D.cfg->features) {
+        /* renderer feature switches of config.json (WALPE_FEATURES wins; a
+         * name this build has no feature for stays in the file, unused) */
+        GHashTableIter fit;
+        gpointer fk, fv;
+        g_hash_table_iter_init (&fit, D.cfg->features);
+        while (g_hash_table_iter_next (&fit, &fk, &fv))
+            walpe_feature_set (fk, GPOINTER_TO_INT (fv) == 1);
+    }
     fx_set_specialize (D.cfg->fx_specialize);       /* effect pass programs (fx_specialize.h) */
     fx_set_shader_quality (D.cfg->fx_quality);
+    fx_sim_set_enabled (D.cfg->fluid_sim);          /* simulation effects (fx_sim.h) */
+    fx_sim_set_quality (walpe_fluid_quality_name ((WalpeFluidQuality) D.cfg->fluid_quality));
     particles_apply ();
+    /* wallpaper sound: only this program may play (the settings window,
+     * the tools and the tests never do); what is heard follows the three
+     * settings, of which scene_sound is off until the user switches it on */
+    walpe_sound_allow (TRUE);
+    walpe_sound_set_master (D.cfg->volume);
+    walpe_sound_set_muted (D.cfg->mute);
+    walpe_sound_set_enabled (D.cfg->scene_sound);
     loadmark_check ();   /* crash-loop guard: skip what killed the last daemon */
     apply_wallpapers (NULL, NULL, FALSE, FALSE);   /* each monitor's saved wallpaper */
     conv_cache_tidy ();
@@ -8164,22 +8877,24 @@ int main (int argc, char **argv)
     }
     convert_scan ();     /* a saved video wallpaper whose converted copy is gone */
 
-    /* StructureNotify: the root's own ConfigureNotify (screen resized) */
-    XSelectInput (D.xd, D.root, PropertyChangeMask | SubstructureNotifyMask | StructureNotifyMask);
-#ifdef HAVE_XRANDR
-    {
-        int rerr = 0;
-        if (!windowed && XRRQueryExtension (D.xd, &rr_event_base, &rerr))
-            XRRSelectInput (D.xd, D.root, RRScreenChangeNotifyMask);
-        else
-            rr_event_base = -1;
-    }
-#endif
+    /* From here on the window system's events arrive: output changes
+     * (not in --windowed), what the pause signals need, input. The
+     * backend takes its first look at the windows before this returns
+     * (X11: the focused window, then what covers the monitors). */
     layout_watch = !windowed;
+    /* pause providers: hand-over point (further providers register here,
+     * before the backend starts the registry; sig_output_lookup names an
+     * output for them) */
+    walpe_sigprov_set_idle_timeout ((guint) MAX (D.cfg->pause_idle, 0));
+    walpe_sigprov_set_see_through (D.cfg->transparent_windows);
+    walpe_sigprov_set_output_lookup (sig_output_lookup, NULL);
+    walpe_sigprov_register (D.backend);
+    walpe_platform_start (!windowed, &signal_sink, NULL);
     /* The layout this daemon runs with was read at the top of start-up
      * (layout_detect), the events that announce a change were asked for
-     * only just now - after EGL, the windows, the render threads and the
-     * first loads. A change in between reached nobody: an xrandr call of
+     * only just now (walpe_platform_start) - after EGL, the windows, the
+     * render threads and the first loads. A change in between reached
+     * nobody: an xrandr call of
      * the session's start-up running next to the daemon's, a monitor that
      * came back while the daemon was restarting for its going (the events
      * of that time went to the old image, which no longer read them). The
@@ -8187,25 +8902,24 @@ int main (int argc, char **argv)
      * the old size, none on a new monitor - until some later event. So one
      * look now, through the usual check (seen twice, restarts apart). */
     layout_schedule ();
-#ifdef HAVE_XI2
-    xi2_init ();
-#endif
-    x_event_source_add ();   /* socket + Xlib's queue (not a bare fd watch) */
-    update_active_window ();
-    recompute_covered ();
     D.windowed = windowed;
     vis_apply_setting ();          /* "Skip hidden areas": the tracker, when switched on */
     /* No periodic timer runs from here on (there were four: pointer
      * recheck 1 s, display sleep 1 s, cover re-scan 2 s, re-lower 5 s). An
      * idle daemon - static wallpaper, paused, covered, display off - sleeps
-     * in poll() until an X event, an IPC request or a signal arrives. */
-    D.stack_dirty = !windowed;     /* one look at the stacking order now */
-    restack_check ();
+     * in poll() until a window-system event, an IPC request or a signal
+     * arrives. */
+    walpe_platform_settle ();      /* one look at the stacking order now */
     pointer_update ();             /* tracks once content needs it */
     if (g_getenv ("G_MESSAGES_DEBUG"))   /* debug-only output */
         g_timeout_add_seconds (2, stats_tick, NULL);
-    sleep_watch_init ();
+    /* display sleep: its watch is set up now, the state is asked for at
+     * the end of the start-up */
+    walpe_signals_recheck (WALPE_SIG_ASLEEP, FALSE);
     power_watch_update ();         /* only when a battery rule is set */
+    /* the idle rule's time, for whoever reports idle in this session */
+    walpe_sigprov_set_idle_timeout ((guint) MAX (D.cfg->pause_idle, 0));
+    walpe_signals_recheck (WALPE_SIG_IDLE, TRUE);
     {
         /* GPUPROF */
         const char *gp = g_getenv ("WALPE_GPU_PROFILE");
@@ -8224,14 +8938,16 @@ int main (int argc, char **argv)
         D.fpslog_us = g_get_monotonic_time ();
         g_timeout_add ((guint) MAX (200.0, D.fpslog_s * 1000.0), fpslog_tick, NULL);
     }
-    sleep_recheck ();
+    walpe_signals_recheck (WALPE_SIG_ASLEEP, TRUE);
+    walpe_signals_recheck (WALPE_SIG_IDLE, TRUE);
 
-    g_main_loop_run (D.loop);
+    if (!D.display_lost)    /* (it can go while the daemon is still starting) */
+        g_main_loop_run (D.loop);
 
     /* release the socket BEFORE the (slow) EGL/X teardown: if a new daemon
      * starts during shutdown, our late unlink would otherwise delete its
      * freshly bound socket and leave it deaf */
-    const gboolean restarting = (Sw.restart || D.restart) && !term_signal;
+    const gboolean restarting = (Sw.restart || D.restart) && !atomic_load (&term_signal);
     const gboolean sock_kept = restarting && walpe_ipc_listen_fd () >= 0;
     if (!sock_kept) {
         char *sp = walpe_socket_path ();
@@ -8265,14 +8981,14 @@ int main (int argc, char **argv)
         Mon *m = l->data;
         if (m->expose_timer_id)
             g_source_remove (m->expose_timer_id);
-        eglDestroySurface (D.egl_dpy, m->surf);
-        XDestroyWindow (D.xd, m->xid);
+        walpe_surface_free (m->ps);   /* its EGL surface, then its window */
         g_mutex_clear (&m->lock);
         g_cond_clear (&m->cond);
         g_free (m->name);
         g_free (m->want_path);
         g_free (m->loaded_path);
         g_free (m->load_error);
+        g_free (m->res_note);
         walpe_region_clear (&m->vis);   /* "Skip hidden areas" */
         g_free (m->qdescribe);
         g_free (m->good_path);
@@ -8286,9 +9002,7 @@ int main (int argc, char **argv)
     walpe_open_undo_clear (&open_undo);
     g_list_free (D.mons);
     eglTerminate (D.egl_dpy);
-    if (D.egl_xd != D.xd)
-        XCloseDisplay (D.egl_xd);
-    XCloseDisplay (D.xd);
+    walpe_platform_close ();
     if (restarting) {
         /* "Render on CPU" changed, the monitor layout changed or web
          * hardware acceleration was switched: the same daemon again (same
@@ -8296,7 +9010,7 @@ int main (int argc, char **argv)
          * new image adopts it. Unless a signal told the daemon to stop
          * while it was taking itself apart: then it stops. */
         if (term_pending ()) {
-            g_message ("signal %d during the restart: not restarting", (int) term_signal);
+            g_message ("signal %d during the restart: not restarting", atomic_load (&term_signal));
             if (sock_kept) {
                 char *sp = walpe_socket_path ();
                 walpe_ipc_release (sp);
@@ -8307,5 +9021,7 @@ int main (int argc, char **argv)
         restart_exec (D.restart);   /* returns only when it failed */
         return 1;
     }
-    return 0;
+    /* without its display the daemon did not end by choice (as on X11,
+     * where the X library ends the process with status 1) */
+    return D.display_lost ? 1 : 0;
 }

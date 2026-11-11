@@ -1,17 +1,12 @@
 /* yuvconv.c - YUV420p -> BGRA (BT.601/709/2020, limited or full range).
- * Reference scalar path + dispatch to the AVX2 kernel (kernels.S). The
- * two are kept byte-identical by design and validated by the test
- * harness; if the asm ever disagrees, flip the env override to force
- * the scalar path. */
+ * Integer arithmetic in plain C: the same bytes on every CPU and with
+ * every compiler (tests/simd_equal_test.c holds fixed results). There is
+ * no hand-written kernel for it on any architecture; the compiler
+ * vectorises the loops for whatever the build targets. */
 #include "yuvconv.h"
 
 #include <stdlib.h>
 #include <string.h>
-#include <string.h>
-
-void wp_yuv420_bgra_avx2 (const guint8 *y, const guint8 *u, const guint8 *v,
-                          gint ystride, gint uvstride,
-                          guint8 *dst, gint dststride, gint w, gint h);
 
 /* fixed-point coefficients (x256): limited range expands Y' 16..235 /
  * CbCr 16..240; full range (yuvj420p, color_range=pc) does not.
@@ -157,32 +152,17 @@ void walpe_yuv420_bgra_half (const guint8 *y, const guint8 *u, const guint8 *v,
     }
 }
 
-static enum { UNSET, HAVE_AVX2 } backend = UNSET;
-
-static void resolve (void)
-{
-#if defined(__x86_64__) && defined(__AVX2__)
-    __builtin_cpu_init ();
-    if (__builtin_cpu_supports ("avx2")) {
-        backend = HAVE_AVX2;
-        return;
-    }
-#endif
-    backend = UNSET + 1;
-}
-
 void walpe_yuv420_bgra (const guint8 *y, const guint8 *u, const guint8 *v,
                         gint ystride, gint uvstride,
                         guint8 *dst, gint dststride, gint w, gint h)
 {
-    /* the AVX2 kernel in kernels.S is pending revalidation; the scalar
-     * path is correct and GCC auto-vectorizes it to AVX2 anyway */
     walpe_yuv420_bgra_scalar (y, u, v, ystride, uvstride, dst, dststride, w, h);
 }
 
+/* An assembly kernel was dispatched here once; it is gone. The answer was
+ * computed with a flag whose "looked, none" value equalled its "have
+ * AVX2" value, so it said TRUE on every CPU, x86 or not. */
 gboolean walpe_yuv_bgra_is_avx2 (void)
 {
-    if (backend == UNSET)
-        resolve ();
-    return backend == HAVE_AVX2;
+    return FALSE;
 }

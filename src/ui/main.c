@@ -25,9 +25,12 @@
 #include "props.h"
 #include "layers.h"   /* "Adjust layers" section under the options */
 #include "perf.h"
+#include "resdialog.h"   /* render resolution per monitor: dialog, settings rows, announcement */
 #include "thumbs.h"
 #include "uiipc.h"
 #include "uistats.h"
+#include "appearance.h"  /* dark / light from the desktop portal (Wayland sessions) */
+#include "monlist.h"     /* the outputs as GDK names them, while no engine runs */
 #ifdef WALPE_HAVE_WORKSHOP_PAGE
 #include "workshop_page.h"   /* GtkWidget *walpe_workshop_page_new (void); */
 #endif
@@ -208,6 +211,7 @@ static struct {
     WalpeConfig *cfg;
     GFileMonitor *dirmon;
     gboolean closing;           /* the main window was destroyed (on_win_destroy) */
+    gboolean want_res_dialog;   /* started with --resolution: the dialog opens with the window */
 } U;
 
 /* supervisor of the engine process */
@@ -405,6 +409,14 @@ static void sup_set_state (DState st, const char *msg)
     }
     gtk_label_set_text (U.engine_lbl, txt);
     g_free (txt);
+    {
+        /* no engine, so no monitor list from it: say at least which
+         * outputs the toolkit sees, by the names the engine will use
+         * (connector names on X11 and Wayland alike) */
+        char *tip = st == D_UP ? NULL : walpe_ui_monitors_line (gdk_display_get_default ());
+        gtk_widget_set_tooltip_text (GTK_WIDGET (U.engine_lbl), tip);
+        g_free (tip);
+    }
     gtk_widget_set_visible (U.restart_btn, st == D_DOWN || st == D_GAVE_UP || st == D_BUSY);
     gtk_button_set_label (GTK_BUTTON (U.restart_btn), st == D_BUSY ? "Restart engine" : "Start engine");
     if (msg)
@@ -762,6 +774,8 @@ static void on_status_reply (JsonObject *reply, const char *err, gpointer u)
         return;
     JsonObject *st = reply ? wpj_obj (reply, "state") : NULL;
     if (!st) {
+        if (ui_ipc_err_is_down (err))
+            walpe_res_ui_status (NULL);     /* no engine: its monitors are not known */
         if (ui_ipc_err_is_down (err) || !reply) {
             gboolean down = ui_ipc_err_is_down (err);
             if (!down && ++Sup.poll_fails < 3)
@@ -806,6 +820,9 @@ static void on_status_reply (JsonObject *reply, const char *err, gpointer u)
         json_object_unref (U.last_state);
     U.last_state = json_object_ref (st);
     settings_software_info ();   /* the engine restarts itself for that switch */
+    /* render resolution per monitor: the dialog, its rows in the settings
+     * window and the announcement of a new monitor all follow this line */
+    walpe_res_ui_status (st);
     const char *path = wpj_str (st, "path", "");
     gboolean cur_changed = g_strcmp0 (path, U.current) != 0;
     g_free (U.current);
@@ -1884,6 +1901,9 @@ typedef struct {
     GtkWidget *vlimit;
     GtkWidget *software, *software_info;   /* "Render on CPU" + what renders now */
     GtkWidget *focus, *focus_fps, *battery, *battery_fps, *previews;   /* opt-in rules */
+    GtkWidget *idle;                 /* pause_idle: seconds without input, 0 = off */
+    GtkWidget *rule_note[5];         /* under a pause setting nothing in the session can
+                                      * drive (status "pause_rules"); order of rule_keys */
     GtkWidget *plowres, *pdensity;   /* particles: reduced-resolution layer, density */
     GtkWidget *fxspec, *fxfast;      /* effect pass programs: fx_specialize, fx_quality = fast */
     GtkWidget *assets_info, *err, *libdir, *shared_info;
@@ -2121,6 +2141,50 @@ static void on_entry_set_leave (GtkEventControllerFocus *fc, gpointer u)
     entry_set_commit (gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (fc)));
 }
 
+/* ---- pause settings that depend on what the session reports
+ * "Pause for fullscreen apps" can only work where the engine finds out
+ * that a window is fullscreen: always on X11, on Wayland only where the
+ * compositor offers the protocol for it. The engine's status says per
+ * setting whether something drives it ("pause_rules": works, note); a
+ * setting that cannot work gets that sentence under its row instead of
+ * silently doing nothing. */
+static const char *const rule_keys[] = { "pause_fullscreen", "pause_covered", "pause_dpms",
+                                         "focus_action", "pause_idle" };
+
+static void rule_note_row (GtkWidget *grid, int row, const char *key)
+{
+    GtkWidget *l = gtk_label_new (NULL);
+    gtk_label_set_xalign (GTK_LABEL (l), 0);
+    gtk_label_set_wrap (GTK_LABEL (l), TRUE);
+    gtk_label_set_max_width_chars (GTK_LABEL (l), 80);
+    gtk_widget_add_css_class (l, "walpe-settings-sub");
+    gtk_widget_add_css_class (l, "walpe-settings-note");
+    gtk_widget_set_visible (l, FALSE);
+    gtk_grid_attach (GTK_GRID (grid), l, 0, row, 2, 1);
+    for (guint i = 0; i < G_N_ELEMENTS (rule_keys); i++)
+        if (!strcmp (rule_keys[i], key))
+            SW.rule_note[i] = l;
+}
+
+static void rule_notes_fill (JsonObject *st)
+{
+    JsonObject *rules = st ? wpj_obj (st, "pause_rules") : NULL;
+    for (guint i = 0; i < G_N_ELEMENTS (rule_keys); i++) {
+        if (!SW.rule_note[i])
+            continue;
+        JsonObject *o = rules ? wpj_obj (rules, rule_keys[i]) : NULL;
+        const char *note = o ? wpj_str (o, "note", NULL) : NULL;
+        if (note && *note) {
+            /* a sentence of its own: capital first letter */
+            char *t = g_strdup (note);
+            t[0] = g_ascii_toupper (t[0]);
+            gtk_label_set_text (GTK_LABEL (SW.rule_note[i]), t);
+            g_free (t);
+        }
+        gtk_widget_set_visible (SW.rule_note[i], note && *note);
+    }
+}
+
 static GtkWidget *settings_row (GtkWidget *grid, int row, const char *title, const char *sub,
                                 GtkWidget *ctl)
 {
@@ -2289,6 +2353,9 @@ static void settings_fill (gboolean follow)
     gtk_switch_set_active (GTK_SWITCH (SW.battery), c->pause_battery);
     if (!(follow && num_pending (SW.battery_fps)))
         gtk_spin_button_set_value (GTK_SPIN_BUTTON (SW.battery_fps), c->battery_fps);
+    if (!(follow && num_pending (SW.idle)))
+        gtk_spin_button_set_value (GTK_SPIN_BUTTON (SW.idle), c->pause_idle);
+    rule_notes_fill (st);
     gtk_drop_down_set_selected (GTK_DROP_DOWN (SW.previews), (guint) c->preview_anim);
     thumbs_set_anim_mode (c->preview_anim);
     {
@@ -2395,9 +2462,12 @@ static GtkWidget *settings_window (void)
                   "Applies when a wallpaper is loaded.", SW.texdown);
     SW.hwdec = mk_switch ("video_hwdec", "Hardware video decoding");
     settings_row (g, r++, "Decode videos on the graphics card",
-                  "Videos (video wallpapers and video layers of scenes) are decoded by the GPU "
-                  "(NVDEC, VA-API or VDPAU through FFmpeg) instead of the CPU when that works; "
-                  "otherwise the CPU decodes as before. Videos that are playing switch at once.",
+                  "Videos (video wallpapers and video layers of scenes) are decoded by a hardware "
+                  "decoder (VA-API, NVDEC, VDPAU, Vulkan Video or a V4L2 decoder through FFmpeg, "
+                  "whichever this machine offers, the graphics card that renders first) instead of "
+                  "the CPU when that works; otherwise the CPU decodes as before. Videos that are "
+                  "playing switch at once. One decoder can be chosen by name with "
+                  "walpe-ctl set hwdec=NAME.",
                   SW.hwdec);
     SW.vlimit = mk_switch ("video_limit", "Videos follow the frame rate cap");
     settings_row (g, r++, "Videos follow the frame rate cap",
@@ -2406,6 +2476,12 @@ static GtkWidget *settings_window (void)
                   "are not decoded. Off: videos keep their own frame rate.", SW.vlimit);
     /* quality presets and the knobs behind them (perf.c) */
     gtk_grid_attach (GTK_GRID (g), walpe_perf_panel_new (FALSE, set_status), 0, r++, 2, 1);
+
+    /* the size each monitor's wallpaper is rendered at, and the limits
+     * that follow it (resdialog.c; the same rows as the "Monitor
+     * resolution" dialog, applied at once here) */
+    settings_group (g, r++, "Resolution");
+    gtk_grid_attach (GTK_GRID (g), walpe_res_ui_settings_new (), 0, r++, 2, 1);
 
     SW.software = mk_switch ("software_render", "Render on CPU");
     SW.software_info = settings_row (g, r++, "Render on CPU (software rendering)", "…",
@@ -2436,11 +2512,14 @@ static GtkWidget *settings_window (void)
     settings_group (g, r++, "Pausing");
     SW.fs = mk_switch ("pause_fullscreen", "Pause for fullscreen apps");
     settings_row (g, r++, "Pause while a fullscreen app is focused", NULL, SW.fs);
+    rule_note_row (g, r++, "pause_fullscreen");
     SW.covered = mk_switch ("pause_covered", "Pause when covered");
     settings_row (g, r++, "Pause a monitor when windows cover it",
                   "Counts as covered from 85 % of the monitor.", SW.covered);
+    rule_note_row (g, r++, "pause_covered");
     SW.dpms = mk_switch ("pause_dpms", "Pause while the display sleeps");
     settings_row (g, r++, "Pause while the display sleeps", "DPMS standby / screensaver.", SW.dpms);
+    rule_note_row (g, r++, "pause_dpms");
     SW.covtrans = mk_switch ("cover_transparent", "See-through windows cover");
     settings_row (g, r++, "See-through windows count as covering",
                   "On: a translucent terminal over the wallpaper pauses it too. Off: the "
@@ -2459,6 +2538,7 @@ static GtkWidget *settings_window (void)
         settings_row (g, r++, "While an application is focused",
                       "Applies to the monitor the focused window is on. The wallpaper runs "
                       "normally again when the desktop itself has the focus.", SW.focus);
+        rule_note_row (g, r++, "focus_action");
         SW.focus_fps = mk_num ("focus_fps", "Frame rate while an application is focused", 1, 200);
         settings_row (g, r++, "Frame rate while an application is focused",
                       "Used by \"Limit the frame rate\" (scenes and web wallpapers).", SW.focus_fps);
@@ -2466,6 +2546,12 @@ static GtkWidget *settings_window (void)
         settings_row (g, r++, "Pause on battery power", NULL, SW.battery);
         SW.battery_fps = mk_num ("battery_fps", "Frame rate on battery", 0, 200);
         settings_row (g, r++, "Frame rate limit on battery power", "0 = no limit.", SW.battery_fps);
+        SW.idle = mk_num ("pause_idle", "Pause after idle time", 0, 86400);
+        settings_row (g, r++, "Pause after this many seconds without input",
+                      "0 = off. Counts keyboard and pointer idle time as the session reports "
+                      "it; a playing video that keeps the screen awake keeps the wallpaper "
+                      "running too.", SW.idle);
+        rule_note_row (g, r++, "pause_idle");
     }
 
     settings_group (g, r++, "Library");
@@ -2494,7 +2580,8 @@ static GtkWidget *settings_window (void)
     gtk_widget_set_size_request (SW.volume, 240, -1);
     g_signal_connect (SW.volume, "value-changed", G_CALLBACK (on_volume), NULL);
     settings_row (g, r++, "Wallpaper volume",
-                  "Saved now; WalPE has no wallpaper audio output yet.", SW.volume);
+                  "The volume of wallpaper sound. Scenes play their sound layers once that is "
+                  "switched on: walpe-ctl set scene_sound=on.", SW.volume);
 
     settings_group (g, r++, "Content");
     SW.assets = mk_entry ("we_assets", "Wallpaper Engine assets folder", "auto-detect");
@@ -2929,6 +3016,22 @@ static void act_settings (GSimpleAction *a, GVariant *p, gpointer u)
         g_application_activate (G_APPLICATION (U.app));
     show_settings ();
 }
+
+/* "Monitor resolution…": the menu, walpe-tray's entry, the notification
+ * about a new monitor and `walpe --resolution` (D-Bus
+ * org.freedesktop.Application.ActivateAction). p = the output names to
+ * show, none = every connected monitor. */
+static void act_monitor_resolution (GSimpleAction *a, GVariant *p, gpointer u)
+{
+    (void) a; (void) u;
+    if (!U.win)
+        g_application_activate (G_APPLICATION (U.app));
+    if (!U.win)
+        return;
+    const char **names = p ? g_variant_get_strv (p, NULL) : NULL;
+    walpe_res_ui_show_dialog (names);
+    g_free (names);
+}
 static void act_apply (GSimpleAction *a, GVariant *p, gpointer u) { (void) a; (void) p; (void) u; do_apply (); }
 static void act_import (GSimpleAction *a, GVariant *p, gpointer u) { (void) a; (void) p; (void) u; on_import (); }
 static void act_folder (GSimpleAction *a, GVariant *p, gpointer u) { (void) a; (void) p; (void) u; on_add_folder (); }
@@ -2945,6 +3048,7 @@ static const GActionEntry app_actions[] = {
     { .name = "find", .activate = act_find },
     { .name = "find-option", .activate = act_find_option },
     { .name = "settings", .activate = act_settings },
+    { .name = WALPE_RES_ACTION, .activate = act_monitor_resolution, .parameter_type = "as" },
     { .name = "apply", .activate = act_apply },
     { .name = "import", .activate = act_import },
     { .name = "add-folder", .activate = act_folder },
@@ -3014,6 +3118,10 @@ static GtkWidget *menu_button (void)
     g_menu_append_section (m, NULL, G_MENU_MODEL (s1));
     GMenu *s2 = g_menu_new ();
     g_menu_append (s2, "Engine settings", "app.settings");
+    GMenuItem *res = g_menu_item_new ("Monitor resolution…", NULL);
+    g_menu_item_set_action_and_target_value (res, "app." WALPE_RES_ACTION, g_variant_new_strv (NULL, 0));
+    g_menu_append_item (s2, res);
+    g_object_unref (res);
     g_menu_append (s2, "Quit", "app.quit");
     g_menu_append_section (m, NULL, G_MENU_MODEL (s2));
     GtkWidget *b = gtk_menu_button_new ();
@@ -3295,6 +3403,7 @@ static void on_win_destroy (GtkWidget *w, gpointer user)
         walpe_ipc_sub_free (Sup.sub);
         Sup.sub = NULL;
     }
+    walpe_res_ui_shutdown ();   /* its dialog goes with the window, its notification is taken back */
     U.status = NULL;    /* set_status () and friends return early from here on */
     U.win = NULL;
     if (U.app)
@@ -3311,6 +3420,7 @@ static void activate (GtkApplication *app, gpointer user)
         return;
     }
     load_css ();
+    walpe_appearance_follow ();     /* a no-op on X11 */
     U.bound = g_hash_table_new (g_direct_hash, g_direct_equal);
     struct { const char *act; const char *acc[2]; } accels[] = {
         { "app.find", { "<Control>f", NULL } },
@@ -3394,6 +3504,11 @@ static void activate (GtkApplication *app, gpointer user)
     U.current = g_strdup (U.cfg->current);   /* until the first status reply */
     update_details (NULL);
     sup_set_state (D_UNKNOWN, NULL);
+    {
+        /* before the first status reply: it may hold monitors to ask about */
+        WalpeResUiHost rh = { .app = app, .parent = GTK_WINDOW (U.win), .status = set_status };
+        walpe_res_ui_init (&rh);
+    }
     ui_ipc_set_down_hook (sup_on_down);
     refresh_model ();
 
@@ -3423,6 +3538,10 @@ static void activate (GtkApplication *app, gpointer user)
     walpe_ui_stats_attach (U.win);
     gtk_window_present (GTK_WINDOW (U.win));
     gtk_widget_grab_focus (U.grid);
+    if (U.want_res_dialog) {    /* walpe --resolution */
+        U.want_res_dialog = FALSE;
+        walpe_res_ui_show_dialog (NULL);
+    }
 }
 
 #ifdef WALPE_HAVE_WORKSHOP_PAGE
@@ -3438,6 +3557,26 @@ static void on_stack_page (GObject *o, GParamSpec *ps, gpointer holder)
     gtk_box_append (GTK_BOX (holder), pg);
 }
 #endif
+
+/* `walpe --resolution`: the "Monitor resolution" dialog. A window that
+ * runs already is told to open it (and this process ends); else this
+ * process becomes the window and opens it when it is up. */
+static gint on_local_options (GApplication *app, GVariantDict *opts, gpointer u)
+{
+    (void) u;
+    if (!g_variant_dict_contains (opts, "resolution"))
+        return -1;
+    if (g_application_register (app, NULL, NULL) && g_application_get_is_remote (app)) {
+        g_action_group_activate_action (G_ACTION_GROUP (app), WALPE_RES_ACTION,
+                                        g_variant_new_strv (NULL, 0));
+        GDBusConnection *c = g_application_get_dbus_connection (app);
+        if (c)
+            g_dbus_connection_flush_sync (c, NULL, NULL);
+        return 0;
+    }
+    U.want_res_dialog = TRUE;
+    return -1;
+}
 
 int main (int argc, char **argv)
 {
@@ -3469,6 +3608,10 @@ int main (int argc, char **argv)
     /* app actions exist before the first activate: walpe-tray's
      * ActivateAction("settings") can arrive as soon as the name is owned */
     g_action_map_add_action_entries (G_ACTION_MAP (U.app), app_actions, G_N_ELEMENTS (app_actions), NULL);
+    g_application_add_main_option (G_APPLICATION (U.app), "resolution", 0, G_OPTION_FLAG_NONE,
+                                   G_OPTION_ARG_NONE,
+                                   "Open the dialog that sets each monitor's render resolution", NULL);
+    g_signal_connect (U.app, "handle-local-options", G_CALLBACK (on_local_options), NULL);
     int rc = g_application_run (G_APPLICATION (U.app), argc, argv);
     /* requests already handed to the IPC workers (an option changed a
      * moment before Ctrl+Q) still go out: on_win_destroy quits at once */

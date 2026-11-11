@@ -64,15 +64,20 @@ static void test_defaults (void)
     WalpeConfig *c = walpe_config_load ();
     /* README "Settings" */
     CHECK (c->fps == 60 && WALPE_FPS_DEFAULT == 60);
-    CHECK (c->config_version == 3);
+    CHECK (c->config_version == 4);
     CHECK (!c->paused && c->pause_fullscreen && c->pause_dpms && c->pause_covered);
     CHECK (c->cover_transparent && !g_strcmp0 (c->transparent_windows, "st"));
     CHECK (c->render_shared && c->fx_cache && c->tex_downscale && c->parallax);
     CHECK (!c->software_render && c->software_threads == 0);
     CHECK (c->render_scale == 100 && c->texture_slack == 2);
     CHECK (!c->web_accel && !c->video_hwdec);
+    /* hardware decoding and its zero-copy path are opt-in */
+    CHECK (!c->video_hwdec_api && !c->video_zerocopy && !strcmp (walpe_config_hwdec_word (c), "off"));
+    /* wallpaper sound is off, not muted, and the volume is 0 until set */
+    CHECK (!c->scene_sound && !c->mute && c->volume == 0.0);
     CHECK (c->preview_anim == WALPE_PREVIEW_ALWAYS);
     CHECK (c->focus_action == WALPE_FOCUS_RUN && !c->pause_battery && c->battery_fps == 0);
+    CHECK (c->pause_idle == 0);     /* the idle rule is opt-in */
     CHECK (c->particle_lowres == 1 && c->particle_density == 100 && c->particle_instancing);
     CHECK (!c->fx_specialize && !g_strcmp0 (c->fx_quality, "exact"));
     CHECK (walpe_quality_preset_of (&c->quality) == WALPE_PRESET_HIGH);
@@ -104,6 +109,8 @@ static void test_round_trip (void)
     g_free (c->fx_quality);
     c->fx_quality = g_strdup ("fast");
     c->web_accel = c->video_hwdec = c->software_render = TRUE;
+    CHECK (walpe_config_set_hwdec (c, "VAAPI") && c->video_hwdec);  /* one decoding API by name */
+    c->video_zerocopy = TRUE;
     c->software_threads = 6;
     c->particle_lowres = 2;
     c->particle_density = 45;
@@ -114,9 +121,11 @@ static void test_round_trip (void)
     c->focus_fps = 20;
     c->pause_battery = TRUE;
     c->battery_fps = 24;
+    c->pause_idle = 300;
     c->preview_anim = WALPE_PREVIEW_HOVER;
     c->vsync = FALSE;
     c->audio = TRUE;
+    c->scene_sound = c->mute = TRUE;
     walpe_quality_preset (WALPE_PRESET_LOW, &c->quality);
     c->quality.fps_idle = 40;       /* a custom mix */
     walpe_config_set_prop (c, "/lib/walls/111", "speed", "2");
@@ -144,11 +153,15 @@ static void test_round_trip (void)
     CHECK (!c->cover_transparent && !c->render_shared && !c->fx_cache && !c->tex_downscale && !c->parallax);
     CHECK (c->fx_specialize && !g_strcmp0 (c->fx_quality, "fast"));
     CHECK (c->web_accel && c->video_hwdec && c->software_render && c->software_threads == 6);
+    CHECK (!g_strcmp0 (c->video_hwdec_api, "vaapi") && c->video_zerocopy &&
+           !strcmp (walpe_config_hwdec_word (c), "vaapi"));
     CHECK (c->particle_lowres == 2 && c->particle_density == 45 && !c->particle_instancing);
     CHECK (!g_strcmp0 (c->steam_user, "some_account") && !g_strcmp0 (c->we_assets, "/opt/we/assets"));
     CHECK (c->focus_action == WALPE_FOCUS_LIMIT && c->focus_fps == 20);
     CHECK (c->pause_battery && c->battery_fps == 24 && c->preview_anim == WALPE_PREVIEW_HOVER);
+    CHECK (c->pause_idle == 300);
     CHECK (!c->vsync && c->audio);
+    CHECK (c->scene_sound && c->mute);
     CHECK (c->quality.fps_idle == 40 && c->quality.render_scale == low_scale &&
            c->quality.tex_slack == low_slack);
     CHECK (c->render_scale == low_scale && c->texture_slack == low_slack);     /* both sides agree */
@@ -182,6 +195,26 @@ static void test_round_trip (void)
     walpe_config_free (c);
     c = walpe_config_load ();
     CHECK (!c->steam_user && !c->we_assets && !c->extra);
+    walpe_config_free (c);
+}
+
+/* "video_hwdec" is off | auto | <api>; the switch values keep their meaning */
+static void test_hwdec_words (void)
+{
+    WalpeConfig *c = walpe_config_load ();
+    CHECK (walpe_config_set_hwdec (c, "auto") && c->video_hwdec && !c->video_hwdec_api &&
+           !strcmp (walpe_config_hwdec_word (c), "auto"));
+    CHECK (walpe_config_set_hwdec (c, "cuda") && c->video_hwdec && !g_strcmp0 (c->video_hwdec_api, "cuda"));
+    /* off keeps the name for the next "on" (the switch in the settings) */
+    CHECK (walpe_config_set_hwdec (c, "off") && !c->video_hwdec && !g_strcmp0 (c->video_hwdec_api, "cuda") &&
+           !strcmp (walpe_config_hwdec_word (c), "off"));
+    CHECK (walpe_config_set_hwdec (c, "on") && c->video_hwdec && !strcmp (walpe_config_hwdec_word (c), "cuda"));
+    CHECK (walpe_config_set_hwdec (c, "true") && !strcmp (walpe_config_hwdec_word (c), "cuda"));
+    /* "auto" forgets it */
+    CHECK (walpe_config_set_hwdec (c, " Auto ") && c->video_hwdec && !c->video_hwdec_api);
+    /* not a word of the setting: nothing changes */
+    CHECK (!walpe_config_set_hwdec (c, "va api") && !walpe_config_set_hwdec (c, "") &&
+           !walpe_config_set_hwdec (c, NULL) && c->video_hwdec && !c->video_hwdec_api);
     walpe_config_free (c);
 }
 
@@ -263,7 +296,7 @@ static void test_round12 (void)
     walpe_config_free (c);
 
     c = walpe_config_load ();
-    CHECK (!c->fps_migrated && c->fps == 60 && c->config_version == 3);
+    CHECK (!c->fps_migrated && c->fps == 60 && c->config_version == 4);
     c->fps = 200;                   /* the user's own choice from now on */
     walpe_config_save (c);
     walpe_config_free (c);
@@ -325,6 +358,73 @@ static void test_broken (void)
     CHECK (c->focus_action == WALPE_FOCUS_RUN && c->preview_anim == WALPE_PREVIEW_ALWAYS &&
            !g_strcmp0 (c->fx_quality, "exact"));
     walpe_config_free (c);
+}
+
+/* the window system keys: "backend" (auto / x11 / wayland) and
+ * "wayland_pointer" (auto / off). Not written at their defaults (an
+ * untouched config keeps its bytes), read back when set, anything that is
+ * not one of the names reads as the default, and a default written out by
+ * hand survives a save. */
+static void test_backend_keys (void)
+{
+    g_unlink (cfg_path);
+    WalpeConfig *c = walpe_config_load ();
+    CHECK (c->backend == WALPE_BACKEND_AUTO && c->wayland_pointer == 0);
+    walpe_config_save (c);
+    walpe_config_free (c);
+    JsonNode *n = read_config ();
+    JsonObject *o = n ? json_node_get_object (n) : NULL;
+    CHECK (o && !json_object_has_member (o, "backend") && !json_object_has_member (o, "wayland_pointer"));
+    if (n)
+        json_node_unref (n);
+
+    c = walpe_config_load ();
+    c->backend = WALPE_BACKEND_WAYLAND;
+    c->wayland_pointer = 1;
+    walpe_config_save (c);
+    walpe_config_free (c);
+    n = read_config ();
+    o = n ? json_node_get_object (n) : NULL;
+    CHECK (o && !g_strcmp0 (wpj_str (o, "backend", ""), "wayland"));
+    CHECK (o && !g_strcmp0 (wpj_str (o, "wayland_pointer", ""), "off"));
+    if (n)
+        json_node_unref (n);
+    c = walpe_config_load ();
+    CHECK (c->backend == WALPE_BACKEND_WAYLAND && c->wayland_pointer == 1);
+    c->backend = WALPE_BACKEND_X11;
+    c->wayland_pointer = 0;
+    walpe_config_save (c);
+    walpe_config_free (c);
+    c = walpe_config_load ();
+    CHECK (c->backend == WALPE_BACKEND_X11 && c->wayland_pointer == 0);
+    walpe_config_free (c);
+
+    /* by hand: any case; names that are no backend, and other types, read
+     * as auto */
+    put_config ("{\"config_version\":3,\"backend\":\"X11\",\"wayland_pointer\":\"OFF\"}");
+    c = walpe_config_load ();
+    CHECK (!c->broken_copy && c->backend == WALPE_BACKEND_X11 && c->wayland_pointer == 1);
+    walpe_config_free (c);
+    put_config ("{\"config_version\":3,\"backend\":\"mir\",\"wayland_pointer\":\"maybe\"}");
+    c = walpe_config_load ();
+    CHECK (!c->broken_copy && c->backend == WALPE_BACKEND_AUTO && c->wayland_pointer == 0);
+    walpe_config_free (c);
+    put_config ("{\"config_version\":3,\"backend\":2,\"wayland_pointer\":true}");
+    c = walpe_config_load ();
+    CHECK (!c->broken_copy && c->backend == WALPE_BACKEND_AUTO && c->wayland_pointer == 0);
+    walpe_config_free (c);
+    /* "auto" spelled out stays in the file through a save */
+    put_config ("{\"config_version\":3,\"backend\":\"auto\"}");
+    c = walpe_config_load ();
+    CHECK (c->backend == WALPE_BACKEND_AUTO);
+    walpe_config_save (c);
+    walpe_config_free (c);
+    n = read_config ();
+    o = n ? json_node_get_object (n) : NULL;
+    CHECK (o && !g_strcmp0 (wpj_str (o, "backend", ""), "auto"));
+    if (n)
+        json_node_unref (n);
+    g_unlink (cfg_path);
 }
 
 /* files next to config.json that a save left behind ("config.json.XXXXXX") */
@@ -417,9 +517,11 @@ int main (void)
 
     test_defaults ();
     test_round_trip ();
+    test_hwdec_words ();
     test_unknown_keys ();
     test_round12 ();
     test_broken ();
+    test_backend_keys ();
     test_save_failure ();
 
     broken_copies (TRUE);

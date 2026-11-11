@@ -4,13 +4,17 @@
  * (video_custom.c). Playback is silent: there is no audio path. */
 #include "walpe-build-config.h" /* HAVE_FFMPEG */
 #include "video.h"
+#include "video_hwsel.h"   /* the words of the "video_hwdec" setting */
 #include "glutil.h"
 #include "common/config.h" /* IWYU pragma: keep */
 #include "common/import.h" /* walpe_video_cache_file */
 #include <glib/gstdio.h>
 #include <utime.h>
 
-static gint video_hwdec;   /* atomic: config "video_hwdec" */
+static gint video_hwdec;   /* atomic: config "video_hwdec", 0 = off */
+static gint video_hwdec_serial;     /* atomic: counts the times it was set */
+static GMutex video_hwdec_lock;
+static char video_hwdec_api[24];    /* video_hwdec_lock: the one API asked for, "" = auto */
 
 int walpe_video_hwdec (void)
 {
@@ -19,7 +23,55 @@ int walpe_video_hwdec (void)
 
 void walpe_video_set_hwdec (int on)
 {
+    g_mutex_lock (&video_hwdec_lock);
+    video_hwdec_api[0] = 0;
     g_atomic_int_set (&video_hwdec, on ? 1 : 0);
+    g_atomic_int_inc (&video_hwdec_serial);
+    g_mutex_unlock (&video_hwdec_lock);
+}
+
+gboolean walpe_video_set_hwdec_name (const char *name)
+{
+    WalpeHwWant w;
+    if (!walpe_hwsel_parse (name, &w))
+        return FALSE;
+    g_mutex_lock (&video_hwdec_lock);
+    g_strlcpy (video_hwdec_api, w.api, sizeof (video_hwdec_api));
+    g_atomic_int_set (&video_hwdec, w.on ? 1 : 0);
+    g_atomic_int_inc (&video_hwdec_serial);
+    g_mutex_unlock (&video_hwdec_lock);
+    return TRUE;
+}
+
+guint walpe_video_hwdec_api (char *buf, gsize len)
+{
+    g_mutex_lock (&video_hwdec_lock);
+    if (buf && len)
+        g_strlcpy (buf, video_hwdec_api, len);
+    guint serial = (guint) g_atomic_int_get (&video_hwdec_serial);
+    g_mutex_unlock (&video_hwdec_lock);
+    return serial;
+}
+
+char *walpe_video_hwdec_setting (void)
+{
+    WalpeHwWant w = { FALSE, "" };
+    g_mutex_lock (&video_hwdec_lock);
+    w.on = g_atomic_int_get (&video_hwdec) != 0;
+    g_strlcpy (w.api, video_hwdec_api, sizeof (w.api));
+    g_mutex_unlock (&video_hwdec_lock);
+    return g_strdup (walpe_hwsel_want_name (&w));
+}
+
+static gint video_zerocopy;    /* atomic: config "video_zerocopy" */
+int walpe_video_zerocopy (void)
+{
+    return g_atomic_int_get (&video_zerocopy);
+}
+
+void walpe_video_set_zerocopy (int on)
+{
+    g_atomic_int_set (&video_zerocopy, on ? 1 : 0);
 }
 
 static gint video_limit;   /* atomic: config "video_limit" */
@@ -101,7 +153,12 @@ void walpe_video_note_decoder (const char *text)
 {
     g_mutex_lock (&decoder_note_lock);
     g_free (decoder_note);
-    decoder_note = g_strndup (text ? text : "", 900);
+    /* (one entry per open video, each with the reasons of the hardware
+     * decoders that were tried; cut at a character, not inside one) */
+    decoder_note = g_strndup (text ? text : "", 2400);
+    const char *bad = NULL;
+    if (!g_utf8_validate (decoder_note, -1, &bad) && bad)
+        decoder_note[bad - decoder_note] = 0;
     g_mutex_unlock (&decoder_note_lock);
 }
 
@@ -178,6 +235,8 @@ static gboolean vc_gl_render (WalpeContent *c, int w, int h, float px, float py)
         glClear (GL_COLOR_BUFFER_BIT);
     }
     video_frame_limit = s->fps;     /* walpe_video_frame_limit (), "video_limit" */
+    s->v->render_w = c->render_w;   /* the size chosen for this monitor's picture */
+    s->v->render_h = c->render_h;
     gboolean ok = s->v->gl_render (s->v, w, h, &err);
     video_frame_limit = 0;
     c->next_frame_us = s->v->next_frame_us; /* presentation beat */
@@ -259,7 +318,10 @@ WalpeContent *walpe_video_content_new (const char *path, const WalpeLoadOpts *op
          * a changed file has no copy). When that copy exists it is the one
          * to play. The wallpaper keeps its own path everywhere else
          * (config, options, status). */
-        char *cf = walpe_video_cache_file (s->media);
+        /* (the copy made for the box this wallpaper is shown with: a copy
+         * for another limit has another name) */
+        const WalpeVideoBox box = { opts ? opts->video_box_w : 0, opts ? opts->video_box_h : 0 };
+        char *cf = walpe_video_cache_file (s->media, &box);
         if (cf && g_file_test (cf, G_FILE_TEST_IS_REGULAR)) {
             s->v = walpe_video_custom_new (cf, NULL);
             if (s->v) {

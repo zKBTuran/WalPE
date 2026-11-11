@@ -319,6 +319,14 @@ JsonNode *walpe_content_property_defs (const char *path, JsonNode **localization
         out = json_node_copy (pn);      /* deep copy */
         json_node_unref (pn);
         JsonObject *oo = json_node_get_object (out);
+        /* "walpe_sound" is WalPE's own key: the wallpaper's sound switch
+         * (engine/scenesound.h; `walpe-ctl setprop walpe_sound=on|off`). A
+         * project that declares an option of that name got a row of its
+         * own wording in the options panel ("Reduce flicker"), and a click
+         * on it switched the wallpaper's sound on although the setting
+         * scene_sound is off. Scenes have no built-in options that would
+         * take the name (below), so the declaration is dropped here. */
+        json_object_remove_member (oo, "walpe_sound");
         GList *ks = preset ? json_object_get_members (preset) : NULL;
         for (GList *k = ks; k; k = k->next) {
             JsonNode *pv = json_object_get_member (preset, k->data);

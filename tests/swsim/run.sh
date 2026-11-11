@@ -52,6 +52,9 @@ icd "$T/lib/libEGL_gpudrv.so.0" > "$T/v-nomesa/10_gpudrv.json"
 icd "libEGL_mesa_not_installed.so.0" > "$T/v-nomesa/50_mesa.json"
 
 export XDG_CONFIG_HOME="$T/cfg" XDG_RUNTIME_DIR="$T/rt" XDG_CACHE_HOME="$T/cache" XDG_DATA_HOME="$T/data"
+# (the X display asked for above is the one to draw on, also when the terminal this is
+# started from belongs to a Wayland session)
+export WALPE_BACKEND=x11
 unset WALPE_SOFTWARE __EGL_VENDOR_LIBRARY_FILENAMES LIBGL_ALWAYS_SOFTWARE GALLIUM_DRIVER LP_NUM_THREADS
 fails=0
 ok ()  { echo "  ok    $1"; }

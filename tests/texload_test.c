@@ -19,7 +19,11 @@
  *     left to decode after the first frame, and at no moment a full-size
  *     texture on the GPU.
  * Needs a GL 3.3 context with a pbuffer (Mesa surfaceless platform); skips
- * itself without one. Writes its files to temporary directories. */
+ * itself without one. Writes its files to temporary directories.
+ * "The texels of the GL blit" is asked bit for bit only of a renderer whose
+ * half-size blit has the rounding of walpe_gl_tex_halve_cpu, which the test
+ * asks the renderer itself (blit_rounding): Mesa's software renderer has it
+ * on x86 with SSSE3 and not on aarch64, where its 8-bit filter truncates. */
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <epoxy/gl.h>
@@ -33,7 +37,8 @@
 #include "common/premult.h"
 
 static int fails, checks;
-static gboolean exact_driver;   /* Mesa's software renderer: the blit's rounding is known */
+static gboolean exact_driver;   /* the half-size blit rounds as the CPU reduction does: bit for bit */
+static int blit_slack = 1;      /* else: what one halving may differ by, in 1/255 */
 
 static void check (gboolean ok, const char *what)
 {
@@ -156,15 +161,16 @@ static int max_diff (const guint8 *a, const guint8 *b, gsize n)
     return m;
 }
 
-/* the same texels from the two ways of making them */
-static gboolean same_texture (GLuint a, GLuint b, int want_w, int want_h)
+/* the same texels from the two ways of making them, `halvings` steps below
+ * the picture */
+static gboolean same_texture (GLuint a, GLuint b, int want_w, int want_h, int halvings)
 {
     int aw, ah, bw, bh;
     guint8 *pa = readback (a, &aw, &ah), *pb = readback (b, &bw, &bh);
     gboolean ok = aw == want_w && ah == want_h && bw == want_w && bh == want_h;
     if (ok) {
         int m = max_diff (pa, pb, (gsize) aw * ah * 4);
-        ok = exact_driver ? m == 0 : m <= 1;
+        ok = exact_driver ? m == 0 : m <= blit_slack * halvings;
         if (!ok)
             printf ("     largest difference %d/255\n", m);
     }
@@ -200,6 +206,56 @@ static void halve_ref (const guint8 *s, int w, int h, int bpp, guint8 *o)
                 o[((gsize) y * (w / 2) + x) * bpp + c] =
                     (guint8) ((((a + b + 1) >> 1) + ((cc + d + 1) >> 1) + 1) >> 1);
             }
+}
+
+/* The largest difference, in 1/255, between a GL_LINEAR blit to exactly
+ * half size - what the engine's reduction on the GPU is - and the 2x2 box
+ * with the rounding of walpe_gl_tex_halve_cpu, on 64x64 texels of noise.
+ * 0: the renderer's blit rounds like the CPU reduction (Mesa's software
+ * renderer where its 8-bit filter has a rounding multiply: x86 with
+ * SSSE3). Its filter for every other CPU (aarch64; x86 without SSSE3)
+ * truncates both interpolations and comes out up to 2/255 lower. */
+static int blit_rounding (void)
+{
+    enum { N = 64 };
+    guint8 *px = g_malloc (N * N * 4), *want = g_malloc (N * N), *got = g_malloc0 (N * N);
+    guint32 r = 12345;      /* (its own numbers: the pictures of the checks stay what they were) */
+    for (int i = 0; i < N * N * 4; i++) {
+        r = r * 1664525u + 1013904223u;
+        px[i] = (guint8) (r >> 24);
+    }
+    halve_ref (px, N, N, 4, want);
+    GLint pr = 0, pd = 0;
+    glGetIntegerv (GL_READ_FRAMEBUFFER_BINDING, &pr);
+    glGetIntegerv (GL_DRAW_FRAMEBUFFER_BINDING, &pd);
+    GLuint t[2], fb[2];
+    glGenTextures (2, t);
+    glGenFramebuffers (2, fb);
+    for (int i = 0; i < 2; i++) {      /* (rows of whole RGBA texels: any pixel-store alignment fits) */
+        glBindTexture (GL_TEXTURE_2D, t[i]);
+        glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, N >> i, N >> i, 0, GL_RGBA, GL_UNSIGNED_BYTE, i ? NULL : px);
+    }
+    glBindFramebuffer (GL_READ_FRAMEBUFFER, fb[0]);
+    glFramebufferTexture2D (GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t[0], 0);
+    glBindFramebuffer (GL_DRAW_FRAMEBUFFER, fb[1]);
+    glFramebufferTexture2D (GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t[1], 0);
+    glBlitFramebuffer (0, 0, N, N, 0, 0, N / 2, N / 2, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    glBindFramebuffer (GL_READ_FRAMEBUFFER, fb[1]);
+    glReadPixels (0, 0, N / 2, N / 2, GL_RGBA, GL_UNSIGNED_BYTE, got);
+    int m = max_diff (want, got, N * N);
+    glBindFramebuffer (GL_READ_FRAMEBUFFER, (GLuint) pr);
+    glBindFramebuffer (GL_DRAW_FRAMEBUFFER, (GLuint) pd);
+    glDeleteFramebuffers (2, fb);
+    glDeleteTextures (2, t);
+    glBindTexture (GL_TEXTURE_2D, 0);
+    g_free (px);
+    g_free (want);
+    g_free (got);
+    return m;
 }
 
 static void cache_checks (const char *dir)
@@ -248,10 +304,11 @@ static void cache_checks (const char *dir)
         GLuint g0 = walpe_gl_tex_cached (f, 0, GL_CLAMP_TO_EDGE, TRUE, &ti0);
         GLuint g1 = walpe_gl_tex_cached (f, WALPE_GL_TEX_LEVEL (1), GL_CLAMP_TO_EDGE, TRUE, &ti);
         GLuint g2 = walpe_gl_tex_cached (f, WALPE_GL_TEX_LEVEL (2), GL_CLAMP_TO_EDGE, TRUE, &ti);
-        what = g_strdup_printf ("  ... the same texels as the GL blit of the full texture%s",
-                                exact_driver ? " (bit for bit)" : " (+-1)");
-        check (c2 && g0 && g1 && g2 && g1 != c1 && same_texture (c1, g1, 128, 64) &&
-               same_texture (c2, g2, 64, 32), what);
+        what = exact_driver ? g_strdup ("  ... the same texels as the GL blit of the full texture (bit for bit)")
+                            : g_strdup_printf ("  ... the same texels as the GL blit of the full texture "
+                                               "(+-%d for each halving)", blit_slack);
+        check (c2 && g0 && g1 && g2 && g1 != c1 && same_texture (c1, g1, 128, 64, 1) &&
+               same_texture (c2, g2, 64, 32, 2), what);
         g_free (what);
         GLint fa = 0, fb = 0;
         glBindTexture (GL_TEXTURE_2D, c1);
@@ -269,7 +326,7 @@ static void cache_checks (const char *dir)
             GLuint o1 = walpe_gl_tex_cached_own (f, WALPE_GL_TEX_LEVEL (1), GL_CLAMP_TO_EDGE, TRUE, &ti,
                                                  o0, &ti0);
             check (o0 && o1 && o1 != o0 && ti.phys_w == 128 && ti.lod == 1 && ti.width == 256 &&
-                   same_texture (o1, c1, 128, 64),
+                   same_texture (o1, c1, 128, 64, 1),
                    "no share group: a reduced copy from the caller's own full texture (the file is gone)");
             walpe_gl_tex_release (o0);
             walpe_gl_tex_release (o1);
@@ -613,8 +670,18 @@ int main (void)
         return 0;
     }
     const char *ren = (const char *) glGetString (GL_RENDERER);
-    exact_driver = ren && strstr (ren, "llvmpipe") != NULL;
-    printf ("GL: %s%s\n", ren ? ren : "?", exact_driver ? "" : " (the blit's rounding is not known here: +-1 allowed)");
+    /* bit for bit where the renderer's own half-size blit is the CPU
+     * reduction's box; else what its blit was seen to differ by for each
+     * halving, and never more than 2 (a renderer further off than Mesa's
+     * truncating filter fails the checks, as it should) */
+    int off = blit_rounding ();
+    exact_driver = off == 0;
+    blit_slack = CLAMP (off, 1, 2);
+    if (exact_driver)
+        printf ("GL: %s\n", ren ? ren : "?");
+    else
+        printf ("GL: %s (its half-size blit is up to %d/255 off the rounded 2x2 box: +-%d allowed for each halving)\n",
+                ren ? ren : "?", off, blit_slack);
     walpe_glutil_init ();
     char *dir = g_dir_make_tmp ("walpe-texload-XXXXXX", NULL);
     char *sdir = g_dir_make_tmp ("walpe-texload-scene-XXXXXX", NULL);

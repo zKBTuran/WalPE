@@ -23,6 +23,7 @@
 #include "common/gifcheck.h"
 #include "common/premult.h"
 #include "common/util.h"
+#include "common/lazy.h"
 
 /* one decoded picture in GL: shared between the monitors' contexts when
  * they form a share group (key: path + stored size), else one per content */
@@ -223,9 +224,10 @@ static void image_tex_unref (ImageTex *it)
 static void image_want_size (ImageContent *s, int vw, int vh, int *ww, int *wh)
 {
     *ww = *wh = 0;
-    static int full = -1;
+    static WalpeLazy full_cell = WALPE_LAZY_UNSET;   /* read once (common/lazy.h) */
+    int full = walpe_lazy_get (&full_cell);
     if (full < 0)
-        full = g_getenv ("WALPE_IMAGE_FULLRES") ? 1 : 0;
+        full = walpe_lazy_set (&full_cell, g_getenv ("WALPE_IMAGE_FULLRES") ? 1 : 0);
     if (full || !s->scalable || s->img_w < 1 || s->img_h < 1 || vw < 16 || vh < 16)
         return;
     float m[9], k = 1.0f;
@@ -237,11 +239,34 @@ static void image_want_size (ImageContent *s, int vw, int vh, int *ww, int *wh)
     *wh = MAX (1, (int) ceilf (s->img_h * k));
 }
 
+/* the view the stored size is chosen for: the size picked for this
+ * monitor's picture when the owner set one (content.h render_w / render_h),
+ * else the surface's */
+static void image_store_view (ImageContent *s, int *vw, int *vh)
+{
+    if (s->base.render_w > 0 && s->base.render_h > 0) {
+        *vw = s->base.render_w;
+        *vh = s->base.render_h;
+    }
+}
+
+/* content.h tex_limit: the longer side the picture is stored at, at most.
+ * side 0 (the picture's own size) becomes the cap when the picture is
+ * longer than it. Only formats that can be decoded smaller. */
+static int image_cap_side (ImageContent *s, int side)
+{
+    const int cap = s->base.tex_limit, own = MAX (s->img_w, s->img_h);
+    if (cap <= 0 || !s->scalable || own <= cap)
+        return side;
+    return side > 0 ? MIN (side, cap) : cap;
+}
+
 static gboolean image_load (ImageContent *s, int vw, int vh, GError **err)
 {
     int ww = 0, wh = 0;
+    image_store_view (s, &vw, &vh);
     image_want_size (s, vw, vh, &ww, &wh);
-    ImageTex *it = image_tex_get (s->base.path, MAX (ww, wh), err);
+    ImageTex *it = image_tex_get (s->base.path, image_cap_side (s, MAX (ww, wh)), err);
     if (!it)
         return FALSE;
     image_tex_unref (s->it);
@@ -285,11 +310,20 @@ static gboolean image_gl_render (WalpeContent *c, int w, int h, float px, float 
     if (s->it && s->scalable) {
         /* the stored size no longer fits what is shown (alignment option
          * changed, or the first guess of the view was off): decode again */
-        int ww = 0, wh = 0;
-        image_want_size (s, w, h, &ww, &wh);
+        int ww = 0, wh = 0, sw = w, sh = h;
+        image_store_view (s, &sw, &sh);
+        image_want_size (s, sw, sh, &ww, &wh);
         if (!ww) {
             ww = s->img_w;
             wh = s->img_h;
+        }
+        {
+            /* texture_limit: what is wanted is never more than the cap */
+            const int side = MAX (ww, wh), capped = image_cap_side (s, side);
+            if (capped > 0 && capped < side) {
+                ww = MAX (1, (int) ((gint64) ww * capped / side));
+                wh = MAX (1, (int) ((gint64) wh * capped / side));
+            }
         }
         if (ww > s->it->tex_w + 1 || wh > s->it->tex_h + 1 ||
             (ww * 3 < s->it->tex_w * 2 && wh * 3 < s->it->tex_h * 2)) {

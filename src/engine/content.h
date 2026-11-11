@@ -118,6 +118,26 @@ struct WalpeContent {
     gboolean (*quality_stats) (WalpeContent *c, WalpeQualityStats *out);
     char *(*quality_describe) (WalpeContent *c);
     gboolean stats_wanted;
+    /* Render resolution (common/resolution.h), set by the owner before
+     * gl_init and before every gl_render call (module ABI 11): the size
+     * chosen for this monitor's picture when it is not the surface's own;
+     * 0, 0 = the surface's size. gl_render is still called with the
+     * surface's size and still fills the whole surface: what the chosen
+     * size means is the content's to decide. A scene draws its frame at
+     * that size and scales it to the surface (the size is "the monitor"
+     * for its effects and textures); a video shows its frames as they are
+     * and keeps them as large as the chosen size needs; a web page takes
+     * it as its page size; a picture is stored at it. A content that
+     * ignores the fields shows what it always did.
+     * scale_filter: WALPE_SCALE_*, how a frame drawn at the chosen size is
+     * scaled to the surface.
+     * tex_limit: no texture of the wallpaper is kept longer than this many
+     * pixels on its longer side (config texture_limit; 0 = no cap). A
+     * scene applies it once its first frames are drawn; the owner loads
+     * the wallpaper again when it changes. */
+    int render_w, render_h;
+    int scale_filter;
+    int tex_limit;
 };
 
 typedef struct {
@@ -146,6 +166,12 @@ typedef struct {
     /* the quality knobs the wallpaper starts with (NULL = High: every
      * knob at its default); borrowed for the load call */
     const WalpeQuality *quality;
+    /* video wallpapers (module ABI 11): the box the converted copy of
+     * this wallpaper is made for - config video_resolution and the render
+     * sizes of the monitors that show it (common/resolution.h
+     * walpe_video_box; 0 = no limit). The copy's cache name carries it
+     * (common/import.h walpe_video_cache_file). */
+    int video_box_w, video_box_h;
 } WalpeLoadOpts;
 
 /* phase-locked frame clock for gl_render: returns the next deadline one

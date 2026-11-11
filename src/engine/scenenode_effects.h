@@ -26,6 +26,19 @@ void fx_set_input_tint (gpointer fxset, const float *rgb);
  * takes it, draw the effects' result with opacity 1; FALSE
  * (WALPE_FX_ALPHA=after): the opacity stays with the draw of the result */
 gboolean fx_set_input_alpha (gpointer fxset, float alpha);
+/* The input is a sprite sheet and the layer shows this part of it: uv =
+ * the frame's origin, x axis and y axis in texture coordinates of the
+ * input (a point (u, v) of the frame, v = 0 its first row, is origin + u *
+ * x axis + v * y axis). The layer's own material pass in front of the
+ * first effect - the one that applies fx_set_input_tint / _alpha - then
+ * reads that part and always runs when an effect runs, so the effects see
+ * a picture of the frame's size (pass that size as w, h, fullw, fullh).
+ * Kept until changed; NULL = the whole input (the default). When the
+ * frame changes under the same texture the caller says so with
+ * fx_invalidate (), as for any change of the input's picture. A run in
+ * which no effect draws hands the input back: the caller then shows the
+ * frame itself. */
+void fx_set_input_frame (gpointer fxset, const float uv[6]);
 /* static chain cache: input_static = the input texture's pixels only change
  * with its name (no video, album art, framebuffer copy). A set whose every
  * chain is proven time/audio/pointer/feedback-free then reuses its last
@@ -97,6 +110,12 @@ void fx_set_cache_enabled (gboolean on);
  * to wallpapers loaded afterwards. */
 void fx_set_specialize (gboolean on);
 void fx_set_shader_quality (const char *quality);
+/* The language effect shaders are built in. By default it follows the GL
+ * context: GLSL 3.30 on desktop OpenGL, GLSL ES 3.00 / 3.10 / 3.20 on
+ * OpenGL ES (fx_essl.h). Tests and tools: 0, 300, 310 or 320 forces that
+ * language whatever the context is (the sources can be built and inspected
+ * without one); any other value follows the context again. */
+void fx_set_glsl_es (int version);
 /* programs compiled / passes that reused a program / relinks after a
  * script changed a baked constant / specialised builds that fell back to
  * the generic program / constants baked / identity passes, since the
@@ -288,3 +307,59 @@ void fx_quality_describe (gpointer fxset, const char *layer, GString *out);
 
 /* WALPE_PROP_PROBE digest of a layer's effects (propprobe.h) */
 void fx_probe_dump (gpointer fxset, JsonBuilder *b);
+
+/* ---- simulation effects (fx_sim.h) --------------------------------------
+ * An effect whose pass list has a "swap" command carries fields from frame
+ * to frame (Wallpaper Engine's Fluid Simulation: velocity, pressure, dye).
+ * Such a chain owns its targets, advances in steps of a fixed length by
+ * scene time - the same fluid at 30, 60 and 144 frames per second - and is
+ * never cached, held, kept or drawn in part.
+ * fx_sim_set_enabled: config fluid_sim (default on; WALPE_FLUID=0|1
+ * overrides). Off: such chains are left out like an effect switched
+ * invisible, their targets freed. Any thread; running wallpapers follow
+ * with their next frame.
+ * fx_sim_set_quality: config fluid_quality, "full" (default) | "reduced" |
+ * "low" (common/fluidsim.h; WALPE_FLUID_QUALITY overrides). FALSE = not a
+ * level's name, nothing changed. Any thread; live. */
+void fx_sim_set_enabled (gboolean on);
+gboolean fx_sim_enabled (void);
+gboolean fx_sim_set_quality (const char *quality);
+const char *fx_sim_quality (void);
+/* render thread, once per frame (any time before the frame's runs; the
+ * values stay until the next call): is there a pointer for this frame's
+ * picture at all - FALSE while it is on another monitor or, on Wayland,
+ * not over the wallpaper - and is its left button held. A simulation gets
+ * no push from a pointer that is not there and none along the way from
+ * where it left to where it comes back. Not called: present, not held. */
+void fx_set_pointer_state (gboolean present, gboolean down);
+/* render thread, right before fx_run_for_object () of a set with a
+ * simulation (fx_has_simulation): the 3x3 column-major transform the
+ * run's result is drawn with into the frame (the layer's +-1 quad to clip
+ * space). The pointer is taken through its inverse, so the fluid is pushed
+ * under the pointer wherever the layer sits. Applies to the next run only;
+ * without it the frame stands in for the layer. */
+void fx_set_pointer_map (const float *m3);
+gboolean fx_has_simulation (gpointer fxset);
+/* render thread: the fields of the set's simulations start again from
+ * their clear values (as after a load) */
+void fx_sim_reset (gpointer fxset);
+/* render thread: run a "functions" entry of a simulation's effect file
+ * (the stock effect has clearVelocity and clearDye: named clears of some
+ * targets); inst = position in the effects array, -1 = any. FALSE = no
+ * such function. */
+gboolean fx_sim_call (gpointer fxset, int inst, const char *function);
+/* a set's simulations: how many (off = left out by the switch or for lack
+ * of float targets), steps run and resets so far, their targets and bytes,
+ * the grid and the picture-sized fields, the step rate in force */
+typedef struct {
+    int chains, off, targets;
+    guint64 steps;
+    guint resets;
+    gint64 bytes;
+    int grid_w, grid_h, field_w, field_h;
+    double step_hz;
+} FxSimStats;
+void fx_sim_stats (gpointer fxset, FxSimStats *out);
+/* render thread: simulation steps run / runs that drew only the picture /
+ * runs that drew nothing (the last picture still held), since the reset */
+void fx_sim_thread_stats (guint64 *steps, guint *presented, guint *reused, gboolean reset);

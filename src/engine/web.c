@@ -2,10 +2,18 @@
  *
  * Threading (the daemon is GTK-free on its render threads):
  *  - WebShared lives on the MAIN thread (the thread running the default
- *    GMainContext): gtk_init (once), a 1 x 1 off-screen override-redirect
- *    GtkWindow whose child (WalpeWebHost) gives the WebKitWebView the
+ *    GMainContext): gtk_init (once), a 1 x 1 GtkWindow that nobody sees
+ *    and whose child (WalpeWebHost) gives the WebKitWebView the
  *    page's size, the capture, JS pushes. One per wallpaper path, shared
  *    by every monitor showing it (one web process, one capture stream).
+ *    Where that window lives is the "page host" (webhostsel.h): an
+ *    override-redirect X window off screen (X11, and Wayland through
+ *    Xwayland), or a Wayland display of the module's own
+ *    (webhost_wl.c; taken where there is no X display, or by name:
+ *    WALPE_WEB_HOST=private). GTK talks to exactly
+ *    one of them for the life of the process. Nothing else in this
+ *    file depends on which: the capture reads GTK's render node, never
+ *    the window system.
  *  - WebViewer is the WalpeContent on each monitor's render thread: it
  *    only uploads what changed of the latest frame (glTexSubImage2D) and
  *    draws. Render threads never touch GTK/WebKit objects; they tell the
@@ -51,14 +59,26 @@
 #include "modules.h"
 #include "glutil.h"
 #include "common/util.h"
+#include "common/lazy.h"
 #include "common/config.h"
 #include "common/audio.h"
 #include "common/media.h"
+#include "webhostsel.h"
 #include <gtk/gtk.h>
-#include <gdk/x11/gdkx.h>
 #include <webkit/webkit.h>
 #include <libsoup/soup.h>
+/* the X11 page host: GTK's X11 backend and Xlib in this build */
+#if defined (GDK_WINDOWING_X11) && !defined (WALPE_WEB_NO_X11)
+#define WEB_HAVE_X11 1
+#include <gdk/x11/gdkx.h>
 #include <X11/Xlib.h>
+#endif
+/* the private page host */
+#if defined (GDK_WINDOWING_WAYLAND) && defined (HAVE_WEBHOST_WL)
+#define WEB_HAVE_PRIVATE 1
+#include "webhost_wl.h"
+#endif
+#include <dlfcn.h>
 #include <string.h>
 #include <math.h>
 #include <errno.h>
@@ -239,6 +259,10 @@ typedef struct {
  * black until resume. It now counts as active until its first frame is
  * captured, for at most WEB_FIRST_FRAME_S. Call with sh->lock held. */
 #define WEB_FIRST_FRAME_S 30
+/* the size a page is made at when no viewer has drawn yet (sh_create_real);
+ * it is resized to what its monitors ask for with their first frame */
+#define WEB_SIZE_UNKNOWN_W 1920
+#define WEB_SIZE_UNKNOWN_H 1080
 static gboolean sh_first_frame_wanted (WebShared *sh)
 {
     return sh->seq == 0 &&
@@ -1194,6 +1218,9 @@ static void sh_push_properties (WebShared *sh, gboolean all)
 }
 
 static void hide_window_offscreen (GtkWidget *win, int w, int h);
+#ifdef WEB_HAVE_PRIVATE
+static void web_private_screen (int w, int h);
+#endif
 
 #define JS_MEDIA_SUSPEND \
     "document.querySelectorAll('video,audio').forEach(function(m){" \
@@ -1406,7 +1433,9 @@ static void sh_notify_viewers (WebShared *sh)
  * on the render threads (they add atomically; glFinish makes it visible).
  *   web timing: main thread N ms CPU/s | page repaints/s | GTK frames/s x
  *   ms | captures/s x ms (copied bytes, allocations) | uploads x ms (bytes) */
-static int web_timing = -1;
+/* (-1 = not read yet. The main thread reads the switch, the render threads
+ * look at the result for their upload times: common/lazy.h) */
+static WalpeLazy web_timing = WALPE_LAZY_UNSET;
 static struct {
     guint frames, idle_ticks, invalidates, gtk_frames, allocs, same;
     gint64 grab_cpu, dl_cpu, diff_cpu, gtk_cpu, fc_cpu0, main_cpu0, t0;
@@ -1420,9 +1449,10 @@ static struct {
 
 static gboolean timing_on (void)
 {
-    if (web_timing < 0)
-        web_timing = g_getenv ("WALPE_WEB_TIMING") != NULL;
-    return web_timing;
+    int on = walpe_lazy_get (&web_timing);
+    if (on < 0)
+        on = walpe_lazy_set (&web_timing, g_getenv ("WALPE_WEB_TIMING") != NULL);
+    return on;
 }
 
 /* CPU time of the calling thread, us */
@@ -2338,6 +2368,9 @@ static gboolean sh_state_main (gpointer user)
     }
     sh_push_paused (sh, FALSE);
     if (ww > 0 && wh > 0 && (ww != sh->view_w || wh != sh->view_h)) {
+#ifdef WEB_HAVE_PRIVATE
+        web_private_screen (ww, wh);
+#endif
         if (web_bigwin ())
             gtk_window_set_default_size (GTK_WINDOW (sh->win), ww, wh);
         walpe_web_host_set_size (WALPE_WEB_HOST (sh->box), ww, wh);
@@ -2392,36 +2425,154 @@ static void on_clipboard_changed (GdkClipboard *cb, gpointer user)
         gdk_clipboard_set_content (cb, NULL);
 }
 
+/* ---- the page host (webhostsel.h) */
+static WebHost web_host = WEB_HOST_NONE;    /* in use once GTK is up; main thread */
+static gboolean web_private_failed;         /* its start-up test failed: not tried again */
+static gint web_host_shown = WEB_HOST_NONE; /* for status (any thread) */
+
+static WebHost web_host_pick (const char **why)
+{
+    WebHostEnv e = { 0 };
+    const char *xd = g_getenv ("DISPLAY"), *wd = g_getenv ("WAYLAND_DISPLAY");
+    e.setting = g_getenv ("WALPE_WEB_HOST");
+    /* the daemon says which backend it runs on (0 = none open yet: the
+     * start-up test's process, which goes by the environment). A daemon
+     * without that function has no backend but X11: it draws on X, also
+     * under Xwayland in a session that sets WAYLAND_DISPLAY, and its pages
+     * stay on the X11 page host as before. */
+    int (*in_use) (void) = (int (*) (void)) dlsym (RTLD_DEFAULT, "walpe_backend_in_use");
+    e.backend = in_use ? in_use () : 1;
+    e.backend_env = g_getenv ("WALPE_BACKEND");
+    e.x_display = xd && *xd;
+    e.wayland_display = wd && *wd;
+#ifdef WEB_HAVE_X11
+    e.built_x11 = TRUE;
+#endif
+#ifdef WEB_HAVE_PRIVATE
+    e.built_private = TRUE;
+#endif
+    e.private_failed = web_private_failed;
+    return web_host_choose (&e, why);
+}
+
+#ifdef WEB_HAVE_PRIVATE
+/* What a page reads as window.screen is GTK's monitor, and on the private
+ * page host that is the host's one made-up output. It is given the size
+ * of the largest page (a page fills its monitor): left at the host's own
+ * 16384 x 16384, a page that sizes a canvas by screen.width / .height
+ * would ask for a quarter of a billion pixels. The first page's size is
+ * there before GTK connects; a later, larger page changes the mode. */
+static void web_private_screen (int w, int h)
+{
+    static int max_w, max_h;
+    if (w <= max_w && h <= max_h)
+        return;
+    max_w = MAX (max_w, w);
+    max_h = MAX (max_h, h);
+    walpe_webhost_output_size (max_w, max_h);
+}
+
+/* GTK on the module's own Wayland display. The display has to be GTK's
+ * default one before anything of WebKit asks for "the" display, and it
+ * must not come from the environment (WAYLAND_DISPLAY is the session's
+ * compositor, and the environment cannot be changed once threads run):
+ * it is opened by name. */
+static gboolean gtk_init_private (void)
+{
+    char *sock = NULL, *why = NULL;
+    if (!walpe_webhost_start (&sock, &why)) {
+        g_warning ("web: %s", why ? why : "the private page host cannot start");
+        g_free (why);
+        return FALSE;
+    }
+    gdk_set_allowed_backends ("wayland");
+    if (!gtk_is_initialized ())
+        gtk_disable_setlocale ();
+    /* opened before gtk_init: GTK then takes it as the default display
+     * instead of opening the session's */
+    GdkDisplay *d = gdk_display_open (sock);
+    gboolean ok = d != NULL && gtk_init_check ();
+    if (!d && gtk_init_check ()) {
+        /* a GTK that wants to be initialised first: that opened the
+         * session's display; ours replaces it as the default */
+        GdkDisplay *first = gdk_display_get_default ();
+        d = gdk_display_open (sock);
+        ok = d != NULL;
+        if (d && first && first != d) {
+            gdk_display_manager_set_default_display (gdk_display_manager_get (), d);
+            gdk_display_close (first);
+        }
+    }
+    g_free (sock);
+    if (!ok || !d) {
+        walpe_webhost_abandon ();
+        g_warning ("web: GTK could not use the private page host%s",
+                   d ? " (gtk_init failed)" : " (its Wayland backend did not connect; GDK_BACKEND "
+                                              "set to something else?)");
+        return FALSE;
+    }
+    if (gdk_display_get_default () != d)
+        gdk_display_manager_set_default_display (gdk_display_manager_get (), d);
+    g_message ("web: pages live on a private Wayland display inside the daemon (no window on the "
+               "desktop, no X; the session's clipboard and selections are out of their reach)");
+    return TRUE;
+}
+#endif
+
 static gboolean ensure_gtk (void)
 {
     if (gtk_ready)
         return TRUE;
+    const char *host_why = NULL;
+    WebHost host = web_host_pick (&host_why);
+    if (host == WEB_HOST_NONE) {
+        g_warning ("web: %s", host_why ? host_why : "no page host");
+        return FALSE;
+    }
+    if (host_why)
+        g_message ("web: %s", host_why);
     /* GSK_RENDERER=cairo / GDK GL off are set in main() before any thread
      * exists: g_setenv here raced getenv on the render/audio/media threads
      * (and in the GL driver) - glibc reallocates environ on a new name */
-    gdk_set_allowed_backends ("x11");
-    /* gtk_init would setlocale (LC_ALL, "") for the whole daemon: in a
-     * comma-decimal locale every scene loaded afterwards was mis-parsed
-     * ("0.5" read as 0) and Turkish case rules reached strcasecmp. The
-     * daemon stays in the "C" locale it started in; WebKit takes the
-     * page language from the environment, not from setlocale. */
-    if (!gtk_is_initialized ())
-        gtk_disable_setlocale ();
-    if (!gtk_init_check ()) {
-        g_warning ("web: gtk_init failed (no display?)");
+#ifdef WEB_HAVE_PRIVATE
+    if (host == WEB_HOST_PRIVATE && !gtk_init_private ())
         return FALSE;
+#endif
+    if (host == WEB_HOST_X11) {
+#ifdef WEB_HAVE_X11
+        gdk_set_allowed_backends ("x11");
+        /* gtk_init would setlocale (LC_ALL, "") for the whole daemon: in a
+         * comma-decimal locale every scene loaded afterwards was mis-parsed
+         * ("0.5" read as 0) and Turkish case rules reached strcasecmp. The
+         * daemon stays in the "C" locale it started in; WebKit takes the
+         * page language from the environment, not from setlocale. */
+        if (!gtk_is_initialized ())
+            gtk_disable_setlocale ();
+        if (!gtk_init_check ()) {
+            g_warning ("web: gtk_init failed (no display?)");
+            return FALSE;
+        }
+        /* gtk_init replaces the process-wide Xlib error handler (the daemon's
+         * walpe_xerror) with GDK's, which _exit(1)s on any X error on its
+         * display that no GDK trap covers - the daemon vanished without a
+         * trace. A trap that is never popped covers them all; GDK's own nested
+         * traps still get their errors (innermost first). */
+        gdk_x11_display_error_trap_push (gdk_display_get_default ());
+#else
+        return FALSE;   /* web_host_pick does not choose a host that is not built */
+#endif
     }
-    /* gtk_init replaces the process-wide Xlib error handler (the daemon's
-     * walpe_xerror) with GDK's, which _exit(1)s on any X error on its
-     * display that no GDK trap covers - the daemon vanished without a
-     * trace. A trap that is never popped covers them all; GDK's own nested
-     * traps still get their errors (innermost first). */
-    gdk_x11_display_error_trap_push (gdk_display_get_default ());
+    web_host = host;
+    g_atomic_int_set (&web_host_shown, (gint) host);
     /* a page can select text in a form field by script: WebKit then made
      * the daemon the owner of the X PRIMARY selection with page-chosen
      * text, replacing what the user had selected (the next middle-click
      * paste into a terminal inserted the wallpaper's text). A wallpaper
-     * has no business owning a selection: give it up as soon as it is ours. */
+     * has no business owning a selection: give it up as soon as it is ours.
+     * (X11 host: the claim itself is stopped in the daemon, selguard.c,
+     * and this drops what GDK keeps locally. Private host: the display
+     * cancels every claim, and what is dropped here is the copy pages of
+     * this process could otherwise read from each other.) */
     g_signal_connect (gdk_display_get_primary_clipboard (gdk_display_get_default ()), "changed",
                       G_CALLBACK (on_clipboard_changed), NULL);
     g_signal_connect (gdk_display_get_clipboard (gdk_display_get_default ()), "changed",
@@ -2461,18 +2612,23 @@ static gboolean ensure_gtk (void)
 }
 
 /* off-screen, override-redirect: the WM never manages, tiles or focuses it,
- * but it is mapped, so WebKit keeps the page "visible" and animating */
+ * but it is mapped, so WebKit keeps the page "visible" and animating.
+ * (X11 page host only.) */
 static void hide_window_offscreen (GtkWidget *win, int w, int h)
 {
+#ifdef WEB_HAVE_X11
     GdkSurface *surf = gtk_native_get_surface (GTK_NATIVE (win));
     if (!surf || !GDK_IS_X11_SURFACE (surf))
-        return;
+        return;     /* the private page host: its display shows nothing anyway */
     Display *xd = gdk_x11_display_get_xdisplay (gdk_surface_get_display (surf));
     Window xid = gdk_x11_surface_get_xid (surf);
     XSetWindowAttributes a = { .override_redirect = True };
     XChangeWindowAttributes (xd, xid, CWOverrideRedirect, &a);
     XMoveWindow (xd, xid, -w - 64, -h - 64);
     XFlush (xd);
+#else
+    (void) win; (void) w; (void) h;
+#endif
 }
 
 /* ------------------------------------------------ WebKit start-up probe
@@ -2492,6 +2648,10 @@ static GPtrArray *probe_waiting;  /* WebShared waiting for the result (main thre
 static char *probe_error;         /* under reg_lock */
 
 static gboolean sh_create_real (WebShared *sh);
+static gboolean probe_spawn (void);
+/* the page host the running test uses (the child is told by
+ * WALPE_WEB_HOST, so it tests what this process will then use) */
+static WebHost probe_host = WEB_HOST_NONE;
 
 /* what the start-up test said about WebGL in pages (under reg_lock):
  * the renderer string, "" = not known */
@@ -2579,6 +2739,26 @@ static void probe_done (GObject *src, GAsyncResult *res, gpointer user)
             : g_strdup_printf ("WebKit start-up test exited with status %d",
                                g_subprocess_get_exit_status (p));
     g_clear_error (&err);
+    if (!ok && probe_host == WEB_HOST_PRIVATE && !web_private_failed) {
+        /* the private page host did not get through: with an X display
+         * (Xwayland) the off-screen X window is tried before giving up */
+        web_private_failed = TRUE;
+        const char *hw = NULL;
+        WebHost next = web_host_pick (&hw);
+        if (next == WEB_HOST_X11) {
+            g_warning ("web: %s (%s)", hw ? hw : "falling back to the X11 page host", why);
+            g_free (why);
+            g_free (out);
+            g_object_unref (p);
+            if (probe_spawn ())
+                return;
+            /* could not even start the second test: as after a failed one */
+            ok = FALSE;
+            why = g_strdup ("the start-up test for the X11 page host could not be run");
+            out = NULL;
+            p = NULL;
+        }
+    }
     probe_state = ok ? PROBE_OK : PROBE_FAILED;
     if (ok) {
         g_message ("web: WebKit start-up test passed");
@@ -2600,7 +2780,44 @@ static void probe_done (GObject *src, GAsyncResult *res, gpointer user)
             sh_create_real (w->pdata[i]);
     if (w)
         g_ptr_array_unref (w);
-    g_object_unref (p);
+    if (p)
+        g_object_unref (p);
+}
+
+/* run `walpe-daemon --web-probe` for the page host that would be used
+ * now; FALSE when the child could not be started */
+static gboolean probe_spawn (void)
+{
+    char *exe = g_file_read_link ("/proc/self/exe", NULL);
+    GError *err = NULL;
+    GSubprocess *p = NULL;
+    const char *hw = NULL;
+    probe_host = web_host_pick (&hw);
+    if (exe) {
+        /* stderr inherited: WebKit's own abort message lands in our log;
+         * stdout is the test's answer (probe_note_webgl) */
+        GSubprocessLauncher *l = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE);
+        if (probe_host != WEB_HOST_NONE)
+            g_subprocess_launcher_setenv (l, "WALPE_WEB_HOST", web_host_name (probe_host), TRUE);
+        char self[24];
+        g_snprintf (self, sizeof self, "%ld", (long) getpid ());
+        g_subprocess_launcher_setenv (l, "WALPE_WEB_PROBE_PARENT", self, TRUE);   /* walpe_web_probe_run */
+        p = g_subprocess_launcher_spawn (l, &err, exe, "--web-probe", NULL);
+        g_object_unref (l);
+    }
+    g_free (exe);
+    if (!p) {
+        g_warning ("web: cannot run the WebKit start-up test (%s)", err ? err->message : "no exe");
+        g_clear_error (&err);
+        return FALSE;
+    }
+    g_message ("web: testing WebKit start-up in a child process (page host: %s)",
+               web_host_name (probe_host));
+    probe_timed_out = FALSE;   /* (a second test, for the other page host, starts from here too) */
+    probe_cancel = g_cancellable_new ();
+    probe_child_timer = g_timeout_add_seconds (WEB_PROBE_MAX_S, probe_child_overdue, p);
+    g_subprocess_communicate_utf8_async (p, NULL, probe_cancel, probe_done, NULL);
+    return TRUE;
 }
 
 static gboolean sh_create_main (gpointer user)
@@ -2629,21 +2846,8 @@ static gboolean sh_create_main (gpointer user)
     if (probe_state == PROBE_RUNNING)
         return G_SOURCE_REMOVE;
     probe_state = PROBE_RUNNING;
-    char *exe = g_file_read_link ("/proc/self/exe", NULL);
-    GError *err = NULL;
-    /* stderr inherited: WebKit's own abort message lands in our log;
-     * stdout is the test's answer (probe_note_webgl) */
-    GSubprocessLauncher *pl = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE);
-    char self[24];
-    g_snprintf (self, sizeof self, "%ld", (long) getpid ());
-    g_subprocess_launcher_setenv (pl, "WALPE_WEB_PROBE_PARENT", self, TRUE);   /* walpe_web_probe_run */
-    GSubprocess *p = exe ? g_subprocess_launcher_spawn (pl, &err, exe, "--web-probe", NULL) : NULL;
-    g_object_unref (pl);
-    g_free (exe);
-    if (!p) {
+    if (!probe_spawn ()) {
         /* cannot test (no /proc?): keep the old in-process behaviour */
-        g_warning ("web: cannot run the WebKit start-up test (%s)", err ? err->message : "no exe");
-        g_clear_error (&err);
         probe_state = PROBE_OK;
         GPtrArray *w = probe_waiting;
         probe_waiting = NULL;
@@ -2652,10 +2856,6 @@ static gboolean sh_create_main (gpointer user)
         g_ptr_array_unref (w);
         return G_SOURCE_REMOVE;
     }
-    g_message ("web: testing WebKit start-up in a child process");
-    probe_cancel = g_cancellable_new ();
-    probe_child_timer = g_timeout_add_seconds (WEB_PROBE_MAX_S, probe_child_overdue, p);
-    g_subprocess_communicate_utf8_async (p, NULL, probe_cancel, probe_done, NULL);
     return G_SOURCE_REMOVE;
 }
 
@@ -2993,12 +3193,21 @@ static gboolean sh_create_real (WebShared *sh)
 {
     if (sh->dead)
         return G_SOURCE_REMOVE;
+    /* the page's size: the largest its viewers asked for (their monitors'
+     * render sizes). None has yet when the page is made before the first
+     * frame of any viewer: a placeholder until the first one says
+     * (web_gl_render -> sh_state_main resizes the page) */
+    g_mutex_lock (&sh->lock);
+    int w = sh->want_w > 0 ? sh->want_w : WEB_SIZE_UNKNOWN_W;
+    int h = sh->want_h > 0 ? sh->want_h : WEB_SIZE_UNKNOWN_H;
+    g_mutex_unlock (&sh->lock);
+#ifdef WEB_HAVE_PRIVATE
+    /* before GTK is brought up: the private page host announces its
+     * output with this size (nothing happens with the X11 page host) */
+    web_private_screen (w, h);
+#endif
     if (!ensure_gtk ())
         return G_SOURCE_REMOVE;
-    g_mutex_lock (&sh->lock);
-    int w = sh->want_w > 0 ? sh->want_w : 1920;
-    int h = sh->want_h > 0 ? sh->want_h : 1080;
-    g_mutex_unlock (&sh->lock);
 
     WebKitNetworkSession *ns = webkit_network_session_new_ephemeral ();
     g_signal_connect (ns, "download-started", G_CALLBACK (on_download_started), NULL);
@@ -3296,9 +3505,28 @@ static void sh_input_replay (WebShared *sh)
  * monitors follows the monitor the pointer is on. */
 void walpe_web_input (gpointer viewer, const WalpeWebInput *in)
 {
+    /* the keyboard's layout and modifier state belong to no page */
+    if (in->kind == WALPE_WEB_IN_KEYMAP) {
+        int fd = in->keymap_fd >= 0 ? dup (in->keymap_fd) : -1;
+        web_input_keymap (fd, in->keymap_size);
+        return;
+    }
+    if (in->kind == WALPE_WEB_IN_MODIFIERS) {
+        web_input_modifiers (in->mods);
+        return;
+    }
     WebShared *sh = sh_by_viewer (viewer);
     if (!sh || sh->dead)
         return;
+    if (in->kind == WALPE_WEB_IN_KBD_FOCUS || in->kind == WALPE_WEB_IN_KEY) {
+        if (!sh_takes_input (sh))
+            return;
+        if (in->kind == WALPE_WEB_IN_KBD_FOCUS)
+            web_input_keyboard_focus (sh->input, in->pressed);
+        else
+            web_input_key (sh->input, in->key, in->pressed, in->time);
+        return;
+    }
     if (in->kind == WALPE_WEB_IN_LEAVE) {
         if (sh->in_owner == viewer) {   /* not when another monitor took it over */
             sh->in_owner = NULL;
@@ -3327,6 +3555,13 @@ void walpe_web_input (gpointer viewer, const WalpeWebInput *in)
 
 /* how pointer input reaches the live pages: "native", "native
  * (unconfirmed)", "js", "off"; "" = no page; g_free */
+/* where pages live, for status: "x11", "private", "" = no page yet */
+char *walpe_web_host (void)
+{
+    WebHost h = (WebHost) g_atomic_int_get (&web_host_shown);
+    return g_strdup (h == WEB_HOST_NONE ? "" : web_host_name (h));
+}
+
 char *walpe_web_input_status (void)
 {
     GString *s = g_string_new (NULL);
@@ -3375,13 +3610,20 @@ static gboolean web_gl_render (WalpeContent *c, int w, int h, float px, float py
     (void) px; (void) py;
     WebViewer *v = (WebViewer *) c;
     WebShared *sh = v->sh;
-    if (w != v->last_w || h != v->last_h) {
-        v->last_w = w;
-        v->last_h = h;
+    /* the size the page is laid out and painted at for this monitor: the
+     * one chosen for its picture (content.h render_w / render_h), else the
+     * surface's. The page's texture is drawn over the whole surface either
+     * way, and pointer positions are mapped from the monitor to the page
+     * (walpe_web_input). */
+    const int pw = c->render_w > 0 && c->render_h > 0 ? c->render_w : w;
+    const int ph = c->render_w > 0 && c->render_h > 0 ? c->render_h : h;
+    if (pw != v->last_w || ph != v->last_h) {
+        v->last_w = pw;
+        v->last_h = ph;
         g_mutex_lock (&sh->lock);
-        gboolean grew = w > sh->want_w || h > sh->want_h;
-        sh->want_w = MAX (sh->want_w, w);
-        sh->want_h = MAX (sh->want_h, h);
+        gboolean grew = pw > sh->want_w || ph > sh->want_h;
+        sh->want_w = MAX (sh->want_w, pw);
+        sh->want_h = MAX (sh->want_h, ph);
         g_mutex_unlock (&sh->lock);
         if (grew)
             g_idle_add (sh_state_main, sh);   /* the page gets that size */
@@ -3421,16 +3663,16 @@ static gboolean web_gl_render (WalpeContent *c, int w, int h, float px, float py
         glBindTexture (GL_TEXTURE_2D, v->tex);
         glPixelStorei (GL_UNPACK_ALIGNMENT, 4);
         if (v->tex_w != fw || v->tex_h != fh) {
-            glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, fw, fh, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+            walpe_gl_tex_image_bgra (fw, fh, NULL);
             v->tex_w = fw;
             v->tex_h = fh;
         }
         if (full || dx0 < 0 || dy0 < 0 || dx1 > fw || dy1 > fh)
             dx0 = 0, dy0 = 0, dx1 = fw, dy1 = fh;
-        gint64 ut0 = web_timing > 0 ? g_get_monotonic_time () : 0;
+        gint64 ut0 = walpe_lazy_get (&web_timing) > 0 ? g_get_monotonic_time () : 0;
         glPixelStorei (GL_UNPACK_ROW_LENGTH, fw);
-        glTexSubImage2D (GL_TEXTURE_2D, 0, dx0, dy0, dx1 - dx0, dy1 - dy0, GL_BGRA, GL_UNSIGNED_BYTE,
-                         fr->data + ((gsize) dy0 * fw + dx0) * 4);
+        walpe_gl_tex_sub_image_bgra (dx0, dy0, dx1 - dx0, dy1 - dy0,
+                                     fr->data + ((gsize) dy0 * fw + dx0) * 4);
         glPixelStorei (GL_UNPACK_ROW_LENGTH, 0);
         if (ut0) {
             glFinish ();   /* timing only: make the upload's cost visible */
@@ -3638,7 +3880,7 @@ WALPE_API const WalpeWebModule *walpe_web_module_entry (void)
     static const WalpeWebModule m = {
         WALPE_MODULE_ABI, walpe_web_new, walpe_web_input, walpe_web_stats,
         walpe_web_media_missing, walpe_web_error, walpe_web_probe_run,
-        walpe_web_input_status, walpe_web_info,
+        walpe_web_input_status, walpe_web_info, walpe_web_host,
     };
     return &m;
 }

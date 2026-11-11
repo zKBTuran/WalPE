@@ -250,7 +250,10 @@ static gboolean fxs_compare (EffPass *pass, GLuint cand, guint round, int *maxdi
      * frame's own values with its next draw (the spectrum always is) */
     for (int u = 0; u < pass->n_dyn; u++) {
         const int kind = pass->dyn[u].kind;
-        if (kind == FXU_TIME || kind == FXU_FRAMETIME || kind == FXU_POINTER || kind == FXU_DAYTIME)
+        /* (FXU_POINTER_LAST: g_PointerPositionLast of a simulation chain,
+         * fx_sim.h - the probe wrote that name as well) */
+        if (kind == FXU_TIME || kind == FXU_FRAMETIME || kind == FXU_POINTER || kind == FXU_DAYTIME ||
+            kind == FXU_POINTER_LAST)
             pass->dyn_last[u].sent = FALSE;
     }
     g_free (px);

@@ -7,8 +7,14 @@ option('audio', type: 'combo', choices: ['auto', 'enabled', 'disabled'], value: 
 option('scenescript', type: 'combo', choices: ['auto', 'enabled', 'disabled'], value: 'auto',
   description: 'SceneScript (scene property scripts: clocks, toggles, ...) via QuickJS')
 option('native_tuning', type: 'combo', choices: ['generic', 'alderlake', 'native', 'auto', 'off'], value: 'generic',
-  description: 'CPU tuning: generic (default) = portable code, no -march / -mtune / cache parameters (off = the same, its earlier name); alderlake = the maintainer make.conf flags (binary runs on Alder Lake-class CPUs only; ./build.sh --tuning=alderlake); native = -march=native; auto = -march=native if supported')
+  description: 'CPU tuning: generic (default) = portable code for the target architecture, no -march / -mtune / cache parameters (off = the same, its earlier name); alderlake = x86-64 only: the maintainer make.conf flags (binary runs on Alder Lake-class CPUs only; ./build.sh --tuning=alderlake); native = the building machine\'s CPU (-march=native on x86, -mcpu=native on aarch64; refused in a cross build); auto = native if the compiler supports it and the build is not a cross build')
+option('quickjs_libdir', type: 'string', value: '',
+  description: 'Absolute path of one more directory searched (first) for libquickjs.a: a QuickJS built by hand, or the target\'s in a cross build. Its header is found through the compiler (quickjs/quickjs.h; add -Dc_args=-I<dir> when it is elsewhere)')
 option('tray', type: 'combo', choices: ['auto', 'enabled', 'disabled'], value: 'auto',
-  description: 'walpe-tray: system tray icon (XEmbed via Xlib/XRender + StatusNotifierItem via GDBus)')
+  description: 'walpe-tray: system tray icon (StatusNotifierItem via GDBus; XEmbed via Xlib/XRender when those libraries are found)')
 option('hardening', type: 'boolean', value: true,
   description: 'Build with stack protector, stack clash and control-flow protection, _FORTIFY_SOURCE, format-security errors, full RELRO + immediate binding (PIE is the b_pie default)')
+option('x11', type: 'feature', value: 'auto',
+  description: 'walpe-daemon: the X11 backend (libX11, libXext, libXinerama; libXi and libXrandr when found). At least one of x11 / wayland has to be built')
+option('wayland', type: 'feature', value: 'auto',
+  description: 'walpe-daemon: the Wayland backend (layer shell; wayland-client, wayland-egl, wayland-scanner). The daemon picks X11 or Wayland when it starts: walpe-ctl backend')

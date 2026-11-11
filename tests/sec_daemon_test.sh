@@ -3,6 +3,8 @@
 # Security checks against a running daemon. An X server of
 # its own (Xvfb -displayfd, never a fixed display number), private HOME /
 # config / cache / runtime directories, everything removed at the end.
+# WALPE_CHECK_DISPLAY=sway runs the same against a headless Wayland compositor
+# of its own (scripts/displayenv.py; part 5 needs the X server and is skipped).
 #  1. a runtime directory other accounts can write to is not used: the
 #     socket goes to a private directory, and a FIFO planted as the
 #     crash-loop marker does not hang the start;
@@ -12,11 +14,28 @@
 #  4. software_threads=nan does not put a number outside 0..32 in the config;
 #  5. the layout restart does not hand its open descriptors to the new image
 #     and leaves no zombie children.
-# exit 77: skipped (no Xvfb).
+# exit 77: skipped (the display's programs are not installed, or the build has
+# no backend for it); WALPE_CHECK_STRICT=1 makes that a failure.
 daemon=$1
 ctl=$2
 fails=0
-command -v Xvfb >/dev/null 2>&1 || { echo "sec-daemon: Xvfb not installed, skipped"; exit 77; }
+skip=77
+[ "${WALPE_CHECK_STRICT:-0}" = 0 ] || skip=1
+displayenv=$(dirname "$0")/../scripts/displayenv.py
+case "${WALPE_CHECK_DISPLAY:-xvfb}" in
+    xvfb|x11) kind=xvfb ;;
+    sway|wayland) kind=sway ;;
+    *) echo "sec-daemon: WALPE_CHECK_DISPLAY is not a display kind (xvfb, sway)"; exit 2 ;;
+esac
+if [ "$kind" = xvfb ] && ! command -v python3 >/dev/null 2>&1; then
+    command -v Xvfb >/dev/null 2>&1 || { echo "sec-daemon: Xvfb not installed, skipped"; exit $skip; }
+else
+    # (asked of the harness: the display's programs, and whether this build has the backend)
+    command -v python3 >/dev/null 2>&1 || { echo "sec-daemon: python3 not installed, skipped"; exit $skip; }
+    why=$(python3 -I "$displayenv" needs --display "$kind" --build "$(dirname "$daemon")")
+    rc=$?
+    [ $rc = 0 ] || { echo "sec-daemon: skipped: $why"; exit $rc; }
+fi
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/walpe-secd.XXXXXX") || exit 1
 xpid=
 dpid=
@@ -43,21 +62,39 @@ chmod 1777 "$tmp/shared"            # a runtime "directory" like /tmp
 mkfifo "$tmp/shared/walpe.sock.loading"   # what another account could put there
 export HOME="$tmp/home" XDG_CONFIG_HOME="$tmp/cfg" XDG_CACHE_HOME="$tmp/cache"
 export XDG_RUNTIME_DIR="$tmp/shared" TMPDIR="$tmp/tmp"
-unset DBUS_SESSION_BUS_ADDRESS WALPE_SOFTWARE WALPE_MODULE_DIR
+unset DBUS_SESSION_BUS_ADDRESS WALPE_SOFTWARE WALPE_MODULE_DIR DISPLAY WAYLAND_DISPLAY WALPE_MONITORS
 umask 022
 
-Xvfb -displayfd 3 -screen 0 1280x720x24 -nolisten tcp 3>"$tmp/disp" >"$tmp/log/xvfb" 2>&1 &
-xpid=$!
-i=0
-while [ ! -s "$tmp/disp" ] && [ $i -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
-[ -s "$tmp/disp" ] || { echo "sec-daemon: Xvfb did not start, skipped"; exit 77; }
-DISPLAY=:$(cat "$tmp/disp")
-export DISPLAY
-
 echo "640x720+0+0,640x720+640+0" > "$tmp/mons"
+if [ "$kind" = xvfb ]; then
+    Xvfb -displayfd 3 -screen 0 1280x720x24 -nolisten tcp 3>"$tmp/disp" >"$tmp/log/xvfb" 2>&1 &
+    xpid=$!
+    i=0
+    while [ ! -s "$tmp/disp" ] && [ $i -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
+    [ -s "$tmp/disp" ] || { echo "sec-daemon: Xvfb did not start, skipped"; exit $skip; }
+    DISPLAY=:$(cat "$tmp/disp")
+    export DISPLAY
+    # the two monitors are halves of the one X screen
+    WALPE_MONITORS="@$tmp/mons"
+    WALPE_BACKEND=x11
+    export WALPE_MONITORS WALPE_BACKEND
+else
+    # two outputs of the same sizes; the compositor lives in a runtime directory of its
+    # own, the directory others can write to is the daemon's alone
+    python3 -I "$displayenv" serve --display sway --outputs "$(cat "$tmp/mons")" --ready "$tmp/disp" \
+        >"$tmp/log/xvfb" 2>&1 &
+    xpid=$!
+    i=0
+    while [ ! -s "$tmp/disp" ] && [ $i -lt 150 ] && kill -0 "$xpid" 2>/dev/null; do sleep 0.2; i=$((i + 1)); done
+    [ -s "$tmp/disp" ] || { echo "sec-daemon: the headless compositor did not start, skipped"; exit $skip; }
+    WAYLAND_DISPLAY=$(sed -n 's/^WAYLAND_DISPLAY=//p' "$tmp/disp")
+    WALPE_BACKEND=wayland
+    export WAYLAND_DISPLAY WALPE_BACKEND
+fi
+
 : > "$tmp/leak"
 # fd 9: a descriptor some library left open without close-on-exec
-WALPE_MONITORS="@$tmp/mons" "$daemon" 9<"$tmp/leak" >"$tmp/log/daemon" 2>&1 &
+"$daemon" 9<"$tmp/leak" >"$tmp/log/daemon" 2>&1 &
 dpid=$!
 
 sock="$tmp/tmp/walpe-$(id -u)/walpe.sock"
@@ -126,7 +163,7 @@ esac
 # 5. the layout restart: the file behind fd 9 must not be open in the new
 # image (under whatever number)
 leaked () { ls -l "/proc/$dpid/fd" 2>/dev/null | grep -q -F -- "$tmp/leak"; }
-if leaked && command -v xrandr >/dev/null 2>&1; then
+if [ "$kind" = xvfb ] && leaked && command -v xrandr >/dev/null 2>&1; then
     echo "1280x720+0+0" > "$tmp/mons"
     n=0
     restarted=0
@@ -150,7 +187,7 @@ if leaked && command -v xrandr >/dev/null 2>&1; then
         echo "sec-daemon: no layout restart could be triggered on this X server; that part is skipped"
     fi
 else
-    echo "sec-daemon: no xrandr (or no /proc/<pid>/fd); the layout restart part is skipped"
+    echo "sec-daemon: no X server with xrandr (or no /proc/<pid>/fd); the layout restart part is skipped"
 fi
 
 "$ctl" quit >/dev/null 2>&1

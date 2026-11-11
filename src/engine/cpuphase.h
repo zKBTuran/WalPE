@@ -46,6 +46,15 @@ typedef struct {
 } WalpeCphStats;
 
 extern gint walpe_cph_level;          /* -1 = WALPE_CPU_PHASES not read yet, 0 = off */
+/* Every render thread tests the level many times per frame while the first
+ * one to get there stores it (cpuphase.c): read through this, never by
+ * name. A relaxed atomic load: the level is one self-contained value that
+ * every thread works out alike (the reasoning of common/lazy.h), and the
+ * load is the same single instruction the plain read was. */
+static inline int walpe_cph_level_get (void)
+{
+    return __atomic_load_n (&walpe_cph_level, __ATOMIC_RELAXED);
+}
 int walpe_cph_switch (int phase);     /* (slow path of walpe_cph_to) */
 WalpeCphStats *walpe_cph_stats (void);/* this thread's counters; NULL when off */
 void walpe_cph_get (WalpeCphStats *out, gboolean reset);
@@ -53,13 +62,14 @@ guint64 walpe_cph_fnv (guint64 h, const void *p, gsize n);
 
 static inline int walpe_cph_to (int phase)
 {
-    return G_UNLIKELY (walpe_cph_level != 0) ? walpe_cph_switch (phase) : phase;
+    return G_UNLIKELY (walpe_cph_level_get () != 0) ? walpe_cph_switch (phase) : phase;
 }
 
 /* counters: `WALPE_CPH_COUNT (pt_draws, 1);` (nothing when off) */
 #define WALPE_CPH_COUNT(field, n) G_STMT_START { \
-    if (G_UNLIKELY (walpe_cph_level != 0)) { \
+    if (G_UNLIKELY (walpe_cph_level_get () != 0)) { \
         WalpeCphStats *cph_ = walpe_cph_stats (); \
         if (cph_) cph_->field += (guint64) (n); \
     } } G_STMT_END
-#define WALPE_CPH_HASHING() (G_UNLIKELY (walpe_cph_level != 0) && walpe_cph_stats () && walpe_cph_level >= 2)
+#define WALPE_CPH_HASHING() (G_UNLIKELY (walpe_cph_level_get () != 0) && walpe_cph_stats () && \
+                             walpe_cph_level_get () >= 2)

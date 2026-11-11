@@ -7,6 +7,7 @@
  *   xembed.c  freedesktop XEmbed system tray (_NET_SYSTEM_TRAY_S<n>: dwm
  *             systray patch, stalonetray, trayer, xfce4-panel, ...); its
  *             menu is drawn by popup.c (GTK4 override-redirect window)
+ * Which one runs: traysel.h (X11: as the panel offers; Wayland: sni).
  */
 #pragma once
 #include <glib.h>
@@ -78,6 +79,9 @@ gboolean tray_engine_alive (void);
 
 /* left click / activate: open or raise the GUI */
 void tray_open_gui (void);
+/* the panel's xdg-activation token for the click it is about to report
+ * (Wayland: lets the GUI's window come to the front); NULL / "" = none */
+void tray_set_activation_token (const char *token);
 
 /* ------------------------------------------------------------- backends */
 typedef struct {
@@ -91,18 +95,20 @@ typedef struct {
 } TrayBackend;
 
 extern const TrayBackend tray_backend_sni;
-extern const TrayBackend tray_backend_xembed;
+extern const TrayBackend tray_backend_xembed;   /* builds with WALPE_TRAY_XEMBED only */
 
 /* popup.c: our own menu for trays without a menu protocol (XEmbed, and
- * SNI hosts that call ContextMenu instead of reading dbusmenu). X11 only;
- * x, y = root (screen) pixel of the pointer. */
+ * SNI hosts that call ContextMenu instead of reading dbusmenu).
+ * x, y = root (screen) pixel of the pointer, used on X11; elsewhere the
+ * menu is an ordinary window placed by the compositor. */
 gboolean tray_popup_available (void);
 void     tray_popup_show (int x, int y);
 void     tray_popup_hide (void);
 gboolean tray_popup_visible (void);
 /* the menu tree changed while it is open */
 void     tray_popup_refresh (void);
-/* tooltip for XEmbed (trays draw none): anchor = icon rectangle on screen */
+/* tooltip for XEmbed (trays draw none): anchor = icon rectangle on screen.
+ * X11 only; a no-op elsewhere. */
 void     tray_tooltip_show (int ax, int ay, int aw, int ah);
 void     tray_tooltip_hide (void);
 

@@ -274,8 +274,7 @@ static void make_text_texture (SceneLayer *l, gint64 *left)
     glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glPixelStorei (GL_UNPACK_ROW_LENGTH, cairo_image_surface_get_stride (sf) / 4);
     glPixelStorei (GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, tw, th, 0, GL_BGRA, GL_UNSIGNED_BYTE,
-                  cairo_image_surface_get_data (sf));
+    walpe_gl_tex_image_bgra (tw, th, cairo_image_surface_get_data (sf));
     glPixelStorei (GL_UNPACK_ROW_LENGTH, 0);
     glPixelStorei (GL_UNPACK_ALIGNMENT, 4);
     cairo_surface_destroy (sf);

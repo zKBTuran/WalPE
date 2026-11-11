@@ -1,10 +1,13 @@
 #include "glutil.h"
+#include "glcaps.h"
+#include "glfeat.h"
 #include "clip.h"
 #include "gpuprof.h"   /* GPUPROF hooks: WALPE_PROF_QUAD in the quad draws */
 #include "yuvconv.h"
 #include "common/gifcheck.h"
 #include "common/premult.h"
 #include "common/util.h"
+#include "common/lazy.h"
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -31,38 +34,141 @@ void *walpe_gl_get_egl_display (void)
     return g_egl_display;
 }
 
+/* The two header texts are worked out by whichever render thread compiles
+ * the first shader and then read by all of them: one thread builds, the
+ * others wait and read (g_once_init_enter). The fragment header is a heap
+ * string on GLES: a pointer handed to other threads through a plain static
+ * could be seen before the text it points to. (The daemon also lets only
+ * one monitor thread at a time through its first walpe_glutil_init; the
+ * tests and tools that render on threads of their own do not.) Shader
+ * compilation only: not on a frame's path. */
 const char *walpe_gl_shader_header (void)
 {
-    static const char *hdr = NULL;
-    if (hdr)
-        return hdr;
-    if (epoxy_is_desktop_gl ()) {
-        hdr = "#version 330\n";
-        return hdr;
+    static const char *hdr;
+    static gsize once;
+    if (g_once_init_enter (&once)) {
+        if (epoxy_is_desktop_gl ()) {
+            hdr = "#version 330\n";
+        } else {
+            /* GLES: the GLSL ES of the context's version (epoxy: major * 10
+             * + minor, 32 for ES 3.2), and highp as the default for
+             * everything a shader of this program computes with. GLSL ES's
+             * own defaults are mediump int and lowp samplers in the
+             * fragment stage: on a GPU that really has those precisions
+             * the picture would differ from desktop OpenGL's, and a
+             * uniform declared in both stages would have two precisions (a
+             * link error). */
+#define WALPE_ES_PRECISION "precision highp float;\nprecision highp int;\n" \
+                           "precision highp sampler2D;\n"
+            int v = walpe_gl_essl_version (epoxy_gl_version ());
+            if (v >= 320)
+                hdr = "#version 320 es\n" WALPE_ES_PRECISION;
+            else if (v >= 310)
+                hdr = "#version 310 es\n" WALPE_ES_PRECISION;
+            else
+                hdr = "#version 300 es\n" WALPE_ES_PRECISION;
+#undef WALPE_ES_PRECISION
+        }
+        g_once_init_leave (&once, 1);
     }
-    /* GLES: pick the highest ESSL the context supports */
-    int v = epoxy_gl_version (); /* 100*major + minor, e.g. 302 for ES 3.2 */
-    if (v >= 302)
-        hdr = "#version 320 es\n";
-    else if (v >= 301)
-        hdr = "#version 310 es\n";
-    else
-        hdr = "#version 300 es\n";
     return hdr;
 }
 
-/* fragment shaders additionally need an explicit float precision under ESSL
- * (there is no default in fragment stage) */
+/* fragment shaders need an explicit float precision under ESSL (there is
+ * no default in the fragment stage): the GLES header above declares it,
+ * with the same defaults for both stages */
 const char *walpe_gl_shader_fs_header (void)
 {
-    static char *hdr = NULL;
-    if (hdr)
-        return hdr;
-    if (epoxy_is_desktop_gl ())
-        hdr = g_strdup ("#version 330\n");
-    else
-        hdr = g_strconcat (walpe_gl_shader_header (), "precision highp float;\n", NULL);
+    static char *hdr;
+    static gsize once;
+    if (g_once_init_enter (&once)) {
+        if (epoxy_is_desktop_gl ())
+            hdr = g_strdup ("#version 330\n");
+        else
+            hdr = g_strdup (walpe_gl_shader_header ());
+        g_once_init_leave (&once, 1);
+    }
     return hdr;
+}
+
+/* ---- BGRA bytes into a texture
+ * Pictures, text and frames are BGRA in memory (cairo, the .tex loader,
+ * the video and web modules). Desktop OpenGL takes that as the client
+ * format of an RGBA8 texture; OpenGL ES does not. */
+
+/* 0 = desktop OpenGL: RGBA8 texture, GL_BGRA client format (the calls the
+ * call sites made themselves); 1 = OpenGL ES with
+ * GL_EXT_texture_format_BGRA8888: a GL_BGRA_EXT texture; 2 = OpenGL ES
+ * without it: the bytes are reordered here, RGBA8 texture */
+static int bgra_mode (void)
+{
+    if (!walpe_gl_feat_es ())
+        return 0;
+    return walpe_gl_feat_how (WALPE_GLF_BGRA_UPLOAD) == WALPE_GLF_EXTENSION ? 1 : 2;
+}
+
+/* w x h pixels of px as tight RGBA rows; the rows of px are
+ * GL_UNPACK_ROW_LENGTH pixels apart when that is set. NULL: no memory. */
+static guint8 *bgra_to_rgba (int w, int h, const guint8 *px, GLint *row_length)
+{
+    *row_length = 0;
+    glGetIntegerv (GL_UNPACK_ROW_LENGTH, row_length);
+    const gsize stride = (gsize) (*row_length > 0 ? *row_length : w) * 4;
+    guint8 *o = w > 0 && h > 0 ? g_try_malloc ((gsize) w * (gsize) h * 4) : NULL;
+    if (!o)
+        return NULL;
+    for (int y = 0; y < h; y++) {
+        const guint8 *s = px + (gsize) y * stride;
+        guint8 *d = o + (gsize) y * (gsize) w * 4;
+        for (int x = 0; x < w; x++, s += 4, d += 4) {
+            d[0] = s[2];
+            d[1] = s[1];
+            d[2] = s[0];
+            d[3] = s[3];
+        }
+    }
+    return o;
+}
+
+void walpe_gl_tex_image_bgra (int w, int h, const void *px)
+{
+    switch (bgra_mode ()) {
+    case 0:
+        glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, px);
+        break;
+    case 1:
+        /* the extension's unsized format: internal format = format */
+        glTexImage2D (GL_TEXTURE_2D, 0, GL_BGRA, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, px);
+        break;
+    default: {
+        GLint rl = 0;
+        guint8 *sw = px ? bgra_to_rgba (w, h, px, &rl) : NULL;
+        if (sw && rl)
+            glPixelStorei (GL_UNPACK_ROW_LENGTH, 0);
+        glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, sw);
+        if (sw && rl)
+            glPixelStorei (GL_UNPACK_ROW_LENGTH, rl);
+        g_free (sw);
+    }
+    }
+}
+
+void walpe_gl_tex_sub_image_bgra (int x, int y, int w, int h, const void *px)
+{
+    if (bgra_mode () != 2) {
+        glTexSubImage2D (GL_TEXTURE_2D, 0, x, y, w, h, GL_BGRA, GL_UNSIGNED_BYTE, px);
+        return;
+    }
+    GLint rl = 0;
+    guint8 *sw = px ? bgra_to_rgba (w, h, px, &rl) : NULL;
+    if (!sw)
+        return;
+    if (rl)
+        glPixelStorei (GL_UNPACK_ROW_LENGTH, 0);
+    glTexSubImage2D (GL_TEXTURE_2D, 0, x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, sw);
+    if (rl)
+        glPixelStorei (GL_UNPACK_ROW_LENGTH, rl);
+    g_free (sw);
 }
 
 static const char *VS =
@@ -276,6 +382,12 @@ void walpe_glutil_init (void)
         g_message ("gl: renderer \"%s\" (%s)%s", r ? r : "?", vd ? vd : "?",
                    soft ? " (software)" : "");
     }
+    /* which driver this is and what it offers, read once per process: the
+     * optional fast paths and the format choices ask it (glcaps.h) */
+    walpe_gl_caps_init ();
+    /* desktop OpenGL or OpenGL ES, and what the ES path replaces (asks
+     * nothing of a desktop context) */
+    walpe_gl_feat_init ();
     GLuint vs = compile (GL_VERTEX_SHADER, VS);
     GLuint fs = compile (GL_FRAGMENT_SHADER, FS);
     g_prog = glCreateProgram ();
@@ -669,10 +781,11 @@ static void draw_setup (GLuint tex, gboolean premult, float opacity,
  * and tint and resets the blend state afterwards, as before (A/B) */
 static gboolean draw_cache (void)
 {
-    static int on = -1;
+    static WalpeLazy cell = WALPE_LAZY_UNSET;   /* (per layer draw: common/lazy.h) */
+    int on = walpe_lazy_get (&cell);
     if (on < 0) {
         const char *e = g_getenv ("WALPE_GL_DRAW_CACHE");
-        on = !(e && *e == '0');
+        on = walpe_lazy_set (&cell, !(e && *e == '0'));
     }
     return on;
 }
@@ -818,10 +931,17 @@ static void draw_setup (GLuint tex, gboolean premult, float opacity,
 
 gboolean walpe_gl_has_s3tc (void)
 {
-    /* per-context in theory; every context here comes from one driver */
-    static int has = -1;
-    if (has < 0)
-        has = epoxy_has_gl_extension ("GL_EXT_texture_compression_s3tc") ? 1 : 0;
+    /* per-context in theory; every context here comes from one driver.
+     * The capability table decides (and logs the CPU decode once when the
+     * driver has no S3TC); before it exists the context is asked. */
+    static WalpeLazy cell = WALPE_LAZY_UNSET;
+    int has = walpe_lazy_get (&cell);
+    if (has < 0) {
+        if (!walpe_gl_caps ())
+            return epoxy_has_gl_extension ("GL_EXT_texture_compression_s3tc");
+        has = walpe_lazy_set (&cell,
+                              walpe_gl_format (WALPE_FMT_TEX_DXT5).how == WALPE_FMT_NATIVE ? 1 : 0);
+    }
     return has == 1;
 }
 
@@ -857,7 +977,9 @@ static float tex_anisotropy (void)
         const char *e = g_getenv ("WALPE_TEX_ANISO");
         if (e && *e)
             a = (float) g_ascii_strtod (e, NULL);
-        if (a > 1.0f && epoxy_has_gl_extension ("GL_EXT_texture_filter_anisotropic")) {
+        const WalpeGlCaps *gc = walpe_gl_caps ();
+        if (a > 1.0f && (gc ? gc->anisotropic
+                            : epoxy_has_gl_extension ("GL_EXT_texture_filter_anisotropic"))) {
             GLfloat mx = 1.0f;
             glGetFloatv (GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &mx);
             a = fminf (a, mx);
@@ -1257,8 +1379,7 @@ static GLuint upload_tex (WalpeTex *t, GLint wrap, gboolean premultiply, TexUp *
             }
         }
         glPixelStorei (GL_UNPACK_ALIGNMENT, 4);
-        glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, t->width, t->height, 0,
-                      GL_BGRA, GL_UNSIGNED_BYTE, t->data);
+        walpe_gl_tex_image_bgra (t->width, t->height, t->data);
         break;
     case WALPE_TEX_DXT1:
     case WALPE_TEX_DXT3:
@@ -1514,6 +1635,18 @@ gint64 walpe_gl_tex_scope_end (void)
     return tc_scope_bytes;
 }
 
+/* The largest side this driver takes for a texture (GL_MAX_TEXTURE_SIZE),
+ * 0 = not known. The loaders admit pictures of up to 16384 texels a side,
+ * which is what current desktop drivers take; an older or smaller GPU
+ * takes 8192 or 4096, and an upload beyond it fails (the layer would be
+ * black). Such a picture is halved before the upload, like one that does
+ * not fit the texture budget. */
+static int tex_side_limit (void)
+{
+    const WalpeGlCaps *gc = walpe_gl_caps ();
+    return gc && gc->limits.max_texture_size >= 1024 ? gc->limits.max_texture_size : 0;
+}
+
 /* one 2x2 box halving of uncompressed pixels (4, 2 or 1 bytes per texel),
  * in place: the texture budget's way to shrink a picture before it is
  * uploaded at all */
@@ -1600,12 +1733,12 @@ static void tex_info_from (WalpeTexInfo *info, const WalpeTex *t, const TexUp *u
  * RGBA8 layer shown on a 1920x1080 monitor that is a 31.6 MiB upload and
  * 31.6 MiB of video memory for the moment of the blit. For even sizes the
  * GL_LINEAR blit to exactly half size is a 2x2 box with a fixed rounding -
- * on Mesa's software renderer, bit for bit (tests/texcache_test.c compares)
+ * on Mesa's software renderer on x86, bit for bit (tests/texload_test.c)
  *     out = avg (avg (a, b), avg (c, d)),   avg (x, y) = (x + y + 1) >> 1
  * with a b the two texels of the upper row and c d those of the lower one.
  * The same arithmetic on the decoded pixels gives the same texture, and
- * the full-size one never exists (a hardware GPU may round the tie cases
- * of its own blit the other way: at most 1/255 in a texel).
+ * the full-size one never exists (a GPU may round its own blit the other
+ * way, 1/255 in a texel; Mesa's filter off x86 truncates: up to 2/255).
  * An odd width or height (4807 -> 2403 or 2404) makes the blit a real
  * resampling with weights that drift across the picture: those keep the
  * GL path. */
@@ -1852,7 +1985,10 @@ static GLuint tex_upload_prepared (WalpeTex *t, GLint wrap, const TexPrep *p, Te
         tex_set_swizzle (sw[0], sw[1], sw[2], sw[3]);
     glPixelStorei (GL_UNPACK_ROW_LENGTH, 0);
     glPixelStorei (GL_UNPACK_ALIGNMENT, fmt == GL_BGRA ? 4 : 1);
-    glTexImage2D (GL_TEXTURE_2D, 0, (GLint) ifmt, w, h, 0, fmt, GL_UNSIGNED_BYTE, up);
+    if (fmt == GL_BGRA)
+        walpe_gl_tex_image_bgra (w, h, up);
+    else
+        glTexImage2D (GL_TEXTURE_2D, 0, (GLint) ifmt, w, h, 0, fmt, GL_UNSIGNED_BYTE, up);
     glPixelStorei (GL_UNPACK_ALIGNMENT, 4);
     g_free (pk);
     u->w = t->width;
@@ -1927,6 +2063,19 @@ static void tc_seed_init (void)
 }
 
 static void tex_hash (const void *data, gsize n, guint64 h[2]);
+
+/* Has any picture been announced yet? The job table is made under tj_lock
+ * by the first announcement, so that is also where it is looked at: the
+ * functions below used to test the pointer before taking the lock, while
+ * another monitor's thread could be storing it. Once it exists it stays.
+ * (Texture loads only; nothing here runs per frame.) */
+static gboolean tex_jobs_exist (void)
+{
+    g_mutex_lock (&tj_lock);
+    gboolean any = tj_jobs != NULL;
+    g_mutex_unlock (&tj_lock);
+    return any;
+}
 
 static void tex_job_free (TexJob *j)
 {
@@ -2052,7 +2201,7 @@ gboolean walpe_gl_tex_predecode (const char *path, guint load_flags, gint64 est_
 
 void walpe_gl_tex_predecode_cancel (const char *path, guint load_flags)
 {
-    if (!path || !tj_jobs)
+    if (!path || !tex_jobs_exist ())
         return;
     char *key = g_strdup_printf ("%s|%u", path, load_flags & 0xffffu);
     WalpeTex *t = NULL;
@@ -2079,7 +2228,7 @@ void walpe_gl_tex_predecode_cancel (const char *path, guint load_flags)
 
 void walpe_gl_tex_predecode_request (const char *path, guint load_flags, gboolean premultiply)
 {
-    if (!path || !tj_jobs)
+    if (!path || !tex_jobs_exist ())
         return;
     char *key = g_strdup_printf ("%s|%u", path, load_flags & 0xffffu);
     g_mutex_lock (&tj_lock);
@@ -2101,7 +2250,7 @@ void walpe_gl_tex_predecode_request (const char *path, guint load_flags, gboolea
  * nobody is, the caller does it now. */
 static gboolean tex_job_take (const char *path, guint lf, WalpeTex **out, TexPrep *prep)
 {
-    if (!tj_jobs)
+    if (!tex_jobs_exist ())
         return FALSE;
     char *key = g_strdup_printf ("%s|%u", path, lf);
     gboolean got = FALSE;
@@ -2272,6 +2421,18 @@ static GLuint tex_make (const char *path, guint load_flags, GLint wrap, gboolean
         if (got > want && n > 0)
             g_warning ("gl: texture budget (%.1f MiB) reached: %s stored at 1/%d of its size",
                        tc_scope_budget / 1048576.0, path, 1 << got);
+    }
+    if (t->format == WALPE_TEX_RGBA8 && t->nframes == 0 && !prep.valid) {
+        /* larger than the driver's largest texture: halved until it fits */
+        int lim = tex_side_limit (), n = 0;
+        while (lim && n < 8 && (t->width > lim || t->height > lim)) {
+            tex_cpu_halve (t);
+            got++;
+            n++;
+        }
+        if (n > 0)
+            g_warning ("gl: %s is larger than this driver's largest texture (%d texels a side): "
+                       "stored at 1/%d of its size", path, lim, 1 << got);
     }
     int halvings = t->format == WALPE_TEX_RGBA8 ? MAX (0, want - got) : 0;
     if (ckey && hit && tex_dedupe_on ()) {
@@ -2608,6 +2769,18 @@ WalpeGlTex walpe_gl_tex_from_file (const char *path)
         if (halved)
             g_warning ("gl: texture budget (%.1f MiB) reached: %s stored at 1/%d of its size",
                        tc_scope_budget / 1048576.0, path, 1 << halved);
+        {
+            /* larger than the driver's largest texture: halved until it fits */
+            int lim = tex_side_limit (), n = 0;
+            while (lim && t->format == WALPE_TEX_RGBA8 && t->nframes == 0 && n < 8 &&
+                   (t->width > lim || t->height > lim)) {
+                tex_cpu_halve (t);
+                n++;
+            }
+            if (n)
+                g_warning ("gl: %s is larger than this driver's largest texture (%d texels a "
+                           "side): stored at %d x %d", path, lim, t->width, t->height);
+        }
         out.tex = walpe_gl_tex_from_walpetex (t, &out.premult);
         if (out.tex && tc_scope)
             tc_scope_bytes += t->format == WALPE_TEX_RGBA8
@@ -2685,9 +2858,20 @@ WalpeGlTex walpe_gl_tex_from_file (const char *path)
         sw = MAX (1, sw / 2);
         sh = MAX (1, sh / 2);
     }
+    gboolean by_budget = sw != out.width;
+    for (int lim = tex_side_limit (); lim && (sw > lim || sh > lim);) {
+        /* larger than the driver's largest texture */
+        sw = MAX (1, sw / 2);
+        sh = MAX (1, sh / 2);
+    }
     if (sw != out.width) {
         GdkPixbuf *small = gdk_pixbuf_scale_simple (pb, sw, sh, GDK_INTERP_BILINEAR);
-        if (small) {
+        if (small && !by_budget) {
+            g_warning ("gl: %s is larger than this driver's largest texture (%d texels a side): "
+                       "stored at %d x %d", path, tex_side_limit (), sw, sh);
+            g_object_unref (pb);
+            pb = small;
+        } else if (small) {
             g_warning ("gl: texture budget (%.1f MiB) reached: %s stored at %d x %d",
                        tc_scope_budget / 1048576.0, path, sw, sh);
             g_object_unref (pb);

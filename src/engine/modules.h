@@ -15,6 +15,7 @@
 #include "video.h"
 #include "videotex.h"
 #include "web.h"
+#include "scenesound.h"   /* WalpeSoundDecoder */
 
 /* 4 (version 0.12): the web module's web_pointer slot became web_input and
  * web_input_status was appended; WalpeVideo gained `fit` (video.h). */
@@ -38,8 +39,27 @@
  * walpe_video_frame_limit, walpe_video_upload_mode and
  * walpe_video_note_upload from the daemon, and the daemon defines
  * XSetSelectionOwner for what walpe-web.so loads. A module with another
- * number than the daemon's is refused. */
-#define WALPE_MODULE_ABI 10
+ * number than the daemon's is refused.
+ * 12: WalpeWebInput has the keyboard kinds and their fields (key, pressed,
+ * mods, keymap_fd, keymap_size) and the web module's table ends with
+ * web_host; the video module takes walpe_video_hwdec_api and
+ * walpe_video_zerocopy from the daemon; WalpeContent has render_w,
+ * render_h, scale_filter and tex_limit, WalpeLoadOpts video_box_w /
+ * video_box_h, WalpeVideo render_w / render_h; WalpeVideoModule ends with
+ * `sound` (the decoders of compressed sound files, sounddec.c); the modules
+ * take walpe_gl_tex_image_bgra and walpe_gl_tex_sub_image_bgra from the
+ * daemon. (Comments elsewhere that say "module ABI 11" name one of these
+ * changes.)
+ *
+ * NEVER UNLOADED. A module that was loaded stays loaded until the process
+ * ends (modload.c closes a library only when it has no entry symbol).
+ * Scene sound depends on that: its player threads are detached, nobody
+ * waits for them, and a thread may still be inside `sound.read` or
+ * `sound.close` after its wallpaper, its scene and its group are gone
+ * (scenesound.c). Whoever adds a dlclose of walpe-video.so has to wait for
+ * walpe_sound_threads () == 0 first - and those threads may be blocked in
+ * the sound server without a time limit. */
+#define WALPE_MODULE_ABI 12
 
 typedef struct {
     int abi;
@@ -51,6 +71,7 @@ typedef struct {
     int (*web_probe_run) (void);    /* ABI 2: `walpe-daemon --web-probe` */
     char *(*web_input_status) (void);   /* ABI 4 */
     char *(*web_info) (void);           /* ABI 5: what renders WebGL in pages */
+    char *(*web_host) (void);           /* ABI 11: where the pages' windows live */
 } WalpeWebModule;
 
 typedef struct {
@@ -62,6 +83,7 @@ typedef struct {
     void (*tex_set_view) (WalpeVideoTex *v, int w, int h);
     void (*tex_set_paused) (WalpeVideoTex *v, gboolean paused);
     void (*tex_free) (WalpeVideoTex *v);
+    WalpeSoundDecoder sound;        /* ABI 11: MP3 / FLAC / Ogg for scene sound */
 } WalpeVideoModule;
 
 /* module entry points (defined in web.c / video_custom.c) */

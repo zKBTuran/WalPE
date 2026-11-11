@@ -20,6 +20,19 @@ void walpe_glutil_bind_quad_vao (void);
 const char *walpe_gl_shader_header (void);
 const char *walpe_gl_shader_fs_header (void);
 
+/* BGRA bytes (8 bits per channel) into level 0 of the texture bound to
+ * GL_TEXTURE_2D, on either API. _image_ (re)defines the level as w x h
+ * (px NULL: storage only), _sub_image_ replaces a part of a level made by
+ * _image_. GL_UNPACK_ROW_LENGTH / _ALIGNMENT apply as set by the caller.
+ * Desktop OpenGL: glTexImage2D (GL_RGBA8, ..., GL_BGRA, GL_UNSIGNED_BYTE,
+ * px) and glTexSubImage2D (..., GL_BGRA, ...) - the same calls as written
+ * out. OpenGL ES: a GL_BGRA_EXT texture where the driver has
+ * GL_EXT_texture_format_BGRA8888; else the bytes are reordered on the CPU
+ * into an RGBA8 texture (not with a pixel unpack buffer bound). Either way
+ * the texture samples, blits and mipmaps like the desktop one. */
+WALPE_API void walpe_gl_tex_image_bgra (int w, int h, const void *px);
+WALPE_API void walpe_gl_tex_sub_image_bgra (int x, int y, int w, int h, const void *px);
+
 /* EGL display of the GTK GL context, set by the daemon at realize time
  * (GDK may use GLX while EGL images still come from the paired display) */
 void        walpe_gl_set_egl_display (void *egl_display);

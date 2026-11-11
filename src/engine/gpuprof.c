@@ -503,6 +503,10 @@ char *walpe_prof_format_text (const WalpeProfReport *r)
         const WalpeProfMon *m = &r->mons[i];
         g_string_append_printf (s, "\n== monitor %d (%s, %dx%d", m->monitor,
                                 m->name[0] ? m->name : "?", m->w, m->h);
+        /* the megapixel figures below count what was really shaded: at
+         * another render resolution than the monitor's, pixels of that size */
+        if (m->render_w > 0 && m->render_h > 0 && (m->render_w != m->w || m->render_h != m->h))
+            g_string_append_printf (s, ", rendered at %dx%d", m->render_w, m->render_h);
         if (m->hz > 0)
             g_string_append_printf (s, " @ %.1f Hz", m->hz);
         g_string_append_printf (s, "): %s", m->type[0] ? m->type : "none");
@@ -724,6 +728,12 @@ char *walpe_prof_format_text (const WalpeProfReport *r)
         break;   /* one GPU: the same numbers on every monitor */
     }
 
+    /* the kernel's and the driver's own accounting of the run */
+    if (r->kernel) {
+        g_string_append_c (s, '\n');
+        walpe_gpu_stat_format_profile (r->kernel, s);
+    }
+
     /* driver messages: performance first, then by count */
     guint ptotal = 0, pn = report_perf_msgs (r, &ptotal), all = 0;
     for (guint i = 0; i < r->n_msgs; i++)
@@ -808,6 +818,8 @@ char *walpe_prof_format_json (const WalpeProfReport *r)
         jb_s (b, "name", m->name);
         jb_i (b, "width", m->w);
         jb_i (b, "height", m->h);
+        jb_i (b, "render_width", m->render_w > 0 ? m->render_w : m->w);
+        jb_i (b, "render_height", m->render_h > 0 ? m->render_h : m->h);
         jb_num (b, "refresh_hz", m->hz);
         jb_s (b, "type", m->type);
         jb_s (b, "wallpaper", m->wallpaper);
@@ -919,6 +931,11 @@ char *walpe_prof_format_json (const WalpeProfReport *r)
     }
     jb_i (b, "total_bytes", total);
     json_builder_end_object (b);
+
+    if (r->kernel) {
+        json_builder_set_member_name (b, "kernel_gpu_stats");
+        walpe_gpu_stat_to_json (r->kernel, b);
+    }
 
     json_builder_set_member_name (b, "driver_messages");
     json_builder_begin_array (b);
@@ -1472,6 +1489,39 @@ static void (*o_glCopyTexSubImage2D) (GLenum, GLint, GLint, GLint, GLint, GLint,
 static void (*o_glLinkProgram) (GLuint);
 static void (*o_glViewport) (GLint, GLint, GLsizei, GLsizei);
 
+/* The real entry point a wrapper forwards to.
+ *
+ * The slot of an entry point is a plain pointer inside libepoxy that every
+ * GL call in the process loads; the main thread stores a wrapper into it
+ * while render threads are drawing. Nothing orders that store against a
+ * second one, so a wrapper must be complete in itself the moment its
+ * address can be seen. It used to depend on its o_ pointer having been
+ * stored first by the main thread: true on x86-64, where another CPU sees
+ * stores in the order they were made, not on arm64, where a render thread
+ * may see the wrapper in the slot and still read NULL here on the first
+ * profile of a process - and jump to it.
+ *
+ * So each wrapper looks its entry point up itself when its pointer is
+ * still empty. The pointer is a cache of a value that is the same for
+ * every thread and published through nothing else: a relaxed atomic load
+ * and store are enough (the reasoning of common/lazy.h), and the load is
+ * the same instruction the plain read was. Only while a profile runs. */
+static void (*prof_resolve (const char *name)) (void)
+{
+    void (*f) (void) = (void (*) (void)) eglGetProcAddress (name);
+    if (G_UNLIKELY (!f))   /* (hooks_install found an address for every hook) */
+        g_error ("gpuprof: no address for %s", name);
+    return f;
+}
+
+#define PROF_REAL(fn) (__extension__ ({ \
+    __typeof__ (o_##fn) real_ = __atomic_load_n (&o_##fn, __ATOMIC_RELAXED); \
+    if (G_UNLIKELY (!real_)) { \
+        real_ = (__typeof__ (o_##fn)) prof_resolve (#fn); \
+        __atomic_store_n (&o_##fn, real_, __ATOMIC_RELAXED); \
+    } \
+    real_; }))
+
 static inline void prof_draw (ProfThread *T)
 {
     if (T && T->in_frame) {
@@ -1514,21 +1564,21 @@ static void w_glDrawArrays (GLenum mode, GLint first, GLsizei count)
 {
     PROF_T ();
     prof_draw (T);
-    o_glDrawArrays (mode, first, count);
+    PROF_REAL (glDrawArrays) (mode, first, count);
 }
 
 static void w_glDrawElements (GLenum mode, GLsizei count, GLenum type, const void *indices)
 {
     PROF_T ();
     prof_draw (T);
-    o_glDrawElements (mode, count, type, indices);
+    PROF_REAL (glDrawElements) (mode, count, type, indices);
 }
 
 static void w_glDrawArraysInstanced (GLenum mode, GLint first, GLsizei count, GLsizei n)
 {
     PROF_T ();
     prof_draw (T);
-    o_glDrawArraysInstanced (mode, first, count, n);
+    PROF_REAL (glDrawArraysInstanced) (mode, first, count, n);
 }
 
 static void w_glDrawElementsInstanced (GLenum mode, GLsizei count, GLenum type,
@@ -1536,14 +1586,14 @@ static void w_glDrawElementsInstanced (GLenum mode, GLsizei count, GLenum type,
 {
     PROF_T ();
     prof_draw (T);
-    o_glDrawElementsInstanced (mode, count, type, indices, n);
+    PROF_REAL (glDrawElementsInstanced) (mode, count, type, indices, n);
 }
 
 static void w_glClear (GLbitfield mask)
 {
     PROF_T ();
     PROF_C (T, WALPE_PROF_C_CLEARS, 1);
-    o_glClear (mask);
+    PROF_REAL (glClear) (mask);
 }
 
 static void w_glBlitFramebuffer (GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLint dx0, GLint dy0,
@@ -1552,7 +1602,7 @@ static void w_glBlitFramebuffer (GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLi
     PROF_T ();
     PROF_C (T, WALPE_PROF_C_BLITS, 1);
     PROF_C (T, WALPE_PROF_C_BLIT_PIXELS, (gint64) ABS (dx1 - dx0) * ABS (dy1 - dy0));
-    o_glBlitFramebuffer (sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1, mask, filter);
+    PROF_REAL (glBlitFramebuffer) (sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1, mask, filter);
 }
 
 static void w_glBindFramebuffer (GLenum target, GLuint fb)
@@ -1560,7 +1610,7 @@ static void w_glBindFramebuffer (GLenum target, GLuint fb)
     PROF_T ();
     if (target != GL_READ_FRAMEBUFFER)
         PROF_C (T, WALPE_PROF_C_FBO_BINDS, 1);
-    o_glBindFramebuffer (target, fb);
+    PROF_REAL (glBindFramebuffer) (target, fb);
 }
 
 static void w_glTexImage2D (GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h,
@@ -1570,7 +1620,7 @@ static void w_glTexImage2D (GLenum target, GLint level, GLint ifmt, GLsizei w, G
     if (pixels)
         prof_upload (T, WALPE_PROF_C_TEX_UPLOADS, WALPE_PROF_C_TEX_UPLOAD_BYTES,
                      walpe_prof_image_bytes (format, type, w, h));
-    o_glTexImage2D (target, level, ifmt, w, h, border, format, type, pixels);
+    PROF_REAL (glTexImage2D) (target, level, ifmt, w, h, border, format, type, pixels);
 }
 
 static void w_glTexSubImage2D (GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h,
@@ -1579,7 +1629,7 @@ static void w_glTexSubImage2D (GLenum target, GLint level, GLint x, GLint y, GLs
     PROF_T ();
     prof_upload (T, WALPE_PROF_C_TEX_UPLOADS, WALPE_PROF_C_TEX_UPLOAD_BYTES,
                  walpe_prof_image_bytes (format, type, w, h));
-    o_glTexSubImage2D (target, level, x, y, w, h, format, type, pixels);
+    PROF_REAL (glTexSubImage2D) (target, level, x, y, w, h, format, type, pixels);
 }
 
 static void w_glCompressedTexImage2D (GLenum target, GLint level, GLenum ifmt, GLsizei w,
@@ -1588,7 +1638,7 @@ static void w_glCompressedTexImage2D (GLenum target, GLint level, GLenum ifmt, G
     PROF_T ();
     if (data && size > 0)
         prof_upload (T, WALPE_PROF_C_TEX_UPLOADS, WALPE_PROF_C_TEX_UPLOAD_BYTES, (gsize) size);
-    o_glCompressedTexImage2D (target, level, ifmt, w, h, border, size, data);
+    PROF_REAL (glCompressedTexImage2D) (target, level, ifmt, w, h, border, size, data);
 }
 
 static void w_glBufferData (GLenum target, GLsizeiptr size, const void *data, GLenum usage)
@@ -1596,7 +1646,7 @@ static void w_glBufferData (GLenum target, GLsizeiptr size, const void *data, GL
     PROF_T ();
     if (data && size > 0)
         prof_upload (T, WALPE_PROF_C_BUF_UPLOADS, WALPE_PROF_C_BUF_UPLOAD_BYTES, (gsize) size);
-    o_glBufferData (target, size, data, usage);
+    PROF_REAL (glBufferData) (target, size, data, usage);
 }
 
 static void w_glBufferSubData (GLenum target, GLintptr off, GLsizeiptr size, const void *data)
@@ -1604,7 +1654,7 @@ static void w_glBufferSubData (GLenum target, GLintptr off, GLsizeiptr size, con
     PROF_T ();
     if (size > 0)
         prof_upload (T, WALPE_PROF_C_BUF_UPLOADS, WALPE_PROF_C_BUF_UPLOAD_BYTES, (gsize) size);
-    o_glBufferSubData (target, off, size, data);
+    PROF_REAL (glBufferSubData) (target, off, size, data);
 }
 
 static void w_glReadPixels (GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type,
@@ -1612,35 +1662,35 @@ static void w_glReadPixels (GLint x, GLint y, GLsizei w, GLsizei h, GLenum forma
 {
     PROF_T ();
     PROF_C (T, WALPE_PROF_C_READBACKS, 1);
-    o_glReadPixels (x, y, w, h, format, type, pixels);
+    PROF_REAL (glReadPixels) (x, y, w, h, format, type, pixels);
 }
 
 static void w_glGetTexImage (GLenum target, GLint level, GLenum format, GLenum type, void *pixels)
 {
     PROF_T ();
     PROF_C (T, WALPE_PROF_C_READBACKS, 1);
-    o_glGetTexImage (target, level, format, type, pixels);
+    PROF_REAL (glGetTexImage) (target, level, format, type, pixels);
 }
 
 static void w_glFinish (void)
 {
     PROF_T ();
     PROF_C (T, WALPE_PROF_C_FINISHES, 1);
-    o_glFinish ();
+    PROF_REAL (glFinish) ();
 }
 
 static void w_glFlush (void)
 {
     PROF_T ();
     PROF_C (T, WALPE_PROF_C_FLUSHES, 1);
-    o_glFlush ();
+    PROF_REAL (glFlush) ();
 }
 
 static void w_glGenerateMipmap (GLenum target)
 {
     PROF_T ();
     PROF_C (T, WALPE_PROF_C_MIPGENS, 1);
-    o_glGenerateMipmap (target);
+    PROF_REAL (glGenerateMipmap) (target);
 }
 
 static void w_glCopyTexSubImage2D (GLenum target, GLint level, GLint xo, GLint yo, GLint x,
@@ -1648,14 +1698,14 @@ static void w_glCopyTexSubImage2D (GLenum target, GLint level, GLint xo, GLint y
 {
     PROF_T ();
     PROF_C (T, WALPE_PROF_C_TEX_COPIES, 1);
-    o_glCopyTexSubImage2D (target, level, xo, yo, x, y, w, h);
+    PROF_REAL (glCopyTexSubImage2D) (target, level, xo, yo, x, y, w, h);
 }
 
 static void w_glLinkProgram (GLuint program)
 {
     PROF_T ();
     PROF_C (T, WALPE_PROF_C_PROGRAM_LINKS, 1);
-    o_glLinkProgram (program);
+    PROF_REAL (glLinkProgram) (program);
 }
 
 /* not counted: the size a quad drawn next is measured against */
@@ -1666,7 +1716,7 @@ static void w_glViewport (GLint x, GLint y, GLsizei w, GLsizei h)
         T->vw = w;
         T->vh = h;
     }
-    o_glViewport (x, y, w, h);
+    PROF_REAL (glViewport) (x, y, w, h);
 }
 
 typedef void (*ProfFn) (void);
@@ -1674,12 +1724,11 @@ typedef struct {
     const char *name;
     void *slot;        /* &epoxy_glFoo */
     ProfFn wrap;
-    void *orig;        /* &o_glFoo */
-    ProfFn saved;      /* what the slot held before */
-    gboolean on;
+    ProfFn saved;      /* main thread: what the slot held before */
+    gint on;           /* atomic: main sets it, the render threads read it (hooks_check) */
 } ProfHook;
 
-#define PROF_HOOK(fn) { #fn, &epoxy_##fn, (ProfFn) w_##fn, &o_##fn, NULL, FALSE }
+#define PROF_HOOK(fn) { #fn, &epoxy_##fn, (ProfFn) w_##fn, NULL, 0 }
 static ProfHook prof_hooks[] = {
     PROF_HOOK (glDrawArrays), PROF_HOOK (glDrawElements), PROF_HOOK (glDrawArraysInstanced),
     PROF_HOOK (glDrawElementsInstanced), PROF_HOOK (glClear), PROF_HOOK (glBlitFramebuffer),
@@ -1691,7 +1740,10 @@ static ProfHook prof_hooks[] = {
 };
 
 /* the slots are function pointers of different types: read and written as
- * bytes (one aligned pointer store each; readers see the old or the new) */
+ * bytes (one aligned pointer store each; readers see the old or the new,
+ * and either can be called at any time: PROF_REAL). They are libepoxy's
+ * own variables, which it also stores into from whichever thread makes the
+ * first call of an entry point; they cannot be made atomics from here. */
 static inline ProfFn slot_get (void *slot)
 {
     ProfFn f;
@@ -1707,8 +1759,8 @@ static inline void slot_set (void *slot, ProfFn f)
 /* the profiler's own glFinish (sync mode): not one of the renderer's */
 static void prof_finish (void)
 {
-    if (P.hooks_installed && o_glFinish)
-        o_glFinish ();
+    if (P.hooks_installed)
+        PROF_REAL (glFinish) ();
     else
         glFinish ();
 }
@@ -1718,11 +1770,10 @@ static gboolean hooks_install (void)
 {
     if (P.no_hooks)
         return FALSE;
-    /* all or nothing: the real entry points first */
-    ProfFn real[G_N_ELEMENTS (prof_hooks)];
+    /* all or nothing: every real entry point can be looked up (the
+     * wrappers do that themselves, PROF_REAL) */
     for (guint i = 0; i < G_N_ELEMENTS (prof_hooks); i++) {
-        real[i] = (ProfFn) eglGetProcAddress (prof_hooks[i].name);
-        if (!real[i]) {
+        if (!eglGetProcAddress (prof_hooks[i].name)) {
             g_message ("gpuprof: no address for %s: draw / upload counters are off",
                        prof_hooks[i].name);
             return FALSE;
@@ -1730,10 +1781,17 @@ static gboolean hooks_install (void)
     }
     for (guint i = 0; i < G_N_ELEMENTS (prof_hooks); i++) {
         ProfHook *h = &prof_hooks[i];
-        slot_set (h->orig, real[i]);
-        h->saved = slot_get (h->slot);
+        /* (a render thread's hooks_check may have put the wrapper back
+         * after the last hooks_remove - it read `on` before main cleared
+         * it. The wrapper is then not "what the slot held before": taken
+         * as that, hooks_remove would restore the wrapper to itself for
+         * the rest of the process. The value saved by the earlier profile
+         * stays the one to restore.) */
+        ProfFn cur = slot_get (h->slot);
+        if (cur != h->wrap)
+            h->saved = cur;
         slot_set (h->slot, h->wrap);
-        h->on = TRUE;
+        g_atomic_int_set (&h->on, 1);
     }
     return TRUE;
 }
@@ -1742,14 +1800,14 @@ static void hooks_remove (void)
 {
     for (guint i = 0; i < G_N_ELEMENTS (prof_hooks); i++) {
         ProfHook *h = &prof_hooks[i];
-        if (!h->on)
+        if (!g_atomic_int_get (&h->on))
             continue;
         /* libepoxy resolves an entry point at its first call and stores
          * the result in the slot: if that happened meanwhile (the slot is
          * not ours any more) its value is the one to keep */
         if (slot_get (h->slot) == h->wrap)
             slot_set (h->slot, h->saved);
-        h->on = FALSE;
+        g_atomic_int_set (&h->on, 0);
     }
 }
 
@@ -1759,7 +1817,7 @@ static void hooks_check (void)
 {
     for (guint i = 0; i < G_N_ELEMENTS (prof_hooks); i++) {
         ProfHook *h = &prof_hooks[i];
-        if (h->on && slot_get (h->slot) != h->wrap)
+        if (g_atomic_int_get (&h->on) && slot_get (h->slot) != h->wrap)
             slot_set (h->slot, h->wrap);
     }
 }
@@ -1958,6 +2016,8 @@ static void info_copy (ProfThread *T, const WalpeProfThreadInfo *info)
     prof_copy (m->name, sizeof (m->name), info->name);
     m->w = info->w;
     m->h = info->h;
+    m->render_w = info->render_w > 0 ? info->render_w : info->w;
+    m->render_h = info->render_h > 0 ? info->render_h : info->h;
     m->hz = info->hz;
     prof_copy (m->type, sizeof (m->type), info->type);
     prof_copy (m->role, sizeof (m->role), info->role);
@@ -2004,6 +2064,7 @@ static void thread_attach (ProfThread *T, const WalpeProfThreadInfo *info)
     WalpeProfMon *m = &T->mon;
     info_copy (T, info);
     prof_copy (m->gl_vendor, sizeof (m->gl_vendor), (const char *) glGetString (GL_VENDOR));
+    walpe_gpustat_set_gl_vendor (m->gl_vendor);   /* which GPU the kernel-side figures are about */
     prof_copy (m->gl_renderer, sizeof (m->gl_renderer), (const char *) glGetString (GL_RENDERER));
     prof_copy (m->gl_version, sizeof (m->gl_version), (const char *) glGetString (GL_VERSION));
     m->gl_es = !epoxy_is_desktop_gl ();
@@ -2062,6 +2123,11 @@ static void thread_finalize (ProfThread *T, const WalpeProfThreadInfo *info)
     m->mem_count[WALPE_PROF_MEM_FX_TARGETS] = info->fx_count;
     m->mem_bytes[WALPE_PROF_MEM_SURFACES] = (gint64) info->w * info->h * 4 * 2;
     m->mem_count[WALPE_PROF_MEM_SURFACES] = 2;
+    if (info->render_target && info->render_w > 0 && info->render_h > 0) {
+        /* the picture of the chosen render size the frame is scaled from */
+        m->mem_bytes[WALPE_PROF_MEM_SURFACES] += (gint64) info->render_w * info->render_h * 4;
+        m->mem_count[WALPE_PROF_MEM_SURFACES] = 3;
+    }
     mem_snapshot (T);
     g_mutex_lock (&P.lock);
     T->finalized = TRUE;
@@ -2470,6 +2536,115 @@ static gboolean env_off (const char *name)
     return e && (*e == '0' || !g_ascii_strcasecmp (e, "off") || !g_ascii_strcasecmp (e, "no"));
 }
 
+/* ---- the kernel's view of a run (common/gpustat.h) ----------------------
+ * A thread of its own for the length of the run: it reads /proc and /sys
+ * once a second, so neither the main loop nor a render thread waits for a
+ * file. It reads this process, the device's sysfs attributes and - for the
+ * "other programs" line - the DRM statistics and names of the user's other
+ * processes; it never starts a program (nvidia-smi is walpe-ctl's and the
+ * report script's business). WALPE_GPU_PROFILE_KERNEL=0 leaves the section
+ * out, =self reads this process and the device only. On NVIDIA's kernel
+ * driver the section is off unless the variable asks for it (=1, =self):
+ * the driver publishes nothing there, and a profile on it is the one of
+ * before - no thread of ours, the same report (common/gpustat.h
+ * walpe_gpustat_profile_kernel ()). */
+static struct {
+    GThread *thread;
+    GMutex lock;
+    GCond cond;
+    gboolean stop;                /* the run is over: one last sample, then the report */
+    gboolean done;
+    gboolean self_only;
+    WalpeGpuStatReport *report;
+} K;
+
+static gpointer prof_kernel_thread (gpointer user)
+{
+    (void) user;
+    WalpeGpuStatOpts o = { .target_pid = -1, .uid = -1,
+                           .flags = K.self_only ? 0 : WALPE_GPUSTAT_OTHERS };
+    WalpeGpuSampler *s = walpe_gpu_sampler_new (&o);
+    walpe_gpu_sampler_tick (s);
+    g_mutex_lock (&K.lock);
+    for (;;) {
+        gint64 until = g_get_monotonic_time () + G_USEC_PER_SEC;
+        while (!K.stop && g_cond_wait_until (&K.cond, &K.lock, until))
+            ;
+        gboolean last = K.stop;
+        g_mutex_unlock (&K.lock);
+        walpe_gpu_sampler_tick (s);
+        g_mutex_lock (&K.lock);
+        if (last)
+            break;
+    }
+    g_mutex_unlock (&K.lock);
+    WalpeGpuStatReport *r = walpe_gpu_sampler_report (s);
+    walpe_gpu_sampler_free (s);
+    g_mutex_lock (&K.lock);
+    K.report = r;
+    K.done = TRUE;
+    g_mutex_unlock (&K.lock);
+    return NULL;
+}
+
+/* main thread: the sampler of the run before (a run whose collection gave
+ * up on it) is waited for first - it ends within one sample */
+static void prof_kernel_start (void)
+{
+    if (K.thread) {
+        g_mutex_lock (&K.lock);
+        K.stop = TRUE;
+        g_cond_signal (&K.cond);
+        g_mutex_unlock (&K.lock);
+        g_thread_join (K.thread);
+        K.thread = NULL;
+    }
+    walpe_gpu_stat_report_free (K.report);
+    K.report = NULL;
+    K.stop = K.done = FALSE;
+    /* the variable decides; not set: everything, and nothing on NVIDIA's
+     * kernel driver (the device list of sysfs is read for that, here, once) */
+    WalpeGpuProfileKernel mode =
+        walpe_gpustat_profile_kernel (g_getenv ("WALPE_GPU_PROFILE_KERNEL"), NULL);
+    if (mode == WALPE_GPU_PROFILE_KERNEL_OFF)
+        return;
+    K.self_only = mode == WALPE_GPU_PROFILE_KERNEL_SELF;
+    K.thread = g_thread_try_new ("walpe-gpustat", prof_kernel_thread, NULL, NULL);
+}
+
+static void prof_kernel_stop (void)
+{
+    if (!K.thread)
+        return;
+    g_mutex_lock (&K.lock);
+    K.stop = TRUE;
+    g_cond_signal (&K.cond);
+    g_mutex_unlock (&K.lock);
+}
+
+/* TRUE when there is nothing (more) to wait for */
+static gboolean prof_kernel_done (void)
+{
+    if (!K.thread)
+        return TRUE;
+    g_mutex_lock (&K.lock);
+    gboolean done = K.done;
+    g_mutex_unlock (&K.lock);
+    return done;
+}
+
+/* the run's report (the caller frees it), NULL = none */
+static WalpeGpuStatReport *prof_kernel_take (void)
+{
+    if (!K.thread || !prof_kernel_done ())
+        return NULL;   /* still reading: prof_kernel_start () collects the thread later */
+    g_thread_join (K.thread);
+    K.thread = NULL;
+    WalpeGpuStatReport *r = K.report;
+    K.report = NULL;
+    return r;
+}
+
 static gboolean prof_stop_cb (gpointer user)
 {
     (void) user;
@@ -2489,6 +2664,7 @@ static gboolean prof_stop_cb (gpointer user)
                                    120 * G_USEC_PER_SEC);
     if (P.wake)
         P.wake (P.wake_user);
+    prof_kernel_stop ();   /* its last sample is taken now */
     P.collect_id = g_timeout_add (25, prof_collect_cb, NULL);
     return G_SOURCE_REMOVE;
 }
@@ -2524,6 +2700,7 @@ gboolean walpe_prof_start (double seconds, gboolean shared, guint flags, const c
     __atomic_store_n (&P.max_frame_ns, 0, __ATOMIC_RELAXED);
     __atomic_store_n (&P.t_stop_ns, 0, __ATOMIC_RELAXED);
     P.hooks_installed = hooks_install ();
+    prof_kernel_start ();
     g_atomic_int_inc (&P.gen);
     g_atomic_int_set (&P.state, PROF_RUNNING);
     __atomic_store_n (&walpe_prof_enabled_, 1, __ATOMIC_RELAXED);
@@ -2636,6 +2813,8 @@ static gboolean prof_collect_cb (gpointer user)
     (void) user;
     guint gen = (guint) g_atomic_int_get (&P.gen);
     gboolean late = g_get_monotonic_time () >= P.collect_deadline_us;
+    if (!late && !prof_kernel_done ())
+        return G_SOURCE_CONTINUE;   /* the kernel-side sampler is at its last sample */
     g_mutex_lock (&P.lock);
     guint waiting = 0;
     for (guint i = 0; i < P.threads->len; i++) {
@@ -2714,6 +2893,7 @@ static gboolean prof_collect_cb (gpointer user)
     r.n_msgs = P.n_msgs;
     r.msgs_dropped = P.msgs_dropped;
     g_mutex_unlock (&P.lock);
+    r.kernel = prof_kernel_take ();
 
     char *text = walpe_prof_format_text (&r);
     if (n_late || (P.expected > 0 && (int) r.n_mons + (int) n_late < P.expected)) {
@@ -2728,6 +2908,7 @@ static gboolean prof_collect_cb (gpointer user)
         g_free (r.mons[i].rows);
     g_free (r.mons);
     g_free (r.msgs);
+    walpe_gpu_stat_report_free (r.kernel);
 
     char *dir = g_build_filename (g_get_user_cache_dir (), "walpe", NULL);
     g_mkdir_with_parents (dir, 0700);

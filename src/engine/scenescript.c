@@ -18,6 +18,9 @@ gboolean walpe_ss_supported_prop (const char *prop)
     static const char *const ok[] = { "text", "visible", "alpha", "origin", "scale",
                                       "angles", "color", "pointsize", "maxwidth",
                                       "padding",
+                                      /* the layer's depth in the camera parallax (the
+                                       * scene asks for it only where it has one) */
+                                      "parallaxDepth",
                                       /* particle instance overrides */
                                       "inst.rate", "inst.count", "inst.size", "inst.lifetime",
                                       "inst.alpha", "inst.speed", "inst.colorn", NULL };
@@ -336,7 +339,7 @@ static const char *PRELUDE =
 "  addColor(o) { return b.__put(o, typeof o.value === 'string' ? new Vec3(o.value) : (o.value || new Vec3(1, 1, 1))); },\n"
 "  addFile(o) { return b.__put(o, o.value); }, addDirectory(o) { return b.__put(o, o.value); },\n"
 "  addGroup() { return b; }, finish() { return p; } }; return b; }\n"
-"const __vecprops = { origin: 3, scale: 3, angles: 3, color: 3 };\n"
+"const __vecprops = { origin: 3, scale: 3, angles: 3, color: 3, parallaxDepth: 2 };\n"
 /* particle instance overrides (host properties "inst.*"): colorn and the
  * control points are vectors, the rest multipliers */
 "function __instvec(p) { return p.length > 6 && p[4] === '.' && p[5] === 'c' && p !== 'inst.count'; }\n"
@@ -401,6 +404,19 @@ static const char *PRELUDE =
 "function __lidx(l) { return l === undefined || l === null ? -1 : typeof l === 'number' ? l : typeof l === 'string' ? __host.find(l) : (typeof l.__i === 'number' ? l.__i : -1); }\n"
 "const __texAnim = { play() {}, stop() {}, pause() {}, isPlaying() { return false; }, setFrame() {}, getFrame() { return 0; }, join() {},\n"
 "  getCurrentTime() { return 0; }, setCurrentTime() {}, addEndedCallback() {}, frameCount: 0, duration: 0, rate: 1, loop: true };\n"
+/* ITextureAnimation of a layer that plays a sprite sheet: every member goes
+ * to the host by the layer's index and a fixed name; the host keeps frame
+ * numbers and times inside the sheet's own table. There is nothing here a
+ * script could name a file or another texture with. */
+"class __TexAnim { constructor(i) { this.__i = i; }\n"
+"  get frameCount() { return __host.get(this.__i, 'texanim.frames') || 0; } get duration() { return __host.get(this.__i, 'texanim.duration') || 0; }\n"
+"  get rate() { const r = __host.get(this.__i, 'texanim.rate'); return typeof r === 'number' ? r : 1; } set rate(v) { __host.set(this.__i, 'texanim.rate', +v); }\n"
+"  get loop() { const l = __host.get(this.__i, 'texanim.loop'); return l === undefined ? true : !!l; } set loop(v) { __host.set(this.__i, 'texanim.loop', v ? 1 : 0); }\n"
+"  play() { __host.set(this.__i, 'texanim.play', 1); } pause() { __host.set(this.__i, 'texanim.play', 0); } stop() { __host.set(this.__i, 'texanim.play', -1); }\n"
+"  isPlaying() { return !!__host.get(this.__i, 'texanim.playing'); } getFrame() { return __host.get(this.__i, 'texanim.frame') || 0; }\n"
+"  setFrame(f) { __host.set(this.__i, 'texanim.frame', +f); } join() { __host.set(this.__i, 'texanim.join', 1); }\n"
+"  getCurrentTime() { return __host.get(this.__i, 'texanim.time') || 0; } setCurrentTime(t) { __host.set(this.__i, 'texanim.time', +t); }\n"
+"  addEndedCallback() {} }\n"
 "function __animLayer() { return { fps: 30, frameCount: 0, duration: 0, name: '', rate: 1, blend: 1, visible: true, play() {}, pause() {}, stop() {},\n"
 "  isPlaying() { return false; }, getFrame() { return 0; }, setFrame() {}, addEndedCallback() {}, getAnimation() { return __anim; } }; }\n"
 /* IParticleSystemInstance: the object's instance overrides, live. On a
@@ -411,13 +427,22 @@ static const char *PRELUDE =
 "    set(v) { if (vec && typeof v === 'number') v = new Vec3(v); keep[k] = v; __set(i, 'inst.' + k, v); } });\n"
 "  for (const k of ['alpha', 'size', 'count', 'speed', 'lifetime', 'rate']) def(k, false);\n"
 "  def('colorn', true); for (let k = 0; k < 8; k++) def('controlpoint' + k, true); return o; }\n"
-"class Layer { constructor(i) { this.__i = i; this.parallaxDepth = new Vec2(1, 1); }\n"
+/* parallaxDepth: the host's value in a scene with camera parallax (reads
+ * and writes reach the layer); elsewhere the host has none and it is the
+ * plain value it always was, kept here. An own property either way. */
+"class Layer { constructor(i) { this.__i = i; let pd = new Vec2(1, 1);\n"
+"    Object.defineProperty(this, 'parallaxDepth', { enumerable: true, configurable: true,\n"
+"      get() { const h = __get(i, 'parallaxDepth'); return h !== undefined ? h : pd; },\n"
+"      set(v) { pd = v; __set(i, 'parallaxDepth', v); } }); }\n"
 "  get name() { return __host.name(this.__i); }\n"
 "  get angles() { return __lget(this.__i, 'angles'); } set angles(v) { __lset(this.__i, 'angles', v); }\n"
 "  get size() { return __get(this.__i, 'size') || new Vec2(0, 0); } set size(v) {}\n"
 "  get backgroundcolor() { return this.__bg || (this.__bg = new Vec3(0, 0, 0)); } set backgroundcolor(v) { this.__bg = new Vec3(v); }\n"
 "  get instance() { return this.__inst || (this.__inst = __instance(this.__i)); }\n"
-"  getAnimation(n) { return __animFind(this.__i, -1, -1, n); } getTextureAnimation() { return __texAnim; } getVideoTexture() { return __texAnim; }\n"
+"  getAnimation(n) { return __animFind(this.__i, -1, -1, n); } getVideoTexture() { return __texAnim; }\n"
+/* the layer's animated (sprite sheet) texture, driven by the host; a layer
+ * without one gets the inert object */
+"  getTextureAnimation() { return __host.get(this.__i, 'texanim.frames') ? (this.__ta || (this.__ta = new __TexAnim(this.__i))) : __texAnim; }\n"
 "  getEffect(n) { return __effect(this.__i, typeof n === 'number' ? n : __host.fxfind(this.__i, '' + n)); }\n"
 "  getEffectCount() { return __host.fxcount(this.__i); }\n"
 "  getParent() { const p = __parentOf(this.__i); return p >= 0 ? __layer(p) : undefined; }\n"
@@ -453,7 +478,14 @@ static const char *PRELUDE =
 "  Object.defineProperty(Layer.prototype, p, { get() { return __get(this.__i, p); }, set(v) { __set(this.__i, p, v); }, configurable: true });\n"
 /* what the renderer does not have: plain values a script can read and write */
 "Object.assign(Layer.prototype, { perspective: false, alignment: 'center', opaquebackground: false, anchor: 'none', fov: 50, zoom: 1,\n"
-"  volume: 1, rootmotion: false });\n"
+"  rootmotion: false });\n"
+/* volume: the volume of a sound layer that plays (the host answers with a
+ * number and takes the new one: scenenode_sound.h); on every other layer,
+ * and while sound is switched off, a plain value that starts at 1 as before */
+"Object.defineProperty(Layer.prototype, 'volume', { get() { const v = __host.get(this.__i, 'volume');\n"
+"    return typeof v === 'number' ? v : (this.__vol === undefined ? 1 : this.__vol); },\n"
+"  set(v) { Object.defineProperty(this, '__vol', { value: v, writable: true, configurable: true });\n"
+"    if (typeof v === 'number' && isFinite(v)) __host.set(this.__i, 'volume', v); }, enumerable: true, configurable: true });\n"
 "const __layers = [];\n"
 "function __layer(i) { if (i < 0) return null; return __layers[i] || (__layers[i] = new Layer(i)); }\n"
 /* thisScene.createLayer(): layers cannot be added to a loaded scene. The
@@ -466,6 +498,8 @@ static const char *PRELUDE =
 "  for (const k in d) Object.defineProperty(g, k, { value: d[k], writable: true, enumerable: true, configurable: true });\n"
 "  if (!__ghostLogged) { __ghostLogged = true; __host.log('thisScene.createLayer(): not supported, the new layer is not drawn'); }\n"
 "  return g; }\n"
+/* what scripts set of the camera (eye, center, up); the zoom lives with the host */
+"const __cam = {};\n"
 "const thisScene = { getLayer(n) { return __layer(typeof n === 'number' ? n : __host.find('' + n)); },\n"
 "  getLayerByID(id) { const n = __host.count(); id = +id; for (let i = 0; i < n; i++) if (__host.get(i, 'id') === id) return __layer(i); return null; },\n"
 "  getLayerIndex(l) { return __lidx(l); }, getLayerCount() { return __host.count(); },\n"
@@ -474,7 +508,17 @@ static const char *PRELUDE =
 "  getInitialLayerConfig(l) { const i = __lidx(l); if (i < 0 || !__host.name(i) && __host.name(i) !== '') return {};\n"
 "    const L = __layer(i), c = { name: L.name, origin: L.origin, scale: L.scale, angles: L.angles, visible: L.visible, alpha: L.alpha, color: L.color };\n"
 "    if (L.text !== undefined) c.text = L.text; return c; },\n"
-"  getCameraTransforms() { return { eye: new Vec3(0, 0, 1), center: new Vec3(0, 0, 0), up: new Vec3(0, 1, 0), zoom: 1 }; }, setCameraTransforms() {},\n"
+/* The camera of a 2D scene: the zoom is the view's zoom, and an eye moved
+ * sideways pans the view (the eye starts at 0 0 for scripts); center and up
+ * are kept as given. The host has no zoom to give while scripts are not
+ * to move the view: the answer is then what it always was - zoom 1 and the
+ * fixed eye, center and up, whatever a script has set (that is kept for
+ * the day the host has a zoom again). */
+"  getCameraTransforms() { const z = __host.get(-1, 'scene.zoom'), on = typeof z === 'number';\n"
+"    return Object.assign({ eye: new Vec3(0, 0, 1), center: new Vec3(0, 0, 0), up: new Vec3(0, 1, 0) }, on ? __cam : null, { zoom: on ? z : 1 }); },\n"
+"  setCameraTransforms(t) { if (!t || typeof t !== 'object') return; for (const k of ['eye', 'center', 'up']) if (t[k] !== undefined && t[k] !== null) __cam[k] = new Vec3(t[k]);\n"
+"    const z = +t.zoom; if (isFinite(z) && z > 0) __host.set(-1, 'scene.zoom', z);\n"
+"    if (__cam.eye) __host.set(-1, 'scene.pan', [+__cam.eye.x || 0, +__cam.eye.y || 0]); },\n"
 "  getAnimation(n) { const t = n !== undefined && n !== null ? __tracks.find(u => !u.leader && u.name === '' + n) : __tracks.find(u => !u.leader);\n"
 "    return t ? (t.api || (t.api = new __Anim(t))) : __anim; },\n"
 "  createModelData() { return { applyData() {}, replaceData() {}, getAnimation() { return __anim; },\n"
@@ -813,7 +857,15 @@ static const char *PRELUDE =
 "function __sget(s) { if (s.e === -3) return s.val; if (s.e < 0) return __lget(s.i, s.prop);\n"
 "  if (s.p < 0) { const v = __host.fxget(s.i, s.e, -1, 'visible'); return v === undefined ? !!s.val : !!v; }\n"
 "  const v = __host.fxget(s.i, s.e, s.p, s.prop); return v === undefined ? s.val : __fxval(v); }\n"
-"function __sset(s, v) { if (v === undefined || v === null) return; if (s.e === -3) { s.val = v; return; } if (s.e < 0) return __lset(s.i, s.prop, v);\n"
+/* (a script on the scene's own "zoom" sets the zoom of the view. A script
+ * bound to a sound layer's "volume" stays one of the scripts whose value
+ * lives here; a new number is also handed to the layer's player.) */
+"function __sset(s, v) { if (v === undefined || v === null) return;\n"
+"  if (s.e === -3) { s.val = v;\n"
+"    if (s.i === -1 && s.prop === 'zoom' && typeof v === 'number' && isFinite(v) && v > 0) __host.set(-1, 'scene.zoom', v);\n"
+"    if (s.prop === 'volume' && s.i >= 0 && typeof v === 'number' && isFinite(v) && v !== s.sent) { s.sent = v; __host.set(s.i, 'volume', v); }\n"
+"    return; }\n"
+"  if (s.e < 0) return __lset(s.i, s.prop, v);\n"
 "  if (s.p < 0) { s.val = !!v; __host.fxset(s.i, s.e, -1, 'visible', !!v); return; }\n"
 "  const a = __fxarrS(v); if (!a) return; __fxput(s.i, s.e, s.p, s.prop, a, __fxarr(s.val)); s.val = __fxval(a); }\n"
 "function __media(kind, ev) { for (const k in ev) if (/Color$/.test(k) && Array.isArray(ev[k])) ev[k] = new Vec3(ev[k][0], ev[k][1], ev[k][2]);\n"

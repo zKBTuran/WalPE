@@ -8,6 +8,8 @@
  * it triggered, and every 2 s only against a daemon too old to push. Shows itself through a
  * StatusNotifierItem when an SNI host is present (KDE, waybar, ...), else
  * as a classic XEmbed tray icon (dwm systray, stalonetray, trayer, ...).
+ * On a Wayland session it is always a StatusNotifierItem (XEmbed is an X11
+ * protocol); which one is used when is in traysel.h.
  *
  *   walpe-tray [--backend=auto|sni|xembed] [--quit] [--export-icon=FILE]
  */
@@ -18,6 +20,7 @@
 
 #include "walpe-build-config.h"   /* WALPE_VERSION, WALPE_CODENAME: from meson.build */
 #include "tray.h"
+#include "traysel.h"
 #include "trayipc.h"
 #include "trayconf.h"
 #include "common/config.h"
@@ -25,6 +28,7 @@
 #include "common/util.h"
 #include "common/uitext.h"
 #include "common/workshop.h"
+#include "ui/resmodel.h"   /* render resolution per monitor: who is new, the GUI's action */
 #include "ui/store.h"
 
 #define POLL_MS        2000
@@ -64,6 +68,13 @@ static struct {
     gint64 last_gui_spawn;
     gboolean pending_settings;
     guint ui_watch;
+    gboolean ui_running;   /* the GUI owns its bus name */
+
+    /* render resolution per monitor (the GUI owns the dialog) */
+    WalpeMonresTracker *res_track;
+    GPtrArray *res_new;    /* char*: names of the outputs nobody was asked about */
+    char *res_new_label;   /* the menu line for them, NULL = none */
+    guint res_announced;   /* monitors named by the notification that is up */
 
     gboolean poll_inflight;
     guint poll_timer;
@@ -82,13 +93,20 @@ static struct {
 
     const TrayBackend *backend;
     guint watcher_watch;
+    gboolean watcher;      /* org.kde.StatusNotifierWatcher has an owner */
     gboolean sni_host;     /* a StatusNotifierWatcher with a registered host */
     guint host_sub;
     GDBusConnection *bus;
+    const char *pick_note; /* what tray_pick () last had to say (logged once) */
+    /* xdg-activation token of the click being handled (Wayland: without one
+     * the compositor may refuse to bring the GUI's window to the front) */
+    char *act_token;
+    gint64 act_token_us;
 } T = { .volume_before_mute = 1.0, .icon_state = TRAY_ICON_DEAD };
 
 static void poll_now (void);
 static void rebuild (void);
+static void res_update (JsonObject *st);
 
 /* ================================================================ menu tree */
 
@@ -445,6 +463,7 @@ static void on_status (const char *reply, gpointer user)
     }
     if (was_alive != T.alive)
         g_message ("walpe-daemon %s", T.alive ? "is running" : "is not running");
+    res_update (st);
     if (n)
         json_node_unref (n);
     read_config_flags ();
@@ -639,6 +658,48 @@ static gboolean finish_call (GObject *src, GAsyncResult *res)
 
 gboolean tray_x11_raise_class (const char *res_class); /* popup.c */
 
+/* ---- activation token
+ * Wayland compositors let a window come to the front only for a token that
+ * proves a user action (xdg-activation). The tray has no surface the click
+ * happened on, so the panel hands its own token over before it calls
+ * Activate / an item's event (StatusNotifierItem.ProvideXdgActivationToken,
+ * sni.c). It is good for one use and only for a moment. */
+#define ACT_TOKEN_MAX_AGE_US (10 * G_USEC_PER_SEC)
+/* A token is a short opaque word (compositors build it from digits, a
+ * counter, a host name). It arrives from whoever calls the method on the
+ * session bus and goes into the environment of the GUI that is started
+ * and into a D-Bus call. One that is not such a word is not passed on:
+ * a string of a few hundred kilobytes in the environment makes the GUI's
+ * start fail (the kernel's limit for one string), and control characters
+ * have no business in either place. */
+#define ACT_TOKEN_MAX_LEN 512
+
+static gboolean act_token_ok (const char *token)
+{
+    gsize n = 0;
+    for (const guchar *p = (const guchar *) token; p && *p; p++)
+        if (*p < 0x20 || *p == 0x7f || ++n > ACT_TOKEN_MAX_LEN)
+            return FALSE;
+    return n > 0;
+}
+
+void tray_set_activation_token (const char *token)
+{
+    g_free (T.act_token);
+    T.act_token = act_token_ok (token) ? g_strdup (token) : NULL;
+    T.act_token_us = g_get_monotonic_time ();
+}
+
+/* the token, if one was handed over recently; the caller owns it (g_free) */
+static char *take_activation_token (void)
+{
+    char *t = T.act_token;
+    T.act_token = NULL;
+    if (t && g_get_monotonic_time () - T.act_token_us > ACT_TOKEN_MAX_AGE_US)
+        g_clear_pointer (&t, g_free);
+    return t;
+}
+
 static void spawn_gui (void)
 {
     gint64 now = g_get_monotonic_time ();
@@ -648,7 +709,20 @@ static void spawn_gui (void)
     char *path = walpe_tray_sibling_exe ("walpe");
     char *argv[] = { path, NULL };
     GError *err = NULL;
-    if (!g_spawn_async (NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, &err)) {
+    /* a token goes to the new process the way launchers pass it (GTK reads
+     * both names at start-up); without one the environment is inherited
+     * untouched, as before */
+    char **envp = NULL;
+    char *token = take_activation_token ();
+    if (token) {
+        envp = g_get_environ ();
+        envp = g_environ_setenv (envp, "XDG_ACTIVATION_TOKEN", token, TRUE);
+        envp = g_environ_setenv (envp, "DESKTOP_STARTUP_ID", token, TRUE);
+        g_free (token);
+    }
+    gboolean spawned = g_spawn_async (NULL, argv, envp, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, &err);
+    g_strfreev (envp);
+    if (!spawned) {
         g_warning ("cannot start %s: %s", path, err->message);
         g_error_free (err);
     } else {
@@ -662,6 +736,7 @@ static void on_activated (GObject *src, GAsyncResult *res, gpointer user)
     (void) user;
     if (finish_call (src, res)) {
         g_message ("raised the running WalPE window (D-Bus Activate)");
+        g_free (take_activation_token ());   /* used */
         return;
     }
     /* a GUI from before version 0.12 is not a unique GApplication: find its
@@ -672,24 +747,40 @@ static void on_activated (GObject *src, GAsyncResult *res, gpointer user)
         spawn_gui ();
 }
 
-static GVariant *platform_data (void)
+/* org.freedesktop.Application platform data: the activation token under
+ * the two names GApplication knows ("activation-token", and
+ * "desktop-startup-id" for toolkits from before xdg-activation); empty
+ * when the panel gave none. peek = leave the token for a call that
+ * follows (the fallback that starts the GUI). */
+static GVariant *platform_data (gboolean peek)
 {
     GVariantBuilder b;
     g_variant_builder_init (&b, G_VARIANT_TYPE ("a{sv}"));
+    char *token = peek ? g_strdup (T.act_token) : take_activation_token ();
+    if (token && peek && g_get_monotonic_time () - T.act_token_us > ACT_TOKEN_MAX_AGE_US)
+        g_clear_pointer (&token, g_free);
+    if (token) {
+        g_variant_builder_add (&b, "{sv}", "activation-token", g_variant_new_string (token));
+        g_variant_builder_add (&b, "{sv}", "desktop-startup-id", g_variant_new_string (token));
+        g_free (token);
+    }
     return g_variant_builder_end (&b);
 }
 
 void tray_open_gui (void)
 {
     tray_popup_hide ();
-    ui_call ("Activate", g_variant_new ("(@a{sv})", platform_data ()), on_activated);
+    /* the token stays until the reply: when no GUI runs, spawn_gui () needs it */
+    ui_call ("Activate", g_variant_new ("(@a{sv})", platform_data (TRUE)), on_activated);
 }
 
 static void on_settings_called (GObject *src, GAsyncResult *res, gpointer user)
 {
     (void) user;
-    if (finish_call (src, res))
+    if (finish_call (src, res)) {
+        g_free (take_activation_token ());   /* used */
         return;
+    }
     /* not running: start it, run the action once its name appears */
     T.pending_settings = TRUE;
     if (tray_x11_raise_class ("walpe"))
@@ -700,17 +791,148 @@ static void on_settings_called (GObject *src, GAsyncResult *res, gpointer user)
 
 static void open_settings (void)
 {
-    GVariant *p = g_variant_new ("(sav@a{sv})", "settings", NULL, platform_data ());
+    GVariant *p = g_variant_new ("(sav@a{sv})", "settings", NULL, platform_data (TRUE));
     ui_call ("ActivateAction", p, on_settings_called);
 }
 
 static void ui_appeared (GDBusConnection *c, const char *name, const char *owner, gpointer u)
 {
     (void) c; (void) name; (void) owner; (void) u;
+    T.ui_running = TRUE;
     if (T.pending_settings) {
         T.pending_settings = FALSE;
         open_settings ();
     }
+}
+
+static void ui_vanished (GDBusConnection *c, const char *name, gpointer u)
+{
+    (void) c; (void) name; (void) u;
+    T.ui_running = FALSE;
+}
+
+/* ================================================================ monitor resolution
+ * The dialog belongs to the GUI. The tray has the menu entry that opens
+ * it, names monitors nobody was asked about in its menu, and - when the
+ * GUI is not running - announces a monitor that is connected with one
+ * desktop notification. It never opens a window by itself, and announces
+ * nothing while a fullscreen application has the focus (resmodel.c). */
+
+#define RES_NOTIFY_ID "monitor-resolution"
+
+static void on_resolution_called (GObject *src, GAsyncResult *res, gpointer user)
+{
+    (void) user;
+    if (finish_call (src, res)) {
+        g_free (take_activation_token ());   /* used (it went along in the call) */
+        return;
+    }
+    /* A window that is there but could not be told (no session bus: it is
+     * not a unique application then; or it did not answer in time and takes
+     * the call when it can) is raised, as for "Settings…": starting
+     * `walpe --resolution` next to it would be a second window program on
+     * the same library and engine. Its menu has "Monitor resolution…". */
+    if (tray_x11_raise_class ("walpe"))
+        return;
+    /* no GUI: start one that opens the dialog when it is up (it lists
+     * every monitor; the ones not asked about are marked) */
+    gint64 now = g_get_monotonic_time ();
+    if (now - T.last_gui_spawn < 5 * G_USEC_PER_SEC)
+        return;
+    T.last_gui_spawn = now;
+    char *path = walpe_tray_sibling_exe ("walpe");
+    char *argv[] = { path, "--resolution", NULL };
+    GError *err = NULL;
+    if (!g_spawn_async (NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, &err)) {
+        g_warning ("cannot start %s: %s", path, err->message);
+        g_error_free (err);
+    } else {
+        g_message ("started %s --resolution", path);
+    }
+    g_free (path);
+}
+
+/* names: output names separated by line breaks, NULL or "" = all monitors */
+static void open_resolution (const char *names)
+{
+    char **v = names && *names ? g_strsplit (names, "\n", 64) : NULL;
+    GVariantBuilder av;
+    g_variant_builder_init (&av, G_VARIANT_TYPE ("av"));
+    g_variant_builder_add (&av, "v", g_variant_new_strv ((const char *const *) v, v ? -1 : 0));
+    /* (the click's activation token goes along, as for "settings": the
+     * dialog can then come to the front on a Wayland session) */
+    GVariant *p = g_variant_new ("(sav@a{sv})", WALPE_MONRES_ACTION, &av, platform_data (TRUE));
+    g_strfreev (v);
+    tray_popup_hide ();
+    ui_call ("ActivateAction", p, on_resolution_called);
+}
+
+static void res_announce (const WalpeMonresState *rs, GPtrArray *names)
+{
+    /* no session bus (a bare X session started without one): no
+     * notification service, and GIO would log criticals about its missing
+     * connection; the menu line for these monitors remains */
+    if (!g_application_get_dbus_connection (G_APPLICATION (T.app))) {
+        walpe_monres_tracker_unshown (T.res_track, names);
+        return;
+    }
+    char *title = NULL, *body = NULL;
+    walpe_monres_announce_text (rs, names, &title, &body);
+    GString *arg = g_string_new (NULL);
+    for (guint i = 0; i < names->len; i++)
+        g_string_append_printf (arg, "%s%s", i ? "\n" : "", (const char *) names->pdata[i]);
+    GNotification *n = g_notification_new (title);
+    g_notification_set_body (n, body);
+    g_notification_set_default_action_and_target (n, "app.resolution", "s", arg->str);
+    g_notification_add_button_with_target (n, "Choose…", "app.resolution", "s", arg->str);
+    g_application_send_notification (G_APPLICATION (T.app), RES_NOTIFY_ID, n);
+    g_object_unref (n);
+    T.res_announced += names->len;
+    g_message ("announced: %s", title);
+    g_string_free (arg, TRUE);
+    g_free (title);
+    g_free (body);
+}
+
+/* every status (st == NULL: no engine) */
+static void res_update (JsonObject *st)
+{
+    WalpeMonresState *rs = walpe_monres_state_new (st);
+    if (!T.res_track)
+        T.res_track = walpe_monres_tracker_new ();
+    if (!T.res_new)
+        T.res_new = g_ptr_array_new_with_free_func (g_free);
+    g_ptr_array_set_size (T.res_new, 0);
+    g_clear_pointer (&T.res_new_label, g_free);
+    if (walpe_monres_state_unasked (rs, T.res_new) == 1) {
+        char *t = walpe_monres_mon_title (walpe_monres_state_find (rs, T.res_new->pdata[0]));
+        T.res_new_label = g_strdup_printf ("Choose the render resolution of %s…", t);
+        g_free (t);
+    } else if (T.res_new->len > 1) {
+        T.res_new_label = g_strdup_printf ("Choose the render resolution of %u monitors…",
+                                           T.res_new->len);
+    }
+    GPtrArray *back = NULL;
+    GPtrArray *news = walpe_monres_tracker_feed (T.res_track, rs, NULL, &back);
+    if (back) {
+        T.res_announced = T.res_announced > back->len ? T.res_announced - back->len : 0;
+        if (!T.res_announced)
+            g_application_withdraw_notification (G_APPLICATION (T.app), RES_NOTIFY_ID);
+        g_ptr_array_unref (back);
+    }
+    if (news) {
+        /* a running GUI announces it itself: one notification, not two.
+         * Then nothing of the tray's is up for these monitors, and the
+         * tracker is told so (T.res_announced counts what the tray sent:
+         * taking back what it never sent withdrew the notification of
+         * another monitor that was still to be asked about). */
+        if (T.ui_running)
+            walpe_monres_tracker_unshown (T.res_track, news);
+        else
+            res_announce (rs, news);
+        g_ptr_array_unref (news);
+    }
+    walpe_monres_state_free (rs);
 }
 
 /* ================================================================ actions */
@@ -815,6 +1037,8 @@ void tray_dispatch (const char *action, const char *arg)
                                 : "{\"cmd\":\"set\",\"pause_covered\":true}");
     } else if (!strcmp (action, "settings")) {
         open_settings ();
+    } else if (!strcmp (action, "resolution")) {
+        open_resolution (arg);
     } else if (!strcmp (action, "start")) {
         begin_transition (FALSE);
         spawn_daemon ();
@@ -867,6 +1091,15 @@ static TrayItem *build_menu (void)
 
     TrayItem *it = add (root, TRAY_ITEM_NORMAL, "Open WalPE", "open-gui");
     it->is_default = TRUE;
+    if (T.res_new_label && T.res_new && T.res_new->len) {
+        /* a monitor nobody was asked about: its render resolution can be
+         * chosen from here (the dialog opens for these monitors) */
+        GString *names = g_string_new (NULL);
+        for (guint i = 0; i < T.res_new->len; i++)
+            g_string_append_printf (names, "%s%s", i ? "\n" : "", (const char *) T.res_new->pdata[i]);
+        it = add (root, TRAY_ITEM_NORMAL, T.res_new_label, "resolution");
+        it->arg = g_string_free (names, FALSE);
+    }
     add_sep (root);
 
     if (!T.alive || busy) {
@@ -952,6 +1185,7 @@ static TrayItem *build_menu (void)
     add_sep (root);
 
     add (root, TRAY_ITEM_NORMAL, "Settings…", "settings");
+    add (root, TRAY_ITEM_NORMAL, "Monitor resolution…", "resolution");
     if (T.alive && !busy)
         add (root, TRAY_ITEM_NORMAL, "Restart engine", "restart");
     add_sep (root);
@@ -1059,12 +1293,52 @@ static void use_backend (const TrayBackend *b)
     }
 }
 
+/* the toolkit talks X11 (by type name: no X header here, and right in a
+ * build of GTK without the X11 backend) */
+static gboolean session_is_x11 (void)
+{
+    GdkDisplay *d = gdk_display_get_default ();
+    return d && g_str_has_prefix (G_OBJECT_TYPE_NAME (d), "GdkX11");
+}
+
+/* traysel.h decides; what it has to say is logged when it changes */
+static void pick_backend (const char *want)
+{
+    const char *xd = g_getenv ("DISPLAY");
+    TrayEnv e = {
+        .want = want,
+        .have_bus = T.bus != NULL,
+        .watcher = T.watcher,
+        .host = T.sni_host,
+        .session_x11 = session_is_x11 (),
+        .x_display = xd && *xd,
+#ifdef WALPE_TRAY_XEMBED
+        .built_xembed = TRUE,
+#endif
+    };
+    const char *note = NULL;
+    TrayPick p = tray_pick (&e, &note);
+    if (note && note != T.pick_note)
+        g_message ("%s", note);
+    T.pick_note = note;
+    switch (p) {
+    case TRAY_PICK_SNI:
+        use_backend (&tray_backend_sni);
+        break;
+#ifdef WALPE_TRAY_XEMBED
+    case TRAY_PICK_XEMBED:
+        use_backend (&tray_backend_xembed);
+        break;
+#endif
+    default:
+        use_backend (NULL);
+        break;
+    }
+}
+
 static void choose_auto (void)
 {
-    if (T.sni_host)
-        use_backend (&tray_backend_sni);
-    else
-        use_backend (&tray_backend_xembed);
+    pick_backend ("auto");
 }
 
 static void on_host_prop (GObject *src, GAsyncResult *res, gpointer user)
@@ -1100,6 +1374,7 @@ static void on_host_registered (GDBusConnection *c, const char *s, const char *p
                                 const char *sig, GVariant *params, gpointer u)
 {
     (void) c; (void) s; (void) p; (void) i; (void) sig; (void) params; (void) u;
+    T.watcher = TRUE;
     T.sni_host = TRUE;
     choose_auto ();
 }
@@ -1107,12 +1382,14 @@ static void on_host_registered (GDBusConnection *c, const char *s, const char *p
 static void watcher_appeared (GDBusConnection *c, const char *name, const char *owner, gpointer u)
 {
     (void) c; (void) name; (void) owner; (void) u;
+    T.watcher = TRUE;
     check_host ();
 }
 
 static void watcher_vanished (GDBusConnection *c, const char *name, gpointer u)
 {
     (void) c; (void) name; (void) u;
+    T.watcher = FALSE;
     T.sni_host = FALSE;
     choose_auto ();
 }
@@ -1122,16 +1399,17 @@ static void start_backends (void)
     const char *want = T.backend_opt ? T.backend_opt : g_getenv ("WALPE_TRAY_BACKEND");
     if (!want || !*want)
         want = T.conf->backend;
-    if (!g_strcmp0 (want, "sni")) {
-        use_backend (&tray_backend_sni);
+    if (!g_strcmp0 (want, "sni") || !g_strcmp0 (want, "xembed")) {
+        pick_backend (want);
         return;
     }
-    if (!g_strcmp0 (want, "xembed") || !T.bus) {
-        use_backend (&tray_backend_xembed);
+    if (!T.bus) {
+        /* nothing to follow: X11 = XEmbed as before, Wayland = no icon (said once) */
+        pick_backend ("auto");
         return;
     }
-    /* auto: SNI when a watcher with a host exists, XEmbed otherwise; follow
-     * the watcher coming and going */
+    /* auto: on X11, SNI when a watcher with a host exists and XEmbed
+     * otherwise; on Wayland SNI. Follow the watcher coming and going */
     T.host_sub = g_dbus_connection_signal_subscribe (T.bus, NULL, "org.kde.StatusNotifierWatcher",
                                                      "StatusNotifierHostRegistered",
                                                      "/StatusNotifierWatcher", NULL,
@@ -1174,6 +1452,14 @@ static void act_dispatch (GSimpleAction *a, GVariant *p, gpointer u)
     tray_dispatch (g_variant_get_string (p, NULL), NULL);
 }
 
+/* the "new monitor" notification was clicked: p = its output names */
+static void act_resolution (GSimpleAction *a, GVariant *p, gpointer u)
+{
+    (void) a; (void) u;
+    const char *names = p ? g_variant_get_string (p, NULL) : NULL;
+    tray_dispatch ("resolution", names && *names ? names : NULL);
+}
+
 static void on_startup (GApplication *app, gpointer u)
 {
     (void) u;
@@ -1186,13 +1472,14 @@ static void on_startup (GApplication *app, gpointer u)
         { "open", act_open, NULL, NULL, NULL, { 0 } },
         { "menu", act_menu, "(ii)", NULL, NULL, { 0 } },
         { "dispatch", act_dispatch, "s", NULL, NULL, { 0 } },
+        { "resolution", act_resolution, "s", NULL, NULL, { 0 } },
     };
     g_action_map_add_action_entries (G_ACTION_MAP (app), acts, G_N_ELEMENTS (acts), NULL);
     recent_load ();
     read_config_flags ();
     if (T.bus)
         T.ui_watch = g_bus_watch_name_on_connection (T.bus, WALPE_UI_APP_ID, G_BUS_NAME_WATCHER_FLAGS_NONE,
-                                                     ui_appeared, NULL, NULL, NULL);
+                                                     ui_appeared, ui_vanished, NULL, NULL);
     rebuild ();
     start_backends ();
     poll_now ();

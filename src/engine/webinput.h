@@ -33,6 +33,20 @@ void web_input_button (WebInput *wi, int button, gboolean down, double x, double
 /* wheel clicks: dy > 0 = down, dx > 0 = right */
 void web_input_scroll (WebInput *wi, int dx, int dy, double x, double y, guint32 time);
 
+/* ---- keyboard: only the private page host can deliver keys (as real
+ * wl_keyboard events); elsewhere these do nothing. */
+/* TRUE when keys given to this page would reach it */
+gboolean web_input_takes_keys (WebInput *wi);
+/* the layout: an xkb keymap (text v1) in a descriptor the callee takes
+ * over (closes when it cannot use it); for every page */
+void web_input_keymap (int fd, guint32 size);
+/* this page gets the keys from now on / no longer */
+void web_input_keyboard_focus (WebInput *wi, gboolean focus);
+/* one key: evdev code as wl_keyboard.key carries it */
+void web_input_key (WebInput *wi, guint32 evdev_key, gboolean down, guint32 time);
+/* depressed, latched, locked, group (wl_keyboard.modifiers) */
+void web_input_modifiers (const guint32 mods[4]);
+
 /* the page posted 'input': it received a trusted pointer event */
 void web_input_ack (WebInput *wi);
 /* TRUE once after a main-frame load that was refused or failed for a URI

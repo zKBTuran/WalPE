@@ -117,6 +117,14 @@ static const WalpePresetExtra preset_extras[] = {
       { NULL, NULL,
         "Effect shaders get their fixed settings compiled in: the same picture to within one "
         "colour step in 255.", NULL } },
+    /* simulation effects (engine/fx_sim.h; Wallpaper Engine's Fluid
+     * Simulation): the smoke's picture at half size from balanced on, and
+     * half the step rate at low. The speed and the shape of the flow stay. */
+    { "fluid_quality", 's', { "full", "full", "reduced", "low" },
+      { NULL, NULL,
+        "Simulated smoke (Fluid Simulation) is computed at half size and looks softer.",
+        "Simulated smoke (Fluid Simulation) is computed at half size and in 30 instead of 60 "
+        "steps a second: softer, and it moves in coarser steps." } },
     { "fx_quality", 's', { "exact", "exact", "exact", "fast" },
       { NULL, NULL, NULL,
         "Stacked wave, shake and ripple effects of a layer are drawn in one pass, blur and "

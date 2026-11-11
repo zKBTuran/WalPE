@@ -40,14 +40,18 @@ static gint blocked;        /* claims refused so far */
 
 int XSetSelectionOwner (Display *dpy, Atom selection, Window owner, Time time)
 {
-    /* (plain statics: every caller computes the same values) */
+    /* Xlib's own function and the switch are looked up once, by whichever
+     * thread calls first; any other waits for it and then reads them
+     * (g_once_init_enter). They used to be plain statics that every first
+     * caller stored at the same time. */
     static int (*real) (Display *, Atom, Window, Time);
-    static int allow = -1;
-    if (!real)
+    static int allow;
+    static gsize once;
+    if (g_once_init_enter (&once)) {
         real = (int (*) (Display *, Atom, Window, Time)) dlsym (RTLD_NEXT, "XSetSelectionOwner");
-    if (allow < 0) {
         const char *e = getenv ("WALPE_WEB_SELECTIONS");
         allow = e && *e && strcmp (e, "0") != 0;
+        g_once_init_leave (&once, 1);
     }
     if (owner != None && !allow) {
         if (g_atomic_int_add (&blocked, 1) == 0)    /* the first time only */

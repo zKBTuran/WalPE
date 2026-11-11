@@ -27,22 +27,69 @@ struct WalpeVideo {
     /* set by gl_render (module ABI 5): nothing was drawn, the first frame
      * is not decoded yet */
     gboolean no_frame;
+    /* set by the owner before every gl_render (module ABI 11): the render
+     * resolution chosen for the monitor (WalpeContent.render_w / render_h;
+     * 0 = the surface's size). Frames need not be kept larger than they
+     * are shown at that size. */
+    int render_w, render_h;
 };
 
-/* Hardware video decoding (config "video_hwdec", walpe-ctl set hwdec=on|off;
- * off by default): the daemon stores the setting here, the video module
- * reads it when it opens a decoder. 0 = software decoding (libavcodec on
- * the CPU), 1 = try the GPU's decoder first (NVDEC through FFmpeg's "cuda"
- * hwaccel, else VA-API, else VDPAU) and fall back to software when it is
- * not available or fails. WALPE_VIDEO_HWDEC=0|1|cuda|vaapi|vdpau overrides. */
+/* Hardware video decoding (config "video_hwdec": off | auto | <api>, and
+ * walpe-ctl set hwdec=...; off by default). The daemon stores the setting
+ * here, the video module reads it when it opens a decoder and follows a
+ * change while a video plays.
+ *   off     software decoding (libavcodec on the CPU)
+ *   auto    (also: on) the hardware decoders FFmpeg in this build offers
+ *           are tried in an order that depends on the machine, not on who
+ *           made its GPU (one exception: where NVIDIA's own driver renders,
+ *           "cuda" = NVDEC stays the first one): first those that can be
+ *           opened on the GPU that renders the wallpaper, then those whose
+ *           API picks the device,
+ *           then other GPUs, then decoder blocks of their own (ARM boards;
+ *           on x86-64 FFmpeg's V4L2 decoder is not part of auto: it would
+ *           open every /dev/video* node - by name it is still taken);
+ *           the rules are in video_hwsel.h. Anything that fails - no device,
+ *           no permission, a profile or a size the device does not decode,
+ *           an error in the middle of the clip - ends in software decoding
+ *           at the same position
+ *   <api>   only that one: FFmpeg's name of the device type ("vaapi",
+ *           "cuda" = NVDEC, "vdpau", "vulkan", "drm" = V4L2 request API) or
+ *           of a decoder of its own ("v4l2m2m", "rkmpp", ...)
+ * walpe_video_hwdec: 0 = off, 1 = on (as before). walpe_video_hwdec_api:
+ * the one API asked for, copied into buf ("" = auto); returns a number that
+ * changes whenever the setting is set, so that a reader can tell a change
+ * from "auto" to "vaapi" without comparing text every frame.
+ * walpe_video_set_hwdec keeps its meaning (on = auto);
+ * walpe_video_set_hwdec_name takes the setting's words and returns FALSE
+ * for anything else (nothing is changed then).
+ * WALPE_VIDEO_HWDEC=<the same words> in front of the daemon overrides. */
 WALPE_API int walpe_video_hwdec (void);
 void walpe_video_set_hwdec (int on);
-/* How the video decoder opened last works, in words ("3840x2160 60.00 fps:
- * hardware (cuda)", "1920x1080 30.00 fps: software, 1 thread"): the video
- * module says so whenever it opens a decoder (also after a fallback to
- * software), `walpe-ctl status` shows it as "video_decoder" - the way to
- * see whether hardware decoding is really in use. NULL = none opened yet;
- * the caller frees the copy. */
+gboolean walpe_video_set_hwdec_name (const char *name);
+WALPE_API guint walpe_video_hwdec_api (char *buf, gsize len);
+/* the setting as one word: "off", "auto" or the API (g_free) */
+char *walpe_video_hwdec_setting (void);
+/* Zero-copy for hardware-decoded pictures (config "video_zerocopy", walpe-ctl
+ * set video_zerocopy=on|off; off by default; only with hardware decoding).
+ * Off: every picture is downloaded to main memory and uploaded like a
+ * software picture - the exact samples, on every driver. On: where the
+ * decoder can export its pictures as DMA-BUFs and the renderer's EGL can
+ * import them (EGL_EXT_image_dma_buf_import), the planes are used as
+ * textures where they are; a stream whose imported planes are not, sample
+ * for sample, what a download gives is refused and downloaded as before
+ * (video_hwsel.h, WALPE_ZC_*). WALPE_VIDEO_ZEROCOPY=0|1 overrides. */
+WALPE_API int walpe_video_zerocopy (void);
+void walpe_video_set_zerocopy (int on);
+/* What the decoders of the open videos do, in words: size, frame rate and
+ * codec profile, then "hardware (<api> on <device> [<kernel driver>], <which
+ * GPU>; <how the pictures reach the renderer>)" or "software, N threads" -
+ * the latter followed, when hardware decoding was asked for, by every
+ * attempt that failed and the kind of reason (codec unsupported, profile,
+ * resolution outside the decoder's limits, no device, permission, ...;
+ * video_hwsel.h has the exact form). The video module says so whenever it
+ * opens a decoder (also after a fallback to software), `walpe-ctl status`
+ * shows it as "video_decoder" - the way to see whether hardware decoding is
+ * really in use. NULL = none opened yet; the caller frees the copy. */
 WALPE_API void walpe_video_note_decoder (const char *text);
 char *walpe_video_decoder_note (void);
 /* "Videos follow the frame rate limit" (config "video_limit", walpe-ctl set

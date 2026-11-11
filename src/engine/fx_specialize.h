@@ -125,9 +125,14 @@ void fx_set_specialize (gboolean on)
     const char *e = g_getenv ("WALPE_FX_SPEC");
     if (e && *e)
         on = *e != '0';
-    if (g_atomic_int_get (&fxs_spec_on) != (on ? 1 : 0))
-        fxs_picture_changed ();
+    /* the value first, the count after it: a render thread takes the
+     * count into its frame signature before it draws. Counted first, a
+     * frame drawn between the two stores carried the new count with the
+     * old setting, and nothing told that scene to draw again. */
+    gboolean changed = g_atomic_int_get (&fxs_spec_on) != (on ? 1 : 0);
     g_atomic_int_set (&fxs_spec_on, on ? 1 : 0);
+    if (changed)
+        fxs_picture_changed ();
 }
 
 void fx_set_shader_quality (const char *q)
@@ -136,9 +141,10 @@ void fx_set_shader_quality (const char *q)
     if (e && *e)
         q = e;
     int v = q && !g_ascii_strcasecmp (q, "fast") ? 1 : 0;
-    if (g_atomic_int_get (&fxs_quality) != v)
+    gboolean changed = g_atomic_int_get (&fxs_quality) != v;
+    g_atomic_int_set (&fxs_quality, v);   /* (the value first: see fx_set_specialize) */
+    if (changed)
         fxs_picture_changed ();
-    g_atomic_int_set (&fxs_quality, v);
 }
 
 static void fxs_env (void)

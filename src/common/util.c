@@ -24,11 +24,28 @@ static char *expand_path_raw (const char *path)
         }
         /* ~user */
         char *user = g_strndup (rest, strcspn (rest, "/"));
-        struct passwd *pw = getpwnam (user);
+        /* (getpwnam_r: paths are expanded on the main thread and, for a
+         * wallpaper's options, on render threads; getpwnam answers from
+         * one static buffer) */
+        /* (the buffer grows while the entry does not fit: getpwnam had no
+         * limit, and an entry of a directory service can be longer than
+         * any fixed size; ERANGE read as "no such user" left the path
+         * unexpanded without a word) */
+        struct passwd pwbuf, *pw = NULL;
+        gsize blen = 4096;
+        char *buf = g_malloc (blen);
+        int rc;
+        while ((rc = getpwnam_r (user, &pwbuf, buf, blen, &pw)) == ERANGE && blen < 1024 * 1024) {
+            blen *= 2;
+            buf = g_realloc (buf, blen);
+        }
+        if (rc != 0)
+            pw = NULL;
         g_free (user);
-        if (pw)
-            return g_build_filename (pw->pw_dir, strchr (rest, '/') ? strchr (rest, '/') + 1 : "", NULL);
-        return g_strdup (path);
+        char *out = pw ? g_build_filename (pw->pw_dir, strchr (rest, '/') ? strchr (rest, '/') + 1 : "", NULL)
+                       : g_strdup (path);
+        g_free (buf);   /* (pw points into it) */
+        return out;
     }
     if (path[0] != '/') {
         char *cwd = g_get_current_dir ();

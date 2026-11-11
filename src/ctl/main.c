@@ -8,15 +8,19 @@
 #include "common/ipc.h"
 #include "common/config.h"
 #include "common/quality.h"
+#include "common/resolution.h"
 #include "common/setkeys.h"
 #include "common/util.h"
 #include "common/workshop.h"
+#include "common/gpusel.h"
 
 /* text from a reply on its way to the terminal (below) */
 static const char *tt (const char *s);
 static void print_json (const char *reply);
 
 #include "layers_ctl.h"   /* walpe-ctl layers ... */
+#include "gpu_ctl.h"      /* walpe-ctl gpu */
+#include "gpustat_ctl.h"  /* walpe-ctl gpu-stats ... */
 
 static void usage (void)
 {
@@ -24,8 +28,8 @@ static void usage (void)
              "  walpe-ctl open <path> [--monitor N]  set wallpaper (project dir or media file)\n"
              "                                 on every monitor, or only on monitor N (status\n"
              "                                 \"monitors\": index, name, geometry, current)\n"
-             "  walpe-ctl add <path>           import a video: normalize to h264 mp4\n"
-             "                                 <=1080p into <wallpapers>/imported/\n"
+             "  walpe-ctl add <path>           import a video: normalize to h264 mp4 (at most the\n"
+             "                                 size of video_resolution) into <wallpapers>/imported/\n"
              "                                 (open does the same on its own for a video the\n"
              "                                 player cannot read: WebM, HEVC, MKV ... - into a\n"
              "                                 cache, the wallpaper changes when it is ready)\n"
@@ -33,6 +37,13 @@ static void usage (void)
              "  walpe-ctl pause | resume       control playback\n"
              "  walpe-ctl status               show daemon state (+ import progress)\n"
              "  walpe-ctl set fps=N volume=X parallax=on|off fs=on|off\n"
+             "  walpe-ctl set scene_sound=on|off  scenes play their sound layers (WAV, MP3, FLAC, Ogg)\n"
+             "                                 through PulseAudio / PipeWire; off by default. Heard at\n"
+             "                                 `set volume=X` (0..1; it is 0 until you set it), silent\n"
+             "                                 while the wallpaper is paused; applies at once\n"
+             "  walpe-ctl set mute=on|off      wallpaper sound silent, the volume setting stays\n"
+             "  walpe-ctl setprop walpe_sound=on|off  one wallpaper's own sound switch: wins over\n"
+             "                                 scene_sound (resetprops drops it again)\n"
              "  walpe-ctl set covered=on|off   pause a monitor while windows cover it\n"
              "  walpe-ctl set dpms=on|off      pause while the display is in power save or the\n"
              "                                 screensaver runs\n"
@@ -45,6 +56,11 @@ static void usage (void)
              "  walpe-ctl set battery=on|off battery_fps=N\n"
              "                                 on battery power: pause every wallpaper / limit the\n"
              "                                 frame rate (0 = no limit); both off by default\n"
+             "  walpe-ctl set idle=N           pause every wallpaper after N seconds without input\n"
+             "                                 (0 = off, the default). Needs a session that reports\n"
+             "                                 idle time; status \"pause_rules\" says for this and\n"
+             "                                 the other pause settings whether anything in the\n"
+             "                                 session can drive them, and why not\n"
              "  walpe-ctl set previews=always|hover|off  animated (GIF) previews in the GUI\n"
              "  walpe-ctl set shared=on|off fx_cache=on|off tex_downscale=on|off\n"
              "                                 render a scene once for same-size monitors /\n"
@@ -59,6 +75,20 @@ static void usage (void)
              "  walpe-ctl set frame_align=on|off  the frame clocks of all monitors run on one grid (off by\n"
              "                                 default; for this run of the daemon: `frame_align = on` in\n"
              "                                 ~/.config/walpe/gpu.conf keeps it)\n"
+             "  walpe-ctl backend [auto|x11|wayland]  the window system the daemon draws on: show it (the\n"
+             "                                 one running, how it was chosen, what this build holds,\n"
+             "                                 who reports the pause signals), or save the setting for\n"
+             "                                 the daemon's next start (= set backend=...). auto =\n"
+             "                                 Wayland where the compositor has the layer shell, else\n"
+             "                                 X11; WALPE_BACKEND in the daemon's environment beats it\n"
+             "  walpe-ctl set wayland_pointer=auto|off  Wayland: the wallpaper takes pointer input while\n"
+             "                                 it uses the pointer (auto), or never (off: clicks on the\n"
+             "                                 desktop always stay with the compositor)\n"
+             "  walpe-ctl set fluid_sim=on|off fluid_quality=full|reduced|low\n"
+             "                                 Wallpaper Engine's Fluid Simulation effect (smoke that\n"
+             "                                 flows): on and full by default; off = the layer is shown\n"
+             "                                 without it; reduced = the smoke is computed at half\n"
+             "                                 size, low = also in 30 instead of 60 steps a second\n"
              "  walpe-ctl set fx_specialize=on|off fx_quality=exact|fast\n"
              "                                 effect shaders, both off / exact by default:\n"
              "                                 constants compiled in (each such shader is first\n"
@@ -72,18 +102,75 @@ static void usage (void)
              "                                 software_note (why not, when it is not available)\n"
              "  walpe-ctl set software_threads=N  CPU threads llvmpipe draws with (0 or auto = half\n"
              "                                 of the CPUs, at most 8)\n"
+             "  walpe-ctl gpu [--json]         the graphics devices of this machine, the one that renders\n"
+             "                                 the wallpapers, and what each value below picks here\n"
+             "  walpe-ctl set gpu=auto|integrated|discrete|<PCI address or name>\n"
+             "                                 which GPU renders. auto (default): the one that drives\n"
+             "                                 the displays, no copy between GPUs. Another one costs a\n"
+             "                                 full-screen copy per monitor and frame. The daemon\n"
+             "                                 restarts itself; status: gpu_in_use, gpu_candidates,\n"
+             "                                 gpu_note (why not, when it could not be done)\n"
+             "  walpe-ctl set preset_follow_gpu=on|off\n"
+             "                                 on: the quality preset is set once when the kind of GPU\n"
+             "                                 that renders changes (discrete: high, integrated:\n"
+             "                                 balanced, CPU: low). Off by default\n"
+             "  walpe-ctl set gl_api=auto|gl|gles  auto: desktop OpenGL 3.3 where the driver has it,\n"
+             "                                 else OpenGL ES 3.2 / 3.1 (GPUs without desktop OpenGL:\n"
+             "                                 many ARM ones); gl / gles: that one. A saved gl / gles\n"
+             "                                 this machine has no context for runs as auto and\n"
+             "                                 gl_api_note says so. The daemon restarts itself.\n"
+             "                                 status: gl, gl_context, gl_api_note, gl_features (what\n"
+             "                                 the OpenGL ES path replaces or lacks)\n"
              "  walpe-ctl set texture_slack=2|0  2: textures and effects may be drawn up to 2 %%\n"
              "                                 larger than stored (less GPU memory and load);\n"
              "                                 0: exact sizes. Applies to the next wallpaper load\n"
              "  walpe-ctl set render_scale=N   scenes render at N percent of the monitor's size\n"
              "                                 (25..100, default 100): less GPU load, softer picture\n"
+             "  walpe-ctl resolution [--json]  the render resolution of every monitor: its mode, the\n"
+             "                                 size chosen for its wallpaper, what that is in pixels,\n"
+             "                                 its texture limit, and whether it was asked about yet\n"
+             "  walpe-ctl resolution <monitor> <value> [texture_limit=auto|none|PIXELS]\n"
+             "                                 <monitor>: an output name (HDMI-0), an index, or all;\n"
+             "                                 <value>: native (the monitor's own mode, the default),\n"
+             "                                 720p, 1080p, 1440p, 4k (lines on the shorter side, the\n"
+             "                                 monitor's shape) or WIDTHxHEIGHT. The wallpaper is\n"
+             "                                 rendered at that size and scaled to the monitor: smaller\n"
+             "                                 = less GPU work and video memory, softer; larger =\n"
+             "                                 smoother edges, more of both. Applies at once\n"
+             "  walpe-ctl resolution <monitor> texture_limit=auto|none|PIXELS\n"
+             "                                 the largest texture kept for its wallpaper: auto = as\n"
+             "                                 large as it is shown at the chosen size, PIXELS = also\n"
+             "                                 never longer than that, none = file size\n"
+             "  walpe-ctl resolution [<monitor>] --keep | --ask | --forget\n"
+             "                                 keep what it has and count it as asked / ask about it\n"
+             "                                 again in the window / drop the stored choice (no\n"
+             "                                 <monitor>: every connected one)\n"
+             "  walpe-ctl resolution --prompt on|off  may the window ask about new monitors (on)\n"
+             "  walpe-ctl set resolution=VALUE | resolution=NAME:VALUE,NAME:VALUE\n"
+             "                                 the same through set (VALUE alone: every monitor); also\n"
+             "                                 texture_limit=..., resolution_prompt=on|off\n"
+             "  walpe-ctl set scale_filter=bilinear|nearest  how a scene rendered at another size than\n"
+             "                                 the monitor's is scaled to it: smooth (default), or\n"
+             "                                 whole pixels (exact at 2x, 3x; blocky otherwise)\n"
+             "  walpe-ctl set video_resolution=auto|none|1080p|...|WxH  the largest size videos are\n"
+             "                                 imported and converted at: auto = the largest render\n"
+             "                                 resolution of the monitors that show the video, none =\n"
+             "                                 their own size; a config from an older version has 1080p\n"
              "  walpe-ctl set web_accel=on|off web pages on the GPU (off: WebKit paints on the CPU);\n"
              "                                 restarts the daemon; status \"web_render\" says what runs\n"
-             "  walpe-ctl set hwdec=on|off     decode videos (video wallpapers, video layers of\n"
-             "                                 scenes) on the GPU (NVDEC, VA-API or VDPAU through\n"
-             "                                 FFmpeg) when that works; off (the default) = on the\n"
-             "                                 CPU. Videos that are playing switch at once; status\n"
-             "                                 shows what the decoder really does (video_decoder)\n"
+             "  walpe-ctl set hwdec=off|auto|API  decode videos (video wallpapers, video layers of\n"
+             "                                 scenes) with a hardware decoder. off (the default) =\n"
+             "                                 on the CPU; auto (or on) = what this machine and its\n"
+             "                                 FFmpeg offer, the GPU that renders first, software\n"
+             "                                 when nothing works or something fails; API = only\n"
+             "                                 that one: vaapi, cuda (NVDEC), vdpau, vulkan, drm\n"
+             "                                 (V4L2 request API), v4l2m2m. Videos that are playing\n"
+             "                                 switch at once; status \"video_decoder\" says API,\n"
+             "                                 device and codec profile, or why the CPU decodes\n"
+             "  walpe-ctl set video_zerocopy=on|off  hardware-decoded pictures stay in GPU memory\n"
+             "                                 (DMA-BUF -> EGL image) where the driver can do it and\n"
+             "                                 the samples are exactly the decoder's; off (the\n"
+             "                                 default) = they are downloaded and uploaded\n"
              "  walpe-ctl set video_limit=on|off  videos follow the frame rate limit: a video wallpaper\n"
              "                                 is shown at most fps times a second (and by the battery /\n"
              "                                 focus / fps_idle limits), and pictures of a video that\n"
@@ -105,6 +192,23 @@ static void usage (void)
              "                                 off = sprites as six vertices each, the submission\n"
              "                                 before the instanced one (if particles are missing\n"
              "                                 or misplaced on a driver)\n"
+             "  walpe-ctl set camera_parallax=on|off parallax_offset=on|off script_camera=on|off\n"
+             "                sprite_sheets=on|off script_texanim=on|off\n"
+             "                                 renderer features, on by default except\n"
+             "                                 parallax_offset: layers of scenes with camera parallax\n"
+             "                                 follow the pointer (*) / are also displaced while it\n"
+             "                                 rests (off: a scene at rest is the picture its file\n"
+             "                                 describes); scripts move and zoom the view; animated\n"
+             "                                 (sprite sheet) pictures play (*) / scripts drive\n"
+             "                                 them. (*) loads the wallpaper again.\n"
+             "                                 `walpe-ctl status` shows them as \"features\";\n"
+             "                                 WALPE_FEATURES=name=off,... in the daemon's\n"
+             "                                 environment wins\n"
+             "  walpe-ctl set bloom=on|off camera_shake=on|off\n"
+             "                                 two more of them, on by default: scenes that ask for\n"
+             "                                 bloom (a glow around bright parts) or camera shake (the\n"
+             "                                 view sways) get it. post=reduced makes bloom cheaper,\n"
+             "                                 post=off leaves it out too\n"
              "  walpe-ctl set preset=max|high|balanced|low\n"
              "                                 quality for GPU load, all knobs at once; single knobs:\n"
              "      fx_rate=1|2|3              animated effects are redrawn every Nth frame ...\n"
@@ -152,6 +256,14 @@ static void usage (void)
              "                                 in ~/.cache/walpe/gpu-profile-<time>.txt / .json.\n"
              "                                 --sync: measure with glFinish instead of timer queries\n"
              "                                 (slows rendering; for software GL / odd drivers)\n"
+             "  walpe-ctl gpu-stats [--sample SECONDS] [--pid PID | --no-process] [--device DEV] [--json]\n"
+             "                                 GPU busy %%, GPU memory, power, temperature and clocks as\n"
+             "                                 the kernel and the driver account them, on AMD, Intel and\n"
+             "                                 NVIDIA: the whole GPU, walpe-daemon's own part and the\n"
+             "                                 other programs on the GPU, each value with its source or\n"
+             "                                 \"not available\". Works without a running daemon (then\n"
+             "                                 the GPU alone). SECONDS default 2; DEV = card1, renderD129\n"
+             "                                 or a PCI address when the machine has two GPUs\n"
              "  walpe-ctl quit                 stop the daemon\n"
              "exit status: 0 done, 1 usage, 2 no daemon, 3 the daemon refused the command\n");
 }
@@ -794,6 +906,254 @@ static int quality_cmd (int argc, char **argv)
     return rc;
 }
 
+/* walpe-ctl backend: the window system of the running daemon, in words.
+ * Exit status as elsewhere: 2 = no daemon, 3 = it refused. */
+static int backend_show (void)
+{
+    char *sock = walpe_socket_path ();
+    char *reply = walpe_ipc_request (sock, "{\"cmd\":\"status\"}", 2000);
+    g_free (sock);
+    if (!reply) {
+        g_printerr ("walpe-daemon is not running\n");
+        return 2;
+    }
+    JsonNode *rn = wpj_parse_data (reply, -1);
+    JsonObject *so = rn && JSON_NODE_HOLDS_OBJECT (rn) ? wpj_obj (json_node_get_object (rn), "state")
+                                                       : NULL;
+    int rc = 0;
+    if (!so || !json_object_has_member (so, "display_backend")) {
+        /* a daemon from before the two backends: it draws on X11 */
+        g_print ("backend: x11 (this daemon has no other; it does not report a choice)\n");
+        rc = so ? 0 : 3;
+    } else {
+        g_print ("backend: %s\n  chosen: %s\n  setting: %s (from: %s)\n  built into this daemon: %s\n",
+                 wpj_str (so, "display_backend", "?"), wpj_str (so, "display_backend_why", "?"),
+                 wpj_str (so, "display_backend_setting", "auto"),
+                 wpj_str (so, "display_backend_source", "default"),
+                 wpj_str (so, "display_backends_built", "?"));
+        JsonObject *ps = wpj_obj (so, "pause_signals");
+        static const char *const sig[][2] = {
+            { "fullscreen", "a fullscreen window has the focus (fs)" },
+            { "covered", "windows cover the monitor (covered)" },
+            { "asleep", "the display sleeps or the session is locked (dpms)" },
+            { "focus_app", "an application has the focus (focus_action)" },
+            { "idle", "no input for a while" },
+        };
+        g_print ("  what can pause a wallpaper here, and who reports it:\n");
+        for (guint i = 0; ps && i < G_N_ELEMENTS (sig); i++) {
+            JsonObject *one = wpj_obj (ps, sig[i][0]);
+            const char *from = one ? wpj_str (one, "from", "") : "";
+            const char *miss = one ? wpj_str (one, "missing", "") : "";
+            g_print ("    %-52s %s%s%s%s\n", sig[i][1], *from ? from : "nobody in this session",
+                     *miss ? "  (not available: " : "", miss, *miss ? ")" : "");
+        }
+    }
+    if (rn)
+        json_node_unref (rn);
+    g_free (reply);
+    return rc;
+}
+
+/* ---- walpe-ctl resolution ------------------------------------------------
+ * Values are checked here with the same functions the daemon uses, so a
+ * typo is reported before anything is sent. */
+static void resolution_print (JsonObject *r)
+{
+    JsonArray *ms = wpj_arr (r, "monitors");
+    g_print ("%-4s %-14s %-12s %-7s %-11s %-12s %-7s %-13s %s\n", "mon", "output", "mode",
+             "Hz", "resolution", "rendered at", "pixels", "texture limit", "asked");
+    for (guint i = 0; i < wpj_arr_len (ms); i++) {
+        JsonObject *m = wpj_arr_obj (ms, i);
+        if (!m)
+            continue;
+        if (!wpj_bool (m, "connected", TRUE)) {
+            g_print ("%-4s %-14s %-20s %-11s %-12s %-7s %-13s %s\n", "-", wpj_str (m, "name", "?"),
+                     "(not connected)", wpj_str (m, "resolution", "?"), "", "",
+                     wpj_str (m, "texture_limit", "?"), wpj_bool (m, "asked", FALSE) ? "yes" : "no");
+            continue;
+        }
+        double mw = 0, mh = 0, rw = 0, rh = 0;
+        wpj_num2 (m, "mode", &mw, &mh);
+        wpj_num2 (m, "render_size", &rw, &rh);
+        char mode[32], rend[32], hz[16], pct[16], idx[16];
+        g_snprintf (mode, sizeof (mode), "%.0fx%.0f", mw, mh);
+        g_snprintf (rend, sizeof (rend), "%.0fx%.0f", rw, rh);
+        g_snprintf (hz, sizeof (hz), "%.1f", wpj_num (m, "refresh", 0));
+        g_snprintf (pct, sizeof (pct), "%.0f %%", wpj_num (m, "render_percent", 100));
+        g_snprintf (idx, sizeof (idx), "%.0f", wpj_num (m, "index", 0));
+        g_print ("%-4s %-14s %-12s %-7s %-11s %-12s %-7s %-13s %s\n", idx, wpj_str (m, "name", "?"),
+                 mode, hz, wpj_str (m, "resolution", "?"), rend, pct,
+                 wpj_str (m, "texture_limit", "?"),
+                 wpj_bool (m, "asked", FALSE) ? "yes" : "not yet");
+        if (json_object_has_member (m, "note"))
+            g_print ("     %s\n", wpj_str (m, "note", ""));
+    }
+    double bw = 0, bh = 0;
+    wpj_num2 (r, "video_box", &bw, &bh);
+    if (bw > 0 && bh > 0)
+        g_print ("videos: imported and converted at up to %.0fx%.0f (video_resolution %s)\n", bw, bh,
+                 wpj_str (r, "video_resolution", "auto"));
+    else
+        g_print ("videos: imported and converted at their own size (video_resolution %s)\n",
+                 wpj_str (r, "video_resolution", "none"));
+    g_print ("scaling to the monitor: %s (scale_filter)\n", wpj_str (r, "scale_filter", "bilinear"));
+    if (wpj_bool (r, "env", FALSE))
+        g_print ("WALPE_RESOLUTION in the daemon's environment decides the sizes while it is set\n");
+    int un = (int) wpj_num (r, "unasked", 0);
+    if (un > 0)
+        g_print ("%d monitor(s) not asked about yet: rendered at their own resolution. Choose with "
+                 "`walpe-ctl resolution <monitor> <value>`, or keep what they have with "
+                 "`walpe-ctl resolution --keep`%s\n", un,
+                 wpj_bool (r, "prompt", TRUE) ? " (the WalPE window asks about them once; "
+                                                "`walpe --resolution` opens that dialog)" : "");
+    if (json_object_has_member (r, "note"))
+        g_print ("note: %s\n", wpj_str (r, "note", ""));
+}
+
+/* <monitor> as a request member: an index, "all", or an output name */
+static void resolution_target (GString *req, const char *mon)
+{
+    gboolean digits = mon && *mon;
+    for (const char *p = mon; p && *p; p++)
+        digits = digits && g_ascii_isdigit (*p);
+    if (!mon)
+        return;     /* every connected monitor */
+    if (digits && strlen (mon) <= 4) {
+        g_string_append_printf (req, ",\"monitor\":%s", mon);
+    } else {
+        char *e = walpe_json_escape (mon);
+        g_string_append_printf (req, ",\"monitor\":\"%s\"", e);
+        g_free (e);
+    }
+}
+
+static int resolution_cmd (int argc, char **argv)
+{
+    gboolean json = FALSE;
+    const char *mon = NULL, *value = NULL, *tex = NULL, *prompt = NULL;
+    int asked = -1;
+    gboolean forget = FALSE;
+    for (int i = 2; i < argc; i++) {
+        const char *a = argv[i];
+        if (!g_strcmp0 (a, "--json"))
+            json = TRUE;
+        else if (!g_strcmp0 (a, "--keep"))
+            asked = 1;
+        else if (!g_strcmp0 (a, "--ask"))
+            asked = 0;
+        else if (!g_strcmp0 (a, "--forget"))
+            forget = TRUE;
+        else if (!g_strcmp0 (a, "--prompt") && i + 1 < argc)
+            prompt = argv[++i];
+        else if (g_str_has_prefix (a, "--prompt="))
+            prompt = a + 9;
+        else if (g_str_has_prefix (a, "texture_limit="))
+            tex = a + 14;
+        else if (g_str_has_prefix (a, "--")) {
+            g_printerr ("resolution: unknown option '%s' (walpe-ctl without arguments shows the "
+                        "usage)\n", a);
+            return 1;
+        } else if (!mon)
+            mon = a;
+        else if (!value)
+            value = a;
+        else {
+            g_printerr ("resolution: '%s' is one argument too many: <monitor> <value> "
+                        "[texture_limit=...]\n", a);
+            return 1;
+        }
+    }
+    /* `resolution 1080p` is not "monitor 1080p": say what is expected */
+    if (mon && !value) {
+        WalpeRes r;
+        if (walpe_res_parse (mon, &r, NULL) && !tex && asked < 0 && !forget) {
+            g_printerr ("resolution: which monitor? `walpe-ctl resolution all %s` sets every "
+                        "connected one, `walpe-ctl resolution` lists them\n", mon);
+            return 1;
+        }
+    }
+    char *err = NULL;
+    WalpeRes res;
+    int tl = 0;
+    if (value && !walpe_res_parse (value, &res, &err)) {
+        g_printerr ("%s; nothing was changed\n", err);
+        g_free (err);
+        return 1;
+    }
+    if (tex && !walpe_texlimit_parse (tex, &tl, &err)) {
+        g_printerr ("%s; nothing was changed\n", err);
+        g_free (err);
+        return 1;
+    }
+    gboolean pon = FALSE;
+    if (prompt) {
+        pon = !g_ascii_strcasecmp (prompt, "on") || !g_ascii_strcasecmp (prompt, "true") ||
+              !g_ascii_strcasecmp (prompt, "yes");
+        if (!pon && g_ascii_strcasecmp (prompt, "off") && g_ascii_strcasecmp (prompt, "false") &&
+            g_ascii_strcasecmp (prompt, "no")) {
+            g_printerr ("resolution: --prompt needs on or off, not '%s'\n", prompt);
+            return 1;
+        }
+    }
+    if (forget && (value || tex || asked >= 0)) {
+        g_printerr ("resolution: --forget goes alone (it drops the stored choice)\n");
+        return 1;
+    }
+    if (mon && !value && !tex && asked < 0 && !forget) {
+        g_printerr ("resolution: nothing to set for '%s': a value (native, 720p, 1080p, 1440p, 4k, "
+                    "WIDTHxHEIGHT), texture_limit=..., --keep, --ask or --forget\n", mon);
+        return 1;
+    }
+    GString *req = g_string_new ("{\"cmd\":\"resolution\"");
+    if (value || tex || asked >= 0 || forget) {
+        resolution_target (req, mon && g_ascii_strcasecmp (mon, "all") && strcmp (mon, "*") ? mon
+                                                                                             : NULL);
+        if (value) {
+            char *canon = walpe_res_format (&res);
+            g_string_append_printf (req, ",\"value\":\"%s\"", canon);
+            g_free (canon);
+        }
+        if (tex) {
+            char *canon = walpe_texlimit_format (tl);
+            g_string_append_printf (req, ",\"texture_limit\":\"%s\"", canon);
+            g_free (canon);
+        }
+        if (asked >= 0)
+            g_string_append_printf (req, ",\"asked\":%s", asked ? "true" : "false");
+        if (forget)
+            g_string_append (req, ",\"forget\":true");
+    }
+    if (prompt)
+        g_string_append_printf (req, ",\"prompt\":%s", pon ? "true" : "false");
+    g_string_append_c (req, '}');
+
+    int rc = 0;
+    char *sock = walpe_socket_path ();
+    char *reply = walpe_ipc_request (sock, req->str, 4000);
+    if (!reply) {
+        g_printerr ("walpe-daemon is not running (no reply on %s)\n", sock);
+        rc = 2;
+    } else {
+        JsonNode *rn = wpj_parse_data (reply, -1);
+        JsonObject *ro = rn && JSON_NODE_HOLDS_OBJECT (rn) ? json_node_get_object (rn) : NULL;
+        gboolean ok = ro && wpj_bool (ro, "ok", FALSE);
+        if (json || !ok)
+            g_print ("%s\n", reply);
+        else
+            resolution_print (ro);
+        if (!ok) {
+            rc = 3;
+            note_old_daemon (reply, "resolution");
+        }
+        if (rn)
+            json_node_unref (rn);
+    }
+    g_free (reply);
+    g_free (sock);
+    g_string_free (req, TRUE);
+    return rc;
+}
+
 int main (int argc, char **argv)
 {
     if (argc < 2) {
@@ -809,6 +1169,22 @@ int main (int argc, char **argv)
     }
     if (!g_strcmp0 (cmd, "layers"))
         return layers_main (argc, argv);
+    if (!g_strcmp0 (cmd, "gpu"))
+        return gpu_ctl_main (argc, argv);
+    if (!g_strcmp0 (cmd, "gpu-stats"))
+        return gpustat_main (argc, argv);
+    if (!g_strcmp0 (cmd, "backend") && argc == 2)
+        return backend_show ();
+    if (!g_strcmp0 (cmd, "backend") && argc == 3) {
+        /* the name is checked here, so that a typing mistake is answered
+         * with the three names and not sent */
+        int bk = walpe_backend_parse (argv[2], -1);
+        if (bk < 0) {
+            g_printerr ("backend: auto, x11 or wayland - not '%s'\n", argv[2]);
+            return 1;
+        }
+        req = g_strdup_printf ("{\"cmd\":\"set\",\"backend\":\"%s\"}", walpe_backend_name (bk));
+    } else
     if (!g_strcmp0 (cmd, "install") && argc >= 3) {
         char *id = walpe_workshop_parse_id (argv[2]);
         if (!id) {
@@ -952,6 +1328,7 @@ int main (int argc, char **argv)
                     { "dpms", "pause_dpms" }, { "transparent", "cover_transparent" },
                     { "shared", "render_shared" }, { "software", "software_render" },
                     { "battery", "pause_battery" }, { "previews", "preview_anim" },
+                    { "idle", "pause_idle" },
                     { "focus", "focus_action" }, { "hwdec", "video_hwdec" },
                 };
                 for (guint a = 0; a < G_N_ELEMENTS (alias); a++)
@@ -1004,6 +1381,8 @@ int main (int argc, char **argv)
         req = g_string_free (s, FALSE);
     } else if (!g_strcmp0 (cmd, "quality")) {
         return quality_cmd (argc, argv);
+    } else if (!g_strcmp0 (cmd, "resolution")) {
+        return resolution_cmd (argc, argv);
     } else if (!g_strcmp0 (cmd, "props") || !g_strcmp0 (cmd, "resetprops")) {
         /* [--monitor N | --path P]: another wallpaper than the default one */
         GString *tgt = g_string_new (NULL);
@@ -1106,17 +1485,24 @@ int main (int argc, char **argv)
             json_node_unref (rn);
         if (!ok)
             note_old_daemon (reply, cmd);
+        /* (read before the reply is freed: the test below used the freed text) */
+        const gboolean restart_needed = ok && (!g_strcmp0 (cmd, "set") || !g_strcmp0 (cmd, "backend")) &&
+                                        strstr (reply, "\"restart_needed\":true") != NULL;
         g_free (reply);
         if (!ok) {
             g_free (sock);
             g_free (req);
             return 3;
         }
+        if (restart_needed)
+            g_printerr ("backend: saved. The running daemon keeps the window system it started on; "
+                        "the setting is read when walpe-daemon starts (walpe-ctl quit, then start "
+                        "it again). `walpe-ctl backend` shows the one in use\n");
         if (!g_strcmp0 (cmd, "set") && strstr (req, "\"video_hwdec\""))
             g_printerr ("hwdec: videos that are playing switch within a second (a paused one when it "
-                        "resumes); `walpe-ctl status` shows the decoder in use as \"video_decoder\" - "
-                        "\"software\" there after hwdec=on means it was not available or failed, "
-                        "and the same line says why\n");
+                        "resumes); `walpe-ctl status` shows the decoder in use as \"video_decoder\" "
+                        "(API, device, codec profile) - \"software\" there after hwdec=auto or a "
+                        "name means it was not available or failed, and the same line says why\n");
     } else {
         g_printerr ("walpe-daemon is not running (no reply on %s)\n", sock);
         g_free (sock);

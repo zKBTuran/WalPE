@@ -1,7 +1,6 @@
 /* yuvconv.h - YUV420p -> BGRA conversion (BT.601 / BT.709 / BT.2020,
- * limited or full range). The AVX2 kernel in kernels.S and the
- * scalar reference here MUST produce byte-identical output; the test
- * harness validates them against each other. */
+ * limited or full range), plain C integer arithmetic: byte-identical on
+ * every architecture. */
 #pragma once
 #include <glib.h>
 #include "common/api.h"
@@ -12,11 +11,12 @@ void walpe_yuv420_bgra_scalar (const guint8 *y, const guint8 *u, const guint8 *v
                                gint ystride, gint uvstride,
                                guint8 *dst, gint dststride, gint w, gint h);
 
-/* dispatches to the AVX2 kernel when available */
+/* the same as walpe_yuv420_bgra_scalar (kept for its callers' name) */
 void walpe_yuv420_bgra (const guint8 *y, const guint8 *u, const guint8 *v,
                         gint ystride, gint uvstride,
                         guint8 *dst, gint dststride, gint w, gint h);
 
+/* always FALSE: no AVX2 kernel exists */
 gboolean walpe_yuv_bgra_is_avx2 (void);
 
 /* how the planes are coded (the last argument of the functions below and

@@ -37,6 +37,11 @@
  *                                  cannot be read - only stage 1 is left)
  */
 
+/* GLSL ES output (fx_essl.h, included behind this file). fx_essl () is 0
+ * for GLSL 3.30 - desktop OpenGL - and then nothing of it runs. */
+static int fx_essl (void);
+static int fx_essl_src (char **src);
+
 /* ------------------------------------------------------------------ types */
 
 typedef enum { FXB_UNK = 0, FXB_VOID, FXB_BOOL, FXB_INT, FXB_UINT, FXB_FLOAT, FXB_MAT,
@@ -2674,6 +2679,19 @@ static void fx_prepass_said (const char *name, int nv, int nf, gboolean vary)
                    vary ? ", varying interface" : "");
 }
 
+/* behind the repairs: they leave GLSL 3.30, this makes it GLSL ES. Not
+ * part of what a scene load's memo keeps (fx_prepass): the kept texts are
+ * the repaired GLSL 3.30 ones, and this runs on them for every pass. */
+static void fx_prepass_essl (char **vsrc, char **fsrc, const char *name)
+{
+    if (!fx_essl ())
+        return;
+    int ev = fx_essl_src (vsrc), ef = fx_essl_src (fsrc);
+    if (ev || ef)
+        g_debug ("fx: shader %s: %d line(s) rewritten for GLSL ES %d (vertex %d, fragment %d)",
+                 name, ev + ef, fx_essl (), ev, ef);
+}
+
 static void fx_prepass (char **vsrc, char **fsrc, const char *name)
 {
     if (fx_env_on ("WALPE_FX_NO_PREPASS"))
@@ -2702,6 +2720,7 @@ static void fx_prepass (char **vsrc, char **fsrc, const char *name)
             *fsrc = g_strdup (k->fsrc);
             fx_prepass_said (name, k->nv, k->nf, k->vary);
             g_atomic_int_inc (&fx_memo_reused);
+            fx_prepass_essl (vsrc, fsrc, name);
             return;
         }
         fx_said_tape = g_ptr_array_new_with_free_func (fx_said_free);
@@ -2721,6 +2740,7 @@ static void fx_prepass (char **vsrc, char **fsrc, const char *name)
         g_atomic_int_inc (&fx_memo_computed);
     }
     fx_prepass_said (name, nv, nf, vary);
+    fx_prepass_essl (vsrc, fsrc, name);
 }
 
 /* ------------------------------------------- stage 2: error-driven fallback */
@@ -2795,7 +2815,12 @@ static void fx_log_error_lines (const char *log, GArray *out)
 /* compile src; FALSE + the driver's log when it does not compile */
 typedef gboolean (*FxTryFn) (const char *src, char *log, gsize logsize, gpointer user);
 
-typedef struct { char *text; gboolean uint_body; } FxCand;
+/* at1: the candidate replaces line at1 - 1 instead of the line the log
+ * names (0 = that line); only GLSL ES candidates set it */
+typedef struct { char *text; gboolean uint_body; guint at1; } FxCand;
+
+static void fx_essl_cands (FxAn *an, char **lines, guint nl, guint base, guint idx, gboolean blk,
+                           GPtrArray *out);
 
 static void fx_cand_free (gpointer p)
 {
@@ -2952,6 +2977,8 @@ static GPtrArray *fx_candidates (char **lines, guint nl, guint base, guint idx)
             fx_cand_add (out, line, g_strdup_printf ("%.*s%s", (int) (d - code), line,
                                                      line + (fx_sp (d + 5) - code)));
         fx_an_decls (&an, code);
+        if (fx_essl ())
+            fx_essl_cands (&an, lines, nl, base, idx, blk, out);
         char *before = fx_join_upto (lines, idx);
         fx_cands_line (&an, line, line, before, blk, out, 0);
         g_free (before);
@@ -2994,8 +3021,9 @@ static gboolean fx_repair_by_lines (char **src, const char *log, FxTryFn try, gp
                 fx_uint_to_int (nlines, base, nl);
                 fx_strip_uint_suffix (nlines, base, nl);
             } else {
-                g_free (nlines[idx]);
-                nlines[idx] = g_strdup (cd->text);
+                guint at = cd->at1 ? cd->at1 - 1 : idx;
+                g_free (nlines[at]);
+                nlines[at] = g_strdup (cd->text);
             }
             char *nsrc = g_strjoinv ("\n", nlines);
             g_strfreev (nlines);

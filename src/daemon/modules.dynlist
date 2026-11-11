@@ -4,6 +4,9 @@
   walpe_config_get_prop;
   walpe_glutil_init; walpe_glutil_draw_quad; walpe_glutil_draw_yuv_range;
   walpe_gl_is_software; walpe_mat3_cover;
+  walpe_gl_caps; walpe_gl_caps_has_ext; walpe_gl_caps_at_least; walpe_gl_caps_format;
+  walpe_gl_format; walpe_gpu_in_use; walpe_gpu_in_use_clear;
+  walpe_gl_tex_image_bgra; walpe_gl_tex_sub_image_bgra;
   walpe_media_ref; walpe_media_unref; walpe_media_serial; walpe_media_get;
   walpe_media_now_clear;
   mp4_demux_open_range; mp4_demux_free; mp4_demux_next;
@@ -11,7 +14,12 @@
   walpe_video_hwdec; walpe_video_note_decoder; walpe_video_note_frame;
   walpe_video_limit; walpe_video_frame_limit;
   walpe_video_upload_mode; walpe_video_note_upload;
+  walpe_video_hwdec_api; walpe_video_zerocopy;
   wpj_str; wpj_obj; wpj_num; wpj_bool; wpj_parse_file;
+  /* which window system the daemon draws on (WALPE_BACKEND_X11 = 1,
+   * WALPE_BACKEND_WAYLAND = 2): looked up by name by a module that wants
+   * to know, so a daemon without it still loads the module */
+  walpe_backend_in_use;
   /* not called by the modules: defined by the daemon so that GTK / WebKit
    * (loaded with walpe-web.so) reach this definition instead of libX11's
    * - the daemon never owns an X selection (src/daemon/selguard.c) */

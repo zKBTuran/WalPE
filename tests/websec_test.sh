@@ -37,7 +37,7 @@ T=$(mktemp -d "${TMPDIR:-/tmp}/walpe-websec-XXXXXX") || exit 77
 export HOME="$T/home" XDG_RUNTIME_DIR="$T/run"
 export XDG_CONFIG_HOME="$HOME/.config" XDG_DATA_HOME="$HOME/.local/share" XDG_CACHE_HOME="$HOME/.cache"
 export NO_AT_BRIDGE=1 GTK_A11Y=none
-unset WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS WALPE_WEB_SELECTIONS WALPE_WEB_TIMING WALPE_WEB_SCHEME WALPE_WEB_FILE_URLS
+unset WAYLAND_DISPLAY WAYLAND_SOCKET DBUS_SESSION_BUS_ADDRESS WALPE_WEB_SELECTIONS WALPE_WEB_TIMING WALPE_WEB_SCHEME WALPE_WEB_FILE_URLS
 mkdir -p "$HOME/.config" "$XDG_RUNTIME_DIR" "$T/wp"
 chmod 700 "$XDG_RUNTIME_DIR"
 XPID= DPID= LPID=
@@ -60,6 +60,9 @@ XPID=$!
 i=0; while [ ! -s "$T/dfd" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done
 [ -s "$T/dfd" ] || { echo "SKIP: Xvfb did not start"; exit 77; }
 export DISPLAY=":$(cat "$T/dfd")"
+# (the daemon is told its window system by name: it must use this X server whatever
+# session the test is started from)
+export WALPE_BACKEND=x11
 
 # --- "another service on this machine"
 python3 -I -c '
@@ -135,6 +138,14 @@ i=0; while [ ! -S "$XDG_RUNTIME_DIR/walpe.sock" ] && [ $i -lt 100 ]; do sleep 0.
 i=0; while ! grep -q 'NP net done' "$T/daemon.log" && [ $i -lt 240 ]; do sleep 0.5; i=$((i+1)); done
 if ! grep -q 'NP net done' "$T/daemon.log"; then
     if grep -q 'web: loaded' "$T/daemon.log"; then echo "FAIL: the page loaded but never finished its requests"; exit 1; fi
+    # a page host asked for by name (the websec-private run) that did not
+    # come up is what that run is there to find: not a skip
+    if [ "$WALPE_WEB_HOST" = private ] &&
+       grep -q 'private page host cannot start\|could not use the private page host\|cannot make a directory for the page host' "$T/daemon.log"; then
+        echo "FAIL: WALPE_WEB_HOST=private, and the private page host did not come up:"
+        grep 'page host' "$T/daemon.log" | sed 's/^/    /' | head -5
+        exit 1
+    fi
     echo "SKIP: WebKit did not show the page here"; tail -5 "$T/daemon.log"; exit 77
 fi
 
@@ -166,6 +177,14 @@ bad () { echo "FAIL: $*"; fail=1; }
 grep -q 'message handler: it is stopped' "$T/daemon.log" || bad "a page that posted 480 MB to the message handler was not stopped"
 grep -q 'web_error.*was stopped' "$T/status.json" || bad "status does not report the stopped page (web_error)"
 grep -q 'NP own: ok' "$T/daemon.log" || bad "the page's own file did not load with network access off"
+# a run for one page host (WALPE_WEB_HOST=private | x11) has tested that
+# host only if the page really lived there
+case "$WALPE_WEB_HOST" in
+private|x11)
+    grep -Eq "\"web_host\" *: *\"$WALPE_WEB_HOST\"" "$T/status.json" ||
+        bad "the page was not on the page host asked for (WALPE_WEB_HOST=$WALPE_WEB_HOST); status says: $(grep -Eo '"web_host" *: *"[a-z0-9]*"' "$T/status.json" | head -1)"
+    ;;
+esac
 if [ -s "$T/listen.log" ]; then
     bad "with network access off the page reached another port of this machine:"; sed 's/^/    /' "$T/listen.log" | head -5
 fi

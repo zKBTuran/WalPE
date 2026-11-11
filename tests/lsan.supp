@@ -1,6 +1,7 @@
 # LeakSanitizer suppressions for the test suites of a sanitizer build
 # (meson.build: test setup "sanitize", which `meson test` uses by itself in
-# a build made with -Db_sanitize=address...). By hand:
+# a build made with -Db_sanitize=address...; `--setup=asan_leaks` passes the
+# same file). By hand:
 #   LSAN_OPTIONS=suppressions=tests/lsan.supp build/<name>-test
 #
 # Only memory of libraries that LeakSanitizer cannot follow is listed.
