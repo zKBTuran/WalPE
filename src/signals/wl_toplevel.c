@@ -7,6 +7,9 @@
  * the outputs it is on; a batch of changes ends with `done`. From that:
  *
  *   fullscreen (global)   an activated toplevel is fullscreen
+ *   fullscreen_on (output) ... and is on the output; on every output
+ *                         (WALPE_OUTPUT_ALL) where the compositor does not
+ *                         say which one it is on (wlplan.h)
  *   focus_app (output)    an activated toplevel is on the output
  *   covered (output)      a fullscreen or maximized toplevel is on it and
  *                         is not minimized, not in the "see-through
@@ -46,6 +49,9 @@ static struct {
     gboolean cover_all;     /* WALPE_WL_COVERED=all */
     guint recompute_id;
     GArray *reported;       /* guint32: output ids a per-output value was given for */
+    GArray *fs_reported;    /* guint32: output ids fullscreen_on was given for */
+    WalpeTlWhere fs_where;  /* why fullscreen_on is reported for every output now
+                             * (WALPE_TL_WHERE_KNOWN = it is not) */
 } W;
 
 static void tl_free (gpointer p)
@@ -78,6 +84,66 @@ static gboolean id_listed (GArray *a, guint32 id)
     return FALSE;
 }
 
+/* the daemon's outputs a window is on -> ids (no id twice); the answer
+ * says whether that is the whole truth (wlplan.h) */
+static WalpeTlWhere tl_where (Tl *t, GArray *ids)
+{
+    guint n = t->outs->len;
+    guint32 *id = g_new0 (guint32, n + 1);
+    gboolean *named = g_new0 (gboolean, n + 1);
+    for (guint i = 0; i < n; i++) {
+        WlSessOutput *o = walpe_wlsess_output_of (W.sess, t->outs->pdata[i]);
+        id[i] = o ? o->id : 0;
+        named[i] = o && o->name != NULL;
+    }
+    WalpeTlWhere w = walpe_tl_where (n, id, named);
+    for (guint i = 0; w == WALPE_TL_WHERE_KNOWN && i < n; i++)
+        if (id[i] && !id_listed (ids, id[i]))
+            g_array_append_val (ids, id[i]);
+    g_free (id);
+    g_free (named);
+    return w;
+}
+
+/* fullscreen: is there a focused fullscreen window, and on which of the
+ * daemon's outputs (several windows can be activated at once: one per
+ * seat). One whose output is not known counts for every output. */
+static void tl_recompute_fullscreen (void)
+{
+    gboolean fs = FALSE;
+    WalpeTlWhere where = WALPE_TL_WHERE_KNOWN;
+    GArray *ids = g_array_new (FALSE, FALSE, sizeof (guint32));
+    for (guint i = 0; i < W.tls->len; i++) {
+        Tl *t = W.tls->pdata[i];
+        if (!walpe_tl_is_fullscreen_focus (t->state))
+            continue;
+        fs = TRUE;
+        WalpeTlWhere w = tl_where (t, ids);
+        if (w != WALPE_TL_WHERE_KNOWN && where == WALPE_TL_WHERE_KNOWN)
+            where = w;
+    }
+    /* (often only for a moment: a compositor may announce a new window's
+     * state before its output; status has the sentence while it lasts) */
+    if (where != W.fs_where && where != WALPE_TL_WHERE_KNOWN)
+        g_debug ("wl-toplevel: fullscreen counts for every monitor: %s",
+                 walpe_tl_where_why (where));
+    W.fs_where = where;
+    walpe_signal_set (&walpe_sig_wl_fullscreen, WALPE_SIG_FULLSCREEN, 0, fs);
+    walpe_signal_set (&walpe_sig_wl_fullscreen, WALPE_SIG_FULLSCREEN_ON, WALPE_OUTPUT_ALL,
+                      where != WALPE_TL_WHERE_KNOWN);
+    for (guint k = 0; k < ids->len; k++)
+        walpe_signal_set (&walpe_sig_wl_fullscreen, WALPE_SIG_FULLSCREEN_ON,
+                          g_array_index (ids, guint32, k), TRUE);
+    /* an output the window left, or one that is gone */
+    for (guint k = 0; k < W.fs_reported->len; k++) {
+        guint32 id = g_array_index (W.fs_reported, guint32, k);
+        if (!id_listed (ids, id))
+            walpe_signal_set (&walpe_sig_wl_fullscreen, WALPE_SIG_FULLSCREEN_ON, id, FALSE);
+    }
+    g_array_free (W.fs_reported, TRUE);
+    W.fs_reported = ids;
+}
+
 static void tl_recompute (void)
 {
     if (W.recompute_id) {
@@ -88,12 +154,8 @@ static void tl_recompute (void)
         return;
     const char *see = walpe_sigprov_see_through ();
     walpe_signals_begin ();
-    if (W.fs_on) {
-        gboolean fs = FALSE;
-        for (guint i = 0; i < W.tls->len && !fs; i++)
-            fs = walpe_tl_is_fullscreen_focus (((Tl *) W.tls->pdata[i])->state);
-        walpe_signal_set (&walpe_sig_wl_fullscreen, WALPE_SIG_FULLSCREEN, 0, fs);
-    }
+    if (W.fs_on)
+        tl_recompute_fullscreen ();
     if (W.win_on) {
         /* the outputs the daemon shows on, as this connection knows them */
         GArray *ids = g_array_new (FALSE, FALSE, sizeof (guint32));
@@ -322,6 +384,8 @@ static gboolean tracker_up (char **why)
     }
     W.tls = g_ptr_array_new_with_free_func (tl_free);
     W.reported = g_array_new (FALSE, FALSE, sizeof (guint32));
+    W.fs_reported = g_array_new (FALSE, FALSE, sizeof (guint32));
+    W.fs_where = WALPE_TL_WHERE_KNOWN;
     W.mgr = walpe_wlsess_bind (s, &zwlr_foreign_toplevel_manager_v1_interface, 3, &W.version);
     if (!W.mgr) {
         if (why)
@@ -329,6 +393,8 @@ static gboolean tracker_up (char **why)
         g_clear_pointer (&W.tls, g_ptr_array_unref);
         g_array_free (W.reported, TRUE);
         W.reported = NULL;
+        g_array_free (W.fs_reported, TRUE);
+        W.fs_reported = NULL;
         walpe_wlsess_unref (s);
         return FALSE;
     }
@@ -373,6 +439,9 @@ static void tracker_down (void)
     if (W.reported)
         g_array_free (W.reported, TRUE);
     W.reported = NULL;
+    if (W.fs_reported)
+        g_array_free (W.fs_reported, TRUE);
+    W.fs_reported = NULL;
     walpe_wlsess_unref (W.sess);
     W.sess = NULL;
 }
@@ -403,8 +472,36 @@ static void fs_stop (const WalpeSignalProvider *self)
     if (!W.fs_on)
         return;
     walpe_signal_set (&walpe_sig_wl_fullscreen, WALPE_SIG_FULLSCREEN, 0, FALSE);
+    walpe_signal_set (&walpe_sig_wl_fullscreen, WALPE_SIG_FULLSCREEN_ON, WALPE_OUTPUT_ALL, FALSE);
+    for (guint k = 0; W.fs_reported && k < W.fs_reported->len; k++)
+        walpe_signal_set (&walpe_sig_wl_fullscreen, WALPE_SIG_FULLSCREEN_ON,
+                          g_array_index (W.fs_reported, guint32, k), FALSE);
+    if (W.fs_reported)
+        g_array_set_size (W.fs_reported, 0);
+    W.fs_where = WALPE_TL_WHERE_KNOWN;
     W.fs_on = FALSE;
     tracker_down ();
+}
+
+/* For status: why the fullscreen rule pauses every monitor in this session
+ * instead of the one the window is on; NULL = it can tell them apart (or
+ * the provider does not run). That is so while a focused fullscreen
+ * window's output is not known, and - window or not - while this
+ * connection has an output it could not match to one of the daemon's for
+ * want of a name: a window on that one could be anywhere. */
+const char *walpe_sig_wl_fullscreen_everywhere (void)
+{
+    if (!W.fs_on || !W.sess)
+        return NULL;
+    if (W.fs_where != WALPE_TL_WHERE_KNOWN)
+        return walpe_tl_where_why (W.fs_where);
+    GPtrArray *outs = walpe_wlsess_outputs (W.sess);
+    for (guint i = 0; outs && i < outs->len; i++) {
+        WlSessOutput *o = outs->pdata[i];
+        if (o->done && !o->name && !o->id)
+            return WALPE_WLPLAN_FS_NO_NAME;
+    }
+    return NULL;
 }
 
 static gboolean win_start (const WalpeSignalProvider *self, char **why)
@@ -450,7 +547,7 @@ static void tl_recheck (const WalpeSignalProvider *self, WalpeSignal sig, gboole
 
 const WalpeSignalProvider walpe_sig_wl_fullscreen = {
     .name = "wl-fullscreen",
-    .signals = WALPE_SIG_BIT (WALPE_SIG_FULLSCREEN),
+    .signals = WALPE_SIG_BIT (WALPE_SIG_FULLSCREEN) | WALPE_SIG_BIT (WALPE_SIG_FULLSCREEN_ON),
     .backends = 1u << WALPE_BACKEND_WAYLAND,
     .start = fs_start,
     .stop = fs_stop,

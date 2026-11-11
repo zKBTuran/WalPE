@@ -16,8 +16,9 @@ version 0.13.0, which is not released; the last release is 0.12.2.
 > emulation. Nothing new has been run on real AMD, Intel, NVIDIA or ARM hardware or on a
 > real Wayland desktop.** The NVIDIA / X11 path is meant to be unchanged from 0.12.2,
 > except that scenes which ask for bloom, camera shake, sprite sheets or a script camera
-> now get them and that effects on colour-only layers are sharper on monitors wider than
-> 2048 pixels; that too was checked on the software renderer only
+> now get them, that effects on colour-only layers are sharper on monitors wider than
+> 2048 pixels and that a fullscreen window pauses the wallpaper of its own monitor only
+> ([Pausing](#pausing)); that too was checked on the software renderer only
 > ([Known limitations](#known-limitations)).
 
 > **WalPE is an independent project. It is not affiliated with or endorsed by Wallpaper
@@ -379,7 +380,8 @@ is [docs/SETTINGS.md](docs/SETTINGS.md); the most used:
 |---|---|---|
 | `fps=N` | 60 | frame rate limit of scenes and web pages (5-200); never above the monitor's refresh rate |
 | `preset=max\|high\|balanced\|low` | high | quality for GPU load, all knobs at once (below) |
-| `fs=on\|off`, `covered=on\|off`, `dpms=on\|off` | on | pause under a fullscreen window / while covered / while the display sleeps |
+| `fs=on\|off`, `covered=on\|off`, `dpms=on\|off` | on | pause the monitor a focused fullscreen window is on / while covered / while the display sleeps |
+| `fs_all=on\|off` | off | a focused fullscreen window pauses every monitor, not only the one it is on |
 | `focus=run\|limit\|pause`, `focus_fps=N` | run, 15 | what a wallpaper does while an application has the focus on its monitor |
 | `battery=on\|off`, `battery_fps=N` | off, 0 | pause / limit on battery power |
 | `shared=on\|off` | on | render a scene once for same-size monitors |
@@ -416,15 +418,24 @@ releasing GPU memory while paused, frame clocks on one grid) are read from
 
 ## Pausing
 
-Per monitor, a wallpaper pauses while: you paused it; a focused fullscreen window is on any
-monitor (`pause_fullscreen`: every monitor pauses, not only the one the window is on); the
-display is in power save or the screensaver runs
+Per monitor, a wallpaper pauses while: you paused it; a focused fullscreen window is on
+that monitor (`pause_fullscreen`); the display is in power save or the screensaver runs
 (`pause_dpms`); or visible normal windows cover 85 % of the monitor or more
 (`pause_covered`; docks, desktop windows, menus, minimized windows and the windows of other
 dwm tags never count). See-through windows (WM_CLASSes in `transparent_windows`, or
 `_NET_WM_WINDOW_OPACITY` below 100 %) count as covering while `cover_transparent` is on.
 
-That paragraph describes X11. On Wayland each rule needs something in the session that
+A fullscreen window on one monitor leaves the wallpapers of the other monitors running
+(up to 0.12 it paused all of them; `walpe-ctl set fs_all=on`, `pause_fullscreen_all`,
+brings that back, for example to leave the whole GPU to a game). The monitor is the one
+that holds most of the window, so a border or gap a tiling window manager keeps around a
+fullscreen window does not matter; a window across several monitors pauses each one it
+covers at least half of. The rule follows the focus: while another window has the focus,
+the monitor under the fullscreen window is paused by `pause_covered`, not by this rule.
+`walpe-ctl status` says it per monitor (`monitors`: `fullscreen`, `fullscreen_pause`,
+`paused`).
+
+Those paragraphs describe X11. On Wayland each rule needs something in the session that
 reports its condition (the compositor's frame events, its window list, its idle
 notification, logind); `walpe-ctl backend` and the status member `pause_rules` say for the
 running session which rule has a source and which cannot trigger, and why
@@ -535,9 +546,11 @@ a key), `--action=next|random|pause-toggle` runs a menu entry.
   renderer (llvmpipe), a headless Wayland compositor, a null sound sink and - the build
   for 64-bit ARM - under emulation. Nothing new has been run on real AMD, Intel, NVIDIA
   or ARM hardware or on a real Wayland desktop**; the NVIDIA / X11 path is meant to be
-  unchanged from 0.12.2 with default settings, except for the 16 scenes of the next item
-  and for effects on colour-only layers on monitors wider than 2048 pixels, and that too
-  is so far shown only on the software renderer, in two steps. The development tree as it
+  unchanged from 0.12.2 with default settings, except for the 16 scenes of the next item,
+  for effects on colour-only layers on monitors wider than 2048 pixels and for the
+  fullscreen pause rule with more than one monitor ([Pausing](#pausing): the monitor of
+  the fullscreen window pauses, the others keep running; `fs_all=on` is the old rule), and
+  that too is so far shown only on the software renderer, in two steps. The development tree as it
   stood before the fixes of 0.12.2 were merged in was compared with release 0.12.1: the
   same frames of the 91 test scenes at 960x540 (16 of them with the switch of their new
   feature off), the same threads,

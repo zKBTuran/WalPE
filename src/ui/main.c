@@ -1896,7 +1896,7 @@ static gboolean tray_set (gboolean on, char **err)
 
 typedef struct {
     GtkWidget *tray, *tray_info;
-    GtkWidget *fps, *volume, *fs, *covered, *dpms, *transparent, *parallax, *assets, *steam;
+    GtkWidget *fps, *volume, *fs, *fs_all, *covered, *dpms, *transparent, *parallax, *assets, *steam;
     GtkWidget *shared, *fxcache, *texdown, *covtrans, *webaccel, *webaccel_info, *hwdec;
     GtkWidget *vlimit;
     GtkWidget *software, *software_info;   /* "Render on CPU" + what renders now */
@@ -2310,6 +2310,7 @@ static void settings_fill (gboolean follow)
     if (!(follow && SW.vol_id))
         gtk_range_set_value (GTK_RANGE (SW.volume), 100.0 * (st ? wpj_num (st, "volume", c->volume) : c->volume));
     gtk_switch_set_active (GTK_SWITCH (SW.fs), c->pause_fullscreen);
+    gtk_switch_set_active (GTK_SWITCH (SW.fs_all), c->pause_fullscreen_all);
     gtk_switch_set_active (GTK_SWITCH (SW.covered), c->pause_covered);
     gtk_switch_set_active (GTK_SWITCH (SW.dpms), c->pause_dpms);
     gtk_switch_set_active (GTK_SWITCH (SW.parallax), c->parallax);
@@ -2511,8 +2512,13 @@ static GtkWidget *settings_window (void)
 
     settings_group (g, r++, "Pausing");
     SW.fs = mk_switch ("pause_fullscreen", "Pause for fullscreen apps");
-    settings_row (g, r++, "Pause while a fullscreen app is focused", NULL, SW.fs);
+    settings_row (g, r++, "Pause while a fullscreen app is focused",
+                  "Pauses the monitor the app is on.", SW.fs);
     rule_note_row (g, r++, "pause_fullscreen");
+    SW.fs_all = mk_switch ("pause_fullscreen_all", "Fullscreen apps pause every monitor");
+    settings_row (g, r++, "Fullscreen apps pause every monitor",
+                  "On: a focused fullscreen app pauses the wallpapers of all monitors, not "
+                  "only of the one it is on.", SW.fs_all);
     SW.covered = mk_switch ("pause_covered", "Pause when covered");
     settings_row (g, r++, "Pause a monitor when windows cover it",
                   "Counts as covered from 85 % of the monitor.", SW.covered);

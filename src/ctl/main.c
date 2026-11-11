@@ -44,6 +44,8 @@ static void usage (void)
              "  walpe-ctl set mute=on|off      wallpaper sound silent, the volume setting stays\n"
              "  walpe-ctl setprop walpe_sound=on|off  one wallpaper's own sound switch: wins over\n"
              "                                 scene_sound (resetprops drops it again)\n"
+             "  walpe-ctl set fs_all=on|off    a focused fullscreen window pauses every monitor,\n"
+             "                                 not only the one it is on (fs=on; off by default)\n"
              "  walpe-ctl set covered=on|off   pause a monitor while windows cover it\n"
              "  walpe-ctl set dpms=on|off      pause while the display is in power save or the\n"
              "                                 screensaver runs\n"
@@ -934,6 +936,7 @@ static int backend_show (void)
         JsonObject *ps = wpj_obj (so, "pause_signals");
         static const char *const sig[][2] = {
             { "fullscreen", "a fullscreen window has the focus (fs)" },
+            { "fullscreen_on", "... and which monitor it is on" },
             { "covered", "windows cover the monitor (covered)" },
             { "asleep", "the display sleeps or the session is locked (dpms)" },
             { "focus_app", "an application has the focus (focus_action)" },
@@ -1326,7 +1329,8 @@ int main (int argc, char **argv)
             {
                 /* short names: fs, covered, dpms, transparent, shared, ... */
                 static const char *alias[][2] = {
-                    { "fs", "pause_fullscreen" }, { "covered", "pause_covered" },
+                    { "fs", "pause_fullscreen" }, { "fs_all", "pause_fullscreen_all" },
+                    { "covered", "pause_covered" },
                     { "dpms", "pause_dpms" }, { "transparent", "cover_transparent" },
                     { "shared", "render_shared" }, { "software", "software_render" },
                     { "battery", "pause_battery" }, { "previews", "preview_anim" },

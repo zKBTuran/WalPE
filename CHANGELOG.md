@@ -11,8 +11,8 @@ built and tested only on Mesa's software renderer (llvmpipe), a headless Wayland
 compositor (sway 1.9), a PulseAudio null sink and - the build for 64-bit ARM - under
 emulation. Nothing of it has been run on real AMD, Intel, NVIDIA or ARM hardware or on a
 real Wayland desktop.** On NVIDIA's driver under X11 with default settings it is meant
-to behave as 0.12.2 does, apart from the scene features and the one change to effects on
-colour-only layers below. What was compared, on the software renderer: the development
+to behave as 0.12.2 does, apart from the scene features, the one change to effects on
+colour-only layers and - with more than one monitor - the fullscreen pause rule below. What was compared, on the software renderer: the development
 tree before the fixes of 0.12.2 were merged in with
 release 0.12.1, call by call (four scenes: the same OpenGL calls) and picture by picture
 (the 91 test scenes: the same frames with the new features off); then the pictures of
@@ -102,6 +102,21 @@ the final tree with those of that earlier tree.
   the GPU that renders (`walpe-ctl set hwdec=off|auto|<api>`: VA-API, NVDEC, VDPAU, Vulkan
   Video, V4L2); on NVIDIA's driver NVDEC stays first. Optional zero-copy
   (`video_zerocopy`). Both off by default.
+
+### Pausing
+
+- "Pause for fullscreen apps" (`pause_fullscreen`) pauses the monitor the focused
+  fullscreen window is on; the wallpapers of the other monitors keep running. Up to 0.12
+  a fullscreen window on one monitor paused every monitor. **This changes the default
+  behaviour on a machine with more than one monitor**; `walpe-ctl set fs_all=on`
+  (`pause_fullscreen_all`, also a switch in the settings window) brings the old behaviour
+  back. On X11 the monitor is found from the window's rectangle: the monitor holding
+  most of the window, whatever border or gap a tiling window manager keeps around it,
+  and every monitor a window across several covers at least half of. On Wayland it is
+  the output the compositor names for the window; where it names none, every monitor
+  pauses as before and `walpe-ctl status` (`pause_rules`) says so. Status reports
+  `fullscreen` and `fullscreen_pause` per monitor. Tested with two monitor rectangles
+  on Xvfb and two outputs of a headless sway 1.9; not on real monitors.
 
 ### Other
 

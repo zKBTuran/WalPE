@@ -50,7 +50,9 @@ typedef struct WalpeConfig_ {
                                * option "walpe_sound") wins over it */
     gboolean mute;            /* wallpaper sound is silent; `volume` keeps its value */
     gboolean paused;
-    gboolean pause_fullscreen;
+    gboolean pause_fullscreen; /* pause the monitor a focused fullscreen window is on */
+    gboolean pause_fullscreen_all; /* ... and every other monitor with it, as before
+                                    * 0.13 (off by default) */
     gboolean pause_dpms;      /* pause while the display is in a power-save state */
     gboolean pause_covered;   /* pause per-monitor while windows hide the wallpaper */
     char   *transparent_windows; /* comma-separated WM_CLASS list that never count

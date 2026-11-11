@@ -109,6 +109,14 @@ void walpe_sigprov_status_json (JsonBuilder *b, const WalpeConfig *cfg)
         char *sources = g_strdup (walpe_signal_sources (r->signal));
         char *missing = g_strdup (walpe_signal_missing (r->signal));
         char *note = walpe_pause_rule_note (r, sources, missing);
+        if (!note && r->signal == WALPE_SIG_FULLSCREEN) {
+            /* it works, but not per monitor in this session */
+            const char *everywhere = NULL;
+#ifdef HAVE_WL_SIGNALS
+            everywhere = walpe_sig_wl_fullscreen_everywhere ();
+#endif
+            note = walpe_pause_rule_everywhere_note (everywhere, cfg->pause_fullscreen_all);
+        }
         json_builder_set_member_name (b, r->key);
         json_builder_begin_object (b);
         json_builder_set_member_name (b, "on");

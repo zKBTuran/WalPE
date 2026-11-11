@@ -6,7 +6,8 @@
  * can; on Wayland that depends on the compositor. Rather than leave such
  * a switch silently without effect, `walpe-ctl status` carries one entry
  * per setting ("pause_rules") saying which provider drives it, or why
- * none does, and the settings window prints that sentence under the
+ * none does - or, for the fullscreen rule, why it cannot tell the monitors
+ * apart here - and the settings window prints that sentence under the
  * switch. Pure functions: the daemon (providers.c), the GUI and
  * tests/sig_select_test.c share them. */
 #pragma once
@@ -55,4 +56,21 @@ static inline char *walpe_pause_rule_note (const WalpePauseRule *r, const char *
     if (missing && *missing)
         return g_strdup_printf ("not available in this session: %s", missing);
     return g_strdup_printf ("not available in this session: nothing here reports %s", r->what);
+}
+
+/* "Pause for fullscreen apps" pauses the monitor the focused fullscreen
+ * window is on. Where the session reports such a window but not the
+ * monitor it is on (a Wayland compositor that does not name the window's
+ * output: signals/wlplan.h), the rule works as it did before it looked at
+ * monitors: every monitor pauses. The sentence for that, so that a second
+ * monitor that stops is explained where the user looks for it; NULL when
+ * the monitor is known (everywhere_why NULL / "") or when every monitor is
+ * what the user asked for (the setting pause_fullscreen_all). g_free. */
+static inline char *walpe_pause_rule_everywhere_note (const char *everywhere_why,
+                                                      gboolean all_wanted)
+{
+    if (all_wanted || !everywhere_why || !*everywhere_why)
+        return NULL;
+    return g_strdup_printf ("pauses every monitor, not only the one the window is on: %s",
+                            everywhere_why);
 }

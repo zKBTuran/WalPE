@@ -111,6 +111,8 @@ typedef struct Mon {
     int last_w, last_h;      /* last rendered size (diagnostics) */
     gboolean covered;        /* main thread: client windows hide this monitor */
     gboolean focus_app;      /* main: the focused window is an application's, on this monitor */
+    gboolean fs_here;        /* main: the focused fullscreen window (D.fs_active) is on
+                              * this monitor, or nobody can tell which one it is on */
     int fps_cap;             /* main: the frame rate limit last handed to the thread */
     gint64 last_swap_us;     /* WALPE_CADENCE: previous swap timestamp */
     /* presentation (present.h) */
@@ -298,7 +300,8 @@ static struct {
     int backend;             /* WalpeBackend: the window system in use (fixed at start-up) */
     EGLDisplay egl_dpy;
     EGLConfig egl_conf;
-    gboolean fs_active;      /* fullscreen window has focus */
+    gboolean fs_active;      /* fullscreen window has focus (on whichever monitor:
+                              * Mon.fs_here) */
     gboolean asleep;         /* DPMS power-save or screensaver active */
     gboolean idle;           /* main: no user input for a while (a provider's
                               * report; no rule of this file reads it) */
@@ -3209,13 +3212,43 @@ static Mon *mon_route (Mon *m)
     return m && m->leader ? m->leader : m;
 }
 
+static const WalpeOutput *mon_output (Mon *m);
+
+/* A fullscreen window that has the focus is on this monitor. (The
+ * --windowed preview is on no monitor: for it, any such window counts,
+ * as it always did.) */
+static gboolean mon_fullscreen (Mon *m)
+{
+    return D.fs_active && (m->fs_here || !mon_output (m));
+}
+
+/* "Pause for fullscreen apps" (pause_fullscreen) applies to this monitor:
+ * the focused fullscreen window is on it. A film or a game in full screen
+ * on one monitor leaves the wallpaper of the monitor next to it running;
+ * pause_fullscreen_all brings back what the rule did before it looked at
+ * monitors (every monitor pauses, which frees the GPU for the game). */
+static gboolean mon_fullscreen_pause (Mon *m)
+{
+    return D.cfg->pause_fullscreen && D.fs_active &&
+           (D.cfg->pause_fullscreen_all || mon_fullscreen (m));
+}
+
+/* ... and to any monitor (status "fullscreen_pause") */
+static gboolean any_fullscreen_pause (void)
+{
+    for (GList *l = D.mons; l; l = l->next)
+        if (mon_fullscreen_pause (l->data))
+            return TRUE;
+    return FALSE;
+}
+
 /* one central place deciding whether a monitor's wallpaper should be
  * paused (decode + render). Per-monitor: each monitor owns its own
  * content/decoder instance, so covered monitors stop while others play. */
 static gboolean want_pause_mon (Mon *m)
 {
     return D.cfg->paused ||
-           (D.cfg->pause_fullscreen && D.fs_active) ||
+           mon_fullscreen_pause (m) ||
            (D.cfg->pause_dpms && D.asleep) ||
            (D.cfg->pause_covered && m->covered) ||
            /* "Skip hidden areas" (opt-in): not one pixel of it can be seen
@@ -3237,7 +3270,7 @@ static const char *pause_reason_mon (Mon *m)
 {
     if (D.cfg->paused)
         return "walpe-ctl pause";
-    if (D.cfg->pause_fullscreen && D.fs_active)
+    if (mon_fullscreen_pause (m))
         return "a fullscreen window has the focus";
     if (D.cfg->pause_dpms && D.asleep)
         return "display asleep";
@@ -3465,8 +3498,9 @@ static void power_watch_update (void)
 }
 
 /* -------------------------------------------------------- pause signals
- * Whether a fullscreen window has the focus, the displays sleep, windows
- * cover a monitor or an application has the focus on it is found out by
+ * Whether a fullscreen window has the focus (and on which monitor), the
+ * displays sleep, windows cover a monitor or an application has the focus
+ * on it is found out by
  * the providers of the platform layer (platform/signals.h: on X11 from
  * EWMH properties, DPMS and the screensaver extension, as ever). Their
  * combined values land here, in the fields the pause rules read; the
@@ -3487,6 +3521,9 @@ static void signals_changed (guint mask, gpointer user)
             /* an application's window on this monitor has the focus (the
              * focus_action rule; the desktop itself focused = none) */
             m->focus_app = walpe_signal_get (WALPE_SIG_FOCUS_APP, m->out_id);
+            /* the focused fullscreen window is on this monitor (or on one
+             * nobody can name: reported for every output then) */
+            m->fs_here = walpe_signal_get (WALPE_SIG_FULLSCREEN_ON, m->out_id);
         }
     apply_pause_state ();
 }
@@ -3508,7 +3545,7 @@ static gboolean stats_tick (gpointer user)
                  walpe_surface_native_id (m->ps));
         g_debug ("stats:   geom=%dx%d at %d,%d fs=%d covered=%d paused_cfg=%d",
                  m->geom.width, m->geom.height, m->geom.x, m->geom.y,
-                 D.fs_active, m->covered, D.cfg->paused);
+                 mon_fullscreen (m), m->covered, D.cfg->paused);
     }
     return G_SOURCE_CONTINUE;
 }
@@ -4887,9 +4924,11 @@ static void ipc_status (JsonBuilder *b)
     jb_str (b, "path", D.cfg->current);
     jb_str (b, "type", m0 ? walpe_type_name (g_atomic_int_get (&m0->content_type)) : "none");
     jb_bool (b, "paused", D.cfg->paused);
-    jb_bool (b, "fullscreen_pause", D.cfg->pause_fullscreen && D.fs_active);
+    /* the fullscreen rule pauses a monitor (which one: "monitors" below) */
+    jb_bool (b, "fullscreen_pause", any_fullscreen_pause ());
     /* a fullscreen window has the focus, whatever the pause setting says
-     * (a client that wants to show something waits until it has not) */
+     * and whichever monitor it is on (a client that wants to show
+     * something waits until it has not) */
     jb_bool (b, "fullscreen", D.fs_active);
     jb_bool (b, "dpms_pause", D.cfg->pause_dpms && D.asleep);
     jb_bool (b, "covered_pause", D.cfg->pause_covered && m0 && m0->covered);
@@ -4903,6 +4942,7 @@ static void ipc_status (JsonBuilder *b)
      * setting AND a fullscreen window) but not the settings: after
      * `walpe-ctl set covered=off` nothing in status said so. */
     jb_bool (b, "pause_fullscreen", D.cfg->pause_fullscreen);
+    jb_bool (b, "pause_fullscreen_all", D.cfg->pause_fullscreen_all);
     jb_bool (b, "pause_dpms", D.cfg->pause_dpms);
     jb_bool (b, "pause_covered", D.cfg->pause_covered);
     jb_int (b, "pause_idle", D.cfg->pause_idle);     /* seconds; "idle_pause" above = it applies now */
@@ -4918,13 +4958,15 @@ static void ipc_status (JsonBuilder *b)
     /* ("software_threads" below is the count in use, 0 while a GPU renders) */
     jb_int (b, "software_threads_saved", D.cfg->software_threads);
     {
-        /* per monitor: covered, paused, following (render_shared) */
+        /* per monitor: paused, fullscreen (the rule pauses it), covered,
+         * following (render_shared) */
         GString *mons = g_string_new (NULL);
         int shared = 0;
         for (GList *l = D.mons; l; l = l->next) {
             Mon *m = l->data;
-            g_string_append_printf (mons, "%smon%d:%s%s%s", mons->len ? " " : "", m->index,
+            g_string_append_printf (mons, "%smon%d:%s%s%s%s", mons->len ? " " : "", m->index,
                                     m->own_paused ? "paused" : "running",
+                                    mon_fullscreen_pause (m) ? ",fullscreen" : "",
                                     m->covered ? ",covered" : "",
                                     m->leader ? ",follows" : m->nfollowers ? ",leads" : "");
             if (D.vis && m->vis_known && vis_percent (m) < 100)
@@ -5134,6 +5176,11 @@ static void ipc_status (JsonBuilder *b)
         jb_bool (b, "paused", m->own_paused);
         if (D.vis)
             jb_int (b, "visible_percent", vis_percent (m));   /* "Skip hidden areas" */
+        /* a focused fullscreen window is on it (whatever the settings
+         * say), and: the fullscreen rule pauses it (pause_fullscreen; with
+         * pause_fullscreen_all also for a window on another monitor) */
+        jb_bool (b, "fullscreen", mon_fullscreen (m));
+        jb_bool (b, "fullscreen_pause", mon_fullscreen_pause (m));
         jb_bool (b, "covered", m->covered);
         jb_bool (b, "focused_app", m->focus_app);      /* an application on it has the focus */
         jb_int (b, "fps_limit", m->fps_cap);            /* what its render thread was given */
@@ -6301,6 +6348,14 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
         D.cfg->pause_fullscreen = wpj_bool (o, "pause_fullscreen", D.cfg->pause_fullscreen);
         changed = TRUE;
         walpe_signals_recheck (WALPE_SIG_FULLSCREEN, TRUE);
+        apply_pause_state ();
+    }
+    if (json_object_has_member (o, "pause_fullscreen_all")) {
+        /* the fullscreen rule for every monitor (as before 0.13) or only
+         * for the one the window is on; at once */
+        D.cfg->pause_fullscreen_all = wpj_bool (o, "pause_fullscreen_all",
+                                                D.cfg->pause_fullscreen_all);
+        changed = TRUE;
         apply_pause_state ();
     }
     if (json_object_has_member (o, "pause_dpms")) {
@@ -7916,7 +7971,8 @@ static gboolean fpslog_tick (gpointer user)
         else if (m->nfollowers)
             g_string_append (ln, ", leads");
         if (m->own_paused)
-            g_string_append_printf (ln, ", paused%s", m->covered ? ": covered" : "");
+            g_string_append_printf (ln, ", paused%s", mon_fullscreen_pause (m) ? ": fullscreen"
+                                                      : m->covered ? ": covered" : "");
         g_string_append_c (ln, ')');
     }
     g_string_append_printf (ln, " [fps setting %d%s]", D.cfg->fps,

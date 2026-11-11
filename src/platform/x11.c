@@ -34,6 +34,7 @@
 #include <unistd.h>
 
 #include "platform/impl.h"
+#include "platform/fsplace.h"
 #include "common/config.h"
 #include "common/pace.h"
 
@@ -51,6 +52,7 @@ typedef struct {
     gpointer user;           /* handed back in surface events */
     gboolean covered;        /* client windows hide this monitor */
     gboolean focus_app;      /* the focused window is an application's, on this monitor */
+    gboolean fs_here;        /* the focused fullscreen window is on this monitor */
 } X11Surface;
 
 static struct {
@@ -65,6 +67,10 @@ static struct {
     gboolean has_wm;         /* EWMH manager present (checked at startup) */
     GPtrArray *surfs;        /* X11Surface *: the wallpaper windows, in creation order */
     gboolean fs_active;      /* fullscreen window has focus */
+    Window fs_win;           /* that window (None while fs_active is off) */
+    Window fs_placed;        /* the window the monitors' fs_here was worked out for */
+    gboolean fs_everywhere;  /* ... and where it is could not be found out: it
+                              * counts for every monitor */
     gboolean asleep;         /* DPMS power-save or screensaver active */
     Window watched_win;      /* active window we subscribed to */
     guint cover_timer_id;    /* debounced coverage recompute */
@@ -513,6 +519,8 @@ static gboolean client_is_watched (Window w)
     return X.watched_clients && g_hash_table_contains (X.watched_clients, GSIZE_TO_POINTER (w));
 }
 
+static void fs_place_report (void);
+
 static void recompute_covered (void)
 {
     /* client list: dwm maintains _NET_CLIENT_LIST; XQueryTree fallback */
@@ -612,6 +620,10 @@ static void recompute_covered (void)
         XFree (data);
     if (tree_clients)
         XFree (tree_clients);
+    /* the focused fullscreen window may have been moved to another monitor
+     * (the scan runs after every change of a window's place) */
+    if (X.fs_active)
+        fs_place_report ();
 
     walpe_signals_end ();
 }
@@ -794,6 +806,70 @@ static gboolean window_is_fullscreen (Window w)
     return found;
 }
 
+/* Which monitors the focused fullscreen window is on
+ * (WALPE_SIG_FULLSCREEN_ON; the rule is fsplace.h's). "Pause for
+ * fullscreen apps" pauses those and leaves the others running: a film or
+ * a game in full screen on one monitor used to stop the wallpaper of the
+ * monitor next to it.
+ * The window is the client _NET_ACTIVE_WINDOW names. Its rectangle is
+ * asked for in root coordinates (under a reparenting window manager the
+ * client sits inside a frame, and its own position is the one in that
+ * frame) and without its border. The server is asked only while such a
+ * window exists (three requests, when the focus or its state changes and
+ * after a scan of the windows): without one this costs no request, and
+ * nothing here runs on a timer.
+ * A window whose rectangle cannot be asked for stays on the monitors it
+ * was last seen on (it is going away: the window manager moves the focus
+ * on in a moment); one that was never seen counts for every monitor, as
+ * the rule did before. So does every window for the --windowed preview,
+ * which has no monitor rectangle. */
+static void fs_place_report (void)
+{
+    guint n = X.surfs ? X.surfs->len : 0;
+    WalpeFsRect win = { 0, 0, 0, 0 };
+    gboolean known = FALSE, everywhere = FALSE;
+    if (X.fs_active && X.fs_win != None && !X.windowed) {
+        XWindowAttributes wa;
+        Window junk;
+        int ox = 0, oy = 0;
+        if (XGetWindowAttributes (X.xd, X.fs_win, &wa) &&
+            XTranslateCoordinates (X.xd, X.fs_win, X.root, 0, 0, &ox, &oy, &junk)) {
+            win = (WalpeFsRect) { ox, oy, wa.width, wa.height };
+            known = TRUE;
+        } else if (X.fs_placed == X.fs_win) {
+            return;     /* as it was when the window could still be asked */
+        }
+    }
+    X.fs_placed = known ? X.fs_win : None;
+    WalpeFsRect *mons = g_new0 (WalpeFsRect, n + 1);
+    gboolean *on = g_new0 (gboolean, n + 1);
+    for (guint k = 0; k < n; k++) {
+        const XRect *g = &SURF (k)->geom;
+        mons[k] = (WalpeFsRect) { g->x, g->y, g->width, g->height };
+    }
+    walpe_fs_decide (X.fs_active, known ? &win : NULL, mons, (int) n, on, &everywhere);
+    walpe_signals_begin ();
+    if (everywhere != X.fs_everywhere) {
+        X.fs_everywhere = everywhere;
+        if (everywhere)
+            g_debug ("fullscreen: where the window is is not known: every monitor");
+        walpe_signal_set (&x11_provider, WALPE_SIG_FULLSCREEN_ON, WALPE_OUTPUT_ALL, everywhere);
+    }
+    for (guint k = 0; k < n; k++) {
+        X11Surface *m = SURF (k);
+        if (on[k] == m->fs_here)
+            continue;
+        m->fs_here = on[k];
+        g_debug ("mon%d: %s (window %dx%d+%d+%d)", m->index,
+                 on[k] ? "the focused fullscreen window is on it" : "no focused fullscreen window",
+                 win.width, win.height, win.x, win.y);
+        walpe_signal_set (&x11_provider, WALPE_SIG_FULLSCREEN_ON, m->out_id, on[k]);
+    }
+    walpe_signals_end ();
+    g_free (mons);
+    g_free (on);
+}
+
 static void update_active_window (void)
 {
     Atom prop = XInternAtom (X.xd, "_NET_ACTIVE_WINDOW", True);
@@ -809,12 +885,20 @@ static void update_active_window (void)
     }
     gboolean fs = window_is_fullscreen (active);
     gboolean changed = active != X.watched_win;
+    /* one batch: the daemon hears of the window and of its monitor at once */
+    walpe_signals_begin ();
     if (fs != X.fs_active) {
         X.fs_active = fs;
         changed = TRUE;
         g_debug ("fullscreen %s", fs ? "engaged -> pausing" : "left -> resuming");
         walpe_signal_set (&x11_provider, WALPE_SIG_FULLSCREEN, 0, fs);
     }
+    /* its monitor, also when another fullscreen window took the focus */
+    gboolean placed = fs || X.fs_win != None || X.fs_everywhere;
+    X.fs_win = fs ? active : None;
+    if (placed)
+        fs_place_report ();
+    walpe_signals_end ();
     if (active != X.watched_win) {
         /* clients of _NET_CLIENT_LIST are watched anyway (clients_watch) */
         if (X.watched_win != None && !client_is_watched (X.watched_win))
@@ -1628,7 +1712,7 @@ static void x11_status (JsonBuilder *b)
 }
 
 /* -------------------------------------------------------- pause signals
- * The four signals X11 can tell (signals.h). The scans run when their
+ * The signals X11 can tell (signals.h). The scans run when their
  * events arrive (xdata_ready); the registry only asks for another look
  * when a setting they read was changed. Display sleep is watched from the
  * first time it is asked about: the daemon does that at the point of its
@@ -1647,6 +1731,7 @@ static void x11_provider_recheck (const WalpeSignalProvider *self, WalpeSignal s
         return;
     switch (sig) {
     case WALPE_SIG_FULLSCREEN:
+    case WALPE_SIG_FULLSCREEN_ON:
         if (now)
             update_active_window ();
         break;
@@ -1672,7 +1757,8 @@ static void x11_provider_recheck (const WalpeSignalProvider *self, WalpeSignal s
 static const WalpeSignalProvider x11_provider = {
     .name = "x11",
     .signals = WALPE_SIG_BIT (WALPE_SIG_FULLSCREEN) | WALPE_SIG_BIT (WALPE_SIG_ASLEEP) |
-               WALPE_SIG_BIT (WALPE_SIG_COVERED) | WALPE_SIG_BIT (WALPE_SIG_FOCUS_APP),
+               WALPE_SIG_BIT (WALPE_SIG_COVERED) | WALPE_SIG_BIT (WALPE_SIG_FOCUS_APP) |
+               WALPE_SIG_BIT (WALPE_SIG_FULLSCREEN_ON),
     .backends = 1u << WALPE_BACKEND_X11,
     .start = x11_provider_start,
     .stop = NULL,

@@ -47,7 +47,10 @@ static gboolean combined (WalpeSignal sig, guint32 output)
             if (s->global[sig])
                 return TRUE;
         } else if (s->per_output[sig] &&
-                   g_hash_table_contains (s->per_output[sig], GUINT_TO_POINTER (output))) {
+                   (g_hash_table_contains (s->per_output[sig], GUINT_TO_POINTER (output)) ||
+                    g_hash_table_contains (s->per_output[sig],
+                                           GUINT_TO_POINTER (WALPE_OUTPUT_ALL)))) {
+            /* (reported for this output, or for all of them) */
             return TRUE;
         }
     }

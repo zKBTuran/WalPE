@@ -135,7 +135,7 @@ false` means the setting has no effect in this session, whether it is on or off,
 | Rule (config key) | Source on Wayland |
 |---|---|
 | Pause while the display sleeps (`pause_dpms`) | logind (systemd-logind or elogind, system bus): the machine is about to suspend, the session is locked (desktops and lockers that set the session's "locked hint"), or the session is not the active one |
-| Pause for fullscreen applications (`pause_fullscreen`) | the compositor's window list (`zwlr_foreign_toplevel_manager_v1`, version 2 or later): the focused window is fullscreen |
+| Pause for fullscreen applications (`pause_fullscreen`) | the compositor's window list (`zwlr_foreign_toplevel_manager_v1`, version 2 or later): the focused window is fullscreen. The monitor that pauses is the output the compositor names for that window, matched to the daemon's monitors by the output's name (`wl_output` version 4), or the only monitor there is. Where that cannot be told - the compositor names no output for the window, or its outputs have no names and there are several monitors - every monitor pauses, as up to 0.12, and `note` says so |
 | Pause a covered monitor (`pause_covered`) | (a) the compositor no longer shows the wallpaper on that monitor: every compositor; (b) the window list: the focused window on that monitor is fullscreen or maximized. There is no "85 % covered" as on X11 |
 | While an application is focused (`focus_action`) | the window list |
 | Pause after N seconds without input (`pause_idle`, new, off by default) | the compositor's idle notification (`ext-idle-notify-v1`). `walpe-ctl set idle=300`; 0 = off. On X11 nothing reports idle time in this version, and status says so |

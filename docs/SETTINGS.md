@@ -60,7 +60,8 @@ command named there, or only in the file while the daemon is not running ("file 
 
 | Key | Default | set name | Meaning |
 |---|---|---|---|
-| `pause_fullscreen` | true | `fs` | pause every monitor while a focused fullscreen window is on one of them |
+| `pause_fullscreen` | true | `fs` | pause a monitor while a focused fullscreen window is on it; the other monitors keep running (a window across several monitors pauses each of them) |
+| `pause_fullscreen_all` | false | `fs_all` | a focused fullscreen window pauses every monitor, not only the one it is on (what `pause_fullscreen` did up to 0.12) |
 | `pause_dpms` | true | `dpms` | pause while the display is in power save or the screensaver runs |
 | `pause_covered` | true | `covered` | pause a monitor while visible normal windows cover 85 % of it or more (X11); on Wayland: while the compositor does not show the wallpaper, or the focused window on that monitor is fullscreen or maximized |
 | `transparent_windows` | `st` | | comma-separated list of see-through windows: WM_CLASS on X11, application ids on Wayland |

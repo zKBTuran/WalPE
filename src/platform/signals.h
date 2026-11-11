@@ -2,8 +2,8 @@
  * them.
  *
  * The daemon pauses a wallpaper while nobody can see it or the user asked
- * for quiet: a fullscreen window has the focus, the displays sleep, windows
- * cover the monitor, an application has the focus on it. How such a
+ * for quiet: a fullscreen window has the focus on its monitor, the displays
+ * sleep, windows cover the monitor, an application has the focus on it. How such a
  * condition is found out depends on the window system and on what the
  * session offers (EWMH properties and the DPMS extension on X11; on
  * Wayland a protocol the compositor may or may not have, logind, ...).
@@ -23,23 +23,37 @@
 #include "common/backend.h"
 
 typedef enum {
-    WALPE_SIG_FULLSCREEN = 0,   /* global: a fullscreen window has the focus */
+    WALPE_SIG_FULLSCREEN = 0,   /* global: a fullscreen window has the focus (on whatever
+                                 * monitor, also one the daemon shows nothing on) */
     WALPE_SIG_ASLEEP,           /* global: the displays are in a power-save state, the
                                  * screensaver runs, or the session is locked / suspended */
     WALPE_SIG_IDLE,             /* global: no user input for the time the provider was given */
     WALPE_SIG_COVERED,          /* per output: windows hide (nearly) all of the wallpaper,
                                  * or the window system does not show its surface */
     WALPE_SIG_FOCUS_APP,        /* per output: an application's window on it has the focus */
+    WALPE_SIG_FULLSCREEN_ON,    /* per output: the window of WALPE_SIG_FULLSCREEN is on it.
+                                 * Whoever reports that signal reports this one with it; a
+                                 * provider that cannot tell where the window is reports it
+                                 * for WALPE_OUTPUT_ALL */
     WALPE_SIG_N
 } WalpeSignal;
 
 #define WALPE_SIG_BIT(s) (1u << (s))
-#define WALPE_SIG_PER_OUTPUT (WALPE_SIG_BIT (WALPE_SIG_COVERED) | WALPE_SIG_BIT (WALPE_SIG_FOCUS_APP))
+#define WALPE_SIG_PER_OUTPUT                                                              \
+    (WALPE_SIG_BIT (WALPE_SIG_COVERED) | WALPE_SIG_BIT (WALPE_SIG_FOCUS_APP) |           \
+     WALPE_SIG_BIT (WALPE_SIG_FULLSCREEN_ON))
+
+/* In place of an output's id (a WalpeOutput.id is never 0), for a
+ * per-output signal: "every output". A provider sets it when it knows the
+ * condition holds but not on which output (a compositor that does not say
+ * where a window is); the value then reads as on for each output asked
+ * about, until the provider takes it back. */
+#define WALPE_OUTPUT_ALL ((guint32) 0)
 
 static inline const char *walpe_signal_name (int s)
 {
     static const char *const names[WALPE_SIG_N] = { "fullscreen", "asleep", "idle", "covered",
-                                                    "focus_app" };
+                                                    "focus_app", "fullscreen_on" };
     return s >= 0 && s < WALPE_SIG_N ? names[s] : "?";
 }
 
@@ -87,16 +101,17 @@ void walpe_signals_start (WalpeBackend backend, const WalpeSignalSink *sink, gpo
  * reports while it stops: the daemon may have freed what the sink reads. */
 void walpe_signals_stop (void);
 
-/* provider -> registry. output: a WalpeOutput.id for a per-output signal,
- * ignored (pass 0) for a global one. Setting a value a provider already
- * has is free. */
+/* provider -> registry. output: a WalpeOutput.id (or WALPE_OUTPUT_ALL)
+ * for a per-output signal, ignored (pass 0) for a global one. Setting a
+ * value a provider already has is free. */
 void walpe_signal_set (const WalpeSignalProvider *p, WalpeSignal sig, guint32 output, gboolean on);
 /* several values that belong together (one scan of all windows): the sink
  * is told once, after the last walpe_signals_end. May nest. */
 void walpe_signals_begin (void);
 void walpe_signals_end (void);
 
-/* daemon -> registry */
+/* daemon -> registry. A per-output signal is on for an output while a
+ * provider reports it for that output or for WALPE_OUTPUT_ALL. */
 gboolean walpe_signal_get (WalpeSignal sig, guint32 output);
 /* ask the providers of sig to look again (WalpeSignalProvider.recheck) */
 void walpe_signals_recheck (WalpeSignal sig, gboolean now);

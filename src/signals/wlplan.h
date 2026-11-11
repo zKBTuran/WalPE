@@ -21,6 +21,8 @@
  *   wl_output version 4                the output's name ("DP-1"), which
  *                                      is how a toplevel's output is
  *                                      matched to one of the daemon's
+ *                                      (covered, focus and fullscreen per
+ *                                      monitor)
  *
  * Where a rule cannot work the plan carries the reason as a sentence for
  * `walpe-ctl status` and the settings window. */
@@ -133,6 +135,52 @@ static inline gboolean walpe_tl_is_fullscreen_focus (guint state)
 {
     return (state & WALPE_TL_ACTIVATED) && (state & WALPE_TL_FULLSCREEN) &&
            !(state & WALPE_TL_MINIMIZED);
+}
+
+/* ---- which output a window is on (the fullscreen rule per monitor)
+ * "Pause for fullscreen apps" pauses the monitor the focused fullscreen
+ * window is on. The protocol names the window's outputs as wl_output
+ * objects (output_enter / output_leave); the provider matches each to one
+ * of the daemon's by its name (wl_output.name, version 4), or takes "the
+ * only output there is" where the compositor names none. That can fail in
+ * two ways, and the rule then falls back to what it did before it looked
+ * at monitors - every monitor pauses - and says so in status
+ * ("pause_rules", rules.h):
+ *   - the compositor has named no output for the window (it sends no
+ *     output_enter, or has not yet);
+ *   - the window is on an output without a name while the daemon shows on
+ *     several: nothing says which of them it is. */
+typedef enum {
+    WALPE_TL_WHERE_KNOWN = 0,   /* on the outputs that have an id (maybe none of the daemon's) */
+    WALPE_TL_WHERE_NO_OUTPUT,   /* the compositor names no output for the window */
+    WALPE_TL_WHERE_NO_NAME,     /* it is on an output that could not be matched */
+} WalpeTlWhere;
+
+#define WALPE_WLPLAN_FS_NO_OUTPUT \
+    "the compositor does not say which output the focused fullscreen window is on"
+#define WALPE_WLPLAN_FS_NO_NAME                                                            \
+    "the compositor does not name its outputs (wl_output older than version 4): a window's " \
+    "output cannot be matched to one of several monitors"
+
+/* n = the outputs the compositor says the window is on. For each: id =
+ * the daemon's id for it (0 = none), named = the compositor gave that
+ * output a name - an id of 0 then means "not an output the daemon shows
+ * on", without a name it means "could not be matched". */
+static inline WalpeTlWhere walpe_tl_where (guint n, const guint32 *id, const gboolean *named)
+{
+    if (!n)
+        return WALPE_TL_WHERE_NO_OUTPUT;
+    for (guint i = 0; i < n; i++)
+        if (!id[i] && !named[i])
+            return WALPE_TL_WHERE_NO_NAME;
+    return WALPE_TL_WHERE_KNOWN;
+}
+
+/* the sentence for status, NULL when the output is known */
+static inline const char *walpe_tl_where_why (WalpeTlWhere w)
+{
+    return w == WALPE_TL_WHERE_NO_OUTPUT ? WALPE_WLPLAN_FS_NO_OUTPUT
+         : w == WALPE_TL_WHERE_NO_NAME ? WALPE_WLPLAN_FS_NO_NAME : NULL;
 }
 
 /* the window has the focus (an application, as opposed to the desktop) */

@@ -8,7 +8,8 @@
  *   provider        signal(s)                        needs
  *   logind          asleep                           org.freedesktop.login1 on the system bus
  *   wl-idle         idle                             ext_idle_notifier_v1 + wl_seat
- *   wl-fullscreen   fullscreen                       zwlr_foreign_toplevel_manager_v1 >= 2
+ *   wl-fullscreen   fullscreen, fullscreen_on        zwlr_foreign_toplevel_manager_v1 >= 2
+ *                   (per output)
  *   wl-windows      covered, focus_app (per output)  zwlr_foreign_toplevel_manager_v1
  *
  * The Wayland providers use a connection of their own (wl_session.c), not
@@ -57,7 +58,9 @@ void walpe_sigprov_set_see_through (const char *app_ids);
 
 /* status: adds the member "pause_rules" to the object being built - per
  * setting that depends on a signal: on, signal, sources, works and, when
- * nothing can report the signal, a note saying why (rules.h) */
+ * nothing can report the signal, a note saying why; for the fullscreen
+ * rule also when it pauses every monitor because nothing says which one
+ * the window is on (rules.h) */
 void walpe_sigprov_status_json (JsonBuilder *b, const WalpeConfig *cfg);
 
 /* ---- logind (logind.c) */
@@ -81,3 +84,7 @@ WalpeBackend walpe_sigprov_backend (void);
 guint32 walpe_sigprov_output_id (const char *name);
 const char *walpe_sigprov_see_through (void);
 void walpe_sig_wl_outputs_changed (void);       /* no-op without HAVE_WL_SIGNALS */
+/* builds with HAVE_WL_SIGNALS (wl_toplevel.c): why "wl-fullscreen" reports
+ * a focused fullscreen window for every output instead of the one it is
+ * on; NULL = it does not (static text) */
+const char *walpe_sig_wl_fullscreen_everywhere (void);

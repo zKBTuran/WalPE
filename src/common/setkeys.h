@@ -40,6 +40,7 @@ static const WalpeSetKey walpe_set_keys[] = {
     { "fps", WALPE_SET_NUM },
     { "volume", WALPE_SET_NUM },
     { "pause_fullscreen", WALPE_SET_BOOL },
+    { "pause_fullscreen_all", WALPE_SET_BOOL },
     { "pause_dpms", WALPE_SET_BOOL },
     { "pause_covered", WALPE_SET_BOOL },
     { "cover_transparent", WALPE_SET_BOOL },

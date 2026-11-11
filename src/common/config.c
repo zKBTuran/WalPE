@@ -143,6 +143,11 @@ static JsonNode *config_to_json (WalpeConfig *c)
     json_builder_end_object (b);
     json_builder_set_member_name (b, "pause_fullscreen");
     json_builder_add_boolean_value (b, c->pause_fullscreen);
+    /* written only when set: an untouched config keeps its bytes */
+    if (c->pause_fullscreen_all) {
+        json_builder_set_member_name (b, "pause_fullscreen_all");
+        json_builder_add_boolean_value (b, TRUE);
+    }
     json_builder_set_member_name (b, "transparent_windows");
     json_builder_add_string_value (b, c->transparent_windows);
     json_builder_set_member_name (b, "pause_covered");
@@ -545,6 +550,7 @@ WalpeConfig *walpe_config_load (void)
     c->mute              = FALSE;
     c->paused            = FALSE;
     c->pause_fullscreen  = TRUE;
+    c->pause_fullscreen_all = FALSE;    /* only the monitor the window is on */
     c->pause_dpms        = TRUE;
     c->pause_covered     = TRUE;
     c->transparent_windows = g_strdup ("st");
@@ -672,6 +678,7 @@ WalpeConfig *walpe_config_load (void)
           }
           g_list_free (ks); }
         c->pause_fullscreen = wpj_bool (o, "pause_fullscreen", c->pause_fullscreen);
+        c->pause_fullscreen_all = wpj_bool (o, "pause_fullscreen_all", c->pause_fullscreen_all);
         c->pause_dpms = wpj_bool (o, "pause_dpms", c->pause_dpms);
         c->pause_covered = wpj_bool (o, "pause_covered", c->pause_covered);
         { const char *tw = wpj_str (o, "transparent_windows", NULL);
