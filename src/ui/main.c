@@ -3134,6 +3134,111 @@ static GtkWidget *menu_button (void)
     return b;
 }
 
+/* The library window's split: the wallpaper grid takes SPLIT_GRID of the
+ * pane's width and the details panel the rest (at least its own minimum
+ * width, 460 px). The share is applied again whenever the pane's width
+ * changes, until the user moves the handle (a drag, or the keyboard: F8 and
+ * the arrow keys); from then on GtkPaned keeps the user's share when the
+ * window is resized (both children resize). Not saved across starts. */
+#define SPLIT_GRID 0.64
+
+static struct {
+    gboolean user;        /* the user has moved the handle */
+    gboolean ours;        /* split_apply () is setting the position */
+    gboolean pressed;     /* a button / touch went down on the handle */
+    int width;            /* the pane's width split_apply () last used */
+    guint idle;
+    GtkWidget *handle;    /* the paned's child with the CSS name "separator" */
+} Split;
+
+static gboolean split_apply (gpointer user)
+{
+    (void) user;
+    Split.idle = 0;
+    int w = gtk_widget_get_width (U.paned);
+    if (Split.user || w <= 0)
+        return G_SOURCE_REMOVE;
+    Split.width = w;
+    Split.ours = TRUE;
+    gtk_paned_set_position (GTK_PANED (U.paned), (int) (w * SPLIT_GRID + 0.5));
+    Split.ours = FALSE;
+    return G_SOURCE_REMOVE;
+}
+
+/* max-position changes with the pane's allocation (and with the children's
+ * minimum widths). Not set from inside the size allocation that reports it. */
+static void split_on_max (GObject *o, GParamSpec *ps, gpointer u)
+{
+    (void) o; (void) ps; (void) u;
+    if (!Split.user && !Split.idle)
+        Split.idle = g_idle_add (split_apply, NULL);
+}
+
+static void split_on_position (GObject *o, GParamSpec *ps, gpointer u)
+{
+    (void) o; (void) ps; (void) u;
+    if (!Split.ours && Split.pressed)
+        Split.user = TRUE;
+}
+
+static gboolean split_on_move_handle (GtkPaned *p, GtkScrollType t, gpointer u)
+{
+    (void) p; (void) t; (void) u;
+    Split.user = TRUE;
+    return FALSE;   /* GtkPaned moves the handle */
+}
+
+/* whether a press at the event's position is on the handle (GtkPaned takes
+ * a few pixels on either side of it as well) */
+static gboolean split_on_handle (GdkEvent *ev)
+{
+    double x, y, nx, ny;
+    GtkNative *nat = gtk_widget_get_native (U.paned);
+    if (!Split.handle || !nat || !gdk_event_get_position (ev, &x, &y))
+        return FALSE;
+    gtk_native_get_surface_transform (nat, &nx, &ny);
+    graphene_point_t p = GRAPHENE_POINT_INIT ((float) (x - nx), (float) (y - ny)), h;
+    if (!gtk_widget_compute_point (GTK_WIDGET (nat), Split.handle, &p, &h))
+        return FALSE;
+    return h.x >= -8 && h.x <= gtk_widget_get_width (Split.handle) + 8 &&
+           h.y >= 0 && h.y <= gtk_widget_get_height (Split.handle);
+}
+
+static gboolean split_handle_event (GtkEventControllerLegacy *c, GdkEvent *ev, gpointer u)
+{
+    (void) c; (void) u;
+    switch (gdk_event_get_event_type (ev)) {
+    case GDK_BUTTON_PRESS:
+    case GDK_TOUCH_BEGIN:
+        Split.pressed = split_on_handle (ev);
+        break;
+    case GDK_BUTTON_RELEASE:
+    case GDK_TOUCH_END:
+    case GDK_TOUCH_CANCEL:
+        Split.pressed = FALSE;
+        break;
+    default:
+        break;
+    }
+    return FALSE;   /* GtkPaned's own handling goes on */
+}
+
+static void split_init (void)
+{
+    g_signal_connect (U.paned, "notify::max-position", G_CALLBACK (split_on_max), NULL);
+    g_signal_connect (U.paned, "notify::position", G_CALLBACK (split_on_position), NULL);
+    g_signal_connect (U.paned, "move-handle", G_CALLBACK (split_on_move_handle), NULL);
+    for (GtkWidget *c = gtk_widget_get_first_child (U.paned); c; c = gtk_widget_get_next_sibling (c))
+        if (!g_strcmp0 (gtk_widget_get_css_name (c), "separator"))
+            Split.handle = c;
+    /* on the paned, before its own handling (the handle itself takes no
+     * events): only looks */
+    GtkEventController *ec = gtk_event_controller_legacy_new ();
+    gtk_event_controller_set_propagation_phase (ec, GTK_PHASE_CAPTURE);
+    g_signal_connect (ec, "event", G_CALLBACK (split_handle_event), NULL);
+    gtk_widget_add_controller (U.paned, ec);
+}
+
 /* GtkGridView keeps max_columns x 30 rows of tiles alive, whatever is on
  * screen. With a fixed limit of 24 that was 720 tiles: (almost) every
  * wallpaper got its widgets and a thumbnail decode at start-up although a
@@ -3199,9 +3304,10 @@ static GtkWidget *build_library (void)
     g_signal_connect (f, "teardown", G_CALLBACK (teardown_tile), NULL);
     U.grid = gtk_grid_view_new (GTK_SELECTION_MODEL (g_object_ref (U.sel)), f);
     gtk_widget_add_css_class (U.grid, "walpe-grid");
-    /* the pane starts 780 px wide (build_window); grid_width_changed keeps
-     * the limit at what the pane can hold */
-    gtk_grid_view_set_max_columns (GTK_GRID_VIEW (U.grid), 780 / TILE_W);
+    /* the pane starts at SPLIT_GRID of the window (split_apply; 1440 px
+     * wide by default); grid_width_changed keeps the limit at what the pane
+     * can hold */
+    gtk_grid_view_set_max_columns (GTK_GRID_VIEW (U.grid), (guint) (1440 * SPLIT_GRID) / TILE_W);
     gtk_grid_view_set_min_columns (GTK_GRID_VIEW (U.grid), 1);
     /* single-click-activate also selects on hover: click selects, Enter /
      * double-click applies */
@@ -3476,7 +3582,7 @@ static void activate (GtkApplication *app, gpointer user)
     gtk_paned_set_resize_end_child (GTK_PANED (U.paned), TRUE);
     gtk_paned_set_shrink_start_child (GTK_PANED (U.paned), FALSE);
     gtk_paned_set_shrink_end_child (GTK_PANED (U.paned), FALSE);
-    gtk_paned_set_position (GTK_PANED (U.paned), 780);
+    split_init ();   /* the grid's share of the width: SPLIT_GRID */
     gtk_stack_add_titled (GTK_STACK (U.stack), U.paned, "library", "Library");
     int npages = 1;
 #ifdef WALPE_HAVE_WORKSHOP_PAGE
