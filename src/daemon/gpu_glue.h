@@ -12,7 +12,8 @@
  *                    sets the driver's environment variables - after a
  *                    child process (`walpe-daemon --gpu-probe`) has shown
  *                    that a window can be drawn that way. With gpu = auto
- *                    it reads the device list and sets nothing.
+ *                    it reads the device list (not the PCI id list) and
+ *                    sets nothing.
  *   gpu_note_egl ()  after eglInitialize: which device EGL really uses,
  *                    for `status`, the log and the modules.
  *
@@ -33,6 +34,7 @@ static struct {
     char *setting;          /* what decides this run: WALPE_GPU, else config "gpu" */
     gboolean env_forced;    /* WALPE_GPU decides, not the config */
     GPtrArray *devs;        /* the machine's graphics devices (WalpeGpuDev) */
+    gboolean named;         /* their names are those of the PCI id list (gpu_names) */
     int display;            /* the device that drives the displays, -1 = not known */
     int target;             /* the device the setting names, -1 = auto / none */
     int in_use;             /* the device EGL renders on, -1 = not known */
@@ -54,6 +56,20 @@ static void gpu_set_note (char *note)   /* takes note */
 {
     g_free (Gpu.note);
     Gpu.note = note;
+}
+
+/* The devices' names from the PCI id list (1.5 MB of text, read once).
+ * Only when a value other than "auto" is in play: it may name a device by
+ * a part of its name, and the notes about it carry the names. With
+ * gpu = auto the daemon never reads the list: its log lines and its status
+ * name a PCI device by vendor and ids, and `walpe-ctl gpu` reads the list
+ * in its own process. */
+static void gpu_names (void)
+{
+    if (Gpu.named || !Gpu.devs)
+        return;
+    Gpu.named = TRUE;
+    walpe_gpu_name_devices (Gpu.devs);
 }
 
 /* ------------------------------------------------- what EGL renders on */
@@ -259,7 +275,7 @@ static void gpu_setup (WalpeGpuWinsys winsys, const char *const *outputs, const 
 {
     Gpu.winsys = winsys;
     if (!Gpu.devs)
-        Gpu.devs = walpe_gpu_enumerate (NULL);
+        Gpu.devs = walpe_gpu_enumerate_plain (NULL);
     const char *e = g_getenv ("WALPE_GPU");
     char *env_val = e && *e ? walpe_gpu_value_normalize (e) : NULL;
     if (e && *e && !env_val)
@@ -267,6 +283,8 @@ static void gpu_setup (WalpeGpuWinsys winsys, const char *const *outputs, const 
     Gpu.env_forced = env_val != NULL;
     g_free (Gpu.setting);
     Gpu.setting = env_val ? env_val : g_strdup (D.cfg && D.cfg->gpu ? D.cfg->gpu : "auto");
+    if (strcmp (Gpu.setting, "auto"))
+        gpu_names ();
     /* the device that renders for the displays when nothing is set (on a
      * system-on-chip not the display controller itself) */
     Gpu.display = walpe_gpu_default_renderer (
@@ -459,7 +477,7 @@ static void gpu_note_egl (EGLDisplay dpy)
     if (Gpu.probing || !D.cfg)
         return;     /* a probe child (--gpu-probe, --sw-probe): nothing to record */
     if (!Gpu.devs)
-        Gpu.devs = walpe_gpu_enumerate (NULL);
+        Gpu.devs = walpe_gpu_enumerate_plain (NULL);
     if (Sw.active) {
         walpe_gpu_in_use_set (NULL, TRUE);
         gpu_tell_stats ();
@@ -627,7 +645,9 @@ static gboolean gpu_ipc_set (JsonObject *o, gboolean busy, gboolean *restart, ch
             return FALSE;
         }
         if (strcmp (v, "auto")) {
-            /* a value that names nothing here would silently mean auto */
+            /* a value that names nothing here would silently mean auto
+             * (it may name a device by a part of its name) */
+            gpu_names ();
             char *why = NULL;
             if (walpe_gpu_match (Gpu.devs, v, Gpu.display, &why) < 0) {
                 *err = g_strdup_printf ("gpu: %s; nothing was changed (`walpe-ctl gpu` lists the "

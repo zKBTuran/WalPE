@@ -333,6 +333,71 @@ static void ws_free (WlSession *s)
     g_free (s);
 }
 
+static void ws_sync_done (void *data, struct wl_callback *cb, uint32_t serial)
+{
+    (void) cb; (void) serial;
+    *(gboolean *) data = TRUE;
+}
+
+static const struct wl_callback_listener ws_sync_listener = { ws_sync_done };
+
+/* One round trip on the default queue, given up at `end`
+ * (g_get_monotonic_time ()): 1 = answered, 0 = no answer in time, -1 = the
+ * connection failed. Nobody else may be reading the connection. */
+static int ws_roundtrip_until (struct wl_display *dpy, gint64 end)
+{
+    gboolean done = FALSE;
+    int rc = 1;
+    struct wl_callback *cb = wl_display_sync (dpy);
+    if (!cb)
+        return -1;
+    wl_callback_add_listener (cb, &ws_sync_listener, &done);
+    while (!done) {
+        if (wl_display_prepare_read (dpy) != 0) {
+            /* events read earlier wait to be handed out */
+            if (wl_display_dispatch_pending (dpy) < 0) {
+                rc = -1;
+                break;
+            }
+            continue;
+        }
+        if (wl_display_flush (dpy) < 0 && errno != EAGAIN) {
+            wl_display_cancel_read (dpy);
+            rc = -1;
+            break;
+        }
+        gint64 left = (end - g_get_monotonic_time ()) / 1000;
+        struct pollfd pfd = { wl_display_get_fd (dpy), POLLIN, 0 };
+        int n = left > 0 ? poll (&pfd, 1, (int) MIN (left, 3600 * 1000)) : 0;
+        if (n < 0 && errno == EINTR) {
+            wl_display_cancel_read (dpy);
+            continue;
+        }
+        if (n <= 0) {
+            /* time is up */
+            wl_display_cancel_read (dpy);
+            rc = n == 0 ? 0 : -1;
+            break;
+        }
+        if (wl_display_read_events (dpy) < 0 || wl_display_dispatch_pending (dpy) < 0) {
+            rc = -1;
+            break;
+        }
+    }
+    /* (a `done` that comes after this is dropped with the object) */
+    wl_callback_destroy (cb);
+    return rc;
+}
+
+/* The first two round trips of a new connection get this long together:
+ * a compositor that accepted the connection and then says nothing must
+ * not hold the daemon's start. Each provider asks for the connection on
+ * its own: after one such silence the next ones are refused at once for a
+ * while instead of waiting the same time again. */
+#define WS_START_MS 5000
+#define WS_SILENT_HOLD_MS 10000
+static gint64 ws_silent_at;     /* g_get_monotonic_time () of the last silence; 0 = none */
+
 WlSession *walpe_wlsess_ref (char **why)
 {
     if (the_session) {
@@ -343,6 +408,12 @@ WlSession *walpe_wlsess_ref (char **why)
         }
         the_session->refs++;
         return the_session;
+    }
+    if (ws_silent_at &&
+        g_get_monotonic_time () - ws_silent_at < (gint64) WS_SILENT_HOLD_MS * 1000) {
+        if (why)
+            *why = g_strdup_printf ("%s (the compositor did not answer)", WALPE_WLPLAN_NO_CONN);
+        return NULL;
     }
     /* WALPE_SIG_WAYLAND_DISPLAY (tests): a compositor other than the
      * session's, by socket name */
@@ -363,10 +434,16 @@ WlSession *walpe_wlsess_ref (char **why)
     s->reg = wl_display_get_registry (dpy);
     wl_registry_add_listener (s->reg, &reg_listener, s);
     /* the globals, then what the bound ones say about themselves */
-    if (wl_display_roundtrip (dpy) < 0 || wl_display_roundtrip (dpy) < 0) {
+    gint64 end = g_get_monotonic_time () + (gint64) WS_START_MS * 1000;
+    int rt = ws_roundtrip_until (dpy, end);
+    if (rt > 0)
+        rt = ws_roundtrip_until (dpy, end);
+    ws_silent_at = rt == 0 ? g_get_monotonic_time () : 0;
+    if (rt <= 0) {
         if (why)
             *why = g_strdup_printf ("%s (%s)", WALPE_WLPLAN_NO_CONN,
-                                    g_strerror (wl_display_get_error (dpy)));
+                                    rt == 0 ? "the compositor did not answer"
+                                            : g_strerror (wl_display_get_error (dpy)));
         ws_free (s);
         return NULL;
     }
@@ -449,14 +526,6 @@ void walpe_wlsess_flush (WlSession *s)
         s->src->error = TRUE;   /* reported from the main loop */
 }
 
-static void ws_sync_done (void *data, struct wl_callback *cb, uint32_t serial)
-{
-    (void) cb; (void) serial;
-    *(gboolean *) data = TRUE;
-}
-
-static const struct wl_callback_listener ws_sync_listener = { ws_sync_done };
-
 /* A round trip with a time limit. wl_display_roundtrip () waits for the
  * compositor without end, and this one is also made while a provider
  * stops (the window list's stop / finished): a compositor that does not
@@ -477,47 +546,8 @@ gboolean walpe_wlsess_roundtrip (WlSession *s)
         wl_display_cancel_read (s->dpy);
         s->src->reading = FALSE;
     }
-    gboolean done = FALSE, ok = TRUE;
-    struct wl_callback *cb = wl_display_sync (s->dpy);
-    if (!cb)
-        return FALSE;
-    wl_callback_add_listener (cb, &ws_sync_listener, &done);
-    gint64 end = g_get_monotonic_time () + (gint64) WS_ROUNDTRIP_MS * 1000;
-    while (!done) {
-        if (wl_display_prepare_read (s->dpy) != 0) {
-            /* events read earlier wait to be handed out */
-            if (wl_display_dispatch_pending (s->dpy) < 0) {
-                ok = FALSE;
-                break;
-            }
-            continue;
-        }
-        if (wl_display_flush (s->dpy) < 0 && errno != EAGAIN) {
-            wl_display_cancel_read (s->dpy);
-            ok = FALSE;
-            break;
-        }
-        gint64 left = (end - g_get_monotonic_time ()) / 1000;
-        struct pollfd pfd = { wl_display_get_fd (s->dpy), POLLIN, 0 };
-        int n = left > 0 ? poll (&pfd, 1, (int) left) : 0;
-        if (n < 0 && errno == EINTR) {
-            wl_display_cancel_read (s->dpy);
-            continue;
-        }
-        if (n <= 0) {
-            /* time is up */
-            wl_display_cancel_read (s->dpy);
-            ok = FALSE;
-            break;
-        }
-        if (wl_display_read_events (s->dpy) < 0 || wl_display_dispatch_pending (s->dpy) < 0) {
-            ok = FALSE;
-            break;
-        }
-    }
-    /* (a `done` that comes after this is dropped with the object) */
-    wl_callback_destroy (cb);
-    return ok && done;
+    return ws_roundtrip_until (s->dpy,
+                               g_get_monotonic_time () + (gint64) WS_ROUNDTRIP_MS * 1000) > 0;
 }
 
 void walpe_wlsess_relookup (WlSession *s)

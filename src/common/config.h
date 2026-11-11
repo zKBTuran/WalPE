@@ -228,6 +228,17 @@ typedef struct WalpeConfig_ {
                                * left out, its layer is shown without it */
     int     fluid_quality;    /* WalpeFluidQuality (common/fluidsim.h): full
                                * (default) | reduced | low; the presets set it */
+    /* ---- at the end as well */
+    GHashTable *monitors_extra; /* output name -> JsonObject (owned): the
+                               * members of that output's "monitors" entry
+                               * this build does not know (a newer version's);
+                               * written back with the entry as long as it
+                               * exists. `extra` holds only top-level members.
+                               * NULL = none */
+    char  **outputs;          /* walpe_config_set_outputs: the connected
+                               * outputs' names (NULL-terminated; NULL = not
+                               * told) */
+    gboolean other_spellings; /* walpe_config_set_outputs */
 } WalpeConfig;
 
 /* config.json format: 1 = versions up to 0.11 (no "config_version" key),
@@ -316,6 +327,18 @@ void         walpe_config_set_prop (WalpeConfig *cfg, const char *path,
 guint        walpe_config_clear_props (WalpeConfig *cfg, const char *path);
 /* per-monitor wallpaper: the path for output `name` (its own or `current`;
  * never NULL); set path NULL = follow `current` again */
+/* The connected outputs as the window system names them, and whether an
+ * output without an entry of its own ("monitor_current", "monitors") may
+ * use the one stored under another spelling of its connector
+ * (common/backend.h walpe_output_name_same: "HDMI-1" on X11 is "HDMI-A-1"
+ * on Wayland). The daemon says TRUE on Wayland, where every entry an
+ * earlier version wrote carries an X11 name; on X11 the names are the ones
+ * those versions used and only the exact name counts, as it always did.
+ * Such an entry is used only when it is the only one of that connector and
+ * is not the name of a connected output itself. What is stored from then
+ * on is stored under the output's own name, which then holds. */
+void         walpe_config_set_outputs (WalpeConfig *cfg, const char *const *names, guint n,
+                                       gboolean other_spellings);
 const char  *walpe_config_monitor_path (WalpeConfig *cfg, const char *name);
 void         walpe_config_set_monitor_path (WalpeConfig *cfg, const char *name,
                                             const char *path);

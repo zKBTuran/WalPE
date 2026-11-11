@@ -5,8 +5,9 @@
  * owner-only, a second server on the same path is refused while the first
  * runs (single-instance lock), a client that never reads does not hold
  * the server up for other clients and is dropped, requests sent in one go
- * are answered in order to a client that reads late, and the place is free
- * again after walpe_ipc_release. */
+ * are answered in order to a client that reads late, the place is free
+ * again after walpe_ipc_release, and requests that queued up on a handed-over
+ * socket can be dropped unanswered. */
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <errno.h>
@@ -26,9 +27,13 @@ static GMainLoop *loop;
 static char *sock;
 
 /* {"big":N} -> N bytes of 'x' in a JSON string; anything else is echoed */
+static int stale_seen;
+
 static char *handler (const char *req, gpointer user)
 {
     (void) user;
+    if (strstr (req, "stale"))
+        stale_seen++;
     const char *b = strstr (req, "\"big\":");
     if (b) {
         gsize n = (gsize) g_ascii_strtoull (b + 6, NULL, 10);
@@ -182,6 +187,62 @@ static gpointer client_thread (gpointer u)
     return NULL;
 }
 
+static gboolean quit_loop (gpointer u)
+{
+    (void) u;
+    g_main_loop_quit (loop);
+    return G_SOURCE_REMOVE;
+}
+
+static gpointer fresh_thread (gpointer u)
+{
+    (void) u;
+    char *r = walpe_ipc_request (sock, "{\"cmd\":\"fresh\"}", 5000);
+    CHECK (r && strstr (r, "\"ok\":true"));
+    g_free (r);
+    g_idle_add (quit_loop, NULL);
+    return NULL;
+}
+
+/* A new process image was handed the listening socket and could not serve
+ * for a while: requests queued up, their senders gave up or still wait.
+ * walpe_ipc_drop_queued closes them unanswered; none reaches the handler
+ * once the socket is served, and a request made after that is answered. */
+static void test_drop_queued (void)
+{
+    int lfd = socket (AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    struct sockaddr_un a = { .sun_family = AF_UNIX };
+    g_strlcpy (a.sun_path, sock, sizeof (a.sun_path));
+    g_unlink (sock);
+    CHECK (lfd >= 0 && bind (lfd, (struct sockaddr *) &a, sizeof (a)) == 0 && listen (lfd, 8) == 0);
+    int c[3];
+    for (int i = 0; i < 3; i++) {
+        c[i] = raw_connect ();
+        CHECK (c[i] >= 0 && send (c[i], "{\"cmd\":\"stale\"}\n", 16, MSG_NOSIGNAL) == 16);
+    }
+    close (c[0]);       /* one sender has hung up already */
+    CHECK (walpe_ipc_drop_queued () == 0);      /* nothing handed over yet */
+    walpe_ipc_adopt_fd (lfd);
+    CHECK (walpe_ipc_drop_queued () == 3);
+    CHECK (walpe_ipc_drop_queued () == 0);
+    for (int i = 1; i < 3; i++) {
+        /* the ones still waiting see the connection end, not a reply */
+        char buf[64];
+        struct timeval tv = { .tv_sec = 3 };
+        setsockopt (c[i], SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+        ssize_t n = recv (c[i], buf, sizeof buf, 0);
+        CHECK (n == 0 || (n < 0 && errno == ECONNRESET));
+        close (c[i]);
+    }
+    stale_seen = 0;
+    CHECK (walpe_ipc_serve (sock, handler, NULL));      /* serves the handed-over socket */
+    GThread *t = g_thread_new ("fresh", fresh_thread, NULL);
+    g_main_loop_run (loop);
+    g_thread_join (t);
+    CHECK (stale_seen == 0);
+    walpe_ipc_release (sock);
+}
+
 int main (void)
 {
     char *dir = g_dir_make_tmp ("walpe-ipc-test-XXXXXX", NULL);
@@ -202,6 +263,8 @@ int main (void)
     CHECK (!g_file_test (sock, G_FILE_TEST_EXISTS));
     CHECK (walpe_ipc_serve (sock, handler, NULL));
     walpe_ipc_release (sock);
+
+    test_drop_queued ();
 
     char *lock = g_strconcat (sock, ".lock", NULL);
     g_unlink (lock);

@@ -12,7 +12,8 @@ Where WalPE keeps what you set, every key, and how to change it.
 Change settings with the settings window of the GUI, the tray menu or `walpe-ctl set
 key=value ...`. Do not edit `config.json` while the daemon runs: it writes the whole file
 with every change. Members it does not know (a newer version's, a note written by hand) are
-written back as they were. A file that is not a JSON object is not used and not overwritten:
+written back as they were, at the top of the file and inside an entry of `monitors`. A file
+that is not a JSON object is not used and not overwritten:
 it is kept as `config.json.broken-<time>`, the defaults apply and `walpe-ctl status` names
 the copy (`config_broken_copy`). The file is written next to itself and renamed, so a save
 that fails (a full disk, a home that cannot be written to) leaves the old file whole; the

@@ -1076,6 +1076,17 @@ test('scenesound', executable('scenesound-test', 'tests/scenesound_test.c',
   include_directories: inc,
   dependencies: [core_dep],
   install: false), env: ['WALPE_SOUND_NULL=1'], timeout: 240)
+# scene sound and the sound server (engine/scenesound.c, out_connect), with
+# stand-ins for the five functions of libpulse-simple: players that start
+# together and are refused by a server whose queue is full ask again at
+# once, and a server that stops answering holds one player only. Contacts
+# no sound server; no display.
+if have_pulse
+  test('scenesound-server', executable('scenesound-server-test', 'tests/scenesound_server_test.c',
+    include_directories: inc,
+    dependencies: [core_dep],
+    install: false), timeout: 120)
+endif
 # the decoders of compressed sound files (engine/sounddec.c, the part of
 # walpe-video.so that scene sound uses, compiled into the test): hostile
 # files, MP3 made of silent frames (gapless trimming), and - with FFmpeg's
@@ -1569,6 +1580,24 @@ endif
 # skipped in a build without the X11 backend. WALPE_CHECK_STRICT=1 in the
 # environment turns "cannot run here" into a failure (for a CI job that has
 # installed everything).
+if lifecheck_py.found() and have_wayland
+  # a Wayland socket that accepts the connection and never answers: the
+  # daemon gives up after its start-up limit instead of waiting for ever.
+  # Needs no display and no compositor.
+  test('daemon-wayland-silent', lifecheck_py,
+    args: ['-I', meson.current_source_dir() / 'scripts/wlsilentcheck.py',
+           '--build', meson.current_build_dir()],
+    depends: [daemon],
+    timeout: 120)
+  # a daemon restarted in place that waits for its compositor and gives
+  # up: it removes the control socket it was handed, not the socket another
+  # daemon has put there meanwhile. No display, no compositor.
+  test('daemon-wayland-wait-socket', lifecheck_py,
+    args: ['-I', meson.current_source_dir() / 'scripts/wlwaitcheck.py',
+           '--build', meson.current_build_dir()],
+    depends: [daemon],
+    timeout: 180)
+endif
 if lifecheck_py.found()
   test('daemon-life-wayland', lifecheck_py,
     args: ['-I', meson.current_source_dir() / 'scripts/lifecheck.py',

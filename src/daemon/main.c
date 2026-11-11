@@ -393,6 +393,11 @@ static struct {
     char *display_node;     /* Wayland, when the compositor told: the DRM device
                              * it composes with (NULL = unknown) */
     int ipc_fd;             /* the control socket handed over by the image before, -1 = none */
+    /* the file of that socket as it was when this image began (start_failed) */
+    gboolean ipc_file_known;
+    dev_t ipc_dev;
+    ino_t ipc_ino;
+    struct timespec ipc_ctim;
 } Bk = { .ipc_fd = -1 };
 
 /* ---- log guard
@@ -8417,6 +8422,13 @@ static gboolean backend_decide (const char *cli, gboolean windowed, gboolean qui
     Bk.source = Bk.lost ? "restart after the display went away" : ch.source;
     g_free (Bk.why);
     Bk.why = g_steal_pointer (&ch.why);
+    if (Bk.lost) {
+        /* (the backend of the image before was passed in the command
+         * line's place: nobody typed --backend) */
+        g_free (Bk.why);
+        Bk.why = g_strdup_printf ("%s, as before the display went away (restart in place)",
+                                  walpe_backend_name (D.backend));
+    }
     if (!quiet)
         g_message ("display backend: %s", Bk.why);
     /* automatic, a Wayland compositor that answers but cannot show a
@@ -8444,13 +8456,30 @@ static int reconnect_wait_s (void)
 
 /* The start ends before the control socket is served. An image that was
  * restarted in place holds the socket of the image before: without this
- * its file would stay behind with nobody listening. Returns main's exit
- * status. */
+ * its file would stay behind with nobody listening. Only that file is
+ * removed: the single-instance lock is not held while such an image waits
+ * for its display (wayland_reconnect: up to an hour), and a daemon that
+ * was started meanwhile has put its own socket in the same place. Returns
+ * main's exit status. */
 static int start_failed (void)
 {
     if (Bk.ipc_fd >= 0) {
         char *sp = walpe_socket_path ();
-        walpe_ipc_release (sp);
+        /* (any other restart in place fails within the moment of its
+         * start: the file is the handed-over one) */
+        gboolean ours = TRUE;
+        if (Bk.lost) {
+            struct stat st;
+            gboolean there = stat (sp, &st) == 0;
+            /* (no file when this image began: then none of its own can be left) */
+            ours = Bk.ipc_file_known && there && st.st_dev == Bk.ipc_dev &&
+                   st.st_ino == Bk.ipc_ino && st.st_ctim.tv_sec == Bk.ipc_ctim.tv_sec &&
+                   st.st_ctim.tv_nsec == Bk.ipc_ctim.tv_nsec;
+            if (!ours && there)
+                g_message ("the control socket %s is no longer this daemon's (another "
+                           "walpe-daemon was started meanwhile): left in place", sp);
+        }
+        walpe_ipc_release (ours ? sp : NULL);
         g_free (sp);
     }
     return 1;
@@ -8513,6 +8542,19 @@ int main (int argc, char **argv)
         if (dl && *dl)
             Bk.lost = g_strdup (dl);
         g_unsetenv ("WALPE_DISPLAY_LOST");
+        if (Bk.lost && Bk.ipc_fd >= 0) {
+            /* this image may wait a long time for its display: which file
+             * the handed-over socket is now, for a start that fails later */
+            char *sp = walpe_socket_path ();
+            struct stat st;
+            if (stat (sp, &st) == 0 && S_ISSOCK (st.st_mode)) {
+                Bk.ipc_file_known = TRUE;
+                Bk.ipc_dev = st.st_dev;
+                Bk.ipc_ino = st.st_ino;
+                Bk.ipc_ctim = st.st_ctim;
+            }
+            g_free (sp);
+        }
         Sw.orig_env = g_get_environ ();
         Sw.argv = g_strdupv (argv);
         /* by its real path, so that the restarted process is still called
@@ -8707,12 +8749,24 @@ int main (int argc, char **argv)
             .socket_path = xs,
             .events = &plat_events,
         };
+        gint64 open_t0 = Bk.lost ? g_get_monotonic_time () : 0;
         gboolean opened = walpe_platform_open (D.backend, &po, &perr);
         g_free (xs);
         g_free (xm);
         if (!opened) {
             g_printerr ("%s\n", perr ? perr : "cannot open the display");
             return start_failed ();
+        }
+        /* An image that waited for its display to come back did not answer
+         * the control socket in that time: walpe-ctl gives up after two
+         * seconds and says that the daemon is not running. What was sent
+         * then (a quit, another wallpaper) is not carried out now. */
+        if (Bk.lost && Bk.ipc_fd >= 0 &&
+            g_get_monotonic_time () - open_t0 >= 2 * G_USEC_PER_SEC) {
+            int dropped = walpe_ipc_drop_queued ();
+            if (dropped)
+                g_message ("%d request(s) sent while this daemon waited for its display were "
+                           "not answered and are not carried out", dropped);
         }
     }
     D.loop = g_main_loop_new (NULL, FALSE);
@@ -8808,6 +8862,11 @@ int main (int argc, char **argv)
             const char **names = g_new0 (const char *, (gsize) nmon + 1);
             for (int i = 0; i < nmon; i++)
                 names[i] = layout_now.o[i].name;
+            /* on Wayland every entry an earlier version stored carries an
+             * X11 name: an output without one of its own uses the entry of
+             * the same connector under its other spelling */
+            walpe_config_set_outputs (D.cfg, names, (guint) nmon,
+                                      D.backend == WALPE_BACKEND_WAYLAND);
             if (walpe_config_monitors_migrate (D.cfg, names, (guint) nmon)) {
                 g_message ("config: written before a render resolution could be chosen per "
                            "monitor: the %d connected monitor(s) stay at their own resolution and "

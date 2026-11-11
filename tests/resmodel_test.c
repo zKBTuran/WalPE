@@ -140,6 +140,14 @@ static void test_sizes (void)
     WalpeMonres big = { WALPE_MONRES_LINES, 2160, 0, 0 };
     CHECK (walpe_monres_size (&big, 32000, 1000, &w, &h));
     CHECK (w <= WALPE_MONRES_MAX_SIDE && (gint64) w * h <= WALPE_MONRES_MAX_PIXELS && h == 2160);
+    /* a mode no monitor has (the numbers are the window system's): the
+     * engine's answer, and no sum on the way that an int cannot hold */
+    w = h = -1;
+    CHECK (walpe_monres_size (&big, 2147483647, 1, &w, &h) && w == WALPE_MONRES_MAX_SIDE && h == 2160);
+    w = h = -1;
+    CHECK (walpe_monres_size (&big, 1, 2147483647, &w, &h) && w == 2160 && h == WALPE_MONRES_MAX_SIDE);
+    w = h = -1;
+    CHECK (walpe_monres_size (&big, 65535, 3, &w, &h) && w == WALPE_MONRES_MAX_SIDE && h == 2160);
 }
 
 static void test_limits_text (void)

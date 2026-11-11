@@ -71,9 +71,11 @@ status` carries the same as `display_backend`, `display_backend_why`,
 `display_backend_setting`, `display_backend_source` and `display_backends_built`. (The
 status member `backend` is older and means the video decoder backend.)
 
-Known gap: a compositor that accepts the connection and never answers holds the daemon's
-start for as long as it is silent, also with `auto` and a working X server. A socket that
-refuses the connection is handled (error, or X11 with `auto`).
+A compositor that accepts the connection and does not answer within 10 seconds counts as
+absent: with `auto` the daemon goes on to X11 when `DISPLAY` is set and otherwise ends
+saying that the compositor does not answer; with `wayland` by name it ends with status 1
+and says so. A socket that refuses the connection is handled at once (error, or X11 with
+`auto`).
 
 ## What is different from X11
 
@@ -100,10 +102,14 @@ is loaded while the pointer rests on the bare desktop follows it from its first 
 
 Monitor names are the keys of per-monitor settings. Where X11 and Wayland only spell a
 connector differently (`HDMI-1` / `HDMI-A-1`), status shows a `canon` name that is the same
-for both and saved settings are found again; where the numbering differs (NVIDIA's X driver
-counts from `DP-0`) a per-monitor wallpaper has to be chosen once more under the other
-backend. (The name matching is tested with made-up names only: the headless outputs are
-called `HEADLESS-n`.)
+for both. On Wayland an output without a stored setting of its own uses the one stored
+under the other spelling of its connector (when that is the only one for the connector
+and no connected output has that name); what is stored from then on is stored under the
+output's own name. On X11 only the exact name counts, so a choice made on Wayland has to
+be made once more there, and where the numbering differs (NVIDIA's X driver counts from
+`DP-0`) a per-monitor wallpaper has to be chosen once more under the other backend. (The
+name matching is tested with made-up names only: the headless outputs are called
+`HEADLESS-n`.)
 
 A monitor that is plugged in, removed or changes its mode, scale or rotation makes the
 daemon restart itself in place about two seconds after the change has settled, as on X11.
@@ -112,8 +118,12 @@ When the compositor goes away the daemon shuts down in order and exits with stat
 does when an X server goes away. `wayland_reconnect = <seconds>` in `gpu.conf`
 ([GPU-PRESENT.md](GPU-PRESENT.md)) makes it restart in place instead and wait that long for
 the compositor's socket to come back. While it waits, `walpe-ctl` reports that the daemon
-is not running. A session started with a one-time socket (`WAYLAND_SOCKET` instead of
-`WAYLAND_DISPLAY`) cannot be reconnected to.
+is not running, and what was sent to it in that time is not carried out when it is back.
+A session started with a one-time socket (`WAYLAND_SOCKET` instead of
+`WAYLAND_DISPLAY`) cannot be reconnected to. Known gap: for the same reason the daemon
+cannot restart itself in place there. At the first change of a monitor that it would
+follow by restarting it ends with status 1 and `no display to draw on` (with `backend=auto`
+and `DISPLAY` set it comes back on X11 instead); start it again from the compositor.
 
 ## Pause rules
 
@@ -138,6 +148,11 @@ rule still works.
 Lockers that do not tell logind that the session is locked (seen with a lock client on
 sway): the wallpaper pauses through the covered rule, because the compositor stops showing
 it, not through the display-sleep rule.
+
+The rules that ask the compositor (idle time, window list) use a connection of their own.
+Its first answers are waited for 5 seconds at most when the daemon starts; a compositor
+that stays silent leaves those rules without a source, and each of them says in
+`pause_rules` that the compositor did not answer.
 
 Tested with stand-ins only: logind (a stand-in login manager on a private bus; no system
 bus was available), the idle and window-list protocols (a stand-in compositor in the test
@@ -216,12 +231,10 @@ XDG_CURRENT_DESKTOP`.
   Not seen at all: `linux-dmabuf`, a hardware EGL on Wayland, connector names of real
   outputs, DPMS on a real connector, presentation feedback with a real refresh period.
 - 8 bits per channel, sRGB; no HDR, no colour management protocol.
-- Five things the headless tests showed that are left as they are:
+- Four things the headless tests showed that are left as they are:
   - A hidden wallpaper with "pause when covered" switched off goes on being drawn at its
     frame rate limit, although the compositor discards every frame. It costs what a shown
     wallpaper costs.
-  - A compositor that accepts the connection and never answers holds the daemon's start
-    for as long as it is silent, also with `auto` and a working X server.
   - A lock screen pauses the wallpaper through "pause when covered", not through "pause
     while the display sleeps", unless the locker tells logind that the session is locked:
     with `pause_covered` off and `pause_dpms` on the wallpaper is drawn on behind such a
@@ -230,7 +243,10 @@ XDG_CURRENT_DESKTOP`.
     daemon had (`hidden: true`); the daemon restarts in place when one is back.
   - While the daemon waits for a compositor to come back (`wayland_reconnect`), its
     control socket is there and nobody answers on it: `walpe-ctl` says that the daemon is
-    not running.
+    not running, and what was sent in that time is not carried out when it is back.
+- A session started with a one-time socket (`WAYLAND_SOCKET`) cannot be restarted in
+  place: the daemon ends at the first change of a monitor it would follow that way (see
+  "What is different from X11").
 - A frame with translucent pixels: the surface is declared opaque; on a driver without
   `EGL_EXT_present_opaque` and without an alpha-free EGL config such pixels can show the
   compositor's background through them (the log says so at start).

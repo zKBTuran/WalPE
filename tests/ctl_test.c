@@ -391,6 +391,20 @@ static gpointer client_thread (gpointer u)
            !g_strcmp0 (wpj_str (o, "value", ""), "1920x1200"));
     if (n)
         json_node_unref (n);
+    /* an index typed with zeros in front goes out as that number ("08" is
+     * not JSON, and "010" is eight to a reader that takes it at all) */
+    CHECK (run_ctl (NULL, "resolution", "08", "native", NULL) == 0);
+    n = sent ();
+    o = n ? json_node_get_object (n) : NULL;
+    CHECK (o && is_type (o, "monitor", G_TYPE_INT64) && wpj_num (o, "monitor", -1) == 8);
+    if (n)
+        json_node_unref (n);
+    CHECK (run_ctl (NULL, "resolution", "010", "native", NULL) == 0);
+    n = sent ();
+    o = n ? json_node_get_object (n) : NULL;
+    CHECK (o && is_type (o, "monitor", G_TYPE_INT64) && wpj_num (o, "monitor", -1) == 10);
+    if (n)
+        json_node_unref (n);
     CHECK (run_ctl (NULL, "resolution", "all", "native", NULL) == 0);       /* every connected one */
     n = sent ();
     o = n ? json_node_get_object (n) : NULL;

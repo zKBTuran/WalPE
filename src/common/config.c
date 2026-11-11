@@ -332,6 +332,15 @@ static JsonNode *config_to_json (WalpeConfig *c)
             json_builder_add_string_value (b, tl);
             json_builder_set_member_name (b, "asked");
             json_builder_add_boolean_value (b, mc->asked);
+            /* what a newer version keeps in the entry stays in it */
+            JsonObject *more = c->monitors_extra
+                                   ? g_hash_table_lookup (c->monitors_extra, k->data) : NULL;
+            GList *ms = more ? json_object_get_members (more) : NULL;
+            for (GList *m = ms; m; m = m->next) {
+                json_builder_set_member_name (b, m->data);
+                json_builder_add_value (b, json_node_copy (json_object_get_member (more, m->data)));
+            }
+            g_list_free (ms);
             json_builder_end_object (b);
             g_free (rs);
             g_free (tl);
@@ -851,6 +860,28 @@ WalpeConfig *walpe_config_load (void)
                 }
                 mc.asked = wpj_bool (e, "asked", TRUE);
                 walpe_config_set_monitor (c, k->data, &mc);
+                /* the members of the entry this build does not read (a
+                 * newer version's): kept with it, as `extra` keeps the
+                 * unknown members of the file. A save wrote the three
+                 * known ones only, so a start of this version between two
+                 * of a newer one took them out of the file. */
+                GList *ems = json_object_get_members (e);
+                for (GList *m = ems; m; m = m->next) {
+                    if (!strcmp (m->data, "resolution") || !strcmp (m->data, "texture_limit") ||
+                        !strcmp (m->data, "asked"))
+                        continue;
+                    if (!c->monitors_extra)
+                        c->monitors_extra = g_hash_table_new_full (
+                            g_str_hash, g_str_equal, g_free, (GDestroyNotify) json_object_unref);
+                    JsonObject *more = g_hash_table_lookup (c->monitors_extra, k->data);
+                    if (!more) {
+                        more = json_object_new ();
+                        g_hash_table_insert (c->monitors_extra, g_strdup (k->data), more);
+                    }
+                    json_object_set_member (more, m->data,
+                                            json_node_copy (json_object_get_member (e, m->data)));
+                }
+                g_list_free (ems);
             }
             g_list_free (ks);
         }
@@ -964,6 +995,9 @@ void walpe_config_free (WalpeConfig *cfg)
         g_hash_table_unref (cfg->wallpaper_quality);
     if (cfg->monitors)
         g_hash_table_unref (cfg->monitors);
+    if (cfg->monitors_extra)
+        g_hash_table_unref (cfg->monitors_extra);
+    g_strfreev (cfg->outputs);
     if (cfg->extra)
         json_object_unref (cfg->extra);
     g_free (cfg);
@@ -1041,10 +1075,61 @@ guint walpe_config_clear_props (WalpeConfig *cfg, const char *path)
     return n;
 }
 
+void walpe_config_set_outputs (WalpeConfig *cfg, const char *const *names, guint n,
+                               gboolean other_spellings)
+{
+    if (!cfg)
+        return;
+    g_strfreev (cfg->outputs);
+    cfg->outputs = g_new0 (char *, (gsize) n + 1);
+    for (guint i = 0, k = 0; names && i < n; i++)
+        if (names[i])
+            cfg->outputs[k++] = g_strdup (names[i]);
+    cfg->other_spellings = other_spellings;
+}
+
+/* the key of `t` (output name -> ...) that holds for output `name`: the
+ * name itself, or the entry under another spelling of its connector
+ * (walpe_config_set_outputs) */
+static const char *output_key (const WalpeConfig *cfg, GHashTable *t, const char *name)
+{
+    if (!t || !name || !cfg->other_spellings || g_hash_table_contains (t, name))
+        return name;
+    const char *found = NULL;
+    GHashTableIter it;
+    gpointer k;
+    g_hash_table_iter_init (&it, t);
+    while (g_hash_table_iter_next (&it, &k, NULL)) {
+        if (!walpe_output_name_same (k, name))
+            continue;
+        /* the entry of an output that is connected itself is that output's */
+        gboolean theirs = FALSE;
+        for (guint i = 0; cfg->outputs && cfg->outputs[i]; i++)
+            theirs = theirs || !strcmp (cfg->outputs[i], k);
+        if (theirs)
+            continue;
+        if (found)
+            return name;    /* two of them: nobody can tell which is meant */
+        found = k;
+    }
+    return found ? found : name;
+}
+
+/* drop what holds for `name`: its own entry and one under another spelling
+ * (which would hold as soon as its own is gone) */
+static void output_key_remove (const WalpeConfig *cfg, GHashTable *t, const char *name)
+{
+    for (int i = 0; t && i < 2; i++)
+        if (!g_hash_table_remove (t, output_key (cfg, t, name)))
+            break;
+}
+
 const char *walpe_config_monitor_path (WalpeConfig *cfg, const char *name)
 {
-    const char *p = name && cfg->monitor_current ? g_hash_table_lookup (cfg->monitor_current, name)
-                                                 : NULL;
+    const char *p = name && cfg->monitor_current
+                        ? g_hash_table_lookup (cfg->monitor_current,
+                                               output_key (cfg, cfg->monitor_current, name))
+                        : NULL;
     return p ? p : (cfg->current ? cfg->current : "");
 }
 
@@ -1053,8 +1138,7 @@ void walpe_config_set_monitor_path (WalpeConfig *cfg, const char *name, const ch
     if (!name || !*name)
         return;
     if (!path) {
-        if (cfg->monitor_current)
-            g_hash_table_remove (cfg->monitor_current, name);
+        output_key_remove (cfg, cfg->monitor_current, name);
         return;
     }
     if (!cfg->monitor_current)
@@ -1066,7 +1150,8 @@ void walpe_config_set_monitor_path (WalpeConfig *cfg, const char *name, const ch
 
 const WalpeMonitorConf *walpe_config_monitor (WalpeConfig *cfg, const char *name)
 {
-    return cfg && cfg->monitors && name ? g_hash_table_lookup (cfg->monitors, name) : NULL;
+    return cfg && cfg->monitors && name
+               ? g_hash_table_lookup (cfg->monitors, output_key (cfg, cfg->monitors, name)) : NULL;
 }
 
 void walpe_config_monitor_get (WalpeConfig *cfg, const char *name, WalpeMonitorConf *out)
@@ -1089,8 +1174,16 @@ void walpe_config_set_monitor (WalpeConfig *cfg, const char *name, const WalpeMo
     if (!cfg || !walpe_monitor_name_ok (name))
         return;
     if (!mc) {
-        if (cfg->monitors)
-            g_hash_table_remove (cfg->monitors, name);
+        /* (the whole entry goes, also what this build did not know of it) */
+        for (int i = 0; cfg->monitors && i < 2; i++) {
+            char *k = g_strdup (output_key (cfg, cfg->monitors, name));
+            gboolean was = g_hash_table_remove (cfg->monitors, k);
+            if (cfg->monitors_extra)
+                g_hash_table_remove (cfg->monitors_extra, k);
+            g_free (k);
+            if (!was)
+                break;
+        }
         return;
     }
     if (!cfg->monitors)

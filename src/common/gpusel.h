@@ -98,6 +98,17 @@ const char *walpe_gpu_sysfs_root (void);
  * an empty array on a machine where none of it exists. Free with
  * g_ptr_array_unref (element free func set). */
 GPtrArray *walpe_gpu_enumerate (const char *sysroot);
+/* The same list without the PCI id list (1.5 MB of text that serves the
+ * names and nothing else): a PCI device is named by its vendor and ids
+ * ("NVIDIA graphics device 10de:25a0"). For a process that decides and
+ * shows no name - the daemon when it starts with gpu = auto. */
+GPtrArray *walpe_gpu_enumerate_plain (const char *sysroot);
+/* Gives the PCI devices of a list their names from the PCI id list, which
+ * is read once for all of them; a device it does not have keeps its name.
+ * Reads nothing when the list holds no PCI device. */
+void walpe_gpu_name_devices (GPtrArray *devs);
+/* how often this process has looked for the PCI id list so far (tests) */
+guint walpe_gpu_pci_ids_reads (void);
 
 /* integrated / discrete / virtual from the ids, the driver and the bus
  * position. *guessed (optional): no rule applied. The rules:

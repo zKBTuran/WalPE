@@ -22,6 +22,7 @@
 #include <pulse/simple.h>
 #include <pulse/error.h>
 #include <dlfcn.h>
+#include "scenesound_server.h"
 #endif
 
 enum { ST_STOPPED, ST_PLAYING, ST_PAUSED };
@@ -487,6 +488,85 @@ static gboolean pas_load (void)
     return Pas.ok;
 }
 
+void walpe_sound_set_server_calls (const WalpeSoundServerCalls *calls)
+{
+    if (g_once_init_enter (&Pas.once)) {
+        Pas.new_stream = calls->new_stream;
+        Pas.free_stream = calls->free_stream;
+        Pas.write = calls->write;
+        Pas.drain = calls->drain;
+        Pas.flush = calls->flush;
+        Pas.ok = TRUE;
+        g_once_init_leave (&Pas.once, 1);
+    }
+}
+
+/* The server refused a connection: asked again a few times, one player at
+ * a time, before the layer is left to play into nothing.
+ * Every player has a connection of its own, and the players of a scene ask
+ * for theirs in the same instant: when the scene is loaded, and again after
+ * every silence of more than LINGER_US (a pause, a covered monitor, mute).
+ * A sound server takes new connections from a short queue (the backlog
+ * of its listening socket), and a connect () that finds the queue full
+ * fails at once - "Connection refused" from a server that is there and
+ * well.
+ * Measured with a running PulseAudio 16.1, ten starts each: of 16 layers, 4
+ * to 10 were refused in seven of the starts; of 12, 2 to 6 in four; of 8, 1
+ * or 2 in three. A refused layer played into nothing for SERVER_RETRY_US:
+ * five seconds of a scene without some of its sound, after every start.
+ * The queue is empty again within milliseconds. The players that were
+ * refused take turns here, so that their further attempts do not meet in
+ * the queue as their first ones did: up to CONNECT_AGAIN of them, 10 ms
+ * apart. A player waits for its turn for CONNECT_TURN_US at most and then
+ * goes on as before (into nothing, asking again later): should the server
+ * stop answering the one whose turn it is, nobody else waits behind it
+ * without a limit. Turn and attempts together stay below the half second
+ * by which a player on the null device may be late and still keep its
+ * place in time (out_write). A connection that is not refused is not
+ * touched by any of this. */
+#define CONNECT_TURN_US (G_USEC_PER_SEC / 4)
+#define CONNECT_AGAIN 4
+#define CONNECT_AGAIN_US 10000
+static GMutex turn_lock;          /* (taken alone, by a player's thread, for a few instructions) */
+static GCond turn_cond;
+static gboolean turn_taken;       /* turn_lock: a refused player is asking the server again */
+
+static gboolean connect_turn_take (void)
+{
+    const gint64 until = g_get_monotonic_time () + CONNECT_TURN_US;
+    g_mutex_lock (&turn_lock);
+    while (turn_taken && g_cond_wait_until (&turn_cond, &turn_lock, until))
+        ;
+    const gboolean mine = !turn_taken;
+    if (mine)
+        turn_taken = TRUE;
+    g_mutex_unlock (&turn_lock);
+    return mine;
+}
+
+static void connect_turn_give (void)
+{
+    g_mutex_lock (&turn_lock);
+    turn_taken = FALSE;
+    g_cond_signal (&turn_cond);
+    g_mutex_unlock (&turn_lock);
+}
+
+/* (*e is PA_ERR_CONNECTIONREFUSED and stays that unless an attempt ends otherwise) */
+static pa_simple *connect_again (const pa_sample_spec *ss, const pa_buffer_attr *ba, const char *name, int *e)
+{
+    pa_simple *pa = NULL;
+    if (!connect_turn_take ())
+        return NULL;
+    for (int i = 0; i < CONNECT_AGAIN && !pa && *e == PA_ERR_CONNECTIONREFUSED; i++) {
+        if (i)
+            g_usleep (CONNECT_AGAIN_US);
+        pa = Pas.new_stream (NULL, "walpe", PA_STREAM_PLAYBACK, env.sink, name, ss, NULL, ba, e);
+    }
+    connect_turn_give ();
+    return pa;
+}
+
 /* TRUE: the stream is open on the sound server */
 static gboolean out_connect (Out *o, const char *name)
 {
@@ -501,6 +581,8 @@ static gboolean out_connect (Out *o, const char *name)
     const char *why = "libpulse-simple.so.0 could not be loaded";
     if (lib) {
         o->pa = Pas.new_stream (NULL, "walpe", PA_STREAM_PLAYBACK, env.sink, name, &ss, NULL, &ba, &e);
+        if (!o->pa && e == PA_ERR_CONNECTIONREFUSED)
+            o->pa = connect_again (&ss, &ba, name, &e);
         why = pa_strerror (e);
     }
     if (!o->pa)

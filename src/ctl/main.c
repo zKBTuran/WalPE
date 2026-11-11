@@ -1019,7 +1019,9 @@ static void resolution_target (GString *req, const char *mon)
     if (!mon)
         return;     /* every connected monitor */
     if (digits && strlen (mon) <= 4) {
-        g_string_append_printf (req, ",\"monitor\":%s", mon);
+        /* (the number, not the digits as typed: "08" is not JSON, and a
+         * reader that takes "010" at all reads eight) */
+        g_string_append_printf (req, ",\"monitor\":%d", (int) g_ascii_strtoll (mon, NULL, 10));
     } else {
         char *e = walpe_json_escape (mon);
         g_string_append_printf (req, ",\"monitor\":\"%s\"", e);

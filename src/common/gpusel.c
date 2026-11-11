@@ -30,6 +30,28 @@ static char *read_trim (const char *dir, const char *name)
     return g_strstrip (txt);
 }
 
+/* Text that came from sysfs or from the PCI id list, for a log line, an
+ * environment variable and a JSON reply (takes s; g_free): at most `max`
+ * bytes, valid UTF-8, no control characters. The kernel's own names are
+ * short ASCII words and pass unchanged; a file of another kind (a strange
+ * mount, a broken list) must not make the status reply unreadable. */
+static char *sys_text (char *s, gsize max)
+{
+    if (!s)
+        return NULL;
+    if (strlen (s) > max)
+        s[max] = 0;
+    if (!g_utf8_validate (s, -1, NULL)) {
+        char *v = g_utf8_make_valid (s, -1);
+        g_free (s);
+        s = v;
+    }
+    for (char *p = s; *p; p++)
+        if ((guchar) *p < 0x20 || *p == 0x7f)
+            *p = '?';
+    return s;
+}
+
 /* VALUE of the line "KEY=VALUE" in a uevent text (g_free) or NULL */
 static char *uevent_get (const char *text, const char *key)
 {
@@ -258,18 +280,29 @@ char *walpe_gpu_pci_path_tag (const char *pci)
 
 /* ------------------------------------------------------------- names */
 
-/* the device's text in the PCI id list (g_free) or NULL. The list is the
- * one pciutils / hwdata install; $WALPE_GPU_PCI_IDS names another file
+/* how often this process has looked for the PCI id list (tests) */
+static gint pci_ids_reads;
+
+guint walpe_gpu_pci_ids_reads (void)
+{
+    return (guint) g_atomic_int_get (&pci_ids_reads);
+}
+
+/* The text of the PCI id list (g_free) or NULL. The list is the one
+ * pciutils / hwdata install; $WALPE_GPU_PCI_IDS names another file
  * (tests), or "none". */
-static char *pci_ids_lookup (guint vendor, guint device)
+static char *pci_ids_load (void)
 {
     static const char *const places[] = { "/usr/share/hwdata/pci.ids", "/usr/share/misc/pci.ids",
                                           "/usr/share/pci.ids", NULL };
     const char *e = g_getenv ("WALPE_GPU_PCI_IDS");
     char *txt = NULL;
     gsize len = 0;
+    if (e && !strcmp (e, "none"))
+        return NULL;
+    g_atomic_int_inc (&pci_ids_reads);
     if (e && *e) {
-        if (!strcmp (e, "none") || !g_file_get_contents (e, &txt, &len, NULL))
+        if (!g_file_get_contents (e, &txt, &len, NULL))
             return NULL;
     } else {
         for (int i = 0; places[i] && !txt; i++)
@@ -282,6 +315,12 @@ static char *pci_ids_lookup (guint vendor, guint device)
         g_free (txt);
         return NULL;
     }
+    return txt;
+}
+
+/* the device's text in the PCI id list `txt` (g_free) or NULL */
+static char *pci_ids_find (const char *txt, guint vendor, guint device)
+{
     char vkey[8], dkey[8];
     g_snprintf (vkey, sizeof vkey, "%04x", vendor & 0xffffu);
     g_snprintf (dkey, sizeof dkey, "%04x", device & 0xffffu);
@@ -302,7 +341,6 @@ static char *pci_ids_lookup (guint vendor, guint device)
         }
         p = eol ? eol + 1 : NULL;
     }
-    g_free (txt);
     if (found && !*found) {
         g_free (found);
         found = NULL;
@@ -310,22 +348,43 @@ static char *pci_ids_lookup (guint vendor, guint device)
     return found;
 }
 
-static char *make_name (guint vendor, guint device, const char *driver, const char *of_compat)
+/* the name of a device. ids_text: its text in the PCI id list, NULL = not
+ * looked up or not listed (the name is then made from the ids) */
+static char *make_name (guint vendor, guint device, const char *driver, const char *of_compat,
+                        const char *ids_text)
 {
     const char *vw = walpe_gpu_vendor_word (vendor);
-    if (vendor) {
-        char *txt = pci_ids_lookup (vendor, device);
-        char *n = txt ? g_strdup_printf ("%s%s%s", vw ? vw : "", vw ? " " : "", txt)
-                      : g_strdup_printf ("%s graphics device %04x:%04x", vw ? vw : "PCI", vendor,
-                                         device);
-        g_free (txt);
-        return n;
-    }
+    if (vendor)
+        return ids_text ? g_strdup_printf ("%s%s%s", vw ? vw : "", vw ? " " : "", ids_text)
+                        : g_strdup_printf ("%s graphics device %04x:%04x", vw ? vw : "PCI", vendor,
+                                           device);
     if (of_compat && *of_compat)
         return g_strdup (of_compat);
     if (driver && *driver)
         return g_strdup_printf ("%s device", driver);
     return g_strdup ("graphics device");
+}
+
+void walpe_gpu_name_devices (GPtrArray *devs)
+{
+    gboolean any = FALSE;
+    for (guint i = 0; devs && i < devs->len; i++)
+        any |= ((const WalpeGpuDev *) g_ptr_array_index (devs, i))->vendor != 0;
+    if (!any)
+        return;     /* no device the list could name: it is not read */
+    char *txt = pci_ids_load ();
+    if (!txt)
+        return;
+    for (guint i = 0; i < devs->len; i++) {
+        WalpeGpuDev *d = g_ptr_array_index (devs, i);
+        char *t = d->vendor ? pci_ids_find (txt, d->vendor, d->device) : NULL;
+        if (t) {
+            g_free (d->name);
+            d->name = sys_text (make_name (d->vendor, d->device, d->driver, NULL, t), 127);
+            g_free (t);
+        }
+    }
+    g_free (txt);
 }
 
 /* ------------------------------------------------------- enumeration */
@@ -354,12 +413,18 @@ static void dev_identify (WalpeGpuDev *d, const char *devdir)
         g_free (v);
         g_free (dv);
     }
+    d->vendor &= 0xffffu;       /* PCI ids are 16 bits, whatever the text says */
+    d->device &= 0xffffu;
+    drv = sys_text (drv, 63);
+    slot = sys_text (slot, 63);
+    ofc = sys_text (ofc, 127);
+    offn = sys_text (offn, 127);
     if (!drv) {
         /* no uevent line: the name the "driver" link points to */
         char *dl = g_build_filename (devdir, "driver", NULL);
         char *tgt = g_file_read_link (dl, NULL);
         if (tgt)
-            drv = g_path_get_basename (tgt);
+            drv = sys_text (g_path_get_basename (tgt), 63);
         g_free (tgt);
         g_free (dl);
     }
@@ -385,7 +450,7 @@ static void dev_identify (WalpeGpuDev *d, const char *devdir)
     g_free (bv);
     d->sysfs = g_strdup (devdir);
     d->klass = walpe_gpu_classify (d->vendor, d->device, d->driver, d->pci, &d->class_guessed);
-    d->name = make_name (d->vendor, d->device, d->driver, ofc);
+    d->name = make_name (d->vendor, d->device, d->driver, ofc, NULL);
     g_free (id);
     g_free (ofc);
     g_free (offn);
@@ -393,6 +458,13 @@ static void dev_identify (WalpeGpuDev *d, const char *devdir)
 }
 
 GPtrArray *walpe_gpu_enumerate (const char *sysroot)
+{
+    GPtrArray *devs = walpe_gpu_enumerate_plain (sysroot);
+    walpe_gpu_name_devices (devs);
+    return devs;
+}
+
+GPtrArray *walpe_gpu_enumerate_plain (const char *sysroot)
 {
     if (!sysroot || !*sysroot)
         sysroot = walpe_gpu_sysfs_root ();
@@ -435,7 +507,7 @@ GPtrArray *walpe_gpu_enumerate (const char *sysroot)
         const char *sn;
         while (sd && (sn = g_dir_read_name (sd)))
             if (g_str_has_prefix (sn, "renderD") && g_ascii_isdigit (sn[7]) && !d->render_node)
-                d->render_node = g_strdup_printf ("/dev/dri/%s", sn);
+                d->render_node = sys_text (g_strdup_printf ("/dev/dri/%s", sn), 63);
         if (sd)
             g_dir_close (sd);
         g_free (sub);
@@ -453,7 +525,7 @@ GPtrArray *walpe_gpu_enumerate (const char *sysroot)
             char *od = g_build_filename (drm, on, NULL);
             char *st = read_trim (od, "status");
             if (st && !strcmp (st, "connected"))
-                g_ptr_array_add (conn, g_strdup (on + pl + 1));
+                g_ptr_array_add (conn, sys_text (g_strdup (on + pl + 1), 63));
             g_free (st);
             g_free (od);
         }
@@ -505,7 +577,8 @@ GPtrArray *walpe_gpu_enumerate (const char *sysroot)
             d->card = -1;
             dev_identify (d, devdir);
             if (!d->pci) {
-                d->pci = g_ascii_strdown (slot, -1);
+                d->pci = sys_text (g_ascii_strdown (slot, -1), 63);
+                g_free (d->path_tag);   /* (one made from a device-tree node name) */
                 d->path_tag = walpe_gpu_pci_path_tag (d->pci);
                 d->klass = walpe_gpu_classify (d->vendor, d->device, d->driver, d->pci,
                                                &d->class_guessed);

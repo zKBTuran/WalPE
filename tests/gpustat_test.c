@@ -634,8 +634,43 @@ static void test_restart_and_self (void)
     walpe_gpu_stat_report_free (r);
     walpe_gpu_sampler_free (s);
 
-    /* the real machine, this process: whatever is there, it must answer */
+    /* this process. Nothing is told about a renderer yet: no file is read */
     WalpeGpuSelfStat a, b;
+    const guint scans0 = walpe_gpustat_device_scans ();
+    walpe_gpustat_set_gl_vendor (NULL);
+    walpe_gpustat_set_render_device (NULL);
+    walpe_gpustat_self (&a);
+    CHECK (walpe_gpustat_self_readings () == 0 && !strcmp (a.sources, "none") && a.note[0] &&
+           !a.driver[0] && !a.has_busy && a.mem_kb < 0,
+           "self: no renderer told: nothing read (%u readings, note: %s)",
+           walpe_gpustat_self_readings (), a.note);
+    /* NVIDIA's OpenGL: the answer comes from the vendor alone, however often
+     * and however long it is asked - no reading of /proc or /sys, not one */
+    walpe_gpustat_set_gl_vendor ("NVIDIA Corporation");
+    walpe_gpustat_set_render_device ("0000:01:00.0");
+    walpe_gpustat_self (&a);
+    g_usleep (1100000);
+    walpe_gpustat_self (&b);
+    walpe_gpustat_self (&b);
+    CHECK (walpe_gpustat_self_readings () == 0, "self: NVIDIA's driver: no reading at all (%u)",
+           walpe_gpustat_self_readings ());
+    CHECK (!strcmp (a.driver, "nvidia") && !strcmp (a.vendor_name, "NVIDIA") && a.vendor_id == 0x10de &&
+           !strcmp (a.pci_slot, "0000:01:00.0") && !strcmp (a.sources, "none") && !a.has_busy &&
+           a.mem_kb < 0 && strstr (a.note, "nvidia-smi"),
+           "self: NVIDIA's driver: the answer names the driver and nvidia-smi (%s / %s / %s)", a.driver,
+           a.pci_slot, a.note);
+    CHECK (!strcmp (a.driver, b.driver) && !strcmp (a.note, b.note) && !strcmp (a.pci_slot, b.pci_slot),
+           "self: NVIDIA's driver: the same answer a second later");
+    walpe_gpustat_set_render_device ("/dev/dri/card1");
+    walpe_gpustat_self (&b);
+    CHECK (!strcmp (b.card, "card1") && !b.pci_slot[0] && !strcmp (b.driver, "nvidia") &&
+           walpe_gpustat_self_readings () == 0, "self: NVIDIA's driver, device told by its node (%s)", b.card);
+    CHECK (walpe_gpustat_device_scans () == scans0, "self: so far the device list of sysfs was not read (%u)",
+           walpe_gpustat_device_scans () - scans0);
+    /* the real machine and a renderer that is not NVIDIA's: whatever is
+     * there, it must answer */
+    walpe_gpustat_set_render_device (NULL);
+    walpe_gpustat_set_gl_vendor ("Mesa");
     walpe_gpustat_self (&a);
     walpe_gpustat_self (&b);
     CHECK (a.sources[0] && !a.has_busy, "self: first call has no share yet (sources: %s)", a.sources);
@@ -668,6 +703,7 @@ static void test_restart_and_self (void)
     } else {
         printf ("  (self: driver %s publishes figures: the settled case is not tested here)\n", a.driver);
     }
+    walpe_gpustat_set_gl_vendor (NULL);
     WalpeGpuSampler *n = walpe_gpu_sampler_new (NULL);
     walpe_gpu_sampler_tick (n);
     r = walpe_gpu_sampler_report (n);
@@ -747,6 +783,17 @@ static void test_profile_default (void)
     walpe_gpustat_set_gl_vendor ("NVIDIA Corporation");
     CHECK (prof_mode ("empty", NULL, drv) == OFF && !strcmp (drv, "nvidia"),
            "no GPU listed, NVIDIA's GL: off (driver %s)", drv);
+    {
+        /* ... and that answer comes from the GL vendor alone: the device
+         * list of sysfs is not read for it, whatever tree is there */
+        guint scans = walpe_gpustat_device_scans ();
+        CHECK (prof_mode ("amdgpu", NULL, drv) == OFF && !strcmp (drv, "nvidia") &&
+               prof_mode ("no-such-tree", NULL, drv) == OFF && !strcmp (drv, "nvidia"),
+               "NVIDIA's GL: off on any tree (driver %s)", drv);
+        CHECK (walpe_gpustat_device_scans () == scans, "NVIDIA's GL: sysfs is not read (%u scans more)",
+               walpe_gpustat_device_scans () - scans);
+        CHECK (prof_mode ("amdgpu", "self", drv) == SELF, "NVIDIA's GL: the switch still turns it on");
+    }
     walpe_gpustat_set_gl_vendor (NULL);
 
     /* Intel (the boot GPU) and AMD */
@@ -862,6 +909,274 @@ static void test_nvidia_smi (void)
     walpe_gpu_stat_report_free (r);
 }
 
+/* ---- trees of broken text ------------------------------------------------
+ * Every attribute of /sys and every fdinfo file holds something a strange
+ * kernel, a container or a FUSE mount could show: nothing, no newline at
+ * the end, a line longer than any buffer, numbers with units, negative
+ * numbers, numbers that do not fit, bytes that are no text. Devices and
+ * processes come and go between two samples. No figure is expected: the
+ * sampler has to stay inside its buffers (the sanitizer build says so),
+ * every number of the report has to be finite and every text valid UTF-8. */
+static guint32 hx = 0x9e3779b9u;
+
+static guint32 hrand (void)
+{
+    hx ^= hx << 13;
+    hx ^= hx >> 17;
+    hx ^= hx << 5;
+    return hx;
+}
+
+static void hput (const char *root, const char *rel, const char *txt, gssize len)
+{
+    char *p = g_build_filename (root, rel, NULL), *d = g_path_get_dirname (p);
+    g_mkdir_with_parents (d, 0700);
+    /* (plain stdio: thousands of files, none of them worth a sync) */
+    FILE *f = fopen (p, "wb");
+    if (f) {
+        fwrite (txt, 1, len < 0 ? strlen (txt) : (gsize) len, f);
+        fclose (f);
+    }
+    g_free (d);
+    g_free (p);
+}
+
+/* one hostile value (g_free), *len its length */
+static char *hvalue (gsize *len)
+{
+    static const char *const words[] = {
+        "", "\n", "0", "-1", "18446744073709551615", "18446744073709551616",
+        "99999999999999999999999999 KiB", "4096 KiB", "4096 MiB", "17179869184 MiB", "17 GiB",
+        "1e999", "nan", "inf", "0x", "0x7fffffffffffffff", "100 %", "   42", "42", "\t7\t",
+        "amdgpu", "i915", "xe", "nvidia", "radeon", "0000:03:00.0", "0000:ZZ:00.0", "suspended",
+        "active", "0: 300Mhz\n1: 99999999Mhz *\n2: -5Mhz\n3: nanMhz", "\xff\xfe\xfd", "a:b:c:d",
+        "%s%s%n%999999d", "0x030000", "0x0300000000000000000", "1002", "0x8086", "0x10de",
+        "DRIVER=amdgpu\nPCI_ID=1002:73DF\nPCI_SLOT_NAME=0000:03:00.0",
+        "DRIVER=\nPCI_ID=:\nPCI_SLOT_NAME=",
+        "PCI_ID=ffffffffffffffffffff:-1\nDRIVER=\xc3\x28\nPCI_SLOT_NAME=0000:03:00.0\n",
+    };
+    GString *g = g_string_new (NULL);
+    switch (hrand () % 8) {
+    case 0:
+        for (guint n = 1 + hrand () % 70000, c = 'a' + hrand () % 26; n; n--)
+            g_string_append_c (g, (char) c);
+        break;
+    case 1:
+        for (guint n = 1 + hrand () % 400; n; n--)
+            g_string_append_c (g, (char) (hrand () & 0xff));
+        break;
+    default:
+        g_string_append (g, words[hrand () % G_N_ELEMENTS (words)]);
+        if (hrand () & 1)
+            g_string_append_c (g, '\n');
+        break;
+    }
+    *len = g->len;
+    return g_string_free (g, FALSE);
+}
+
+static void hattr (const char *root, const char *rel)
+{
+    if (hrand () % 6 == 0)
+        return;     /* the attribute is not there */
+    gsize len;
+    char *v = hvalue (&len);
+    hput (root, rel, v, (gssize) len);
+    g_free (v);
+}
+
+static void hfdinfo (const char *root, int pid, int fd, gboolean many)
+{
+    static const char *const keys[] = {
+        "drm-driver", "drm-pdev", "drm-client-id", "drm-engine-gfx", "drm-engine-render",
+        "drm-engine-capacity-render", "drm-cycles-rcs", "drm-total-cycles-rcs", "drm-memory-vram",
+        "drm-resident-gtt", "drm-total-system0", "drm-shared-system0", "drm-active-vram",
+        "drm-purgeable-vram", "amd-evicted-vram", "drm-maxfreq-gfx", "drm-engine-", "drm-memory-",
+        "drm-", "pos", "flags", "", ":", "drm-engine-a-name-that-is-longer-than-the-thirty-two-bytes",
+    };
+    GString *g = g_string_new ("pos:\t0\nflags:\t02100002\n");
+    if (hrand () % 5)
+        g_string_append_printf (g, "drm-driver:\t%s\n", hrand () & 1 ? "amdgpu" : "i915");
+    if (hrand () % 3)
+        g_string_append_printf (g, "drm-pdev:\t0000:0%u:00.0\n", hrand () % 4);
+    if (hrand () % 3)
+        g_string_append_printf (g, "drm-client-id:\t%u\n", hrand () % 6);
+    guint lines = many ? 6000 : hrand () % 40;
+    for (guint i = 0; i < lines; i++) {
+        gsize len;
+        char *v = hvalue (&len);
+        if (many)
+            g_string_append_printf (g, "drm-%s-e%u:\t%u %s\n", i & 1 ? "engine" : "memory", i, hrand (),
+                                    i & 1 ? "ns" : "KiB");
+        else if (hrand () & 1)
+            g_string_append_printf (g, "%s:\t", keys[hrand () % G_N_ELEMENTS (keys)]);
+        g_string_append_len (g, v, (gssize) len);
+        if (hrand () % 4)
+            g_string_append_c (g, '\n');
+        g_free (v);
+    }
+    char *rel = g_strdup_printf ("proc/%d/fdinfo/%d", pid, fd);
+    hput (root, rel, g->str, (gssize) g->len);
+    g_free (rel);
+    g_string_free (g, TRUE);
+}
+
+static void htree (const char *root, guint cards, guint procs, guint fds, gboolean many)
+{
+    static const char *const dev_attrs[] = {
+        "vendor", "device", "uevent", "boot_vga", "power/runtime_status", "gpu_busy_percent",
+        "mem_busy_percent", "mem_info_vram_used", "mem_info_vram_total", "mem_info_gtt_used",
+        "mem_info_gtt_total", "pp_dpm_sclk", "hwmon/hwmon3/power1_average", "hwmon/hwmon3/power1_input",
+        "hwmon/hwmon3/energy1_input", "hwmon/hwmon3/temp1_input", "hwmon/hwmon3/temp2_input",
+        "hwmon/hwmon3/freq1_input", "hwmon/hwmon3/freq2_input", "tile0/gt0/freq0/act_freq",
+        "tile0/gt0/freq0/rp0_freq", "tile0/gt0/freq0/max_freq", "drm/renderD128/dev",
+    };
+    static const char *const card_attrs[] = { "gt_act_freq_mhz", "gt_RP0_freq_mhz", "gt_max_freq_mhz" };
+    for (guint c = 0; c < cards; c++) {
+        char rel[160];
+        for (guint i = 0; i < G_N_ELEMENTS (dev_attrs); i++) {
+            g_snprintf (rel, sizeof (rel), "sys/class/drm/card%u/device/%s", c, dev_attrs[i]);
+            hattr (root, rel);
+        }
+        if (hrand () & 1) {     /* a driver the sysfs readers know, as in a tree of plain files */
+            g_snprintf (rel, sizeof (rel), "sys/class/drm/card%u/device/uevent", c);
+            const char *ue = hrand () & 1 ? "DRIVER=amdgpu\nPCI_ID=1002:73DF\nPCI_SLOT_NAME=0000:01:00.0"
+                                          : "DRIVER=i915\nPCI_ID=8086:9A49\nPCI_SLOT_NAME=0000:00:02.0\n";
+            hput (root, rel, ue, -1);
+        }
+        for (guint i = 0; i < G_N_ELEMENTS (card_attrs); i++) {
+            g_snprintf (rel, sizeof (rel), "sys/class/drm/card%u/%s", c, card_attrs[i]);
+            hattr (root, rel);
+        }
+        g_snprintf (rel, sizeof (rel), "sys/bus/pci/devices/0000:%02x:00.0/class", c & 0xff);
+        hattr (root, rel);
+        g_snprintf (rel, sizeof (rel), "sys/bus/pci/devices/0000:%02x:00.0/uevent", c & 0xff);
+        hattr (root, rel);
+    }
+    for (guint p = 0; p < procs; p++) {
+        int pid = DAEMON + (int) p;
+        char rel[96];
+        g_snprintf (rel, sizeof (rel), "proc/%d/comm", pid);
+        hattr (root, rel);
+        for (guint f = 0; f < fds; f++)
+            hfdinfo (root, pid, 3 + (int) f, many && p == 0 && f == 0);
+    }
+}
+
+static void hcheck_report (WalpeGpuSampler *s, const char *what)
+{
+    WalpeGpuStatReport *r = walpe_gpu_sampler_report (s);
+    gboolean finite = isfinite (r->seconds);
+    for (int i = 0; i < WALPE_GPU_N_METRICS; i++)
+        finite = finite && isfinite (r->m[i].min) && isfinite (r->m[i].avg) && isfinite (r->m[i].max) &&
+                 isfinite (r->m[i].last);
+    for (guint i = 0; i < r->n_procs; i++)
+        finite = finite && isfinite (r->procs[i].busy_pct);
+    GString *t = g_string_new (NULL);
+    walpe_gpu_stat_format_device (r, t);
+    walpe_gpu_stat_format_sources (r, t);
+    walpe_gpu_stat_format_rows (r, "daemon", t);
+    walpe_gpu_stat_format_programs (r, 10, t);
+    walpe_gpu_stat_format_notes (r, t);
+    walpe_gpu_stat_format_profile (r, t);
+    JsonBuilder *b = json_builder_new ();
+    walpe_gpu_stat_to_json (r, b);
+    JsonNode *root = json_builder_get_root (b);
+    char *js = json_to_string (root, FALSE);
+    JsonParser *jp = json_parser_new ();
+    gboolean json_ok = json_parser_load_from_data (jp, js, -1, NULL);
+    if (!finite || !g_utf8_validate (t->str, -1, NULL) || !json_ok) {
+        fails++;
+        printf ("FAIL: hostile tree %s: finite %d, text UTF-8 %d, JSON reads back %d\n", what, finite,
+                g_utf8_validate (t->str, -1, NULL), json_ok);
+    }
+    checks++;
+    g_object_unref (jp);
+    g_free (js);
+    json_node_unref (root);
+    g_object_unref (b);
+    g_string_free (t, TRUE);
+    walpe_gpu_stat_report_free (r);
+}
+
+static void hostile_run (const char *name, guint cards, guint procs, guint fds, gboolean many)
+{
+    char *root = g_build_filename (top, name, NULL);
+    char *proc = g_build_filename (root, "proc", NULL), *sys = g_build_filename (root, "sys", NULL);
+    htree (root, cards, procs, fds, many);
+    WalpeGpuStatOpts o = { .proc_root = proc, .sys_root = sys, .target_pid = DAEMON, .uid = -1,
+                           .flags = WALPE_GPUSTAT_OTHERS, .rescan_every = 2 };
+    if (hrand () % 3 == 0)
+        o.device = hrand () & 1 ? "card0" : "0000:01:00.0";
+    if (hrand () % 3 == 0)
+        o.gl_vendor = hrand () & 1 ? "AMD" : "NVIDIA Corporation";
+    WalpeGpuSampler *s = walpe_gpu_sampler_new (&o);
+    gint64 t = G_GINT64_CONSTANT (1000000000);
+    for (int step = 0; step < 4; step++) {
+        walpe_gpu_sampler_tick_at (s, t);
+        hcheck_report (s, name);
+        /* time stands still, runs, or runs backwards; the tree is another one */
+        t += (gint64) (hrand () % 3) * G_GINT64_CONSTANT (700000000) - G_GINT64_CONSTANT (300000000);
+        if (step == 1 && !many) {
+            const char *rargv[] = { "rm", "-rf", hrand () & 1 ? proc : sys, NULL };
+            g_spawn_sync (NULL, (char **) rargv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL, NULL,
+                          NULL);
+        }
+        if (!many)
+            htree (root, cards, procs, fds, FALSE);
+        if (step == 2)
+            walpe_gpu_sampler_restart (s);
+    }
+    walpe_gpu_sampler_free (s);
+    char drv[32];
+    walpe_gpustat_render_driver (sys, drv, sizeof (drv));
+    CHECK (g_utf8_validate (drv, -1, NULL), "hostile tree %s: the driver name is text", name);
+    const char *rargv[] = { "rm", "-rf", root, NULL };
+    g_spawn_sync (NULL, (char **) rargv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL, NULL, NULL);
+    g_free (proc);
+    g_free (sys);
+    g_free (root);
+}
+
+static void test_hostile_trees (void)
+{
+    /* the parser alone on every kind of line */
+    for (int i = 0; i < 2000; i++) {
+        GString *g = g_string_new (NULL);
+        for (guint n = hrand () % 12; n; n--) {
+            gsize len;
+            char *v = hvalue (&len);
+            if (hrand () & 1)
+                g_string_append (g, "drm-driver: x\ndrm-engine-gfx:");
+            g_string_append (g, v);     /* up to its first NUL: the parser takes a C string */
+            if (hrand () & 1)
+                g_string_append_c (g, '\n');
+            g_free (v);
+        }
+        WalpeGpuFdinfo fi;
+        walpe_gpu_fdinfo_parse (g->str, &fi);
+        gboolean ok = fi.n_engines <= WALPE_GPU_MAX_ENGINES && fi.n_regions <= WALPE_GPU_MAX_REGIONS &&
+                      g_utf8_validate (fi.driver, -1, NULL);
+        for (guint k = 0; k < fi.n_regions && ok; k++)
+            ok = fi.regions[k].resident_kb <= ((gint64) 1 << 40) && fi.regions[k].total_kb <= ((gint64) 1 << 40);
+        if (!ok) {
+            fails++;
+            printf ("FAIL: hostile fdinfo text %d: limits\n", i);
+        }
+        checks++;
+        g_string_free (g, TRUE);
+    }
+    /* small trees of every shape */
+    for (int i = 0; i < 60; i++) {
+        char name[32];
+        g_snprintf (name, sizeof (name), "hostile-%d", i);
+        hostile_run (name, hrand () % 4, hrand () % 4, hrand () % 5, FALSE);
+    }
+    /* many of everything: cards, processes, descriptors, and one client
+     * with six thousand engines and memory regions */
+    hostile_run ("hostile-many", 150, 20, 30, TRUE);
+}
+
 int main (int argc, char **argv)
 {
     if (argc < 3) {
@@ -888,6 +1203,7 @@ int main (int argc, char **argv)
     test_profile_default ();
     test_restart_and_self ();
     test_nvidia_smi ();
+    test_hostile_trees ();
 
     /* the trees: one of them has a directory without permissions */
     const char *cargv[] = { "sh", gen, top, "clean", NULL };

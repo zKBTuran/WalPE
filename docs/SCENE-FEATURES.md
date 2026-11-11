@@ -71,7 +71,9 @@ An image layer whose picture is an animation stored as a sheet of frames plays. 
 are the ones stored in the file (0.1 s for a frame without one); the animation loops unless
 a script says otherwise; a paused wallpaper pauses it. The frame table is checked before
 use; a sheet that fails is refused with a log line and the layer shows its first frame (or
-the whole picture, as before the feature). A playing sheet makes its layer change when the
+the whole picture, as before the feature). The animations of one scene have at most
+1048576 frames together (sixteen tables of the largest size); a layer beyond that shows its
+first frame as a still. A playing sheet makes its layer change when the
 frame changes, not with every screen frame; changing the frame uploads nothing.
 
 Not covered: frames stored on further images of one file (left out, the log says how
@@ -87,7 +89,8 @@ Scripts: `layer.getTextureAnimation ()` (`frameCount`, `duration`, `rate`, `loop
 `thisScene.getCameraTransforms ()` returns `{ eye, center, up, zoom }`;
 `setCameraTransforms` uses the zoom (0.01-100) and the eye's x and y; a script on the
 scene's zoom sets the view's zoom. A script reaches the camera and the animations of its
-own scene only; values that are not finite numbers are ignored.
+own scene only; values that are not finite numbers are ignored. A zoom in the scene file
+that no float holds (`1e39`) counts as no zoom: the scene is drawn at zoom 1.
 
 ## Bloom
 

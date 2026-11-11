@@ -18,8 +18,10 @@
 #include "common/present.h"
 #include "fakegpu.h"
 #include <glib/gstdio.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static int fails;
 #define CHECK(c) do { if (!(c)) { fails++; g_printerr ("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); } } while (0)
@@ -663,6 +665,366 @@ static void test_mesa_hints (void)
     g_ptr_array_unref (ev);
 }
 
+/* The PCI id list serves the names and nothing else: the plain device list
+ * does not read it, the naming call reads it once for all devices, and a
+ * list of broken or hostile text names nothing and breaks nothing. */
+static void test_pci_id_list (void)
+{
+    char *root = P ("ids-intel-nvidia");
+    fakegpu_laptop_intel_nvidia (root);
+    char *ids = P ("pci.ids");
+    g_assert (g_file_set_contents (ids,
+        "# a list for the test\n"
+        "8086  Vendor One\n"
+        "\t9a49  Panel Graphics [Test]\n"
+        "\t\t8086 0001  A subsystem line\n"
+        "10de  Vendor Two\n"
+        "\t28a0  Not this one\n"
+        "\t28a1  Second Card [Test]\n"
+        "ffff  Illegal Vendor ID\n"
+        "C 03  Display controller\n", -1, NULL));
+    g_setenv ("WALPE_GPU_PCI_IDS", ids, TRUE);
+
+    guint r0 = walpe_gpu_pci_ids_reads ();
+    GPtrArray *a = walpe_gpu_enumerate_plain (root);
+    CHECK (walpe_gpu_pci_ids_reads () == r0);            /* the list was not looked for */
+    CHECK (a->len == 2);
+    if (a->len == 2) {
+        CHECK (!g_strcmp0 (dev (a, 0)->name, "Intel graphics device 8086:9a49"));
+        CHECK (!g_strcmp0 (dev (a, 1)->name, "NVIDIA graphics device 10de:28a1"));
+        /* everything a decision is made from is there without the names */
+        CHECK (walpe_gpu_display_index (a, NULL, NULL) == 0);
+        CHECK (walpe_gpu_match (a, "discrete", 0, NULL) == 1);
+        CHECK (walpe_gpu_match (a, "10de:28a1", 0, NULL) == 1);
+        CHECK (walpe_gpu_match (a, "nvidia", 0, NULL) == 1);
+        CHECK (walpe_gpu_match (a, "second card", 0, NULL) == -1);   /* a name of the list: not yet */
+        walpe_gpu_name_devices (a);
+        CHECK (walpe_gpu_pci_ids_reads () == r0 + 1);    /* once for both devices */
+        CHECK (!g_strcmp0 (dev (a, 0)->name, "Intel Panel Graphics [Test]"));
+        CHECK (!g_strcmp0 (dev (a, 1)->name, "NVIDIA Second Card [Test]"));
+        CHECK (walpe_gpu_match (a, "second card", 0, NULL) == 1);
+    }
+    g_ptr_array_unref (a);
+
+    /* the full list: the same names, one more reading */
+    a = walpe_gpu_enumerate (root);
+    CHECK (walpe_gpu_pci_ids_reads () == r0 + 2);
+    CHECK (a->len == 2 && !g_strcmp0 (dev (a, 1)->name, "NVIDIA Second Card [Test]"));
+    g_ptr_array_unref (a);
+
+    /* a machine without a PCI graphics device: nothing the list could name */
+    char *arm = P ("ids-arm");
+    fakegpu_arm_board (arm);
+    guint r1 = walpe_gpu_pci_ids_reads ();
+    a = walpe_gpu_enumerate (arm);
+    CHECK (a->len == 2 && walpe_gpu_pci_ids_reads () == r1);
+    g_ptr_array_unref (a);
+    char *nowhere = P ("ids-no-such-tree");
+    a = walpe_gpu_enumerate (nowhere);
+    g_free (nowhere);
+    CHECK (a->len == 0 && walpe_gpu_pci_ids_reads () == r1);
+    walpe_gpu_name_devices (a);
+    walpe_gpu_name_devices (NULL);
+    CHECK (walpe_gpu_pci_ids_reads () == r1);
+    g_ptr_array_unref (a);
+
+    /* "none": no file is looked for; a file that is not there: looked for, no name */
+    g_setenv ("WALPE_GPU_PCI_IDS", "none", TRUE);
+    a = walpe_gpu_enumerate (root);
+    CHECK (walpe_gpu_pci_ids_reads () == r1);
+    CHECK (a->len == 2 && !g_strcmp0 (dev (a, 1)->name, "NVIDIA graphics device 10de:28a1"));
+    g_ptr_array_unref (a);
+    char *gone = P ("no-such-pci.ids");
+    g_setenv ("WALPE_GPU_PCI_IDS", gone, TRUE);
+    a = walpe_gpu_enumerate (root);
+    CHECK (walpe_gpu_pci_ids_reads () == r1 + 1);
+    CHECK (a->len == 2 && !g_strcmp0 (dev (a, 1)->name, "NVIDIA graphics device 10de:28a1"));
+    g_ptr_array_unref (a);
+    g_free (gone);
+
+    /* broken lists: no newline at the end, a device line cut after the id,
+     * a line of 100 000 characters, an empty file, the id without a text,
+     * bytes that are no text */
+    static const char *const broken[] = {
+        "10de  Vendor Two\n\t28a1  Last Line Without Newline",
+        "10de  Vendor Two\n\t28a1",
+        "10de  Vendor Two\n\t28a1 \n\t28a1  \n",
+        "",
+        "\n\n\t\n\t\t\n10de\n\t28a1\n",
+        "10de  V\n\t28a1  \xff\xfe\x01 not text\n",
+    };
+    for (guint i = 0; i < G_N_ELEMENTS (broken); i++) {
+        g_assert (g_file_set_contents (ids, broken[i], -1, NULL));
+        g_setenv ("WALPE_GPU_PCI_IDS", ids, TRUE);
+        a = walpe_gpu_enumerate (root);
+        CHECK (a->len == 2 && dev (a, 1)->name && *dev (a, 1)->name);
+        if (a->len == 2) {
+            if (i == 0)
+                CHECK (!g_strcmp0 (dev (a, 1)->name, "NVIDIA Last Line Without Newline"));
+            else if (i < 5)
+                CHECK (!g_strcmp0 (dev (a, 1)->name, "NVIDIA graphics device 10de:28a1"));
+            /* whatever the list holds, the name can go into a JSON reply */
+            CHECK (g_utf8_validate (dev (a, 1)->name, -1, NULL) && !strchr (dev (a, 1)->name, 1));
+        }
+        g_ptr_array_unref (a);
+    }
+    {
+        GString *big = g_string_new ("10de  Vendor Two\n\t28a0  ");
+        for (int i = 0; i < 100000; i++)
+            g_string_append_c (big, 'x');
+        g_string_append (big, "\n\t28a1  After The Long Line\n");
+        g_assert (g_file_set_contents (ids, big->str, -1, NULL));
+        g_string_free (big, TRUE);
+        a = walpe_gpu_enumerate (root);
+        CHECK (a->len == 2 && !g_strcmp0 (dev (a, 1)->name, "NVIDIA After The Long Line"));
+        g_ptr_array_unref (a);
+    }
+
+    g_setenv ("WALPE_GPU_PCI_IDS", "none", TRUE);
+    g_free (ids);
+    g_free (arm);
+    g_free (root);
+}
+
+/* a PCI display device without a DRM driver whose uevent names a
+ * device-tree node and no PCI slot: it is known by its directory's name,
+ * and the tag made from the node is not left behind (the leak check of a
+ * sanitizer build sees it) */
+static void test_pci_device_tree_node (void)
+{
+    char *root = P ("pci-of-node");
+    fakegpu_put (root, "bus/pci/devices/0000:09:00.0/class", "0x030000\n");
+    fakegpu_put (root, "bus/pci/devices/0000:09:00.0/uevent",
+                 "DRIVER=some-driver\nOF_FULLNAME=/soc/pcie@40000000/gpu@0\n");
+    GPtrArray *a = walpe_gpu_enumerate (root);
+    CHECK (a->len == 1);
+    if (a->len == 1)
+        CHECK (!g_strcmp0 (dev (a, 0)->pci, "0000:09:00.0") &&
+               !g_strcmp0 (dev (a, 0)->path_tag, "pci-0000_09_00_0") && dev (a, 0)->card == -1);
+    g_ptr_array_unref (a);
+    g_free (root);
+}
+
+/* Device trees of broken text: what a strange kernel, a container or a
+ * mount of another kind could show where sysfs should be. Whatever is in
+ * there, the list is bounded, every text of a device is short valid UTF-8
+ * without control characters (it goes into log lines, an environment
+ * variable and the status reply), and the ids are 16 bits. */
+static guint32 hx = 0x2545f491u;
+
+static guint32 hrand (void)
+{
+    hx ^= hx << 13;
+    hx ^= hx >> 17;
+    hx ^= hx << 5;
+    return hx;
+}
+
+/* a file of the tree, with plain stdio (many files, none worth a sync) */
+static void hput (const char *root, const char *rel, const char *txt)
+{
+    char *p = g_build_filename (root, rel, NULL), *d = g_path_get_dirname (p);
+    g_mkdir_with_parents (d, 0700);
+    FILE *f = fopen (p, "wb");
+    g_assert (f);
+    fwrite (txt, 1, strlen (txt), f);
+    fclose (f);
+    g_free (d);
+    g_free (p);
+}
+
+static char *hvalue (void)
+{
+    static const char *const words[] = {
+        "", "\n", "=", "DRIVER", "DRIVER=", "DRIVER=i915", "DRIVER=nvidia\nPCI_ID=10DE:28A1",
+        "PCI_ID=:", "PCI_ID=10de:", "PCI_ID=ffffffffffffffffffffffff:-1", "PCI_ID=zzzz:yyyy",
+        "PCI_SLOT_NAME=", "PCI_SLOT_NAME=0000:01:00.0", "PCI_SLOT_NAME=\xff\xfe:01:\x01\x02.0",
+        "OF_FULLNAME=/soc/gpu@ff9a0000", "OF_FULLNAME=@", "OF_FULLNAME=/", "OF_COMPATIBLE_0=\xc3\x28,mali",
+        "DRIVER=\xe2\x82", "DRIVER=a\tb\x7f" "c", "0x030000", "0x03", "030000", "-1", "1", "0", "connected",
+        "connected\n\n", "disconnected", "0x8086", "8086", "0xffffffffffffffffffff", "18446744073709551616",
+    };
+    GString *g = g_string_new (NULL);
+    for (guint n = 1 + hrand () % 4; n; n--) {
+        switch (hrand () % 10) {
+        case 0:
+            g_string_append (g, hrand () & 1 ? "DRIVER=" : "PCI_SLOT_NAME=");
+            for (guint k = 1 + hrand () % 70000; k; k--)
+                g_string_append_c (g, 'q');
+            break;
+        case 1:
+            for (guint k = 1 + hrand () % 200; k; k--)
+                g_string_append_c (g, (char) (1 + hrand () % 255));
+            break;
+        default:
+            g_string_append (g, words[hrand () % G_N_ELEMENTS (words)]);
+            break;
+        }
+        if (hrand () % 4)
+            g_string_append_c (g, '\n');
+    }
+    return g_string_free (g, FALSE);
+}
+
+static void hattr (const char *root, const char *rel)
+{
+    if (hrand () % 5 == 0)
+        return;
+    char *v = hvalue ();
+    hput (root, rel, v);
+    g_free (v);
+}
+
+static gboolean text_ok (const char *s, gsize max)
+{
+    if (!s)
+        return TRUE;
+    if (strlen (s) > max || !g_utf8_validate (s, -1, NULL))
+        return FALSE;
+    for (; *s; s++)
+        if ((guchar) *s < 0x20 || *s == 0x7f)
+            return FALSE;
+    return TRUE;
+}
+
+static void check_hostile_list (GPtrArray *a, const char *what)
+{
+    gboolean ok = a != NULL;
+    JsonBuilder *b = json_builder_new ();
+    json_builder_begin_array (b);
+    for (guint i = 0; ok && i < a->len; i++) {
+        const WalpeGpuDev *d = g_ptr_array_index (a, i);
+        /* (a made-up name from another vendor's ids is longer than a driver name: 127 for all) */
+        ok = d->name && *d->name && text_ok (d->name, 255) && text_ok (d->driver, 127) &&
+             text_ok (d->pci, 127) && text_ok (d->path_tag, 255) && text_ok (d->render_node, 127) &&
+             text_ok (d->card_node, 127) && d->vendor <= 0xffff && d->device <= 0xffff && d->connectors;
+        for (int c = 0; ok && d->connectors[c]; c++)
+            ok = text_ok (d->connectors[c], 127);
+        char *txt = walpe_gpu_dev_describe (d);
+        ok = ok && g_utf8_validate (txt, -1, NULL);
+        g_free (txt);
+        json_builder_begin_object (b);
+        walpe_gpu_dev_to_json (b, d);
+        json_builder_end_object (b);
+        if (i < 4) {
+            walpe_gpu_in_use_set (d, FALSE);
+            WalpeGpuInUse u;
+            ok = ok && walpe_gpu_in_use (&u);
+            walpe_gpu_in_use_clear (&u);
+        }
+    }
+    json_builder_end_array (b);
+    JsonNode *root = json_builder_get_root (b);
+    char *js = json_to_string (root, FALSE);
+    JsonParser *jp = json_parser_new ();
+    ok = ok && json_parser_load_from_data (jp, js, -1, NULL);
+    g_object_unref (jp);
+    g_free (js);
+    json_node_unref (root);
+    g_object_unref (b);
+    /* the choices on such a list end, with an index inside it or -1 */
+    static const char *const outs[] = { "HDMI-A-1", "eDP-1", "DP-99999999999999999999", "", NULL };
+    static const char *const values[] = { "auto", "integrated", "discrete", "nvidia", "0000:01:00.0",
+                                          "card1", "renderD128", "10de:28a1", "q", "\xc3\xa9" };
+    int disp = walpe_gpu_display_index (a, outs, NULL);
+    int rend = walpe_gpu_default_renderer (a, disp);
+    ok = ok && disp >= -1 && disp < (int) a->len && rend >= -1 && rend < (int) a->len;
+    for (guint v = 0; v < G_N_ELEMENTS (values); v++) {
+        char *why = NULL;
+        int m = walpe_gpu_match (a, values[v], disp, &why);
+        ok = ok && m >= -1 && m < (int) a->len && (!why || g_utf8_validate (why, -1, NULL));
+        if (m >= 0) {
+            char *note = NULL;
+            char **env = walpe_gpu_offload_env (disp >= 0 ? g_ptr_array_index (a, disp) : NULL,
+                                                g_ptr_array_index (a, m), WALPE_GPU_WS_X11, "/m.json",
+                                                NULL, &note);
+            for (int e = 0; env[e]; e++)
+                ok = ok && text_ok (env[e], 255);
+            g_strfreev (env);
+            g_free (note);
+        }
+        g_free (why);
+    }
+    walpe_gpu_in_use_set (NULL, FALSE);
+    if (!ok) {
+        fails++;
+        g_printerr ("FAIL: hostile device tree %s\n", what);
+    }
+}
+
+static void test_hostile_sysfs (void)
+{
+    static const char *const attrs[] = { "uevent", "vendor", "device", "boot_vga", "class" };
+    for (int t = 0; t < 50; t++) {
+        char name[32], rel[200];
+        g_snprintf (name, sizeof name, "hostile-%d", t);
+        char *root = P (name);
+        guint cards = hrand () % 4;
+        for (guint c = 0; c < cards; c++) {
+            for (guint i = 0; i < G_N_ELEMENTS (attrs); i++) {
+                g_snprintf (rel, sizeof rel, "class/drm/card%u/device/%s", c, attrs[i]);
+                hattr (root, rel);
+            }
+            g_snprintf (rel, sizeof rel, "class/drm/card%u/device/drm/renderD12%u\xff\x01/dev", c, c);
+            hattr (root, rel);
+            g_snprintf (rel, sizeof rel, "class/drm/card%u-HDMI-A-%u/status", c, hrand () % 3);
+            hattr (root, rel);
+            g_snprintf (rel, sizeof rel, "class/drm/card%u-\xfe\x02 odd\n/status", c);
+            hput (root, rel, hrand () & 1 ? "connected\n" : "connected");
+        }
+        for (guint k = hrand () % 3; k; k--) {
+            g_snprintf (rel, sizeof rel, "bus/pci/devices/%s/class",
+                        hrand () & 1 ? "0000:0\xff:00.0" : "0000:09:00.0");
+            hput (root, rel, hrand () & 1 ? "0x030000" : "0x030200\n");
+            g_snprintf (rel, sizeof rel, "bus/pci/devices/0000:09:00.0/uevent");
+            hattr (root, rel);
+        }
+        GPtrArray *a = walpe_gpu_enumerate (root);
+        CHECK (a->len <= cards + 2);
+        check_hostile_list (a, name);
+        g_ptr_array_unref (a);
+        g_free (root);
+    }
+
+    /* far more DRM cards than a kernel has, names that only look like
+     * cards, and links that lead back into the tree */
+    char *root = P ("hostile-many");
+    char rel[200];
+    for (int c = 0; c < 1100; c++) {
+        if (c == 1000 || c == 1001)
+            continue;       /* the two links below */
+        g_snprintf (rel, sizeof rel, "class/drm/card%d/device/uevent", c);
+        hput (root, rel, c % 3 ? "DRIVER=amdgpu\nPCI_ID=1002:73DF"
+                                      : "DRIVER=i915\nPCI_ID=8086:9A49\nPCI_SLOT_NAME=0000:00:02.0\n");
+        if (c < 40) {
+            g_snprintf (rel, sizeof rel, "class/drm/card%d-DP-%d/status", c, c);
+            hput (root, rel, "connected\n");
+        }
+    }
+    hput (root, "class/drm/card99999999999999999999/device/uevent", "DRIVER=x\n");
+    hput (root, "class/drm/card-1/device/uevent", "DRIVER=x\n");
+    hput (root, "class/drm/card7x/device/uevent", "DRIVER=x\n");
+    hput (root, "class/drm/card5-/status", "connected\n");
+    {
+        char *drm = g_build_filename (root, "class", "drm", NULL);
+        char *l1 = g_build_filename (drm, "card2000", NULL);            /* outside the range */
+        char *l2 = g_build_filename (drm, "card1000", "device", NULL);  /* a link to itself */
+        char *l3 = g_build_filename (drm, "card1001", NULL);            /* back to the directory */
+        fakegpu_dir (root, "class/drm/card1000");
+        CHECK (symlink (".", l1) == 0);
+        CHECK (symlink ("device", l2) == 0);
+        CHECK (symlink ("..", l3) == 0);
+        g_free (l1);
+        g_free (l2);
+        g_free (l3);
+        g_free (drm);
+    }
+    GPtrArray *a = walpe_gpu_enumerate (root);
+    CHECK (a->len >= 2 && a->len <= 1024);
+    check_hostile_list (a, "hostile-many");
+    g_ptr_array_unref (a);
+    g_free (root);
+}
+
 int main (void)
 {
     T = g_dir_make_tmp ("walpe-gpusel-XXXXXX", NULL);
@@ -682,6 +1044,9 @@ int main (void)
     test_in_use ();
     test_config ();
     test_mesa_hints ();
+    test_pci_id_list ();
+    test_pci_device_tree_node ();
+    test_hostile_sysfs ();
 
     char *cmd = g_strdup_printf ("rm -rf '%s'", T);
     if (system (cmd) != 0)

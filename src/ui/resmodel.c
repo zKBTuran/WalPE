@@ -202,8 +202,12 @@ gboolean walpe_monres_size (const WalpeMonres *v, int mode_w, int mode_h, int *w
     } else if (v && v->kind == WALPE_MONRES_LINES && v->lines > 0) {
         int mw = known ? mode_w : 16, mh = known ? mode_h : 9;
         int sht = MIN (mw, mh), lng = MAX (mw, mh);
-        int l = known && sht == v->lines
-                    ? lng : 2 * (int) floor ((double) v->lines * lng / sht / 2.0 + 0.5);
+        /* (bounded before the cast: the mode's sides are whatever the window
+         * system reported, and the engine bounds its own sum the same way) */
+        const double want = (double) v->lines * lng / sht;
+        int l = known && sht == v->lines ? lng
+              : want >= WALPE_MONRES_MAX_SIDE ? WALPE_MONRES_MAX_SIDE
+              : 2 * (int) floor (want / 2.0 + 0.5);
         l = MIN (l, WALPE_MONRES_MAX_SIDE);
         while ((gint64) l * v->lines > WALPE_MONRES_MAX_PIXELS && l > 2)
             l -= 2;

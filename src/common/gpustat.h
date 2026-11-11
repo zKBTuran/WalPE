@@ -307,12 +307,18 @@ typedef struct {
  * most once a second (calls in between return the last result). The busy
  * share is over the time since the reading before. Thread-safe; never
  * reads another process and never starts a program.
- * Where no reading can ever hold a figure - the kernel lists no GPU for
- * the renderer, or its driver is NVIDIA's - the second reading is the last:
- * later calls return it without touching a file, until the renderer is
- * told anew (walpe_gpustat_set_render_device / _set_gl_vendor). */
+ * Nothing is read before the renderer's GL vendor is told
+ * (walpe_gpustat_set_gl_vendor), and nothing at all - no file of /proc,
+ * no file of /sys - when that vendor is NVIDIA: its kernel driver
+ * publishes no figure there, and the answer (driver "nvidia", sources
+ * "none", the note that names nvidia-smi) is made from the vendor alone.
+ * Where the kernel lists no GPU for the renderer the second reading is the
+ * last: later calls return it without touching a file, until the renderer
+ * is told anew (walpe_gpustat_set_render_device / _set_gl_vendor). */
 void walpe_gpustat_self (WalpeGpuSelfStat *out);
 /* how often walpe_gpustat_self has read /proc so far (tests) */
 guint walpe_gpustat_self_readings (void);
+/* how often this process has read the device list of sysfs so far (tests) */
+guint walpe_gpustat_device_scans (void);
 
 G_END_DECLS

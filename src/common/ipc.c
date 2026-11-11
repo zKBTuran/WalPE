@@ -408,6 +408,30 @@ void walpe_ipc_adopt_fd (int fd)
     adopt_fd = fd;
 }
 
+int walpe_ipc_drop_queued (void)
+{
+    int n = 0;
+    /* (the number came from the environment: on a descriptor that is not
+     * a listening socket accept fails and nothing happens) */
+    while (adopt_fd >= 0 && n < 4096) {
+        struct pollfd p = { .fd = adopt_fd, .events = POLLIN };
+        int pr = poll (&p, 1, 0);
+        if (pr < 0 && errno == EINTR)
+            continue;
+        if (pr <= 0 || !(p.revents & POLLIN))
+            break;
+        int c = accept (adopt_fd, NULL, NULL);
+        if (c < 0) {
+            if (errno == EINTR || errno == ECONNABORTED)
+                continue;
+            break;
+        }
+        close (c);
+        n++;
+    }
+    return n;
+}
+
 /* the inherited fd as a GSocket when it is a listening unix socket bound
  * to sock_path; anything else is left alone (the number came from the
  * environment: it may be any descriptor) and NULL returned */

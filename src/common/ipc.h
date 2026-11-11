@@ -22,6 +22,13 @@ void walpe_ipc_release (const char *sock_path);
  * instead of binding a new one. */
 int      walpe_ipc_listen_fd (void);
 void     walpe_ipc_adopt_fd (int fd);
+/* For a new image that could not serve for a while (it waited for its
+ * display to come back): closes every connection that queued up on the
+ * handed-over socket meanwhile, unanswered. Their senders were told that
+ * no daemon replies; what they asked for then is not carried out later.
+ * After walpe_ipc_adopt_fd () and before walpe_ipc_serve (). Returns the
+ * number of connections closed. */
+int      walpe_ipc_drop_queued (void);
 
 /* State pushes. A handler may call walpe_ipc_subscribe_current() while it
  * works on a request: that connection then stays a subscriber and gets

@@ -56,8 +56,10 @@ walpe-ctl set resolution=HDMI-0:1080p,DP-2:native
 walpe-ctl set texture_limit=2048 scale_filter=nearest video_resolution=none
 ```
 
-A value that is not one (a typo, a size outside the limits, a monitor that does not exist)
-is refused with a sentence that names it, and nothing of the request is changed. A change
+A value that is not one (a typo, a size outside the limits, a monitor index that does not
+exist) is refused with a sentence that names it, and nothing of the request is changed.
+An output name that is not connected is not refused: the choice is stored for that output
+and a note says so, which also happens to a mistyped name. A change
 applies at once without restarting anything: scenes on that monitor load again, videos, web
 pages and pictures follow with their next frame. `WALPE_RESOLUTION=1080p` (or
 `HDMI-0:1080p,DP-2:native`) in the daemon's environment decides the sizes for that run and

@@ -134,8 +134,12 @@ None of them has been attacked by anyone but its own tests.
   an option named `walpe_sound`. Tests: `scenesound`, `sounddec`.
 - **Sprite sheets**: the frame table comes from the wallpaper and is checked before use
   (every frame on the picture and with an area, times that are numbers); a sheet that
-  fails is refused. A script reaches the animations and the camera of its own scene only,
-  and what it sets is clamped. Tests: `sprite-sheet`, `scene-feat`.
+  fails is refused. A table has at most 65536 frames, the animations of one scene
+  1048576 together (every layer holds the table it plays from, 32 bytes a frame); a
+  layer beyond that shows its first frame as a still. A script reaches the animations
+  and the camera of its own scene only, and what it sets is clamped. A zoom in the
+  scene file that no float holds (`1e39`) is no zoom: the scene is drawn at zoom 1.
+  Tests: `sprite-sheet`, `scene-feat`.
 - **Fluid simulation**: an effect file gets a grid of at most 1024 cells on its longer side
   and no buffer larger than the driver's largest texture. Test: `fx-sim`.
 - **Effect shaders on OpenGL ES** go through one more rewriting stage ([GPU.md](GPU.md))
@@ -153,6 +157,15 @@ None of them has been attacked by anyone but its own tests.
   GPU, nothing of another user's process, and start no program but `nvidia-smi` (the
   command and the report script only, never the daemon)
   ([GPU-PROFILING.md](GPU-PROFILING.md)).
+- **A compositor that says nothing**: when the daemon starts it waits at most 10 seconds
+  for the first answers of a Wayland compositor (5 seconds on the connection of the
+  pause rules), and one second for every later one. A compositor that does not answer
+  counts as absent; it cannot hold the daemon's start. Requests that queued on the
+  control socket while the daemon waited for a compositor to come back are closed
+  unanswered, not carried out later. Tests: `daemon-wayland-silent`, `sig-wl`, `ipc`.
+- **Names from `/sys` and the PCI id list** (drivers, devices, outputs) are cut to a
+  fixed length, made valid UTF-8 and cleared of control characters before they reach the
+  log, the status reply or a driver variable. Tests: `gpusel`, `gpustat`.
 - **logind** is asked over the system bus for three facts (suspend, locked hint, active
   session); `WALPE_LOGIND_BUS=session` (tests) looks for it on the session bus, where any
   program of yours can stand in for it.

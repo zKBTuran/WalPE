@@ -32,13 +32,18 @@ the final tree with those of that earlier tree.
 - Web wallpapers on a Wayland session run through Xwayland by default.
 - Build options `-Dx11` and `-Dwayland`. `./build.sh -Dwayland=disabled` gives the
   X11-only build, in which the daemon and the web module link no Wayland library.
+- A compositor that accepts the connection and does not answer within 10 seconds counts
+  as absent: the daemon takes X11 when there is an X display, else it ends and says so.
+  The connection of the pause rules gives up after 5 seconds.
+- A per-monitor wallpaper or render resolution that was stored under the X11 name of an
+  output (`HDMI-1`) is found on Wayland, where the same connector is `HDMI-A-1`.
 - Wallpapers were shown on a headless sway 1.9 only. Known and left as they are: a
-  compositor that
-  accepts the connection and never answers holds the daemon's start; a wallpaper that is
-  not shown keeps being drawn when "pause when covered" is off; a lock screen pauses
-  through "pause when covered" only, unless the locker tells logind; with no monitor
-  left `walpe-ctl status` still lists the monitors; while the daemon waits for a
-  compositor to come back, `walpe-ctl` says it is not running.
+  wallpaper that is not shown keeps being drawn when "pause when covered" is off; a lock
+  screen pauses through "pause when covered" only, unless the locker tells logind; with
+  no monitor left `walpe-ctl status` still lists the monitors; while the daemon waits for
+  a compositor to come back, `walpe-ctl` says it is not running, and what it was sent is
+  not carried out later; a session started with a one-time socket (`WAYLAND_SOCKET`)
+  cannot be restarted in place.
 
 ### Graphics cards
 
@@ -55,6 +60,9 @@ the final tree with those of that earlier tree.
 - Driver hints of `gpu.conf` are handed to Mesa drivers where Mesa has a counterpart.
 - Fallbacks for drivers without S3TC, with a smaller largest texture, or without float
   render targets.
+- With `gpu=auto` the daemon does not read the PCI id list when it starts, and on
+  NVIDIA's driver the GPU figures of `walpe-ctl status` read no file of `/proc` or
+  `/sys`.
 
 ### Render resolution
 
@@ -76,13 +84,17 @@ the final tree with those of that earlier tree.
   releases, because bloom, camera shake, sprite sheets and the script camera are on.
   `walpe-ctl set bloom=off camera_shake=off sprite_sheets=off script_camera=off` gives
   the earlier pictures back, each switch for its own feature. The look of the camera
-  shake is an estimate; HDR bloom is not implemented.
+  shake is an estimate; HDR bloom is not implemented. Limits: the sprite animations of
+  one scene have at most 1048576 frames together (a layer beyond that shows its first
+  frame), and a scene zoom that no float holds counts as zoom 1.
 - The Fluid Simulation effect runs on the grid its file declares, at a fixed 60 steps a
   second whatever the frame rate (`fluid_sim`, `fluid_quality`).
 - Scene sound layers (WAV, MP3, FLAC, Ogg) through PulseAudio / PipeWire, **off by
   default**: `walpe-ctl set scene_sound=on volume=0.5`; `mute`; per wallpaper
   `walpe-ctl setprop walpe_sound=on|off`. The `volume` setting now has an effect.
-  Measured against a null sink by recording it; nobody has heard it.
+  A connection the sound server refuses, as happens when many layers start together, is
+  asked for again at once. Measured against a null sink by recording it; nobody has
+  heard it.
 
 ### Video
 
@@ -94,8 +106,9 @@ the final tree with those of that earlier tree.
 ### Other
 
 - The source builds for 64-bit ARM (aarch64) as well as x86-64, with meson cross files:
-  cross-compiled with 0 warnings, and 65 of the 68 tests that need no display pass under
-  emulation. Not run on ARM hardware. OpenGL ES 3.1 is the least an ARM GPU must offer.
+  cross-compiled with 0 warnings, and 65 of the 68 tests that need neither a display nor
+  an OpenGL context pass under emulation. Not run on ARM hardware. OpenGL ES 3.1 is the
+  least an ARM GPU must offer.
 - Test setups for AddressSanitizer / UndefinedBehaviorSanitizer and ThreadSanitizer,
   end-to-end tests on a headless Wayland compositor.
 

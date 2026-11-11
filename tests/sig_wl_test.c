@@ -26,6 +26,8 @@
 #include "signals/wlplan.h"
 #include <glib/gstdio.h>
 #include <sys/eventfd.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 #include <wayland-server.h>
 #include "ext-idle-notify-v1-server-protocol.h"
@@ -818,6 +820,37 @@ static void scenario_d (void)
     srv_down ();
 }
 
+/* ---- E: a compositor that accepts the connection and never says a word
+ * (a listening socket nobody serves): the providers give up within a few
+ * seconds and say why, instead of holding the caller for ever */
+static void scenario_e (const char *dir)
+{
+    char *path = g_build_filename (dir, "walpe-sigtest-silent", NULL);
+    struct sockaddr_un sa = { .sun_family = AF_UNIX };
+    if (strlen (path) >= sizeof sa.sun_path) {
+        printf ("sig-wl: E skipped: the temporary directory's path is too long for a socket\n");
+        g_free (path);
+        return;
+    }
+    g_strlcpy (sa.sun_path, path, sizeof sa.sun_path);
+    int fd = socket (AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    CHECK (fd >= 0 && bind (fd, (struct sockaddr *) &sa, sizeof sa) == 0 && listen (fd, 8) == 0,
+           "E: the silent socket is there");
+    g_setenv ("WALPE_SIG_WAYLAND_DISPLAY", path, TRUE);
+    gint64 t0 = g_get_monotonic_time ();
+    providers_start ();
+    double took = (double) (g_get_monotonic_time () - t0) / G_USEC_PER_SEC;
+    CHECK (took < 9.0, "E: the start came back after %.1f s", took);
+    CHECK (!started (FS) && !started (WIN) && !started (IDL), "E: no provider starts");
+    CHECK (strstr (why_of (WIN), "did not answer") != NULL, "E: windows: %s", why_of (WIN));
+    CHECK (strstr (why_of (IDL), "did not answer") != NULL, "E: idle: %s", why_of (IDL));
+    stub_reset ();
+    if (fd >= 0)
+        close (fd);
+    g_unlink (path);
+    g_free (path);
+}
+
 int main (void)
 {
     /* a runtime directory of its own: the socket never meets a real session */
@@ -835,6 +868,7 @@ int main (void)
     scenario_b ();
     scenario_c ();
     scenario_d ();
+    scenario_e (dir);
 
     /* the sockets and their lock files */
     for (int i = 0; i < srv_serial; i++) {

@@ -413,6 +413,83 @@ static void wl_roundtrip (void)
         wl_callback_destroy (cb);
 }
 
+/* How long the compositor may take to answer during the start (the first
+ * look at it and the backend's own first round trips). A compositor that
+ * is busy at login answers late, so this is far above the second a round
+ * trip gets afterwards; one that accepted the connection and stays silent
+ * must not hold the daemon's start for ever. */
+#define WL_START_ANSWER_S 10
+
+static void wl_start_sync_done (void *data, struct wl_callback *cb, uint32_t serial)
+{
+    *(gboolean *) data = TRUE;
+}
+
+static const struct wl_callback_listener wl_start_sync_listener = { wl_start_sync_done };
+
+/* A round trip on one queue (NULL: the default queue) of any connection,
+ * given up at deadline_us (g_get_monotonic_time ()). 1 = answered, 0 = no
+ * answer in time, -1 = the connection failed. For the start, before W is
+ * set up; the caller is the only thread using dpy. */
+static int wl_sync_until (struct wl_display *dpy, struct wl_event_queue *q, gint64 deadline_us)
+{
+    struct wl_callback *cb;
+    if (q) {
+        struct wl_display *wrap = wl_proxy_create_wrapper (dpy);
+        if (!wrap)
+            return -1;
+        wl_proxy_set_queue ((struct wl_proxy *) wrap, q);
+        cb = wl_display_sync (wrap);
+        wl_proxy_wrapper_destroy (wrap);
+    } else {
+        cb = wl_display_sync (dpy);
+    }
+    if (!cb)
+        return -1;
+    gboolean done = FALSE;
+    int rc = 1;
+    wl_callback_add_listener (cb, &wl_start_sync_listener, &done);
+    while (!done) {
+        if ((q ? wl_display_prepare_read_queue (dpy, q) : wl_display_prepare_read (dpy)) != 0) {
+            /* events read earlier wait to be handed out */
+            if ((q ? wl_display_dispatch_queue_pending (dpy, q)
+                   : wl_display_dispatch_pending (dpy)) < 0) {
+                rc = -1;
+                break;
+            }
+            continue;
+        }
+        if (wl_display_flush (dpy) < 0 && errno != EAGAIN) {
+            wl_display_cancel_read (dpy);
+            rc = -1;
+            break;
+        }
+        gint64 now = g_get_monotonic_time ();
+        int ms = deadline_us > now ? (int) MIN ((deadline_us - now + 999) / 1000, 3600 * 1000) : 0;
+        struct pollfd pfd = { .fd = wl_display_get_fd (dpy), .events = POLLIN };
+        int pr = poll (&pfd, 1, ms);
+        if (pr < 0 && errno == EINTR) {
+            wl_display_cancel_read (dpy);
+            continue;
+        }
+        if (pr > 0 && (pfd.revents & POLLIN)) {
+            if (wl_display_read_events (dpy) < 0) {
+                rc = -1;
+                break;
+            }
+        } else {
+            wl_display_cancel_read (dpy);
+            rc = pr == 0 ? 0 : -1;      /* time is up / the socket failed */
+            break;
+        }
+    }
+    /* (an answer that comes after this is dropped with the object) */
+    wl_callback_destroy (cb);
+    if (rc > 0 && wl_display_get_error (dpy))
+        rc = -1;
+    return rc;
+}
+
 static void wl_push_event (const WlEv *e)
 {
     if (W.evq)
@@ -1365,9 +1442,10 @@ static char *wl_drm_node_of (dev_t dev)
 }
 
 /* dpy / reg: any connection whose registry announced the global `name` at
- * `version`. NULL = not told (older than version 4, or no answer). */
+ * `version`. NULL = not told (older than version 4, or no answer by
+ * deadline_us). */
 static char *wl_dmabuf_device (struct wl_display *dpy, struct wl_registry *reg, guint32 name,
-                               guint32 version)
+                               guint32 version, gint64 deadline_us)
 {
     if (!name || version < 4)
         return NULL;
@@ -1385,7 +1463,7 @@ static char *wl_dmabuf_device (struct wl_display *dpy, struct wl_registry *reg, 
     struct zwp_linux_dmabuf_feedback_v1 *fb = zwp_linux_dmabuf_v1_get_default_feedback (dm);
     zwp_linux_dmabuf_feedback_v1_add_listener (fb, &wl_fb_listener, &ask);
     for (int i = 0; i < 3 && !ask.done; i++)
-        if (wl_display_roundtrip_queue (dpy, q) < 0)
+        if (wl_sync_until (dpy, q, deadline_us) <= 0)
             break;
     zwp_linux_dmabuf_feedback_v1_destroy (fb);
     zwp_linux_dmabuf_v1_destroy (dm);
@@ -2723,9 +2801,15 @@ static gboolean wl_open (const WalpePlatformOpts *opts, char **err)
      * (outputs, seats, the presentation clock); what objects made in the
      * second say (xdg-output of an output announced before its manager) */
     const char *fail = NULL;
-    for (int i = 0; i < 3 && !fail; i++)
-        if (wl_display_roundtrip (W.dpy) < 0)
+    gint64 answer_by = g_get_monotonic_time () + (gint64) WL_START_ANSWER_S * G_USEC_PER_SEC;
+    for (int i = 0; i < 3 && !fail; i++) {
+        int r = wl_sync_until (W.dpy, NULL, answer_by);
+        if (r < 0)
             fail = "the Wayland compositor closed the connection during start-up";
+        else if (r == 0)
+            fail = "the Wayland compositor accepted the connection but did not answer within "
+                   G_STRINGIFY (WL_START_ANSWER_S) " seconds";
+    }
     if (!fail && !W.compositor)
         fail = "the Wayland compositor offers no wl_compositor";
     if (!fail && opts->windowed && !W.wm_base)
@@ -2745,7 +2829,8 @@ static gboolean wl_open (const WalpePlatformOpts *opts, char **err)
     e = g_getenv ("WALPE_WL_RECREATE");
     W.recreate_max = e && !strcmp (e, "0") ? 0 : 3;
     if (!opts->probe)
-        W.display_node = wl_dmabuf_device (W.dpy, W.registry, W.dmabuf_name, W.dmabuf_version);
+        W.display_node = wl_dmabuf_device (W.dpy, W.registry, W.dmabuf_name, W.dmabuf_version,
+                                           answer_by);
     W.outputs_dirty = FALSE;    /* the daemon reads the list next */
     W.motion_dirty = FALSE;
     return TRUE;
@@ -3039,11 +3124,14 @@ void walpe_wayland_probe (WalpePlatformProbe *out)
     WlProbe p = { 0 };
     struct wl_registry *reg = wl_display_get_registry (dpy);
     wl_registry_add_listener (reg, &wl_probe_listener, &p);
-    if (wl_display_roundtrip (dpy) >= 0) {
+    /* no answer in time counts as no compositor: the caller goes on to
+     * X11 or says that the compositor does not answer */
+    gint64 answer_by = g_get_monotonic_time () + (gint64) WL_START_ANSWER_S * G_USEC_PER_SEC;
+    if (wl_sync_until (dpy, NULL, answer_by) > 0) {
         out->connected = TRUE;
         out->layer_shell = p.layer;
         out->xdg_shell = p.xdg;
-        out->display_node = wl_dmabuf_device (dpy, reg, p.dm_name, p.dm_version);
+        out->display_node = wl_dmabuf_device (dpy, reg, p.dm_name, p.dm_version, answer_by);
     }
     wl_registry_destroy (reg);
     if (once || wl_kept_dpy) {

@@ -15,6 +15,9 @@
  *   - camera_parallax=off (read when the scene loads): nothing moves;
  *   - a scene without camera parallax draws the same frame wherever the
  *     pointer is, and is not drawn again for it.
+ * The scene's zoom: general.zoom 1e39 (a number, but none a float holds)
+ * is no zoom - the frame of the same scene without the key, not a black
+ * one.
  * Sprite sheets (a 64 x 32 sheet of four 32 x 16 frames: red, green, blue,
  * white, 2 s each - long, so that a slow first frame cannot use one up):
  *   - the layer shows the first frame over all of its quad, not the sheet
@@ -26,7 +29,10 @@
  *   - a sheet whose third frame lies outside the picture is refused with a
  *     line in the log and shows its first frame as a still; one whose
  *     first frame lies outside shows the picture as a whole;
- *   - sprite_sheets=off: the sheet as a whole, as before.
+ *   - sprite_sheets=off: the sheet as a whole, as before;
+ *   - eighteen layers on one sheet with the largest table (65536 frames):
+ *     sixteen play, the scene's total is reached and the other two are
+ *     stills, said once in the log.
  *
  * Skipped (exit 0, "skip") without EGL surfaceless / GL 3.3.
  * WALPE_FEATURES is cleared by meson.build. */
@@ -260,6 +266,65 @@ static char *make_sprite_scene (int bad, gboolean script)
     return dir;
 }
 
+/* A sheet with the largest frame table: 64 x 32 raw RGBA in one colour and
+ * 65536 frames of 8 x 8 texels, 2 s each. */
+static void write_full_table_sheet (const char *dir, const char *rel)
+{
+    GByteArray *a = g_byte_array_new ();
+    g_byte_array_append (a, (const guint8 *) "TEXV0005\0TEXI0001\0", 18);
+    const guint32 hdr[7] = { 0, 4, 64, 32, 64, 32, 0 };    /* RGBA8888, animated */
+    for (int i = 0; i < 7; i++)
+        put32 (a, hdr[i]);
+    g_byte_array_append (a, (const guint8 *) "TEXB0003\0", 9);
+    put32 (a, 1); put32 (a, 0); put32 (a, 1);              /* images, format, mips */
+    put32 (a, 64); put32 (a, 32); put32 (a, 0); put32 (a, 64 * 32 * 4); put32 (a, 64 * 32 * 4);
+    for (int i = 0; i < 64 * 32; i++)
+        put32 (a, 0xff0000ffu);
+    g_byte_array_append (a, (const guint8 *) "TEXS0003\0", 9);
+    put32 (a, 65536); put32 (a, 8); put32 (a, 8);
+    for (int f = 0; f < 65536; f++) {
+        put32 (a, 0);                                       /* image */
+        putf (a, 2.0f);                                     /* duration */
+        putf (a, (float) (f % 8 * 8)); putf (a, (float) (f / 8 % 4 * 8));   /* x, y */
+        putf (a, 8.0f); putf (a, 0.0f); putf (a, 0.0f); putf (a, 8.0f);     /* x axis, y axis */
+    }
+    put_bytes (dir, rel, a->data, (gssize) a->len);
+    g_byte_array_unref (a);
+}
+
+/* `layers` image layers that all show the sheet with the largest table */
+static char *make_full_table_scene (int layers)
+{
+    char *dir = g_dir_make_tmp ("walpe-feat-tab-XXXXXX", NULL);
+    if (!dir)
+        return NULL;
+    put (dir, "models/solid.json", "{\"solidlayer\":true}");
+    put (dir, "models/anim.json", "{\"autosize\":true,\"material\":\"materials/anim.json\"}");
+    put (dir, "materials/anim.json",
+         "{\"passes\":[{\"blending\":\"translucent\",\"cullmode\":\"nocull\",\"depthtest\":\"disabled\","
+         "\"depthwrite\":\"disabled\",\"shader\":\"genericimage2\",\"textures\":[\"sheet\"]}]}");
+    write_full_table_sheet (dir, "materials/sheet.tex");
+    GString *s = g_string_new (SCENE_HEAD ("\"cameraparallax\":false,"));
+    for (int i = 0; i < layers; i++)
+        g_string_append_printf (s,
+            ",{\"id\":%d,\"name\":\"t%d\",\"image\":\"models/anim.json\",\"origin\":\"%d 90 0\","
+            "\"size\":\"8 8\",\"scale\":\"1 1 1\",\"angles\":\"0 0 0\",\"color\":\"1 1 1\",\"alpha\":1.0,"
+            "\"visible\":true}", 2 + i, i, 10 + i * 16);
+    g_string_append (s, "]}");
+    put (dir, "scene.json", s->str);
+    g_string_free (s, TRUE);
+    put (dir, "project.json", PROJECT);
+    return dir;
+}
+
+static int count_in_log (const char *what)
+{
+    int n = 0;
+    for (const char *p = logged->str; (p = strstr (p, what)) != NULL; p++)
+        n++;
+    return n;
+}
+
 static void redraw_cb (gpointer u) { (void) u; }
 
 #define W 320
@@ -429,6 +494,48 @@ static void settle (Run *r)
         ;
 }
 
+/* a red 20 x 20 layer in the middle of the canvas; zoom: general.zoom as it
+ * stands in the file */
+static char *make_zoom_scene (gboolean zoom)
+{
+    char *dir = g_dir_make_tmp ("walpe-feat-zoom-XXXXXX", NULL);
+    if (!dir)
+        return NULL;
+    put (dir, "models/solid.json", "{\"solidlayer\":true}");
+    GString *s = g_string_new (zoom ? SCENE_HEAD ("\"cameraparallax\":false,\"zoom\":1e39,")
+                                    : SCENE_HEAD ("\"cameraparallax\":false,"));
+    solid (s, 2, "160 90 0", "1 0 0", NULL);
+    g_string_append (s, "]}");
+    put (dir, "scene.json", s->str);
+    g_string_free (s, TRUE);
+    put (dir, "project.json", PROJECT);
+    return dir;
+}
+
+static void zoom_checks (void)
+{
+    Run a = { 0 }, b = { 0 };
+    char *plain = make_zoom_scene (FALSE), *huge = make_zoom_scene (TRUE);
+    if (plain && huge && run_open (&a, plain) && run_open (&b, huge)) {
+        run_frame (&a, 0.0f, 0.0f, TRUE);
+        run_frame (&b, 0.0f, 0.0f, TRUE);
+        result (is (at (&a, 160, 90), 255, 0, 0) && is (at (&a, 40, 40), 51, 102, 153),
+                "a scene without general.zoom shows its layers");
+        result (!memcmp (a.px, b.px, (gsize) W * H * 4),
+                "general.zoom 1e39 (no float holds it) is no zoom: the same frame, not a black one");
+    } else {
+        result (FALSE, "scenes with and without general.zoom load");
+    }
+    run_close (&a);
+    run_close (&b);
+    if (plain)
+        rm_rf (plain);
+    if (huge)
+        rm_rf (huge);
+    g_free (plain);
+    g_free (huge);
+}
+
 static void sprite_checks (void)
 {
     char *dir = make_sprite_scene (-1, FALSE);
@@ -551,6 +658,26 @@ static void sprite_checks (void)
     if (dir)
         rm_rf (dir);
     g_free (dir);
+
+    /* the frames of all animations of a scene together: every layer holds
+     * the table it plays from, sixteen of the largest size are taken */
+    dir = make_full_table_scene (18);
+    g_string_truncate (logged, 0);
+    if (dir && run_open (&r, dir)) {
+        result (count_in_log ("plays a sprite sheet: 65536 frames") == 16,
+                "18 layers on a sheet of 65536 frames: 16 play (the scene's total of frames)");
+        result (count_in_log ("frames together") == 1 && strstr (logged->str, "as a still") != NULL,
+                "... the others show their first frame as a still, said once in the log");
+        result (run_frame (&r, 0.0f, 0.0f, TRUE) && is (at (&r, 10, 90), RED) &&
+                is (at (&r, 10 + 17 * 16, 90), RED),
+                "... and both kinds are drawn");
+    } else {
+        result (FALSE, "scene with 18 layers on a sheet of 65536 frames loads");
+    }
+    run_close (&r);
+    if (dir)
+        rm_rf (dir);
+    g_free (dir);
 }
 
 int main (void)
@@ -599,6 +726,7 @@ int main (void)
     g_unsetenv ("WALPE_FX_TIME");
     g_unsetenv ("WALPE_NOFX");
     parallax_checks ();
+    zoom_checks ();
     sprite_checks ();
     eglMakeCurrent (dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglDestroySurface (dpy, surf);

@@ -195,7 +195,8 @@ itself links neither WebKit, GTK, GStreamer nor FFmpeg.
 
 > **Not run on ARM hardware.** The arm64 build was cross-compiled on an x86-64 machine
 > (both backends and every optional part, 0 warnings) and its tests were run under
-> emulation (qemu-user): of the 68 tests that need no display, 65 pass, 2 fail in a
+> emulation (qemu-user): of the 68 tests that need neither a display nor an OpenGL
+> context, 65 pass, 2 fail in a
 > timing check that means nothing under emulation (`formats`, `scenescript`) and 1 cannot
 > run there (`sec-local` starts itself again). Seven of the tests that draw were run on
 > the emulated software renderer and pass; the tests with a display and a daemon, the
@@ -270,8 +271,10 @@ ninja -C build-arm64
 `--tuning=native` is refused in a cross build; name the target CPU with
 `-Dc_args=-mcpu=...` if you know it. The developer tools have `arm64-sysroot.sh` (the
 arm64 libraries in a directory of their own, without touching the system's packages) and
-`arm64cross.py` (configure, build and run the tests under emulation); that is the way
-the figures above were made. Tests that start another program of the build, or
+`arm64cross.py` (configure, build and run tests under emulation). The figures above were
+made with them: `arm64cross.py --suite portable` made the build and ran the suite
+`portable`; the 68 tests were then started by hand, one by one, under qemu-user in that
+build. Tests that start another program of the build, or
 themselves again, need `binfmt_misc` with qemu registered; timing checks are not valid
 under emulation. The suite `portable` (`meson test --suite portable`) compares this
 machine's results with numbers fixed in the source, needs no display and no OpenGL, and
@@ -529,11 +532,12 @@ a key), `--action=next|random|pause-toggle` runs a menu entry.
   renderer (llvmpipe), a headless Wayland compositor, a null sound sink and - the build
   for 64-bit ARM - under emulation. Nothing new has been run on real AMD, Intel, NVIDIA
   or ARM hardware or on a real Wayland desktop**; the NVIDIA / X11 path is meant to be
-  unchanged from 0.12.2 with default settings, and that too is so far shown only on the
-  software renderer, in two steps. The development tree as it stood before the fixes of
-  0.12.2 were merged in was compared with release 0.12.1: the same frames of the 91 test
-  scenes at 960x540 (16 of them with the switch of their new feature off), the same
-  threads,
+  unchanged from 0.12.2 with default settings, except for the 16 scenes of the next item
+  and for effects on colour-only layers on monitors wider than 2048 pixels, and that too
+  is so far shown only on the software renderer, in two steps. The development tree as it
+  stood before the fixes of 0.12.2 were merged in was compared with release 0.12.1: the
+  same frames of the 91 test scenes at 960x540 (16 of them with the switch of their new
+  feature off), the same threads,
   descriptors and idle cost, and for four scenes the same OpenGL calls in the same order
   over 30 frames (calls that only ask the driver something left aside). The frames of the
   final tree were then compared with those of that earlier tree. Measure on your own
@@ -556,12 +560,15 @@ a key), `--action=next|random|pause-toggle` runs a menu entry.
   the pointer is known only over the bare desktop, "Skip hidden areas" does not exist,
   the fullscreen and focus rules need the compositor's window list, and web wallpapers go
   through Xwayland unless there is no X display (then through an experimental private
-  page host that has never run in a session). Known and left as they are: a compositor
-  that accepts the connection and never answers holds the daemon's start; a wallpaper
-  that is not shown keeps being drawn when "pause when covered" is off; a lock screen
-  pauses through "pause when covered" only, unless the locker tells logind; with no
-  monitor left `walpe-ctl status` still lists the monitors; and while the daemon waits
-  for a compositor to come back, `walpe-ctl` says it is not running.
+  page host that has never run in a session). A compositor that accepts the connection
+  and does not answer within 10 seconds counts as absent (X11 is taken when there is an
+  X display). Known and left as they are: a wallpaper that is not shown keeps being
+  drawn when "pause when covered" is off; a lock screen pauses through "pause when
+  covered" only, unless the locker tells logind; with no monitor left `walpe-ctl status`
+  still lists the monitors; while the daemon waits for a compositor to come back,
+  `walpe-ctl` says it is not running, and what it was sent is not carried out later; and
+  a session started with a one-time socket (`WAYLAND_SOCKET`) cannot be restarted in
+  place, so the daemon ends at the first change of a monitor there.
   [WAYLAND.md](docs/WAYLAND.md#limits).
 - **AMD and Intel graphics, GPU choice, OpenGL ES: written, not run on hardware.** The
   list of graphics devices, render offload to another GPU (`gpu=integrated|discrete`),
@@ -575,7 +582,8 @@ a key), `--action=next|random|pause-toggle` runs a menu entry.
   without the bias).
   [GPU.md](docs/GPU.md).
 - **64-bit ARM: cross-compiled and tested under emulation, never run on ARM hardware**
-  (65 of the 68 tests without a display pass there; no ARM GPU, no board):
+  (65 of the 68 tests that need neither a display nor an OpenGL context pass there; no
+  ARM GPU, no board):
   [64-bit ARM](#64-bit-arm-aarch64).
 - **Sound is off by default and nobody has heard it.** Scene sound layers were measured
   against a PulseAudio null sink by recording it; no loudspeaker, no sound card, no
@@ -711,6 +719,8 @@ directory; nothing of your session is read, written or disturbed:
 |---|---|---|
 | `daemon-life`, `sec-daemon`, `daemon-resolution`, `websec` | `Xvfb` | loads, reloads, the restart in place; what the daemon trusts on the local machine; render resolution; a hostile web wallpaper |
 | `daemon-life-wayland`, `sec-daemon-wayland` | headless sway | the same cases on Wayland; the two of `daemon-life` that change the monitor layout are skipped there (the next row does that with real outputs) |
+| `daemon-wayland-silent` | none | a compositor socket that accepts the connection and never answers: the daemon gives up after ten seconds (`scripts/wlsilentcheck.py`) |
+| `daemon-wayland-wait-socket` | none | a daemon restarted in place that waits for its compositor and gives up: which control socket file it removes, and what its log says (`scripts/wlwaitcheck.py`) |
 | `daemon-wayland` | headless sway | what only outputs can do (`scripts/waylandcheck.py`): two outputs, a mode / scale / transform that changes under the running daemon, outputs that appear and go, a pointer device, the choice between the two backends |
 
 The X ones need `Xvfb` (and use `xdotool`, `xrandr` when present), the Wayland ones `sway`

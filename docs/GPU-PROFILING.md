@@ -115,7 +115,9 @@ user's process. The report holds the names of your GPU clients (a browser, a gam
 before you post it.
 
 `walpe-ctl status` has a member `gpu_stats` with the daemon's own share and memory, read
-at most once a second and only while a client asks for the status.
+at most once a second and only while a client asks for the status. On NVIDIA's driver,
+which publishes no such figures, the member says so and no file of `/proc` or `/sys` is
+read for it.
 
 ## 2. The profiler: `walpe-ctl profile [SECONDS] [--json] [--sync]`
 

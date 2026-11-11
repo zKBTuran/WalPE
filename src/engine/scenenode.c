@@ -346,6 +346,8 @@ typedef struct {
     int cam_moved;              /* frames to go in which a script's change of
                                  * the two reaches the view (see the bake) */
     gboolean has_sprites;       /* some image layer plays a sprite sheet */
+    int sprite_frames;          /* frames of all layers that do (SPRITE_SCENE_FRAMES) */
+    gboolean sprite_over;       /* a layer did not fit: said once */
     /* WALPE_PROP_PROBE (propprobe.h): virtual clock + one state digest */
     gboolean pprobe, pprobe_done;
     /* Frame skipping: the signature of the frame the surface shows (every
@@ -817,6 +819,14 @@ static gboolean node_tex_attach (NodeObj *nv, const char *path, guint lf, gboole
  * rectangle into an index. */
 #define SPRITE_MAX_FRAMES 65536   /* what the container's parser admits */
 #define SPRITE_MAX_SIDE 16384
+/* Frames of all animations of one scene together. Every layer that plays a
+ * sheet holds the table it plays from (32 bytes a frame, 2 MiB for the
+ * largest table), also when a hundred layers show the same file: without a
+ * total, a scene of a few megabytes - one sheet with a full table and some
+ * thousand layers that name it - took gigabytes. Sixteen tables of the
+ * largest size (32 MiB); a layer beyond that shows its first frame as a
+ * still (sprite_attach). */
+#define SPRITE_SCENE_FRAMES (16 * SPRITE_MAX_FRAMES)
 
 struct WalpeSpriteAnim {
     int n;                  /* frames on show (1 = a still) */
@@ -1110,9 +1120,23 @@ static void sprite_attach (SceneNodeContent *s, NodeObj *nv, WalpeTexFrame *fram
                        "shown as a whole", nv->name ? nv->name : "?");
         } else {
             char *why = NULL;
-            nv->sprite = walpe_sprite_anim_new (frames, nv->tex_ti.nframes, nv->tex_w, nv->tex_h, &why);
+            /* a table that does not fit into the scene's total is not
+             * taken: only its first frame is looked at (a still) */
+            const int nf = nv->tex_ti.nframes;
+            const gboolean over = nf > 1 && nf > SPRITE_SCENE_FRAMES - s->sprite_frames;
+            nv->sprite = walpe_sprite_anim_new (frames, over ? 1 : nf, nv->tex_w, nv->tex_h, &why);
             const WalpeSpriteAnim *sp = nv->sprite;
-            if (sp && sp->refused)
+            if (sp && sp->n > 1)
+                s->sprite_frames += sp->n;
+            if (over) {
+                if (!s->sprite_over)
+                    g_warning ("scenenode: layer %s: sprite sheet %s is not played: the animations "
+                               "of this scene have more than %d frames together. It shows %s, and "
+                               "so does every further layer whose table does not fit (not said "
+                               "again)", nv->name ? nv->name : "?", nv->tex_src, SPRITE_SCENE_FRAMES,
+                               sp ? "its first frame as a still" : "the picture as a whole");
+                s->sprite_over = TRUE;
+            } else if (sp && sp->refused)
                 g_warning ("scenenode: layer %s: sprite sheet %s refused (%s): its first frame is "
                            "shown as a still", nv->name ? nv->name : "?", nv->tex_src, why);
             else if (!sp)
@@ -1870,6 +1894,15 @@ static double prop_num (JsonObject *o, const char *k, double d)
     return json_node_get_double (n);
 }
 
+/* A zoom from the scene file (general.zoom, the camera layer's zoom): a
+ * number above 0.01 that a float holds, else 1. 1e39 is a finite double
+ * and no float: converted, it was an infinite zoom, no layer's matrix held
+ * numbers any more and the scene was black. */
+static float file_zoom (double z)
+{
+    return isfinite (z) && z > 0.01 && z <= (double) G_MAXFLOAT ? (float) z : 1.0f;
+}
+
 /* remember {"script": ...} on a supported layer property of node idx */
 static void collect_script (SceneNodeContent *s, int idx, JsonObject *o, const char *k,
                             const char *as_prop)
@@ -2050,7 +2083,7 @@ static void parse_node (NodeObj *nv, JsonObject *o, const char *dir, SceneNodeCo
         double z = prop_num (o, "zoom", 1.0);
         s->cam_found = TRUE;
         s->cam_id = nv->id;
-        s->cam_zoom = isfinite (z) && z > 0.01 ? (float) z : 1.0f;
+        s->cam_zoom = file_zoom (z);
         g_debug ("scenenode: camera layer %d, zoom %.3f", nv->id, s->cam_zoom);
     }
     {
@@ -6673,7 +6706,7 @@ WalpeContent *walpe_scenenode_new_from_root (JsonNode *root, const char *project
         for (int i = 0; i < 3; i++)
             s->clear[i] = clear_on && isfinite (c3[i]) ? CLAMP (c3[i], 0.0f, 1.0f) : 0.0f;
         double gz = prop_num (gen0, "zoom", 1.0);
-        s->gen_zoom = isfinite (gz) && gz > 0.01 ? (float) gz : 1.0f;
+        s->gen_zoom = file_zoom (gz);
         /* general.cameraparallax*, plain or bound to a user option. Read
          * before the objects: a script on a layer's "parallaxDepth" drives
          * the depth only in a scene that has the parallax (parse_node).

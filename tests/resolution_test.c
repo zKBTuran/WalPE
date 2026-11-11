@@ -721,6 +721,121 @@ static void test_config_keys (void)
     walpe_config_free (c);
 }
 
+static void test_config_newer (void)
+{
+    /* a file of a later version: what this build does not know, at the top
+     * of the file and inside an output's entry, is still there after this
+     * build loaded, changed and saved it */
+    put_config ("{\"config_version\":5,\"wallpapers_dir\":\"/lib\",\"fps\":50,"
+                "\"video_resolution\":\"auto\",\"later_top\":{\"a\":[1,2]},\"monitors\":{"
+                "\"DP-1\":{\"resolution\":\"1440p\",\"texture_limit\":\"auto\",\"asked\":true,"
+                "\"later_text\":\"nearest\",\"later_obj\":{\"serial\":\"X1\",\"n\":[1,2,3]}},"
+                "\"HDMI-0\":{\"resolution\":\"native\",\"later_num\":7},"
+                "\"DP-2\":{\"resolution\":\"720p\"}}}");
+    WalpeConfig *c = walpe_config_load ();
+    const WalpeMonitorConf *e = walpe_config_monitor (c, "DP-1");
+    CHECK (e && e->res.kind == WALPE_RES_LINES && e->res.lines == 1440 && e->asked &&
+           !c->resolution_migrate);
+    /* this build changes an entry, drops one and adds one */
+    WalpeMonitorConf mc = { { WALPE_RES_CUSTOM, 0, 1600, 900 }, WALPE_TEXLIMIT_AUTO, TRUE };
+    walpe_config_set_monitor (c, "DP-1", &mc);
+    walpe_config_set_monitor (c, "HDMI-0", NULL);
+    walpe_config_set_monitor (c, "DP-3", &mc);
+    walpe_config_save (c);
+    walpe_config_free (c);
+    JsonNode *root = NULL;
+    JsonObject *o = read_config (&root);
+    JsonObject *mo = o ? wpj_obj (o, "monitors") : NULL;
+    JsonObject *d1 = mo ? wpj_obj (mo, "DP-1") : NULL, *d2 = mo ? wpj_obj (mo, "DP-2") : NULL;
+    JsonObject *d3 = mo ? wpj_obj (mo, "DP-3") : NULL;
+    JsonObject *lo = d1 ? wpj_obj (d1, "later_obj") : NULL;
+    CHECK (o && json_object_has_member (o, "later_top"));
+    CHECK (d1 && !g_strcmp0 (wpj_str (d1, "resolution", ""), "1600x900") &&
+           !g_strcmp0 (wpj_str (d1, "later_text", ""), "nearest"));
+    CHECK (lo && !g_strcmp0 (wpj_str (lo, "serial", ""), "X1") && json_object_has_member (lo, "n") &&
+           json_array_get_length (json_object_get_array_member (lo, "n")) == 3);
+    CHECK (mo && !json_object_has_member (mo, "HDMI-0"));   /* a dropped entry is gone whole */
+    CHECK (d2 && json_object_get_size (d2) == 3 && d3 && json_object_get_size (d3) == 3);
+    if (root)
+        json_node_unref (root);
+    /* loaded and saved once more: the same file; an entry that was dropped
+     * and is made again starts without the members it once had */
+    char *t1 = NULL, *t2 = NULL;
+    g_file_get_contents (cfg_path, &t1, NULL, NULL);
+    c = walpe_config_load ();
+    walpe_config_save (c);
+    g_file_get_contents (cfg_path, &t2, NULL, NULL);
+    CHECK (t1 && t2 && !strcmp (t1, t2));
+    g_free (t1);
+    g_free (t2);
+    walpe_config_set_monitor (c, "DP-1", NULL);
+    walpe_config_set_monitor (c, "DP-1", &mc);
+    walpe_config_save (c);
+    walpe_config_free (c);
+    o = read_config (&root);
+    mo = o ? wpj_obj (o, "monitors") : NULL;
+    d1 = mo ? wpj_obj (mo, "DP-1") : NULL;
+    CHECK (d1 && json_object_get_size (d1) == 3);
+    if (root)
+        json_node_unref (root);
+}
+
+static gboolean path_is (WalpeConfig *c, const char *output, const char *path)
+{
+    return !g_strcmp0 (walpe_config_monitor_path (c, output), path);
+}
+
+static void test_config_other_spelling (void)
+{
+    /* a file as an X11-only version wrote it: the monitors' own wallpapers
+     * under RandR names */
+    put_config ("{\"config_version\":3,\"wallpapers_dir\":\"/lib\",\"current\":\"/lib/a\","
+                "\"monitor_current\":{\"HDMI-1\":\"/lib/b\",\"DP-1\":\"/lib/c\",\"DVI-I-1\":\"/lib/d\","
+                "\"eDP1\":\"/lib/e\"}}");
+    static const char *const wl[] = { "HDMI-A-1", "DP-1", "eDP-1", "DVI-D-1" };
+    static const char *const dvi[] = { "DVI-I-1", "DVI-D-1" };
+    WalpeConfig *c = walpe_config_load ();
+    /* nobody said otherwise, or X11: the exact name only, as it always was */
+    CHECK (path_is (c, "HDMI-A-1", "/lib/a") && path_is (c, "HDMI-1", "/lib/b"));
+    walpe_config_set_outputs (c, wl, G_N_ELEMENTS (wl), FALSE);
+    CHECK (path_is (c, "HDMI-A-1", "/lib/a") && path_is (c, "eDP-1", "/lib/a") && path_is (c, "DP-1", "/lib/c"));
+    /* Wayland: the same connectors under their other spelling */
+    walpe_config_set_outputs (c, wl, G_N_ELEMENTS (wl), TRUE);
+    CHECK (path_is (c, "HDMI-A-1", "/lib/b") && path_is (c, "DP-1", "/lib/c") &&
+           path_is (c, "eDP-1", "/lib/e") && path_is (c, "DVI-D-1", "/lib/d"));
+    CHECK (path_is (c, "HDMI-A-2", "/lib/a") && path_is (c, "DP-2", "/lib/a"));   /* other connectors */
+    /* the entry of an output that is connected itself is not lent */
+    walpe_config_set_outputs (c, dvi, G_N_ELEMENTS (dvi), TRUE);
+    CHECK (path_is (c, "DVI-I-1", "/lib/d") && path_is (c, "DVI-D-1", "/lib/a"));
+    walpe_config_set_outputs (c, wl, G_N_ELEMENTS (wl), TRUE);
+    /* the upgrade step: an output with an entry under its other spelling
+     * has one; a choice made now is stored under the name of now and holds */
+    WalpeMonitorConf mc = { { WALPE_RES_LINES, 720, 0, 0 }, WALPE_TEXLIMIT_AUTO, TRUE };
+    g_hash_table_remove_all (c->monitors ? c->monitors : (c->monitors = g_hash_table_new_full (
+                                 g_str_hash, g_str_equal, g_free, g_free)));
+    g_hash_table_insert (c->monitors, g_strdup ("HDMI-1"), g_memdup2 (&mc, sizeof (mc)));
+    const WalpeMonitorConf *e = walpe_config_monitor (c, "HDMI-A-1");
+    CHECK (e && e->res.kind == WALPE_RES_LINES && e->res.lines == 720);
+    CHECK (c->resolution_migrate && walpe_config_monitors_migrate (c, wl, G_N_ELEMENTS (wl)) &&
+           !g_hash_table_contains (c->monitors, "HDMI-A-1") && g_hash_table_contains (c->monitors, "DP-1"));
+    walpe_config_set_monitor_path (c, "HDMI-A-1", "/lib/g");
+    CHECK (path_is (c, "HDMI-A-1", "/lib/g") &&
+           !g_strcmp0 (g_hash_table_lookup (c->monitor_current, "HDMI-1"), "/lib/b"));
+    /* the choice is dropped: under both spellings, the default shows */
+    walpe_config_set_monitor_path (c, "HDMI-A-1", NULL);
+    CHECK (path_is (c, "HDMI-A-1", "/lib/a") && !g_hash_table_contains (c->monitor_current, "HDMI-1"));
+    walpe_config_set_monitor (c, "HDMI-A-1", NULL);
+    CHECK (!walpe_config_monitor (c, "HDMI-A-1") && !g_hash_table_contains (c->monitors, "HDMI-1"));
+    walpe_config_free (c);
+    /* two entries of one connector: not guessed */
+    put_config ("{\"config_version\":3,\"wallpapers_dir\":\"/lib\",\"current\":\"/lib/a\","
+                "\"monitor_current\":{\"DVI-I-1\":\"/lib/b\",\"DVI-A-1\":\"/lib/c\"}}");
+    c = walpe_config_load ();
+    walpe_config_set_outputs (c, wl, G_N_ELEMENTS (wl), TRUE);
+    CHECK (path_is (c, "DVI-D-1", "/lib/a"));
+    walpe_config_free (c);
+}
+
 int main (void)
 {
     /* before any GLib call that caches the config dir */
@@ -740,6 +855,8 @@ int main (void)
     test_config_fresh ();
     test_config_upgrade ();
     test_config_keys ();
+    test_config_newer ();
+    test_config_other_spelling ();
 
     g_unlink (cfg_path);
     g_rmdir (cfg_dir);

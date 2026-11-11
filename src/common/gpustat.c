@@ -486,8 +486,16 @@ static int dev_cmp (gconstpointer a, gconstpointer b)
 
 /* every GPU the kernel lists: DRM cards first, then PCI display devices
  * that have no DRM node (an NVIDIA card whose driver registers none) */
+static gint devs_scans;           /* atomic: walpe_gpustat_device_scans */
+
+guint walpe_gpustat_device_scans (void)
+{
+    return (guint) g_atomic_int_get (&devs_scans);
+}
+
 static GPtrArray *devs_scan (const char *sys_root)
 {
+    g_atomic_int_inc (&devs_scans);
     GPtrArray *devs = g_ptr_array_new_with_free_func ((GDestroyNotify) dev_free);
     char *drm = g_build_filename (sys_root, "class", "drm", NULL);
     GDir *dir = g_dir_open (drm, 0, NULL);
@@ -1122,6 +1130,15 @@ gboolean walpe_gpustat_render_driver (const char *sys_root, char *driver, gsize 
     g_mutex_lock (&hint_lock);
     char *hint = g_strdup (hint_device), *glv = g_strdup (hint_gl_vendor);
     g_mutex_unlock (&hint_lock);
+    if (glv && strstr (glv, "NVIDIA")) {
+        /* NVIDIA's OpenGL draws on NVIDIA's kernel driver and no other: the
+         * answer needs no look at the device list of sysfs (so the start of
+         * a profile on that driver reads no file here) */
+        g_strlcpy (driver, "nvidia", size);
+        g_free (hint);
+        g_free (glv);
+        return TRUE;
+    }
     GPtrArray *devs = devs_scan (sys_root && *sys_root ? sys_root : "/sys");
     const char *how = "";
     Dev *d = devs_find_named (devs, hint);
@@ -2012,6 +2029,10 @@ static void why (WalpeGpuStatReport *r, int metric, const char *fmt, ...)
 }
 
 /* why each value that is missing is missing, in words for the user */
+static const char nvidia_no_kernel_stats[] =
+    "the NVIDIA driver gives the kernel interfaces no statistics; nvidia-smi has them "
+    "(walpe-gpu-report, walpe-ctl gpu-stats)";
+
 static void report_reasons (WalpeGpuSampler *s, WalpeGpuStatReport *r, const Dev *d)
 {
     const char *drv = r->driver[0] ? r->driver : "this";
@@ -2030,8 +2051,7 @@ static void report_reasons (WalpeGpuSampler *s, WalpeGpuStatReport *r, const Dev
                      "not woken for statistics");
     if (nvidia) {
         const char *t = !(s->flags & WALPE_GPUSTAT_SPAWN)
-                        ? "the NVIDIA driver gives the kernel interfaces no statistics; nvidia-smi "
-                          "has them (walpe-gpu-report, walpe-ctl gpu-stats)"
+                        ? nvidia_no_kernel_stats
                         : "nvidia-smi is not installed, does not answer or has no figure";
         for (int i = 0; i < WALPE_GPU_N_METRICS; i++)
             if (i != WALPE_GPU_M_BUSY_CLIENTS && i != WALPE_GPU_M_OTHERS_BUSY &&
@@ -2871,6 +2891,49 @@ void walpe_gpustat_self (WalpeGpuSelfStat *out)
         *out = last;
         g_mutex_unlock (&lock);
         return;
+    }
+    {
+        /* What the daemon has told about its renderer decides whether a
+         * file is opened at all:
+         *  - nothing yet (no GL context exists so far): nothing is read,
+         *    the answer says so and the next call looks again;
+         *  - NVIDIA's OpenGL: it draws on NVIDIA's kernel driver and no
+         *    other, and that driver puts no figure into fdinfo or sysfs.
+         *    The answer is final from the GL vendor alone: no sampler, no
+         *    device list from sysfs, no /proc/self/fdinfo - not even once. */
+        g_mutex_lock (&hint_lock);
+        const gboolean told = hint_gl_vendor != NULL;
+        const gboolean nv_gl = told && strstr (hint_gl_vendor, "NVIDIA") != NULL;
+        char dev_hint[64];
+        g_strlcpy (dev_hint, hint_device ? hint_device : "", sizeof (dev_hint));
+        g_mutex_unlock (&hint_lock);
+        if (!told || nv_gl) {
+            if (self) {
+                walpe_gpu_sampler_free (self);
+                self = NULL;
+            }
+            memset (&last, 0, sizeof (last));
+            last.mem_kb = -1;
+            g_strlcpy (last.sources, "none", sizeof (last.sources));
+            if (nv_gl) {
+                g_strlcpy (last.driver, "nvidia", sizeof (last.driver));
+                g_strlcpy (last.vendor_name, "NVIDIA", sizeof (last.vendor_name));
+                last.vendor_id = 0x10de;
+                if (is_pci_slot (dev_hint)) {
+                    g_strlcpy (last.pci_slot, dev_hint, sizeof (last.pci_slot));
+                } else if (dev_hint[0]) {
+                    const char *base = strrchr (dev_hint, '/');
+                    g_strlcpy (last.card, base ? base + 1 : dev_hint, sizeof (last.card));
+                }
+                g_strlcpy (last.note, nvidia_no_kernel_stats, sizeof (last.note));
+                settled = TRUE;
+            } else {
+                g_strlcpy (last.note, "the renderer is not known yet", sizeof (last.note));
+            }
+            *out = last;
+            g_mutex_unlock (&lock);
+            return;
+        }
     }
     gint64 now = g_get_monotonic_time ();
     if (!self) {

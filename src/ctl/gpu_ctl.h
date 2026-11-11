@@ -79,6 +79,18 @@ static int gpu_ctl_main (int argc, char **argv)
     JsonObject *st = ro ? wpj_obj (ro, "state") : NULL;
     gboolean has_gpu = st && json_object_has_member (st, "gpu");
     JsonObject *use = has_gpu ? wpj_obj (st, "gpu_in_use") : NULL;
+    if (use) {
+        /* a daemon with gpu = auto has not read the PCI id list and names
+         * the device by vendor and ids; the list read here has its name */
+        const char *pci = wpj_str (use, "pci", NULL);
+        for (guint i = 0; pci && i < devs->len; i++) {
+            const WalpeGpuDev *d = g_ptr_array_index (devs, i);
+            if (d->pci && d->name && !strcmp (d->pci, pci)) {
+                json_object_set_string_member (use, "name", d->name);
+                break;
+            }
+        }
+    }
     if (has_gpu) {
         /* the daemon knows which device EGL renders for the displays on */
         JsonArray *ca = wpj_arr (st, "gpu_candidates");
