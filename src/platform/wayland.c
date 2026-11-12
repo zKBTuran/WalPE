@@ -1,7 +1,8 @@
 /* wayland.c - the Wayland backend of the daemon (platform/impl.h).
  *
  * One connection. Each output gets one surface with the layer-shell role
- * (zwlr_layer_shell_v1) on the background layer: anchored to all four
+ * (zwlr_layer_shell_v1) on the background layer (on KWin: the bottom
+ * layer, see wl_layer_choose () in wayland_logic.h): anchored to all four
  * edges, size 0 x 0 (the compositor decides: the whole output), exclusive
  * zone -1 (panels do not push it), no keyboard. The daemon renders into it
  * through a wl_egl_window; frames are paced by the compositor's frame
@@ -229,6 +230,8 @@ static struct {
     struct zwlr_layer_shell_v1 *layer_shell;
     guint32 layer_shell_version;
     gboolean layer_shell_gone;
+    WlLayer layer;              /* of every wallpaper surface; set in open (), then only read */
+    WlLayerWhy layer_why;
     struct zxdg_output_manager_v1 *xdg_output_mgr;
     guint32 xdg_output_version;
     struct wp_viewporter *viewporter;
@@ -1715,8 +1718,11 @@ static gboolean wl_layer_create_locked (WlSurf *s, gint64 now_us)
 {
     if (!s->shell_rq || !s->wl_out)
         return FALSE;
-    s->layer = zwlr_layer_shell_v1_get_layer_surface (s->shell_rq, s->surface, s->wl_out,
-                                                      ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "walpe");
+    s->layer = zwlr_layer_shell_v1_get_layer_surface (
+        s->shell_rq, s->surface, s->wl_out,
+        W.layer == WL_LAYER_BOTTOM ? ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM
+                                   : ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND,
+        "walpe");
     if (!s->layer)
         return FALSE;
     s->role_on_rq = TRUE;
@@ -2749,6 +2755,42 @@ static const char *wl_no_layer_shell_text (void)
           "KDE Plasma, COSMIC)";
 }
 
+/* Which layer the wallpaper surfaces go on (wayland_logic.h says why KWin
+ * gets another one), said once in the log: on KDE Plasma it decides what
+ * the user sees of Plasma's own desktop. */
+static void wl_layer_decide (gboolean say)
+{
+    const char *asked = g_getenv ("WALPE_WL_LAYER");
+    gboolean kwin = FALSE;
+    for (guint i = 0; W.globals && i < W.globals->len && !kwin; i++)
+        kwin = wl_global_is_kwin (((WlGlobal *) g_ptr_array_index (W.globals, i))->interface);
+    WlLayer named = WL_LAYER_BACKGROUND;
+    W.layer = wl_layer_choose (asked, kwin, &W.layer_why);
+    if (!say)
+        return;
+    if (wl_layer_parse (asked, &named) < 0)
+        g_warning ("wayland: WALPE_WL_LAYER=%s: not a layer this program uses (background, "
+                   "bottom, auto); taken as auto", asked);
+    if (W.layer_why == WL_LAYER_WHY_ASKED)
+        g_message ("wayland: WALPE_WL_LAYER: the wallpaper surfaces go on the layer \"%s\"",
+                   wl_layer_name (W.layer));
+    if (!kwin)
+        return;
+    if (W.layer == WL_LAYER_BOTTOM)
+        g_message ("wayland: KDE Plasma (KWin): the wallpaper surfaces go on the layer \"bottom\"%s. "
+                   "Plasma's own desktop is a window on the background layer, and KWin puts it in "
+                   "front of every other background surface when it is clicked; on \"bottom\" the "
+                   "wallpaper stays in front of it. Plasma's desktop icons and widgets are behind "
+                   "the wallpaper and cannot be seen (docs/WAYLAND.md, \"KDE Plasma\")",
+                   W.layer_why == WL_LAYER_WHY_KWIN ? ", not \"background\"" : "");
+    else
+        g_message ("wayland: KDE Plasma (KWin): on the layer \"background\" the wallpaper shares a "
+                   "stacking layer with Plasma's own desktop window. It is shown in front of "
+                   "Plasma's desktop or hidden behind it, depending on which window was active "
+                   "when the daemon started, and a click on the desktop hides it "
+                   "(docs/WAYLAND.md, \"KDE Plasma\")");
+}
+
 /* the connection the probe had to keep (WAYLAND_SOCKET can be used once) */
 static struct wl_display *wl_kept_dpy;
 
@@ -2828,6 +2870,7 @@ static gboolean wl_open (const WalpePlatformOpts *opts, char **err)
     W.cursor_size = e && *e ? (int) CLAMP (g_ascii_strtoll (e, NULL, 10), 8, 256) : 24;
     e = g_getenv ("WALPE_WL_RECREATE");
     W.recreate_max = e && !strcmp (e, "0") ? 0 : 3;
+    wl_layer_decide (!opts->probe && !opts->windowed);
     if (!opts->probe)
         W.display_node = wl_dmabuf_device (W.dpy, W.registry, W.dmabuf_name, W.dmabuf_version,
                                            answer_by);
@@ -2996,6 +3039,13 @@ static void wl_status (JsonBuilder *b)
     json_builder_set_member_name (b, "wl_compositor_globals");
     json_builder_add_string_value (b, g->str);
     g_string_free (g, TRUE);
+    json_builder_set_member_name (b, "wl_layer");
+    json_builder_add_string_value (b, wl_layer_name (W.layer));
+    json_builder_set_member_name (b, "wl_layer_why");
+    json_builder_add_string_value (b, W.layer_why == WL_LAYER_WHY_ASKED ? "WALPE_WL_LAYER"
+                                      : W.layer_why == WL_LAYER_WHY_KWIN
+                                            ? "the compositor is KWin (KDE Plasma)"
+                                            : "default");
     json_builder_set_member_name (b, "wl_threading");
     json_builder_add_string_value (b, "queue-per-surface");
     json_builder_set_member_name (b, "wl_seat_pointer");

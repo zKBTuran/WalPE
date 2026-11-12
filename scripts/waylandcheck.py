@@ -15,6 +15,10 @@ not what the daemon believes it drew. Each case starts its own daemon:
             and out to the output's corners, keeps a still picture still,
             refuses a second daemon, and leaves nothing on the output after
             `walpe-ctl quit`.
+  layer     WALPE_WL_LAYER=bottom (where the daemon puts its wallpapers by
+            itself on KDE Plasma's compositor): the surface is on the
+            bottom layer, status says so and why, the wallpaper is shown;
+            a value that is no layer is taken as "auto" and said so.
   two       two outputs of different sizes: a wallpaper for all, another for
             one output (saved under that output's name), each still on its
             own output after the outputs swap places.
@@ -269,6 +273,9 @@ def case_start(env, W):
     check(len(ls) == 1 and ls[0]["layer"] == "background" and (ls[0]["width"], ls[0]["height"]) == (640, 360),
           "start: one layer-shell surface on the output: background layer, the output's size", ls)
     check(bool(ls) and ls[0]["namespace"] == "walpe", "start: its namespace is walpe", ls)
+    check((st.get("wl_layer"), st.get("wl_layer_why")) == ("background", "default"),
+          "start: status wl_layer: background, by default (this compositor is not KWin)",
+          (st.get("wl_layer"), st.get("wl_layer_why")))
     sf = st.get("wl_surfaces") or [{}]
     check(len(sf) == 1 and sf[0].get("role") == "ready" and sf[0].get("buffer") == [640, 360],
           "start: status wl_surfaces: one surface, ready, buffer 640x360", sf)
@@ -300,6 +307,43 @@ def case_start(env, W):
     after = look(env, name)
     check(after["middle"] != QUAD and after["size"] == (640, 360),
           "start: after quit the output no longer shows the wallpaper (the compositor is still there)", after)
+
+
+# -------------------------------------------------------------------- layer
+def case_layer(env, W):
+    listed = env.display.layers(env.display.outputs()[0]["name"]) is not None
+    extra = {} if listed else {"WAYLAND_DEBUG": "1"}
+    begun = env.mark()      # the log goes on from the cases before
+    if not start(env, [("A", 640, 360, 0, 0)], "layer", extra=dict(extra, WALPE_WL_LAYER="bottom")):
+        return
+    mark = env.mark()
+    name = env.display.outputs()[0]["name"]
+    st = env.state()
+    ls = env.display.layers(name) if listed else wire_layers(env.since(begun))
+    check(len(ls) == 1 and ls[0]["layer"] == "bottom" and ls[0]["namespace"] == "walpe" and
+          (ls[0]["width"], ls[0]["height"]) == (640, 360),
+          "layer: WALPE_WL_LAYER=bottom: one layer-shell surface, on the bottom layer, the output's size", ls)
+    check((st.get("wl_layer"), st.get("wl_layer_why")) == ("bottom", "WALPE_WL_LAYER"),
+          "layer: status wl_layer says bottom and where it came from", (st.get("wl_layer"), st.get("wl_layer_why")))
+    check('WALPE_WL_LAYER: the wallpaper surfaces go on the layer "bottom"' in env.since(begun),
+          "layer: the log says it")
+    env.open(W["quad"])
+    check(lc.loaded(env, W["quad"]), "layer: the four-colour scene is loaded", rc.brief(env.monitors()))
+    ok, lk = shows_quad(env, name, size=(640, 360))
+    check(ok, "layer: the wallpaper is shown on the bottom layer", lk)
+    healthy(env, mark, "layer")
+    env.stop_daemon()
+    begun = env.mark()
+    if not start(env, [("A", 640, 360, 0, 0)], "layer", extra=dict(extra, WALPE_WL_LAYER="overlay")):
+        return
+    st = env.state()
+    ls = env.display.layers(name) if listed else wire_layers(env.since(begun))
+    check(len(ls) == 1 and ls[0]["layer"] == "background" and
+          (st.get("wl_layer"), st.get("wl_layer_why")) == ("background", "default"),
+          "layer: WALPE_WL_LAYER=overlay is no layer for a wallpaper: background, as without it",
+          (ls, st.get("wl_layer"), st.get("wl_layer_why")))
+    check("WALPE_WL_LAYER=overlay: not a layer this program uses" in env.since(begun), "layer: and the log says so")
+    env.stop_daemon()
 
 
 # ---------------------------------------------------------------------- two
@@ -1017,7 +1061,7 @@ def case_fullscreen(env, W):
 
 
 OPT_IN = ("cycles",)
-CASES = [("start", case_start), ("two", case_two), ("mode", case_mode), ("scale", case_scale),
+CASES = [("start", case_start), ("layer", case_layer), ("two", case_two), ("mode", case_mode), ("scale", case_scale),
          ("noviewport", case_noviewport), ("rotate", case_rotate), ("hotplug", case_hotplug),
          ("pointer", case_pointer), ("covered", case_covered), ("fullscreen", case_fullscreen),
          ("backend", case_backend),

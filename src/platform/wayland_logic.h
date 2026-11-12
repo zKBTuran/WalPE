@@ -2,9 +2,10 @@
  * compositor: how an output's properties become the rectangle the daemon
  * renders, which buffer size and scale a surface gets, where a pointer
  * position on a surface lies in that rectangle, when a surface counts as
- * "not shown", and the life cycle of a layer surface. Pure functions and
- * small state records, no libwayland types, no I/O: platform/wayland.c
- * feeds them with what the protocol delivers and does what they answer;
+ * "not shown", which layer a wallpaper surface goes on, and the life cycle
+ * of a layer surface. Pure functions and small state records, no
+ * libwayland types, no I/O: platform/wayland.c feeds them with what the
+ * protocol delivers and does what they answer;
  * tests/wayland_logic_test.c feeds them with made-up values (like pace.h
  * and present.h and their tests). */
 #pragma once
@@ -535,6 +536,84 @@ static inline gint64 wl_presented_us (guint32 sec_hi, guint32 sec_lo, guint32 ns
 static inline double wl_refresh_hz_from_ns (guint32 refresh_ns)
 {
     return refresh_ns > 0 ? 1e9 / (double) refresh_ns : 0.0;
+}
+
+/* ------------------------------------------------------------ which layer
+ * A wallpaper belongs on the layer shell's "background" layer, and that is
+ * where it goes, with one exception: KWin, the compositor of KDE Plasma.
+ * KWin keeps every background-layer surface in one stacking layer, and
+ * Plasma's own desktop - a window that fills the monitor with Plasma's
+ * wallpaper, the desktop icons and the widgets, opaque - is in that layer
+ * too. Inside the layer KWin orders the windows as it orders ordinary
+ * ones: a new one goes in front (KWin 6: right behind the active window
+ * when that is Plasma's desktop), and a click on a window raises it. Our
+ * surface takes no input, so a click on the "desktop" lands on Plasma's
+ * window underneath, KWin raises that, and the wallpaper is behind an
+ * opaque window from then on; nothing tells us, and no request of the
+ * protocol brings a surface back to the front. Read in KWin 6.8.3 and
+ * 5.27.11 (layershellv1window.cpp: belongsToLayer; layers.cpp:
+ * raiseWindow, restackWindowUnderActive; window.cpp:
+ * getMousePressCommand / getMouseCommand). Other wallpaper programs met
+ * the same thing and answered it the same way (swww, mpvpaper: their
+ * "bottom" layer option).
+ *
+ * On "bottom" KWin puts the surface one stacking layer higher: above
+ * Plasma's desktop whatever is clicked, below every ordinary window. What
+ * that costs: Plasma's desktop icons and widgets are behind the wallpaper
+ * and cannot be seen. No layer puts a surface between Plasma's wallpaper
+ * and its icons - they are one window.
+ *
+ * KWin is told by a global only it announces; these two are offered to
+ * every client by 5.27 and by 6.8 (wayland_server.cpp). */
+typedef enum { WL_LAYER_BACKGROUND = 0, WL_LAYER_BOTTOM = 1 } WlLayer;
+
+typedef enum {
+    WL_LAYER_WHY_DEFAULT = 0,   /* where a wallpaper belongs */
+    WL_LAYER_WHY_KWIN,          /* the compositor is KWin */
+    WL_LAYER_WHY_ASKED,         /* WALPE_WL_LAYER names it */
+} WlLayerWhy;
+
+static inline gboolean wl_global_is_kwin (const char *interface)
+{
+    return interface && (!strcmp (interface, "org_kde_plasma_shell") ||
+                         !strcmp (interface, "org_kde_plasma_virtual_desktop_management"));
+}
+
+/* WALPE_WL_LAYER: 1 = it names a layer (*out), 0 = not set, empty or
+ * "auto", -1 = no value this program knows (taken as "auto") */
+static inline int wl_layer_parse (const char *text, WlLayer *out)
+{
+    if (!text || !*text || !g_ascii_strcasecmp (text, "auto"))
+        return 0;
+    if (!g_ascii_strcasecmp (text, "background")) {
+        *out = WL_LAYER_BACKGROUND;
+        return 1;
+    }
+    if (!g_ascii_strcasecmp (text, "bottom")) {
+        *out = WL_LAYER_BOTTOM;
+        return 1;
+    }
+    return -1;
+}
+
+static inline WlLayer wl_layer_choose (const char *asked, gboolean kwin, WlLayerWhy *why)
+{
+    WlLayer l = WL_LAYER_BACKGROUND;
+    WlLayerWhy w = WL_LAYER_WHY_DEFAULT;
+    if (wl_layer_parse (asked, &l) > 0) {
+        w = WL_LAYER_WHY_ASKED;
+    } else if (kwin) {
+        l = WL_LAYER_BOTTOM;
+        w = WL_LAYER_WHY_KWIN;
+    }
+    if (why)
+        *why = w;
+    return l;
+}
+
+static inline const char *wl_layer_name (WlLayer l)
+{
+    return l == WL_LAYER_BOTTOM ? "bottom" : "background";
 }
 
 /* ------------------------------------------------- layer surface life cycle

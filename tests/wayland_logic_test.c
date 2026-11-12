@@ -3,7 +3,8 @@
  * libwayland. Scale arithmetic at fractional scales and odd sizes, the
  * output rectangles and their order, buffer size / buffer scale / viewport
  * of a surface, the pointer mapping, wheel clicks, the frame-callback
- * visibility test and the life cycle of a layer surface. */
+ * visibility test, the life cycle of a layer surface and the layer a
+ * wallpaper surface goes on. */
 #include <glib.h>
 #include <math.h>
 #include <string.h>
@@ -885,6 +886,56 @@ static void test_limits (void)
            G_MAXINT64 / 4);
 }
 
+/* which layer a wallpaper surface goes on: "background", except on KWin */
+static void test_layer_choice (void)
+{
+    WlLayerWhy why = WL_LAYER_WHY_ASKED;
+    /* the numbers are the protocol's (zwlr_layer_shell_v1.layer) */
+    CHECK (WL_LAYER_BACKGROUND == 0 && WL_LAYER_BOTTOM == 1);
+
+    /* nothing asked for */
+    CHECK (wl_layer_choose (NULL, FALSE, &why) == WL_LAYER_BACKGROUND && why == WL_LAYER_WHY_DEFAULT);
+    CHECK (wl_layer_choose ("", FALSE, &why) == WL_LAYER_BACKGROUND && why == WL_LAYER_WHY_DEFAULT);
+    CHECK (wl_layer_choose ("auto", FALSE, &why) == WL_LAYER_BACKGROUND && why == WL_LAYER_WHY_DEFAULT);
+    CHECK (wl_layer_choose (NULL, TRUE, &why) == WL_LAYER_BOTTOM && why == WL_LAYER_WHY_KWIN);
+    CHECK (wl_layer_choose ("", TRUE, &why) == WL_LAYER_BOTTOM && why == WL_LAYER_WHY_KWIN);
+    CHECK (wl_layer_choose ("Auto", TRUE, &why) == WL_LAYER_BOTTOM && why == WL_LAYER_WHY_KWIN);
+
+    /* a layer by name beats the compositor */
+    CHECK (wl_layer_choose ("background", TRUE, &why) == WL_LAYER_BACKGROUND && why == WL_LAYER_WHY_ASKED);
+    CHECK (wl_layer_choose ("bottom", FALSE, &why) == WL_LAYER_BOTTOM && why == WL_LAYER_WHY_ASKED);
+    CHECK (wl_layer_choose ("BOTTOM", TRUE, &why) == WL_LAYER_BOTTOM && why == WL_LAYER_WHY_ASKED);
+    CHECK (wl_layer_choose ("bottom", TRUE, NULL) == WL_LAYER_BOTTOM);
+
+    /* no value this program knows: as if nothing was asked for. "top" and
+     * "overlay" are layers of the protocol and none a wallpaper goes on */
+    static const char *const bad[] = { "top", "overlay", "0", "1", "bottom ", " background", "bg" };
+    for (guint i = 0; i < G_N_ELEMENTS (bad); i++) {
+        WlLayer l = WL_LAYER_BOTTOM;
+        CHECK (wl_layer_parse (bad[i], &l) == -1 && l == WL_LAYER_BOTTOM);
+        CHECK (wl_layer_choose (bad[i], FALSE, &why) == WL_LAYER_BACKGROUND && why == WL_LAYER_WHY_DEFAULT);
+        CHECK (wl_layer_choose (bad[i], TRUE, &why) == WL_LAYER_BOTTOM && why == WL_LAYER_WHY_KWIN);
+    }
+    WlLayer l = WL_LAYER_BOTTOM;
+    CHECK (wl_layer_parse (NULL, &l) == 0 && wl_layer_parse ("", &l) == 0 &&
+           wl_layer_parse ("auto", &l) == 0 && l == WL_LAYER_BOTTOM);
+    CHECK (wl_layer_parse ("background", &l) == 1 && l == WL_LAYER_BACKGROUND);
+    CHECK (wl_layer_parse ("bottom", &l) == 1 && l == WL_LAYER_BOTTOM);
+
+    /* KWin is told by globals only it has; what other compositors and KWin
+     * share (the layer shell itself, KDE's decoration protocol, which
+     * wlroots compositors offer too) says nothing */
+    CHECK (wl_global_is_kwin ("org_kde_plasma_shell"));
+    CHECK (wl_global_is_kwin ("org_kde_plasma_virtual_desktop_management"));
+    CHECK (!wl_global_is_kwin ("org_kde_kwin_server_decoration_manager"));
+    CHECK (!wl_global_is_kwin ("zwlr_layer_shell_v1"));
+    CHECK (!wl_global_is_kwin ("org_kde_plasma_shell_v2"));
+    CHECK (!wl_global_is_kwin ("") && !wl_global_is_kwin (NULL));
+
+    CHECK (!strcmp (wl_layer_name (WL_LAYER_BACKGROUND), "background"));
+    CHECK (!strcmp (wl_layer_name (WL_LAYER_BOTTOM), "bottom"));
+}
+
 int main (void)
 {
     test_scale ();
@@ -896,6 +947,7 @@ int main (void)
     test_axis ();
     test_frames ();
     test_layer ();
+    test_layer_choice ();
     test_limits ();
     if (fails) {
         g_printerr ("wayland-logic-test: %d check(s) failed\n", fails);
