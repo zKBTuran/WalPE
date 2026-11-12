@@ -16,11 +16,18 @@
  *   --hash K the FNV-1a hash of the picture after K more frames that are
  *   rasterised for real (frame_hash).
  *
- * Unless --raster is given, warm-up and measured frames run with
+ * Unless --raster or --hash is given, warm-up and measured frames run with
  * GL_RASTERIZER_DISCARD: a software rasteriser needs seconds per frame
  * for a 4K scene and would bury the engine's own time; no decision of the
  * engine depends on a pixel. Vertex work still runs (on Mesa llvmpipe:
  * on this thread, inside the draw calls - phases draw and pt_gl).
+ * --hash rasterises every frame, as --raster does: what the engine keeps
+ * from one frame to the next - a layer drawn once as the input of its
+ * effects, the result of a static effect chain - was kept empty from the
+ * frames that drew nothing, and the hash was of a picture without every
+ * layer that has effects (two builds "compared" by it agreed on such
+ * layers whatever they drew). The times of a run with --hash therefore
+ * include the rasteriser: measure in a run without it.
  *
  * Every GRand the engine makes is seeded from --seed (default 20261110),
  * and the tool sets WALPE_CPU_PHASES=1 and WALPE_PROP_PROBE (virtual
@@ -108,6 +115,7 @@ int main (int argc, char **argv)
         } else if (!strcmp (argv[i], "--hash") && i + 1 < argc) {
             int n = atoi (argv[++i]);
             hash_frames = CLAMP (n, 1, 100000);
+            raster = TRUE;      /* a picture needs every frame before it drawn */
         } else if (!strcmp (argv[i], "--seed") && i + 1 < argc) {
             seed_base = (guint32) g_ascii_strtoull (argv[++i], NULL, 10);
         } else if (!strcmp (argv[i], "--raster")) {

@@ -1658,7 +1658,8 @@ test('text-layout', executable('text-layout-test', 'tests/text_layout_test.c',
 # dev tool (not installed): render-thread CPU time of a scene per frame by
 # phase (scripts, transforms, text, particle simulation / vertex data / GL,
 # layer draws), live particles and - for comparing two builds - hashes of
-# the particle state, the particle vertex data and the picture:
+# the particle state, the particle vertex data and the picture (--hash:
+# every frame is rasterised then):
 #   scenecpu <wallpaper dir> [--size WxH] [--warm N] [--frames M] [--hash K]
 executable('scenecpu', 'tests/scenecpu.c',
   include_directories: inc,
