@@ -48,6 +48,8 @@ fakegl = static_library('walpe-fuzz-fakegl', 'fakegl.c',
 
 # the picture files of old-format layers and particle sprites through walpe_gl_tex_from_file
 fuzz_targets += ['layerpic']
+# a package's copy without its sound files, and the walk that completes it (src/engine/pkg.c)
+fuzz_targets += ['pkgsound']
 
 foreach t : fuzz_targets
   x = fuzz_extra.get(t, {'src': [], 'args': [], 'deps': []})
