@@ -9,10 +9,13 @@
  *  - src/ui/suppoll.h: how often the window asks the engine for its
  *    status - never in the background while the state is pushed, and
  *    never in the background while the engine is stopped and its socket
- *    is watched. */
+ *    is watched;
+ *  - src/ui/rescanpace.h: files that keep arriving in a new folder of the
+ *    library do not hold its scan off for as long as they come. */
 #include "ui/appearance.h"
 #include "ui/monlist.h"
 #include "ui/suppoll.h"
+#include "ui/rescanpace.h"
 #include "ui/winstate.h"
 #include <stdio.h>
 #include <string.h>
@@ -29,8 +32,98 @@ static int fails;
         }                                                                     \
     } while (0)
 
+/* The window's timer for the scans after a change of the library, as main.c
+ * runs it, in made-up time: one scan WALPE_RESCAN_QUIET_MS after the change,
+ * one 3 s and one 10 s later; a change of the library folder itself starts
+ * that anew, one of an arriving folder asks rescanpace.h first. */
+typedef struct {
+    gint64 due_us;      /* the timer; 0: none */
+    int more;
+    gint64 asked_us;
+    int scans;
+    gint64 first_scan_us, last_scan_us, longest_us;
+} Pace;
+
+static void pace_until (Pace *p, gint64 now)
+{
+    while (p->due_us && p->due_us <= now) {
+        gint64 t = p->due_us;
+        if (!p->scans)
+            p->first_scan_us = t;
+        else if (t - p->last_scan_us > p->longest_us)
+            p->longest_us = t - p->last_scan_us;
+        p->scans++;
+        p->last_scan_us = t;
+        p->due_us = p->more > 0 ? t + (p->more == 2 ? 3000 : 10000) * 1000 : 0;
+        if (p->more > 0)
+            p->more--;
+    }
+}
+
+static gboolean pace_waits (const Pace *p)
+{
+    return p->due_us && p->more == 2;
+}
+
+static void pace_change (Pace *p, gint64 now)
+{
+    pace_until (p, now);
+    if (!pace_waits (p))
+        p->asked_us = now;
+    p->more = 2;
+    p->due_us = now + WALPE_RESCAN_QUIET_MS * 1000;
+}
+
+static void pace_arrival (Pace *p, gint64 now)
+{
+    pace_until (p, now);
+    if (walpe_rescan_arrival_moves (pace_waits (p), p->asked_us, now))
+        pace_change (p, now);
+}
+
 int main (void)
 {
+    /* ---- the scans while a folder arrives */
+    {
+        const gint64 ms = 1000;
+        /* one file: as after any change, 0.6 s, 3.6 s and 13.6 s later */
+        Pace p = { 0 };
+        pace_arrival (&p, 0);
+        pace_until (&p, 60000 * ms);
+        CHECK (p.scans == 3 && p.first_scan_us == 600 * ms && p.last_scan_us == 13600 * ms,
+               "one file event: %d scans, first after %d ms", p.scans, (int) (p.first_scan_us / ms));
+        /* a second one while the scan waits: the wait starts again */
+        p = (Pace) { 0 };
+        pace_arrival (&p, 0);
+        pace_arrival (&p, 300 * ms);
+        pace_until (&p, 60000 * ms);
+        CHECK (p.scans == 3 && p.first_scan_us == 900 * ms,
+               "two file events: %d scans, first after %d ms", p.scans, (int) (p.first_scan_us / ms));
+        /* a file every 150 ms for a minute: the library is still scanned,
+         * first after 3.6 s at most and then never less often than that */
+        p = (Pace) { 0 };
+        for (gint64 t = 0; t <= 60000 * ms; t += 150 * ms)
+            pace_arrival (&p, t);
+        pace_until (&p, 60000 * ms);
+        CHECK (p.scans >= 15, "files that keep arriving: %d scans in a minute", p.scans);
+        CHECK (p.scans && p.first_scan_us <= (WALPE_RESCAN_ARRIVAL_MAX_MS + WALPE_RESCAN_QUIET_MS) * ms,
+               "files that keep arriving: first scan after %d ms", (int) (p.first_scan_us / ms));
+        CHECK (p.longest_us <= 4000 * ms,
+               "files that keep arriving: %d ms without a scan", (int) (p.longest_us / ms));
+        /* and not at every file: a scan reads the whole library */
+        CHECK (p.scans <= 60 * 1000 / WALPE_RESCAN_ARRIVAL_MAX_MS + 1,
+               "files that keep arriving: %d scans in a minute", p.scans);
+        /* changes of the library folder itself wait for a pause, as they did */
+        p = (Pace) { 0 };
+        for (gint64 t = 0; t <= 10000 * ms; t += 150 * ms)
+            pace_change (&p, t);
+        pace_until (&p, 10000 * ms);
+        CHECK (p.scans == 0, "changes of the library folder: %d scans before the pause", p.scans);
+        pace_until (&p, 60000 * ms);
+        CHECK (p.scans == 3 && p.first_scan_us == 10500 * ms,
+               "changes of the library folder: %d scans, first at %d ms", p.scans, (int) (p.first_scan_us / ms));
+    }
+
     /* ---- when the portal is asked */
     CHECK (!walpe_appearance_wanted (TRUE, NULL, 4, 14), "X11: never (the session stays as it was)");
     CHECK (!walpe_appearance_wanted (TRUE, NULL, 4, 6), "X11, old GTK: never");

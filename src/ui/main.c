@@ -33,6 +33,7 @@
 #include "appearance.h"  /* dark / light from the desktop portal (Wayland sessions) */
 #include "monlist.h"     /* the outputs as GDK names them, while no engine runs */
 #include "suppoll.h"     /* how often the engine is asked for its status */
+#include "rescanpace.h"  /* when the library is scanned again after a change */
 #include "winstate.h"    /* is the window on screen at all */
 #ifdef WALPE_HAVE_WORKSHOP_PAGE
 #include "workshop_page.h"   /* GtkWidget *walpe_workshop_page_new (void); */
@@ -1174,6 +1175,13 @@ static void refresh_model (void)
  * the view alone). One scan 0.6 s after the folder appeared missed every
  * copy that took longer. */
 static int rescan_more;
+static gint64 rescan_asked_us;  /* when the scan that waits was first asked for */
+
+/* the first scan after a change has not been made yet */
+static gboolean rescan_waits (void)
+{
+    return U.rescan_id && rescan_more == 2;
+}
 
 static gboolean rescan_tick (gpointer u)
 {
@@ -1189,10 +1197,12 @@ static gboolean rescan_tick (gpointer u)
 
 static void schedule_rescan (void)
 {
+    if (!rescan_waits ())
+        rescan_asked_us = g_get_monotonic_time ();
     if (U.rescan_id)
         g_source_remove (U.rescan_id);
     rescan_more = 2;
-    U.rescan_id = g_timeout_add (600, rescan_tick, NULL);
+    U.rescan_id = g_timeout_add (WALPE_RESCAN_QUIET_MS, rescan_tick, NULL);
 }
 
 /* ---- folders that arrive while the window is open
@@ -1233,7 +1243,10 @@ static gboolean dir_event_counts (GFileMonitorEvent ev)
 static void on_arrival_changed (GFileMonitor *m, GFile *f, GFile *o, GFileMonitorEvent ev, gpointer u)
 {
     (void) m; (void) f; (void) o; (void) u;
-    if (dir_event_counts (ev))
+    /* (files that keep arriving do not hold the scan off for as long as
+     * they come: rescanpace.h) */
+    if (dir_event_counts (ev) &&
+        walpe_rescan_arrival_moves (rescan_waits (), rescan_asked_us, g_get_monotonic_time ()))
         schedule_rescan ();
 }
 
