@@ -121,14 +121,42 @@ What it gets and what it does not, as the code is today:
   sends megabytes, or more than 20000 messages in ten seconds, is stopped (status:
   `web_error`). A page whose process dies is loaded again, three times within a minute at
   most.
-- **WebKit's sandbox stays on** for the processes that run pages; WalPE adds no folder to
-  it and does not switch it off. It keeps a page process that was taken over away from
-  your files and from the control socket. It is WebKit's sandbox with WebKit's rules: with
-  the X11 page host that process has the X server's socket (and so what any X client has),
-  and the sound server's.
+- **The window it lives in** (the page host) is one nobody sees. On an X11 session, and
+  by default on a Wayland session, it is an X window (under Xwayland there), with the
+  selection guard above. On a Wayland session without an X display that answers it is the
+  private page host ([WAYLAND.md](WAYLAND.md)): a Wayland display inside the daemon to
+  which only the page's toolkit is connected. Everything above limits a page there in
+  the same way; what is its own:
+  - Its socket is made in a directory of its own (mode 0700) below the runtime directory,
+    takes one connection, which must come from the daemon's own process (the peer's
+    credentials are checked), and is removed together with the directory as soon as the
+    toolkit is connected. After that nothing listens: no second client can connect, and
+    the display cannot be started a second time.
+  - The display offers the seven interfaces the toolkit needs (`wl_compositor`,
+    `wl_subcompositor`, `wl_shm`, `xdg_wm_base`, one `wl_output`, one `wl_seat`, and a
+    `wl_data_device_manager` that offers nothing and cancels every copy and drag) and
+    nothing else: no primary selection, no clipboard of anyone else, no screen capture,
+    no input from anywhere but the daemon.
+- **WebKit's sandbox stays on** for the processes that run pages (namespaces and a system
+  call filter of WebKit's own making); WalPE adds no folder to it, does not configure it
+  and does not switch it off. It keeps a page process that was taken over away from your
+  files and from the control socket. It is WebKit's sandbox with WebKit's rules: it gives
+  that process the socket of the display its toolkit is on, and the sound server's.
+  - With the X11 page host that is the X server's socket, on X11 and under Xwayland
+    alike: such a process has what any X client has.
+  - With the private page host WebKit would give it the session compositor's socket
+    (`$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`) - where a page process that was taken over could
+    act as a program of your session, and on compositors that offer clipboard, screen
+    capture and input protocols to every client could use those. The daemon therefore
+    puts the full path of the same socket into its own `WAYLAND_DISPLAY` when it starts
+    on a Wayland backend: every Wayland library takes that, and WebKit's sandbox set-up
+    does not find a file to hand over. Seen with WebKitGTK 2.52: the page's process then
+    has no display socket at all. This rests on how WebKit builds that file name; the
+    test `web-wayland` looks into the page's process and fails when it changes. Not
+    covered: a session started with a one-time socket (`WAYLAND_SOCKET`).
 - Sound in a page plays, as under Wallpaper Engine.
 
-Tests: `meson test -C build websec websec-private`.
+Tests: `meson test -C build websec websec-private web-x11 web-wayland webhost-wl`.
 
 ## What is trusted on the local machine
 
@@ -229,39 +257,11 @@ None of them has been attacked by anyone but its own tests.
 - **Effect shaders on OpenGL ES** go through one more rewriting stage ([GPU.md](GPU.md))
   with the limits of the table above. Tests: `fx-essl`, `fx-hostile`.
 - **Web wallpapers on Wayland**: by default the page's hidden window is an X window under
-  Xwayland, with the selection guard of X11 sessions. Without an X display that answers
-  it lives on the private page host ([WAYLAND.md](WAYLAND.md)): a Wayland display inside
-  the daemon to which only the page's toolkit is connected. Everything that limits a
-  page on the X11 page host limits it there in the same way (the network switch, the
-  navigation guard, no popups, choosers, downloads or permissions, the limits on what a
-  page may send the daemon, no keyboard); what is its own:
-  - Its socket is made in a directory of its own (mode 0700) below the runtime directory,
-    takes one connection, which must come from the daemon's own process (the peer's
-    credentials are checked), and is removed together with the directory as soon as the
-    toolkit is connected. After that nothing listens: no second client can connect, and
-    the display cannot be started a second time.
-  - The display offers the seven interfaces the toolkit needs (`wl_compositor`,
-    `wl_subcompositor`, `wl_shm`, `xdg_wm_base`, one `wl_output`, one `wl_seat`, and a
-    `wl_data_device_manager` that offers nothing and cancels every copy and drag) and
-    nothing else: no primary selection, no clipboard of anyone else, no screen capture,
-    no input from anywhere but the daemon.
-  - WebKit runs each page in a process with a sandbox of WebKit's own making (namespaces
-    and a system call filter; WalPE does not configure it) and gives that process the
-    socket of the display its toolkit is on: with the X11 page host the X server's, on
-    X11 and under Xwayland alike. With the private page host WebKit would give it the
-    session compositor's socket (`$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`) - where a page
-    process that was taken over could act as a program of your session, and on
-    compositors that offer clipboard, screen capture and input protocols to every client
-    could use those. The daemon therefore puts the full path of the same socket into
-    its own `WAYLAND_DISPLAY` when it starts on a Wayland backend: every Wayland library
-    takes that, and WebKit's sandbox set-up does not find a file to hand over. Seen with
-    WebKitGTK 2.52: the page's process then has no display socket at all. This rests on
-    how WebKit builds that file name; the test `web-wayland` looks into the page's
-    process and fails when it changes. Not covered: a session started with a one-time
-    socket (`WAYLAND_SOCKET`). The sound server's socket is handed to the page's process
-    on both page hosts.
-  Tests: `websec-private`, `web-wayland`, `webhost-wl`. The wallpaper surface itself never
-  takes the keyboard.
+  Xwayland, with the selection guard of X11 sessions; without an X display that answers
+  it lives on the private page host ([WAYLAND.md](WAYLAND.md)). What a page gets on
+  either, and what the private page host and WebKit's sandbox keep from it, is in
+  [Web wallpapers](#web-wallpapers) above. The wallpaper surface itself never takes the
+  keyboard.
 - **GPU choice**: for a `gpu` value other than `auto` the daemon starts short child
   processes of itself (`--gpu-probe`) and sets driver variables in its own environment;
   a variable that is already set is never replaced. `walpe-ctl gpu-stats` and the kernel
