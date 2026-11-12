@@ -587,13 +587,21 @@ signals_lib = static_library('walpe-signals', signals_srcs,
 signals_dep = declare_dependency(link_with: signals_lib, include_directories: inc,
   compile_args: signals_args, dependencies: signals_deps)
 
-# Every test program and developer tool from here on has build_by_default:
-# false. meson still puts every program a test() names into its default
-# target (`ninja` with no target), so ./build.sh builds the alias target
-# `programs` (the installed programs, at the end of this file) instead.
-# `meson test` builds what the tests it runs need; one tool by its name:
-# `ninja -C build sceneshot`.
+# Tests and developer tools: only in a build directory set up with
+# -Dtests=true (meson_options.txt; off by default). Without it this file
+# defines no test, no test program and no developer tool, so `ninja`,
+# `meson compile` and `meson install` build what is installed and nothing
+# else. With it: `meson test -C build` builds what the tests it runs need,
+# one tool is built by its name (`ninja -C build sceneshot`), and - meson
+# puts every program a test() names into its default target, whatever
+# build_by_default says - a plain `ninja` or `meson install` builds every
+# test program too; ./build.sh builds the alias target `programs` (the
+# installed programs, at the end of this file) in both cases.
+# The test parts of this file stand between `if with_tests` and
+# `endif  # with_tests`; their lines are not indented.
+with_tests = get_option('tests')
 
+if with_tests
 # which provider can work where: capability lists made up after real
 # compositors, the window arithmetic, WALPE_LOGIND, the status entry
 # "pause_rules", and the real providers with nothing to talk to (each one
@@ -630,6 +638,7 @@ if have_wl_signals and wl_server_dep.found()
     dependencies: [signals_dep, wl_server_dep],
     install: false, build_by_default: false), timeout: 120)
 endif
+endif  # with_tests
 
 # ------------------------------------------------------- dlopen'd modules
 # WebKitGTK (GTK 4, GStreamer, JavaScriptCore) and FFmpeg are loaded only
@@ -668,6 +677,7 @@ if have_web
     install_dir: moddir)
 endif
 
+if with_tests
 # which page host a web wallpaper gets (src/engine/webhostsel.h): X11
 # sessions unchanged, a Wayland backend through Xwayland too and on the
 # private display only without an X display (elsewhere opt-in), with the
@@ -693,6 +703,7 @@ if have_wl_scan and wl_server_dep.found() and wl_client_dep.found()
     dependencies: [glib, wl_server_dep, wl_client_dep],
     install: false, build_by_default: false), timeout: 60)
 endif
+endif  # with_tests
 if have_ffmpeg
   video_mod = shared_module('walpe-video', 'src/engine/video_custom.c', 'src/engine/sounddec.c',
     name_prefix: '',
@@ -736,6 +747,7 @@ daemon = executable('walpe-daemon', daemon_src,
   link_depends: 'src/daemon/modules.dynlist',
   install: true)
 
+if with_tests
 # what walpe-daemon and the web module make the dynamic loader load: a
 # build without the Wayland backend names no Wayland library and has no
 # wl_* symbol left, and no build's daemon names libpulse-simple (scene
@@ -749,6 +761,7 @@ test('linkage', find_program('sh'),
   args: [files('tests/linkage_test.sh'), meson.current_build_dir(),
          have_wayland ? 'wayland' : 'nowayland'],
   depends: linkage_deps, timeout: 60)
+endif  # with_tests
 
 # GUI stylesheet compiled in (data/style.css; ~/.config/walpe/style.css overrides)
 ui_res = import('gnome').compile_resources('walpe-ui-resources',
@@ -770,6 +783,7 @@ ctl = executable('walpe-ctl', 'src/ctl/main.c',
   dependencies: [core_dep],
   install: true)
 
+if with_tests
 # Sanitizer builds (-Db_sanitize=address or address,undefined): the suites
 # run with LeakSanitizer, which AddressSanitizer turns on by itself, and
 # with the suppressions of tests/lsan.supp (library memory only; the file
@@ -1695,10 +1709,10 @@ endif
 
 # ------------------------------------------------------ sanitizer runs
 # The sanitizers are meson's own option:
-#   meson setup build-asan -Db_sanitize=address,undefined -Db_lto=false -Db_lundef=false
+#   meson setup build-asan -Dtests=true -Db_sanitize=address,undefined -Db_lto=false -Db_lundef=false
 #   meson test -C build-asan --setup=asan           reports are failures, leaks are not looked for
 #   meson test -C build-asan --setup=asan_leaks     the same with leak detection
-#   meson setup build-tsan -Db_sanitize=thread -Db_lto=false -Db_lundef=false
+#   meson setup build-tsan -Dtests=true -Db_sanitize=thread -Db_lto=false -Db_lundef=false
 #   meson test -C build-tsan --setup=tsan
 #     (the thread-safety stress tests first, where the tree has them:
 #      --suite race; its race-shim test says whether the sanitizer can follow
@@ -1877,7 +1891,7 @@ executable('labelbench', 'tests/labelbench.c',
 # one decode thread per video, workers) on CPUs with weak memory ordering.
 # The tests are ordinary stress tests in any build; their point is a
 # ThreadSanitizer build, where they must run without a report:
-#   meson setup build-tsan -Db_sanitize=thread -Db_lto=false -Dbuildtype=debugoptimized
+#   meson setup build-tsan -Dtests=true -Db_sanitize=thread -Db_lto=false -Dbuildtype=debugoptimized
 #   meson test -C build-tsan --setup=tsan --suite race      (then the whole suite)
 # race-shim comes first: it tells whether the sanitizer can follow GLib on
 # this machine at all (tests/tsan/gsync_shim.c).
@@ -1917,6 +1931,7 @@ test('race-media', executable('race-media-test', 'tests/race_media_test.c',
   include_directories: inc,
   dependencies: [core_dep, dependency('threads')],
   install: false, build_by_default: false), suite: 'race', timeout: 120)
+endif  # with_tests
 
 # GPU numbers for a bug report: the kernel's statistics (walpe-ctl gpu-stats) or
 # nvidia-smi, /proc samples, then a profile
@@ -1941,6 +1956,7 @@ install_data('data/io.github.walpe.ui.desktop',
 install_data('data/icons/walpe.svg',
   install_dir: get_option('datadir') / 'icons/hicolor/scalable/apps')
 
+if with_tests
 # GUI pieces that used to depend on the session type, without a display:
 # when the dark / light preference is taken from the desktop portal (never
 # on X11) and what it maps to; how a monitor is named while no engine runs.
@@ -1948,6 +1964,7 @@ test('ui-session', executable('ui-session-test', 'tests/ui_session_test.c',
   include_directories: inc,
   dependencies: [gtk4],
   install: false, build_by_default: false))
+endif  # with_tests
 
 # ------------------------------------------------------------ walpe-tray
 # System tray icon (src/tray/): a separate process, so a tray problem can
@@ -1989,6 +2006,7 @@ if have_tray
     install_dir: get_option('sysconfdir') / 'xdg/autostart')
   # (data/icons/walpe.svg is installed with the GUI's desktop entry)
   # PNG sizes, if a launcher needs them: walpe-tray --export-icon=walpe.png --icon-size=N
+  if with_tests
   # dev/test helper (not installed): a StatusNotifierWatcher + host stub
   # that registers walpe-tray's item, dumps icon/tooltip/menu and clicks
   # menu items over dbusmenu
@@ -2007,15 +2025,16 @@ if have_tray
     include_directories: inc,
     dependencies: [glib],
     install: false, build_by_default: false))
+  endif  # with_tests
 endif
 
 summary({'x11': have_x11, 'wayland': have_wayland},
   section: 'Display backends (walpe-daemon)', bool_yn: true)
 
 # What ./build.sh builds: the installed programs and modules, nothing else.
-# (A plain `ninja -C build` also builds every test program: meson adds the
-# programs of all test()s to its default target whatever their
-# build_by_default says.)
+# (In a build directory with -Dtests=true a plain `ninja -C build` also
+# builds every test program: meson adds the programs of all test()s to its
+# default target whatever their build_by_default says.)
 programs = [daemon, ui, ctl]
 if have_tray
   programs += tray

@@ -81,7 +81,7 @@ fluid simulation and their switches), [SOUND.md](docs/SOUND.md), [VIDEO.md](docs
 ./build.sh --tuning=alderlake  # the same with -march=alderlake and friends (see below)
 # or by hand:
 meson setup build
-ninja -C build programs        # the installed programs only (plain `ninja -C build`: tests too)
+ninja -C build programs        # the installed programs (all a plain `ninja -C build` builds, unless the tests are on)
 ```
 
 `build.sh` (POSIX sh) runs ninja with as many jobs as the machine has CPUs (`-j <CPUs> -l
@@ -89,11 +89,12 @@ ninja -C build programs        # the installed programs only (plain `ninja -C bu
 directory (default `build`). `--tuning=<value>` is passed on as `-Dnative_tuning=<value>`,
 every other argument goes to `meson setup` (`./build.sh -Dweb=disabled`). An existing build
 directory is reconfigured, not wiped, and keeps the options it was set up with.
-`build.sh` builds the installed programs only (the ninja target `programs`). The test
-programs are built by `meson test`, a developer tool by its name (`ninja -C build
-sceneshot`). A plain `ninja -C build`, `meson compile` and `meson install` without
-`--no-rebuild` build every test program too: meson puts the programs of its tests into
-its default target.
+`build.sh` builds the installed programs only (the ninja target `programs`). **The tests
+and the developer tools are not part of a build unless you ask for them**: a build
+directory has no test program, no test and no tool until it is set up with `-Dtests=true`
+(`./build.sh -Dtests=true`, or `meson configure build -Dtests=true` for a directory that
+exists; [Tests](#tests)). Without it `ninja -C build`, `meson compile` and `meson
+install` build what is installed and nothing else.
 
 The default is a release build (`-O3`, `NDEBUG`, LTO, hardening flags) with **generic CPU
 tuning**: the binaries run on any CPU of the architecture they were built for.
@@ -215,8 +216,8 @@ every monitor loads its wallpaper again as at a start. The video module stays lo
 > WalPE, and there is no speed figure. Treat all of this section as expected to work, and
 > report.
 
-**Building on the ARM machine** is the same as on x86-64: `./build.sh`, then `meson test
--C build`. `--tuning=native` tunes for the CPU that builds (`-mcpu=native`; the binary
+**Building on the ARM machine** is the same as on x86-64: `./build.sh -Dtests=true`, then
+`meson test -C build`. `--tuning=native` tunes for the CPU that builds (`-mcpu=native`; the binary
 may not run on another ARM CPU), `--tuning=alderlake` is refused. Packages by their
 Debian 13 / Ubuntu 24.04 names (the dependency table above has the pkg-config modules).
 **The list is untested on an ARM machine**: it follows the package names of an x86-64
@@ -275,7 +276,7 @@ tried yet).
 
 ```sh
 meson setup build-arm64 --cross-file cross/aarch64-linux-gnu.ini   # add -Dquickjs_libdir=... or -Dscenescript=disabled
-ninja -C build-arm64 programs      # plain `ninja -C build-arm64`: the test programs too
+ninja -C build-arm64 programs      # (-Dtests=true at setup for the test programs)
 ```
 
 `--tuning=native` is refused in a cross build; name the target CPU with
@@ -294,11 +295,12 @@ is the first thing to run on a real ARM machine: a failure there is a portabilit
 
 ```sh
 ./build.sh --prefix=$HOME/.local     # choose the prefix at setup time
-meson install -C build --no-rebuild  # binaries to <prefix>/bin, modules to <prefix>/<libdir>/walpe
+meson install -C build               # binaries to <prefix>/bin, modules to <prefix>/<libdir>/walpe
 ```
 
-`--no-rebuild`: `build.sh` has built everything that is installed. Without the option
-`meson install` first runs a plain `ninja`, which builds every test program as well.
+`meson install` first runs a plain `ninja`. In a build directory without the tests that
+builds nothing `build.sh` has not built. In one set up with `-Dtests=true` it builds
+every test program as well: `meson install -C build --no-rebuild` installs without that.
 
 Or run from the build directory, or copy by hand: `walpe-daemon`, `walpe`, `walpe-ctl`,
 `walpe-tray` and the two modules `walpe-video.so` / `walpe-web.so` into one directory (the
@@ -739,9 +741,17 @@ Things the code relies on:
 ## Tests
 
 ```sh
+./build.sh -Dtests=true        # or: meson setup build -Dtests=true; an existing directory:
+                               #     meson configure build -Dtests=true
 meson test -C build            # everything (builds the test programs first)
 meson test -C build config ctl # single tests (builds only what they need)
 ```
+
+The tests are off by default (`-Dtests=false`): such a build directory has no test and
+no test program, and `meson test` says "No tests defined." there. `-Dtests=true` adds
+the tests, their programs and the developer tools (`ninja -C build sceneshot`) to the
+build directory; `./build.sh` still builds the installed programs only, and `meson
+configure build -Dtests=false` takes them out again.
 
 Tests that need a display start their own, tests that need OpenGL use EGL's surfaceless
 platform or a software device and skip (exit 77) without one; a test that also has checks
@@ -768,11 +778,11 @@ turns "cannot run here" into a failure.
 Sanitizer runs have test setups of their own:
 
 ```sh
-meson setup build-asan -Db_sanitize=address,undefined -Db_lto=false -Db_lundef=false
+meson setup build-asan -Dtests=true -Db_sanitize=address,undefined -Db_lto=false -Db_lundef=false
 meson test -C build-asan                        # no setup named: leak detection on, suppressions of tests/lsan.supp
 meson test -C build-asan --setup=asan           # stricter options, a report fails the test; leaks are not looked for
 meson test -C build-asan --setup=asan_leaks     # the stricter options with leak detection and the same suppressions
-meson setup build-tsan -Db_sanitize=thread -Db_lto=false -Db_lundef=false
+meson setup build-tsan -Dtests=true -Db_sanitize=thread -Db_lto=false -Db_lundef=false
 meson test -C build-tsan --setup=tsan --suite race   # then the rest
 ```
 

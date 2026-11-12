@@ -44,6 +44,8 @@ else
 	meson setup "$dir" "$@"
 fi
 
-# the installed programs only (meson.build: alias_target programs); the tests
-# and developer tools are built by `meson test` or `ninja -C <dir> <name>`
+# the installed programs only (meson.build: alias_target programs). Tests and
+# developer tools exist only in a build directory set up with -Dtests=true
+# (./build.sh -Dtests=true); there `meson test` or `ninja -C <dir> <name>`
+# builds them, this script still does not
 exec ninja -C "$dir" -j "$jobs" -l "$load" programs

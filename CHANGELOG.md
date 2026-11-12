@@ -128,13 +128,40 @@ Corrections to "Pause for fullscreen apps" per monitor, which is new in 0.13.0:
   daemon of 0.14.0 is refused.
 - README: "One scene's picture depends on reused effect targets" is no known limitation
   any more; 0.13.0 fixed it (a layer with a tint and effects keeps its effects).
-- Tests: scene sound against a slow and a refusing sound server; files of another kind
-  under a picture's name; an effect with 1 to 33 passes; rope trails at 10 to 1000 frames
-  a second; the working size of effects on a colour-only layer; scene switches that
-  reload once; more of the fullscreen rule on X11, and its case no longer ends in a crash
-  of the test script when the X server refuses a connection for a moment; the converted
-  copies of scene videos (`scenevideo`, `daemon-scene-video`); the memory report
-  (`memreport`).
+- Build: **the tests and the developer tools are no part of a build unless asked for.**
+  The new build option `tests` is off by default, and a build directory set up without it
+  has no test, no test program and no developer tool: `ninja`, `meson compile` and `meson
+  install` build the installed programs and nothing else. In 0.13.0 only `./build.sh`
+  left them out; `meson install` and a plain `ninja -C build` built every test program
+  (about a hundred) first. To run the tests: `./build.sh -Dtests=true` (or `meson setup
+  build -Dtests=true`; for a directory that exists `meson configure build -Dtests=true`),
+  then `meson test -C build`. `./build.sh` builds the installed programs only, as before,
+  with the option or without. The developer tools (`sceneshot` ...) were never built by
+  `meson test`, whatever the section of 0.13.0 says: one is built by its name (`ninja -C
+  build sceneshot`), in a directory with `-Dtests=true`.
+- Library window: an arrow, Home, End or Page key pressed anywhere in the window (in the
+  search field, for one) ended the rule that gives the wallpaper grid 64 % of the width;
+  from then on the grid kept its width in pixels when the window changed size. Only moving
+  the handle itself ends the rule now.
+- `walpe-ctl help` marks `script_texanim` as a switch that loads the wallpaper again.
+- Issue forms: they said that WalPE draws on X11 only; and the bug form now says that the
+  output of `walpe-ctl status`, which it asks for, carries the name of the Steam account
+  (`steam_user`) besides the home path.
+- Documents corrected against the code: the two picture-changing fixes of 0.13.0 in the
+  README's summary, the OpenGL ES shader size limit in SECURITY.md, two rows of
+  SETTINGS.md (where `status` shows the window system; which monitors a fullscreen window
+  across several pauses).
+- Tests: a test that cannot run at all - no OpenGL context, or nothing but script checks
+  in a build without QuickJS - ends with exit status 77, so `meson test` counts it as
+  skipped; 13 such tests ended with 0 and were counted as passed. `meson test
+  daemon-life` builds the web and video modules it uses (in a fresh build directory its
+  video case was left out without a word). New or extended: scene sound against a slow
+  and a refusing sound server; files of another kind under a picture's name; an effect
+  with 1 to 33 passes; rope trails at 10 to 1000 frames a second; the working size of
+  effects on a colour-only layer; scene switches that reload once; more of the fullscreen
+  rule on X11, and its case no longer ends in a crash of the test script when the X
+  server refuses a connection for a moment; the converted copies of scene videos
+  (`scenevideo`, `daemon-scene-video`); the memory report (`memreport`).
 
 ### Known limitations
 
@@ -297,10 +324,10 @@ the final tree with those of that earlier tree.
   window manager tiles or maximizes after showing it the grid could end up with two
   columns. The position is not saved across starts.
 - Build: `./build.sh` builds the installed programs and modules only (the new ninja
-  target `programs`), which makes a fresh build much shorter. The test programs are
-  built by `meson test`, a developer tool by its name (`ninja -C build sceneshot`). A
-  plain `ninja -C build` builds the test programs too, and so does `meson install`
-  unless it is given `--no-rebuild`. The installed binaries are the same as before.
+  target `programs`), which makes a fresh build much shorter. The test programs and the
+  developer tools are built by `meson test`, or one by name (`ninja -C build
+  sceneshot`); a plain `ninja -C build` builds them too. The installed binaries are the
+  same as before.
 - Two changes that are meant to change no picture: an effect takes memory for the passes
   it has (the pass table of an effect with one or two passes took 44 kB and takes 1.4 or
   2.8 kB now), and a control point's `flags` in a particle file is converted like the
@@ -309,9 +336,7 @@ the final tree with those of that earlier tree.
 - Tests: in a build without QuickJS (`-Dscenescript=disabled`) `fx-alpha` and `layers`
   leave out the checks that need a script instead of failing, and `sig-wl` no longer
   waits for ever where `TMPDIR` is too long for a socket path (it makes its directory in
-  `/tmp` then). A test that cannot run at all - no OpenGL context, or nothing but script
-  checks in a build without QuickJS - ends with exit status 77, so `meson test` counts
-  it as skipped; 13 such tests ended with 0 and were counted as passed.
+  `/tmp` then).
 
 ### Known limitations
 
