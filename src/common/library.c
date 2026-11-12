@@ -316,8 +316,16 @@ static char **find_dependents (GPtrArray *roots, const char *id)
             char *pj = g_build_filename (rd, name, "project.json", NULL);
             char *data = NULL;
             gsize len = 0;
-            /* most items are no presets: skip the JSON parse for them */
-            if (g_file_get_contents (pj, &data, &len, NULL) && len < 8 * 1024 * 1024 &&
+            /* most items are no presets: skip the JSON parse for them.
+             * A regular file of a project.json's size only, looked at before
+             * it is read: every other item of the library is opened here,
+             * and one whose project.json is a FIFO held the check for ever,
+             * one of gigabytes (or a link to a device) was read into
+             * memory whole before its length was compared. */
+            struct stat pst;
+            if (stat (pj, &pst) == 0 && S_ISREG (pst.st_mode) &&
+                pst.st_size < 8 * 1024 * 1024 &&
+                g_file_get_contents (pj, &data, &len, NULL) && len < 8 * 1024 * 1024 &&
                 strstr (data, "\"dependency\"")) {
                 JsonNode *root = wpj_parse_data (data, (gssize) len);
                 JsonObject *o = root && JSON_NODE_HOLDS_OBJECT (root) ? json_node_get_object (root)

@@ -276,6 +276,33 @@ static void test_validation (void)
     CHECK (pl && pl->dependents && g_strv_length (pl->dependents) == 1 &&
            !g_strcmp0 (pl->dependents[0], "A preset"));
     walpe_del_plan_free (pl);
+    {
+        /* other items of the library whose project.json is no file to read:
+         * a FIFO (the look for presets waited in open () for ever; the
+         * alarm ends this test then) and one of 1 GiB (it was read whole
+         * before its length was looked at). They are passed over. */
+        char *fd = P ("lib/3900000001"), *ff = P ("lib/3900000001/project.json");
+        char *bd = P ("lib/3900000002"), *bf = P ("lib/3900000002/project.json");
+        g_mkdir_with_parents (fd, 0755);
+        g_mkdir_with_parents (bd, 0755);
+        CHECK (mkfifo (ff, 0600) == 0);
+        CHECK (g_file_set_contents (bf, "{\"dependency\":\"3122339805\",\"title\":\"big\"}", -1, NULL));
+        CHECK (truncate (bf, (off_t) 1 << 30) == 0);
+        alarm (60);
+        pl = plan_rel ("lib/3122339805", NULL);
+        alarm (0);
+        CHECK (pl && pl->dependents && g_strv_length (pl->dependents) == 1 &&
+               !g_strcmp0 (pl->dependents[0], "A preset"));
+        walpe_del_plan_free (pl);
+        g_unlink (ff);
+        g_unlink (bf);
+        g_rmdir (fd);
+        g_rmdir (bd);
+        g_free (fd);
+        g_free (ff);
+        g_free (bd);
+        g_free (bf);
+    }
     pl = plan_rel ("lib/3493971117", NULL);   /* the preset itself: both copies */
     CHECK (pl && pl->targets->len == 2 && pl->steam_managed);
     CHECK (pl && pl->dependents && !pl->dependents[0]);
