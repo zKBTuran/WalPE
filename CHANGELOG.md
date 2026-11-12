@@ -99,10 +99,11 @@ copy.
   until then. `walpe-ctl set video_scene_convert=on|off` (on by default; Engine settings,
   "Smaller copies of videos in scenes"), `walpe-ctl status`: `scene_videos`. Only 8-bit
   4:2:0 clips are converted, the frame rate is kept, the picture differs from the original
-  by the scaling and one more encoding. Measured with a 3840x2160 60 fps clip on a
-  1920x1080 monitor, software decoding: 16.1 - 16.8 ms of CPU per picture before, 4.9 ms
-  from the copy (3.3 to 3.5 times less), about 110 MB less memory; the conversion took 64
-  CPU seconds once (docs/VIDEO.md).
+  by the scaling and one more encoding. A copy in the cache that cannot be read any more
+  (cut short when the machine lost power) is removed and made again. Measured with a
+  3840x2160 60 fps clip on a 1920x1080 monitor, software decoding: 16.1 - 16.8 ms of CPU
+  per picture before, 4.9 ms from the copy (3.3 to 3.5 times less), about 110 MB less
+  memory; the conversion took 64 CPU seconds once (docs/VIDEO.md).
 
 ### Pausing
 
