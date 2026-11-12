@@ -297,10 +297,10 @@ the final tree with those of that earlier tree.
   window manager tiles or maximizes after showing it the grid could end up with two
   columns. The position is not saved across starts.
 - Build: `./build.sh` builds the installed programs and modules only (the new ninja
-  target `programs`), which makes a fresh build much shorter. The test programs and the
-  developer tools are built by `meson test`, or one by name (`ninja -C build
-  sceneshot`); a plain `ninja -C build` builds them too. The installed binaries are the
-  same as before.
+  target `programs`), which makes a fresh build much shorter. The test programs are
+  built by `meson test`, a developer tool by its name (`ninja -C build sceneshot`). A
+  plain `ninja -C build` builds the test programs too, and so does `meson install`
+  unless it is given `--no-rebuild`. The installed binaries are the same as before.
 - Two changes that are meant to change no picture: an effect takes memory for the passes
   it has (the pass table of an effect with one or two passes took 44 kB and takes 1.4 or
   2.8 kB now), and a control point's `flags` in a particle file is converted like the

@@ -16,9 +16,10 @@ version 0.14.0, which is not released; the last release is 0.12.2.
 > emulation. Nothing new has been run on real AMD, Intel, NVIDIA or ARM hardware or on a
 > real Wayland desktop.** The NVIDIA / X11 path is meant to be unchanged from 0.12.2,
 > except that scenes which ask for bloom, camera shake, sprite sheets or a script camera
-> now get them and that a fullscreen window pauses the wallpaper of its own monitor only
-> ([Pausing](#pausing)); that too was checked on the software renderer only
-> ([Known limitations](#known-limitations)).
+> now get them, that two fixes change the picture of some scenes (layers with a tint and
+> effects, rope trails of particle systems) and that a fullscreen window pauses the
+> wallpaper of its own monitor only ([Pausing](#pausing)); that too was checked on the
+> software renderer only ([Known limitations](#known-limitations)).
 
 > **WalPE is an independent project. It is not affiliated with or endorsed by Wallpaper
 > Engine, its developers or Valve, and it ships none of Wallpaper Engine's files.** The
@@ -88,9 +89,11 @@ ninja -C build programs        # the installed programs only (plain `ninja -C bu
 directory (default `build`). `--tuning=<value>` is passed on as `-Dnative_tuning=<value>`,
 every other argument goes to `meson setup` (`./build.sh -Dweb=disabled`). An existing build
 directory is reconfigured, not wiped, and keeps the options it was set up with.
-`build.sh` builds the installed programs only (the ninja target `programs`); tests and
-developer tools are built only by `meson test` (or `ninja -C build <name>`, e.g. `ninja -C
-build sceneshot`).
+`build.sh` builds the installed programs only (the ninja target `programs`). The test
+programs are built by `meson test`, a developer tool by its name (`ninja -C build
+sceneshot`). A plain `ninja -C build`, `meson compile` and `meson install` without
+`--no-rebuild` build every test program too: meson puts the programs of its tests into
+its default target.
 
 The default is a release build (`-O3`, `NDEBUG`, LTO, hardening flags) with **generic CPU
 tuning**: the binaries run on any CPU of the architecture they were built for.
@@ -272,7 +275,7 @@ tried yet).
 
 ```sh
 meson setup build-arm64 --cross-file cross/aarch64-linux-gnu.ini   # add -Dquickjs_libdir=... or -Dscenescript=disabled
-ninja -C build-arm64
+ninja -C build-arm64 programs      # plain `ninja -C build-arm64`: the test programs too
 ```
 
 `--tuning=native` is refused in a cross build; name the target CPU with
@@ -291,8 +294,11 @@ is the first thing to run on a real ARM machine: a failure there is a portabilit
 
 ```sh
 ./build.sh --prefix=$HOME/.local     # choose the prefix at setup time
-meson install -C build               # binaries to <prefix>/bin, modules to <prefix>/<libdir>/walpe
+meson install -C build --no-rebuild  # binaries to <prefix>/bin, modules to <prefix>/<libdir>/walpe
 ```
+
+`--no-rebuild`: `build.sh` has built everything that is installed. Without the option
+`meson install` first runs a plain `ninja`, which builds every test program as well.
 
 Or run from the build directory, or copy by hand: `walpe-daemon`, `walpe`, `walpe-ctl`,
 `walpe-tray` and the two modules `walpe-video.so` / `walpe-web.so` into one directory (the
@@ -561,7 +567,7 @@ a key), `--action=next|random|pause-toggle` runs a menu entry.
   renderer (llvmpipe), a headless Wayland compositor, a null sound sink and - the build
   for 64-bit ARM - under emulation. Nothing new has been run on real AMD, Intel, NVIDIA
   or ARM hardware or on a real Wayland desktop**; the NVIDIA / X11 path is meant to be
-  unchanged from 0.12.2 with default settings, except for the 16 scenes of the next item
+  unchanged from 0.12.2 with default settings, except for the scenes of the next item
   and for the fullscreen pause rule with more than one monitor ([Pausing](#pausing): the
   monitor of the fullscreen window pauses, the others keep running; `fs_all=on` is the
   old rule), and that too is so far shown only on the software renderer, in two steps. The development tree as it
@@ -579,7 +585,11 @@ a key), `--action=next|random|pause-toggle` runs a menu entry.
   sprite_sheets=off script_camera=off` gives the earlier pictures back
   ([SCENE-FEATURES.md](docs/SCENE-FEATURES.md)). Wallpaper Engine's HDR bloom is not
   implemented (such scenes get the standard bloom), the look of the camera shake is an
-  estimate, and none of these was compared with Wallpaper Engine's own picture. Effects
+  estimate, and none of these was compared with Wallpaper Engine's own picture. Two
+  fixes change pictures whatever the switches say: a layer with a tint and effects keeps
+  its effects (two scenes of the test library), and a rope trail of a particle system is
+  as long as its scene says at every frame rate (shorter than in 0.12 at 60 Hz and
+  below); [CHANGELOG.md](CHANGELOG.md) has both. Effects
   on colour-only layers are as in 0.12 at a monitor's own resolution; a render size
   chosen above 2048 pixels makes them sharper ([RESOLUTION.md](docs/RESOLUTION.md)).
 - **Wayland: tested headless only.** The Wayland backend needs a compositor with the
@@ -730,11 +740,12 @@ Things the code relies on:
 
 ```sh
 meson test -C build            # everything (builds the test programs first)
-meson test -C build config ctl # single suites
+meson test -C build config ctl # single tests (builds only what they need)
 ```
 
 Tests that need a display start their own, tests that need OpenGL use EGL's surfaceless
-platform or a software device and skip (exit 77) without one. The end-to-end tests start a
+platform or a software device and skip (exit 77) without one; a test that also has checks
+without OpenGL runs those and says what it left out. The end-to-end tests start a
 private display and a private `walpe-daemon` with its own XDG directories in a temporary
 directory; nothing of your session is read, written or disturbed:
 

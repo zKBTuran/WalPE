@@ -64,7 +64,7 @@ Limits on what a wallpaper's scripts and shaders may cost (fixed, no switch):
 | one shader file (`.frag`, `.vert`, included header) | 1 MiB | not read: the effect fails like one whose shader is missing |
 | one shader with all its `#include`s | 4 MiB | further includes stay unexpanded (the effect then fails to compile) |
 | one statement of a shader, macros expanded | 8192 tokens | the shader is not handed to the driver (a driver's compiler can run out of stack on a longer statement); the effect fails like one that does not compile |
-| a shader the repairs look at | 256 KiB of source, 8192 bytes per line | a larger source, or a longer line, is compiled as written, without the repairs for Wallpaper Engine's dialect |
+| a shader the repairs look at | 256 KiB of source, 8192 bytes per line | a larger source, or a longer line, is compiled as written, without the repairs for Wallpaper Engine's dialect. On OpenGL ES a source of more than 256 KiB is not compiled at all (it is not translated to GLSL ES either): a warning names it and its effect is not drawn |
 | a combo name from a wallpaper's JSON or a `[COMBO]` annotation | an identifier of at most 128 characters | anything else is left out of the shader source |
 | a time zone name a script asks for | a zone of the system's zone directory | other names (files there that are no zones, `posix/`, `right/`) give no zone |
 

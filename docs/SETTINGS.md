@@ -31,7 +31,8 @@ the wrong kind and the whole request is refused. A switch takes `on` / `off` (al
 that column is in brackets `walpe-ctl set` does not take the key: it is changed by the
 command named there, or only in the file while the daemon is not running ("file only").
 `walpe-ctl status` shows every key `set` takes under the key's name (`video_backend` as
-`backend`, the quality knobs in `walpe-ctl quality`, the scene feature switches in
+`backend` and the window system setting `backend` as `display_backend_setting`, the
+quality knobs in `walpe-ctl quality`, the scene feature switches in
 `feature_switches`; `software_threads` there is the number in use,
 `software_threads_saved` the setting).
 
@@ -60,7 +61,7 @@ command named there, or only in the file while the daemon is not running ("file 
 
 | Key | Default | set name | Meaning |
 |---|---|---|---|
-| `pause_fullscreen` | true | `fs` | pause a monitor while a focused fullscreen window is on it; the other monitors keep running (a window across several monitors pauses each of them) |
+| `pause_fullscreen` | true | `fs` | pause a monitor while a focused fullscreen window is on it; the other monitors keep running (a window across several monitors pauses each one it covers at least half of) |
 | `pause_fullscreen_all` | false | `fs_all` | a focused fullscreen window pauses every monitor, not only the one it is on (what `pause_fullscreen` did up to 0.12) |
 | `pause_dpms` | true | `dpms` | pause while the display is in power save or the screensaver runs |
 | `pause_covered` | true | `covered` | pause a monitor while visible normal windows cover 85 % of it or more (X11); on Wayland: while the compositor does not show the wallpaper, or the focused window on that monitor is fullscreen or maximized |
