@@ -310,12 +310,19 @@ WalpeVideoTex *walpe_video_tex_new (const char *path, guint64 off, guint64 len, 
 WalpeVideoTex *walpe_video_tex_new_copy (const char *path, guint64 off, guint64 len,
                                          const WalpeVideoTexCopy *copy, GError **err)
 {
+    /* (the scene loader's entry: without the two notes `walpe-ctl mem` said
+     * of every scene video "a scene's compressed sound file (its decoder)",
+     * used 0 times) */
+    mod_why = "a scene with a video texture was opened";
+    mod_why_path = path;
     const WalpeVideoModule *m = walpe_video_module (TRUE);
+    mod_why = mod_why_path = NULL;
     if (!m) {
         g_set_error (err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, "video backend: %s",
                      video_err ? video_err : "not loaded");
         return NULL;
     }
+    g_atomic_int_inc (&video_note.uses);
     return m->tex_new_copy (path, off, len, copy, err);
 }
 

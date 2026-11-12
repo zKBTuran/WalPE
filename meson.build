@@ -1196,6 +1196,12 @@ if have_ffmpeg
     install: false, build_by_default: false)
   test('video', video_test, timeout: 300)
   test('video-nv12', video_test, env: ['WALPE_VIDEO_TEST_NV12=1'], timeout: 300)
+  # what `walpe-ctl mem` says the video module was loaded for, when a
+  # scene's video texture is the first to ask (the module itself is loaded)
+  test('modnote', executable('modnote-test', 'tests/modnote_test.c',
+    include_directories: inc,
+    dependencies: [core_dep],
+    install: false, build_by_default: false), depends: [video_mod])
 endif
 
 # version 0.12: config.json fps migration, shared-rendering leader, pacing, YUV matrices
