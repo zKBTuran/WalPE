@@ -9,6 +9,7 @@
  * not, submenu or not, are decided when the id is first seen), so across
  * all of them an id may only ever be one item. */
 #include "tray/trayids.h"
+#include "tray/traytip.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -153,9 +154,38 @@ static TrayItem *numbered (TrayIds *ids, gboolean alive, int recents, int monito
     return m;
 }
 
+/* the tooltip a panel is given (traytip.h): nothing in it opens a tag,
+ * whatever the wallpaper is called; other text goes out as it is */
+static void tip_for_host (void)
+{
+    static const char *const titles[] = {
+        "<img src=\"http://host/x.png\">",
+        "<b>bold</b> <a href='x'>y</a>",
+        "a < b > c <3 <<>>",
+        "<!doctype html><table><tr><td>",
+    };
+    for (guint i = 0; i < G_N_ELEMENTS (titles); i++) {
+        char *tip = g_strdup_printf ("%s (web)\nPaused: a fullscreen app is running", titles[i]);
+        char *out = tray_tip_for_host (tip);
+        CHECK (!strchr (out, '<') && !strchr (out, '>'), "no angle bracket goes to a host: %s", out);
+        CHECK (g_utf8_validate (out, -1, NULL) && g_utf8_strlen (out, -1) == g_utf8_strlen (tip, -1),
+               "the same characters otherwise: %s", out);
+        CHECK (strstr (out, "\nPaused: a fullscreen app is running") != NULL, "the lines after it stay");
+        g_free (out);
+        g_free (tip);
+    }
+    char *plain = tray_tip_for_host ("DP-1: Forêt & rivière · 雨 (scene)\nPaused · muted");
+    CHECK (!strcmp (plain, "DP-1: Forêt & rivière · 雨 (scene)\nPaused · muted"), "other text is not touched: %s", plain);
+    g_free (plain);
+    char *none = tray_tip_for_host (NULL);
+    CHECK (!strcmp (none, ""), "no text is no text");
+    g_free (none);
+}
+
 int main (void)
 {
     TrayIds ids = TRAY_IDS_INIT;
+    tip_for_host ();
     seen = g_hash_table_new_full (NULL, NULL, NULL, g_free);
 
     /* ---- the report: the panel reads the menu while the tray knows no

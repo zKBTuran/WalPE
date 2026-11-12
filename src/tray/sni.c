@@ -18,6 +18,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "tray.h"
+#include "traytip.h"
 
 static const char sni_xml[] =
     "<node>"
@@ -197,9 +198,14 @@ static GVariant *sni_get (GDBusConnection *c, const char *sender, const char *pa
         return pixmaps ();
     if (!strcmp (prop, "OverlayIconPixmap") || !strcmp (prop, "AttentionIconPixmap"))
         return empty_pixmaps ();
-    if (!strcmp (prop, "ToolTip"))
-        return g_variant_new ("(s@a(iiay)ss)", "", empty_pixmaps (), tray_tooltip_title (),
-                              tray_tooltip_text ());
+    if (!strcmp (prop, "ToolTip")) {
+        /* (a host may read the text as markup: traytip.h) */
+        char *title = tray_tip_for_host (tray_tooltip_title ()), *text = tray_tip_for_host (tray_tooltip_text ());
+        GVariant *v = g_variant_new ("(s@a(iiay)ss)", "", empty_pixmaps (), title, text);
+        g_free (title);
+        g_free (text);
+        return v;
+    }
     if (!strcmp (prop, "ItemIsMenu"))
         return g_variant_new_boolean (FALSE);
     if (!strcmp (prop, "Menu"))
