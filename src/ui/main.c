@@ -231,6 +231,8 @@ static struct {
     int quick_fails;
     guint retry_id;
     gboolean auto_restart;      /* respawn when it dies (off after 3 quick fails / clean quit) */
+    gboolean quit_told;         /* the engine said it leaves on request ({"event":"quit"}) */
+    gboolean restart_asked;     /* ... and that request was this window's "Restart engine" */
     char *why;                  /* last failure reason */
 } Sup = { .auto_restart = TRUE };
 
@@ -487,7 +489,7 @@ static void sup_child_exit (GPid pid, gint wstatus, gpointer u)
     else
         Sup.why = g_strdup_printf ("exit status %d", WIFEXITED (wstatus) ? WEXITSTATUS (wstatus) : -1);
     gboolean clean = WIFEXITED (wstatus) && WEXITSTATUS (wstatus) == 0;
-    if (clean && lived > 3 * G_USEC_PER_SEC) {
+    if (clean && (lived > 3 * G_USEC_PER_SEC || Sup.quit_told)) {
         /* asked to quit (walpe-ctl quit): no automatic restart */
         Sup.auto_restart = FALSE;
         sup_set_state (D_DOWN, "The engine was stopped. Press Start engine to run it again.");
@@ -595,6 +597,8 @@ static void sup_on_down (void)
     if (U.dstate == D_GAVE_UP)
         return;
     Sup.auto_restart = TRUE;
+    Sup.quit_told = FALSE;
+    Sup.restart_asked = FALSE;
     sup_spawn ();
 }
 
@@ -603,6 +607,7 @@ static void on_restart (GtkButton *b, gpointer u)
     (void) b; (void) u;
     Sup.quick_fails = 0;
     Sup.auto_restart = TRUE;
+    Sup.quit_told = FALSE;
     if (U.dstate == D_BUSY && Sup.child) {
         /* our child hangs: end it; the exit handler respawns it */
         kill (Sup.child, SIGTERM);
@@ -610,6 +615,7 @@ static void on_restart (GtkButton *b, gpointer u)
         return;
     }
     if (U.dstate == D_BUSY) {
+        Sup.restart_asked = TRUE;   /* (its "I leave on request" is ours: restart it) */
         ui_ipc_send ("{\"cmd\":\"quit\"}", 0, NULL, NULL);
         set_status ("Asked the engine to quit; it is restarted when it has exited.", FALSE);
         return;
@@ -817,7 +823,10 @@ static void on_status_reply (JsonObject *reply, const char *err, gpointer u)
                                    : "The engine is not running. Starting it…");
                     sup_schedule_respawn ();
                 } else if (!Sup.child) {
-                    sup_set_state (D_DOWN, NULL);
+                    /* told to quit by somebody (walpe-ctl quit, the tray):
+                     * the same words as for an engine of our own */
+                    sup_set_state (D_DOWN, Sup.quit_told ? "The engine was stopped. Press Start engine "
+                                                           "to run it again." : NULL);
                 }
             }
         }
@@ -829,7 +838,10 @@ static void on_status_reply (JsonObject *reply, const char *err, gpointer u)
         Sup.up_since_us = now;
     if (Sup.quick_fails && now - Sup.up_since_us > 30 * G_USEC_PER_SEC)
         Sup.quick_fails = 0;   /* it stayed up: forgive earlier crashes */
-    Sup.auto_restart = TRUE;
+    /* (not while the engine that answers has said it is leaving: its
+     * answer to a request sent before that must not undo it) */
+    if (!Sup.quit_told)
+        Sup.auto_restart = TRUE;
     if (U.last_state)
         json_object_unref (U.last_state);
     U.last_state = json_object_ref (st);
@@ -961,8 +973,27 @@ static void on_sub_line (const char *line, gpointer u)
 {
     (void) u;
     JsonNode *n = line ? wpj_parse_data (line, -1) : NULL;
-    if (n && JSON_NODE_HOLDS_OBJECT (n))
-        on_status_reply (json_node_get_object (n), NULL, NULL);
+    JsonObject *lo = n && JSON_NODE_HOLDS_OBJECT (n) ? json_node_get_object (n) : NULL;
+    if (lo && !json_object_has_member (lo, "state") && !g_strcmp0 (wpj_str (lo, "event", ""), "quit")) {
+        /* The engine leaves because somebody asked it to (walpe-ctl quit,
+         * the tray's menu): its last line. Without it the end of the
+         * connection looked like a crash, and an engine this window had
+         * not started itself was started again a second later. It stays
+         * stopped now, as an engine of our own does after a quit - unless
+         * the request was this window's own "Restart engine". */
+        if (Sup.restart_asked) {
+            Sup.restart_asked = FALSE;
+        } else {
+            Sup.quit_told = TRUE;
+            Sup.auto_restart = FALSE;
+        }
+        json_node_unref (n);
+        return;
+    }
+    if (lo && json_object_has_member (lo, "state"))
+        Sup.quit_told = FALSE;      /* an engine (a new one) tells its state */
+    if (lo)
+        on_status_reply (lo, NULL, NULL);
     else
         sup_poll_now ();
     if (n)

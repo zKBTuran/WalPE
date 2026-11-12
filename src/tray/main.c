@@ -540,6 +540,11 @@ static gboolean poll_tick (gpointer user)
 static void on_sub (const char *line, gpointer user)
 {
     (void) user;
+    /* the engine's last line when it leaves on request ({"event":"quit"}):
+     * no state in it and nothing to act on - the end of the connection
+     * follows, and that is what a restart started here waits for */
+    if (line && strstr (line, "\"event\":\"quit\"") && !strstr (line, "\"state\""))
+        return;
     on_status (line, NULL);
     poll_reschedule ();
 }

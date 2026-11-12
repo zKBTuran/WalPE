@@ -815,7 +815,28 @@ def case_push(env, W):
     got = sub.lines(1.5)
     check(any((g.get("state") or {}).get("resolution_prompt") is False for g in got),
           "push: a resolution request that changes a setting is told", f"{len(got)} lines")
+    # An engine that leaves because it was asked to says so, as its last line:
+    # the end of the connection alone is what a crash looks like too, and a
+    # window that had not started this engine started a new one after
+    # `walpe-ctl quit`. An engine that is killed says nothing.
+    env.ipc({"cmd": "quit"})
+    got = sub.lines(2.0)
+    check(bool(got) and got[-1].get("event") == "quit" and "state" not in got[-1],
+          "push: an engine told to quit says so to its subscribers, last of all",
+          [g.get("event") for g in got])
     sub.close()
+    env.stop_daemon()
+    if not check(env.start_daemon([A]), "push: daemon started again"):
+        return
+    sub = Subscriber(env.sock)
+    sub.lines(1.0)
+    env.daemon.kill()
+    env.daemon.wait()
+    got = sub.lines(2.0)
+    check(not any(g.get("event") == "quit" for g in got), "push: an engine that is killed says nothing of the kind",
+          [g.get("event") for g in got])
+    sub.close()
+    env.daemon = None
     env.stop_daemon()
 
 
@@ -989,10 +1010,53 @@ def case_window(env, W):
             check(woke is not None and woke <= 3,
                   "window: open, idle and without the focus, its main thread sleeps",
                   f"{woke} wake-ups in 16 s")
+
+            # `walpe-ctl quit` while the window is open. The window did not
+            # start this engine, so the engine's going away was a crash to it
+            # and a new engine ran a second later. It stays stopped now, and
+            # the window does not go on asking for it either (it asked a
+            # socket that was not there every 2 s for as long as it stayed
+            # open).
+            def answers():
+                return env.ipc({"cmd": "status"}, timeout=1.5) is not None
+
+            rcode, _ = env.ctl("quit")
+            env.daemon.wait(timeout=20 * PATIENCE)
+            env.daemon = None
+            back = wait_for(answers, 8.0 * PATIENCE, 0.5)
+            check(rcode == 0 and not back and win.poll() is None,
+                  "window: an engine stopped with walpe-ctl quit stays stopped while the window is open")
+            woke = None
+            for _ in range(4):
+                a = main_wakeups(win.pid)
+                time.sleep(16.0)
+                b = main_wakeups(win.pid)
+                woke = b - a if a is not None and b is not None else None
+                if woke is None or woke <= 3:
+                    break
+            check(not back and woke is not None and woke <= 3,
+                  "window: its main thread sleeps while the engine is stopped", f"{woke} wake-ups in 16 s")
+            # an engine somebody starts is found without asking, and one that
+            # dies is still started again by the window
+            if check(env.start_daemon([A]), "window: an engine started from outside runs"):
+                check(bool(wait_for(lambda: subscribers(env) >= 1, 20, 0.5)),
+                      "window: it listens to the engine that was started from outside")
+                time.sleep(1.0)
+                env.daemon.kill()
+                env.daemon.wait()
+                env.daemon = None
+                check(bool(wait_for(answers, 40, 0.5)) and win.poll() is None,
+                      "window: an engine that is killed is started again by the window")
+                env.ipc({"cmd": "quit"})    # (now the window's own: quit, the window ends below)
+                wait_for(lambda: not answers(), 15, 0.5)
         finally:
             xc.close()
     finally:
         stop(win)
+    env.stop_daemon()
+    if not check(env.start_daemon([A]), "window: daemon started again"):
+        return
+    loaded(env, W["red"])
 
     win, ok = start({"WALPE_UI_STATS": stats})
 

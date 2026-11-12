@@ -7969,6 +7969,13 @@ static char *ipc_handler (const char *req, gpointer user)
     } else if (!g_strcmp0 (cmd, "quit")) {
         jb_bool (b, "ok", TRUE);
         quit = TRUE;
+        /* The subscribers (the window, the tray) are told that the engine
+         * leaves because it was asked to. To them the end of the connection
+         * was all there was, the same as after a crash - so a window that
+         * had not started this engine itself started a new one a second
+         * after `walpe-ctl quit`. One line, the last on the connection;
+         * an engine that dies sends none and is restarted as before. */
+        walpe_ipc_broadcast ("{\"event\":\"quit\"}");
     } else {
         jb_fail (b, "unknown cmd");
     }
