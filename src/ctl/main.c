@@ -60,6 +60,7 @@ static void usage (void)
              "  walpe-ctl set mute=on|off      wallpaper sound silent, the volume setting stays\n"
              "  walpe-ctl setprop walpe_sound=on|off  one wallpaper's own sound switch: wins over\n"
              "                                 scene_sound (resetprops drops it again)\n"
+             "  walpe-ctl setprop walpe_volume=X  one wallpaper's own volume, 0..1: times `volume`\n"
              "  walpe-ctl set fs_all=on|off    a focused fullscreen window pauses every monitor,\n"
              "                                 not only the one it is on (fs=on; off by default)\n"
              "  walpe-ctl set covered=on|off   pause a monitor while windows cover it\n"

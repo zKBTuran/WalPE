@@ -5442,6 +5442,28 @@ static const char *ipc_target_path (JsonObject *o)
     return p && *p ? p : NULL;
 }
 
+/* setprop / setprops: WalPE's own two sound options of a wallpaper, its
+ * switch "walpe_sound" (on | off | anything else: as the setting says) and
+ * its volume "walpe_volume" (0..1, a factor on the volume setting). They
+ * change nothing a scene draws, so the wallpaper is not loaded again for
+ * them - its sound would start from the beginning and the picture would
+ * blink for a volume slider: the players of the loaded wallpaper take both
+ * at once. FALSE: the wallpaper has no players (not loaded, no sound
+ * layers): the caller loads it again as for any option. */
+static gboolean prop_is_sound (const char *key)
+{
+    return !strcmp (key, "walpe_sound") || !strcmp (key, "walpe_volume");
+}
+
+static gboolean sound_props_apply (const char *wp)
+{
+    char *sw = walpe_config_get_prop (wp, "walpe_sound"), *vol = walpe_config_get_prop (wp, "walpe_volume");
+    guint n = walpe_sound_wallpaper_set (wp, walpe_sound_switch_parse (sw), walpe_sound_volume_parse (vol));
+    g_free (sw);
+    g_free (vol);
+    return n > 0;
+}
+
 #include "layers_ipc.h"   /* "layers" / "layeradj": ipc_layers, ipc_layeradj */
 #include "common/setkeys.h"   /* "set": the members it may carry (walpe_set_check) */
 
@@ -5457,7 +5479,8 @@ static void ipc_props_note (JsonBuilder *b, const char *wp, GPtrArray *keys)
     GString *unknown = g_string_new (NULL);
     for (guint i = 0; defs && i < keys->len; i++)
         if (!json_object_has_member (defs, keys->pdata[i]) &&
-            strcmp (keys->pdata[i], "walpe_sound") != 0)   /* WalPE's own: a scene's sound switch */
+            strcmp (keys->pdata[i], "walpe_sound") != 0 &&   /* WalPE's own: a scene's sound switch */
+            strcmp (keys->pdata[i], "walpe_volume") != 0)    /* ... and its own volume */
             g_string_append_printf (unknown, "%s%s", unknown->len ? ", " : "",
                                     (const char *) keys->pdata[i]);
     if (unknown->len) {
@@ -8052,7 +8075,8 @@ static char *ipc_handler (const char *req, gpointer user)
             char *tpc = g_strdup (tp);   /* apply_wallpapers may free a monitor's path */
             walpe_config_set_prop (D.cfg, tpc, key, val);
             walpe_config_save (D.cfg);
-            apply_wallpapers (tpc, NULL, FALSE, FALSE);
+            if (!(prop_is_sound (key) && sound_props_apply (tpc)))
+                apply_wallpapers (tpc, NULL, FALSE, FALSE);
             jb_bool (b, "ok", TRUE);
             GPtrArray *ks = g_ptr_array_new ();
             g_ptr_array_add (ks, (gpointer) key);
@@ -8120,18 +8144,21 @@ static char *ipc_handler (const char *req, gpointer user)
             GList *ks = json_object_get_members (po);
             GPtrArray *set = g_ptr_array_new ();
             guint n = 0;
+            gboolean sound_only = TRUE;   /* nothing but WalPE's own sound options */
             for (GList *k = ks; k; k = k->next) {
                 char *val = json_value_to_prop (json_object_get_member (po, k->data));
                 if (val && *(const char *) k->data) {
                     walpe_config_set_prop (D.cfg, tpc, k->data, val);
                     g_ptr_array_add (set, k->data);
+                    sound_only &= prop_is_sound (k->data);
                     n++;
                 }
                 g_free (val);
             }
             if (n) {
                 walpe_config_save (D.cfg);
-                apply_wallpapers (tpc, NULL, FALSE, FALSE);
+                if (!(sound_only && sound_props_apply (tpc)))
+                    apply_wallpapers (tpc, NULL, FALSE, FALSE);
             }
             jb_bool (b, "ok", TRUE);
             jb_int (b, "changed", n);

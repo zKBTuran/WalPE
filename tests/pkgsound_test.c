@@ -31,6 +31,7 @@
 #include "engine/content.h"
 #include "engine/glutil.h"
 #include "engine/pkg.h"
+#include "engine/propnotes.h"
 #include "engine/scenesound.h"
 
 static int fails, checks;
@@ -940,6 +941,21 @@ int main (void)
            walpe_pkg_sound_name ("s/x.flac") && !walpe_pkg_sound_name ("x.tex") && !walpe_pkg_sound_name ("mp3") &&
            !walpe_pkg_sound_name ("a.mp3/scene.json") && !walpe_pkg_sound_name ("a\nb.mp3"),
            "which entries are sound files");
+    {
+        /* "this wallpaper has sound", for the options panel: counted in the
+         * package's scene.json - nothing is extracted for it (no cache
+         * exists yet), no sound file is opened */
+        guint n = 9, none = 9;
+        JsonObject *notes = walpe_prop_notes_sound (item, &n);
+        char *cdir = g_build_filename (T, "cache", "walpe", NULL);
+        CHECK (n == 1 && !g_file_test (cdir, G_FILE_TEST_EXISTS), "sound layers of the packaged scene: %u (cache %s)",
+               n, g_file_test (cdir, G_FILE_TEST_EXISTS) ? "made" : "not made");
+        if (notes)
+            json_object_unref (notes);
+        notes = walpe_prop_notes_sound ("/nowhere/at/all", &none);
+        CHECK (none == 0 && !notes, "no wallpaper: no sound layers (%u)", none);
+        g_free (cdir);
+    }
     test_cache ();
     test_kinds ();
     test_refused ();

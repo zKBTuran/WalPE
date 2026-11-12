@@ -1124,6 +1124,8 @@ static void row_label (Panel *P, const char *key, JsonObject *def, Lab *lab, gbo
     if (ctl && !lab->sub && !g_strcmp0 (key, "schemecolor") && !g_strcmp0 (type, "color"))
         lab->sub = g_strdup ("Wallpaper Engine's accent colour for its own interface and RGB "
                              "hardware. Few wallpapers read it.");
+    if (ctl && !lab->sub && !g_strcmp0 (key, "walpe_sound"))
+        lab->sub = g_strdup ("As Engine settings say, always on, or always off.");
     /* an option the scene cannot react to says so (propnotes.h) instead of
      * silently doing nothing */
     const char *note = ctl && P && P->notes ? wpj_str (P->notes, key, NULL) : NULL;
@@ -2157,6 +2159,35 @@ static void build_cancel (Panel *P)
     }
 }
 
+/* WalPE's own sound options of a wallpaper that has sound: its switch
+ * "walpe_sound" (as Engine settings say / on / off) and its volume
+ * "walpe_volume" (a factor on the volume of Engine settings). The first
+ * existed on the command line only (`walpe-ctl setprop walpe_sound=...`),
+ * the second not at all - a scene whose author gave it no music option
+ * could not be silenced or turned down by itself. They are rows like the
+ * wallpaper's own options, at the top of the list: staged, sent, saved and
+ * reset with them; the engine applies them to the running wallpaper
+ * without loading it again. */
+static const char SOUND_DEFS[] =
+    "{\"walpe_sound_head\":{\"type\":\"group\",\"text\":\"Sound of this wallpaper\",\"order\":-1000002},"
+    "\"walpe_sound\":{\"type\":\"combo\",\"text\":\"Sound\",\"order\":-1000001,"
+    "\"value\":\"\",\"options\":[{\"label\":\"As in Engine settings\",\"value\":\"\"},"
+    "{\"label\":\"On\",\"value\":\"on\"},{\"label\":\"Off\",\"value\":\"off\"}]},"
+    "\"walpe_volume\":{\"type\":\"slider\",\"text\":\"Volume\",\"order\":-1000000,"
+    "\"min\":0,\"max\":1,\"step\":0.01,\"precision\":2,\"value\":1}}";
+
+static void sound_defs_add (JsonObject *defs)
+{
+    JsonNode *n = wpj_parse_data (SOUND_DEFS, -1);
+    JsonObject *o = n && JSON_NODE_HOLDS_OBJECT (n) ? json_node_get_object (n) : NULL;
+    GList *ks = o ? json_object_get_members (o) : NULL;
+    for (GList *k = ks; k; k = k->next)
+        json_object_set_member (defs, k->data, json_node_copy (json_object_get_member (o, k->data)));
+    g_list_free (ks);
+    if (n)
+        json_node_unref (n);
+}
+
 void walpe_props_panel_show (GtkWidget *panel, const char *path, JsonObject *defs,
                              JsonObject *loc, gboolean is_current)
 {
@@ -2197,12 +2228,30 @@ void walpe_props_panel_show (GtkWidget *panel, const char *path, JsonObject *def
     if (path)
         P->own_defs = walpe_content_property_defs (path, &P->own_loc);
     g_clear_pointer (&P->notes, json_object_unref);
+    guint sound_layers = 0;   /* of a scene, counted in its JSON (propnotes.h): nothing is loaded */
     if (path)
-        P->notes = walpe_prop_notes (path);
+        P->notes = walpe_prop_notes_sound (path, &sound_layers);
     if (P->own_defs && JSON_NODE_HOLDS_OBJECT (P->own_defs)) {
         defs = json_node_get_object (P->own_defs);
         if (P->own_loc && JSON_NODE_HOLDS_OBJECT (P->own_loc))
             loc = json_node_get_object (P->own_loc);
+    }
+    if (sound_layers) {
+        /* a wallpaper with sound: WalPE's two sound rows, also when it has
+         * no options of its own (a wallpaper without sound gets none: the
+         * panel does not grow for nothing) */
+        if (!(P->own_defs && JSON_NODE_HOLDS_OBJECT (P->own_defs))) {
+            JsonObject *mine = json_object_new ();
+            GList *dk = defs ? json_object_get_members (defs) : NULL;
+            for (GList *k = dk; k; k = k->next)
+                json_object_set_member (mine, k->data, json_node_copy (json_object_get_member (defs, k->data)));
+            g_list_free (dk);
+            g_clear_pointer (&P->own_defs, json_node_unref);
+            P->own_defs = json_node_new (JSON_NODE_OBJECT);
+            json_node_take_object (P->own_defs, mine);
+            defs = mine;
+        }
+        sound_defs_add (defs);
     }
     P->defs = defs ? json_object_ref (defs) : NULL;
     P->loc = loc ? json_object_ref (loc) : NULL;

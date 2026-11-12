@@ -28,6 +28,12 @@ static WalpeSoundGroup *scene_sound_group (SceneNodeContent *s)
         char *sw = walpe_config_get_prop (s->origin, "walpe_sound");
         s->sound_group = walpe_sound_group_new (s->origin, walpe_sound_switch_parse (sw));
         g_free (sw);
+        /* and its own volume, "walpe_volume" (0..1, a factor on the volume
+         * setting): a wallpaper is made quieter, or silent, whether or not
+         * its author gave it an option for that */
+        char *vol = walpe_config_get_prop (s->origin, "walpe_volume");
+        walpe_sound_group_set_volume (s->sound_group, walpe_sound_volume_parse (vol));
+        g_free (vol);
     }
     return s->sound_group;
 }

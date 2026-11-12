@@ -28,5 +28,11 @@
  * video/GIF/image wallpaper, whose project properties WalPE never reads);
  * NULL when there is nothing to say (web pages are opaque). Unref. */
 JsonObject *walpe_prop_notes (const char *path);
+/* The same, and how many sound layers the scene has (0: none, or no scene):
+ * counted in the scene's JSON, so that the options panel can offer WalPE's
+ * own sound controls for a wallpaper that has sound - running or not,
+ * whether or not it has options of its own. No sound file is opened and,
+ * for a packaged scene, none is extracted. */
+JsonObject *walpe_prop_notes_sound (const char *path, guint *sound_layers);
 /* note -> a sentence for the user (g_free) */
 char *walpe_prop_note_text (const char *note);

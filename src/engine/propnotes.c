@@ -27,6 +27,10 @@ typedef struct {
     const char *root;    /* scan_dir: the wallpaper's folder (names are relative to it) */
 } Scan;
 
+/* scene objects with "sound" met by the scan that runs on this thread
+ * (walpe_prop_notes_sound sets it to 0 and reads it) */
+static _Thread_local guint scan_sound_layers;
+
 /* general.* settings WalPE reads (scenenode.c) / the features behind the
  * ones it does not */
 static const char *general_feature (const char *k)
@@ -143,8 +147,10 @@ static void walk (Scan *sc, JsonNode *n, const char *feature, int depth)
     /* a sound object: whatever is bound on it does something only while
      * wallpaper sound is switched on (off by default) */
     const char *sub = feature;
-    if (json_object_has_member (o, "sound") && json_object_has_member (o, "id"))
+    if (json_object_has_member (o, "sound") && json_object_has_member (o, "id")) {
         sub = "scene sound";
+        scan_sound_layers++;
+    }
     GList *ks = json_object_get_members (o);
     for (GList *k = ks; k; k = k->next) {
         JsonNode *v = json_object_get_member (o, k->data);
@@ -439,6 +445,13 @@ static int count_saturated (Scan *sc, const char *key, JsonObject *d)
 
 JsonObject *walpe_prop_notes (const char *path)
 {
+    return walpe_prop_notes_sound (path, NULL);
+}
+
+JsonObject *walpe_prop_notes_sound (const char *path, guint *sound_layers)
+{
+    if (sound_layers)
+        *sound_layers = 0;
     char *abs = walpe_expand_path (path);
     if (!abs)
         return NULL;
@@ -447,6 +460,12 @@ JsonObject *walpe_prop_notes (const char *path)
     JsonObject *out = NULL;
     if (t == WALPE_TYPE_SCENE || t == WALPE_TYPE_VIDEO || t == WALPE_TYPE_GIF || t == WALPE_TYPE_IMAGE)
         defs = walpe_content_property_defs (abs, NULL);
+    if (!defs && sound_layers && t == WALPE_TYPE_SCENE) {
+        /* a scene without options can have sound layers all the same: its
+         * files are read for the count alone */
+        defs = json_node_new (JSON_NODE_OBJECT);
+        json_node_take_object (defs, json_object_new ());
+    }
     if (!defs) {
         g_free (abs);
         return NULL;
@@ -457,6 +476,7 @@ JsonObject *walpe_prop_notes (const char *path)
                 g_string_new (NULL),
                 g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free),
                 g_array_new (FALSE, FALSE, sizeof (PtCount)), NULL };
+    scan_sound_layers = 0;
     g_array_set_clear_func (sc.counts, pt_count_clear);
     gboolean scanned = FALSE;
     if (t == WALPE_TYPE_SCENE) {
@@ -563,6 +583,8 @@ JsonObject *walpe_prop_notes (const char *path)
         if (!json_object_get_size (out))
             g_clear_pointer (&out, json_object_unref);
     }
+    if (sound_layers)
+        *sound_layers = scan_sound_layers;
     g_hash_table_unref (sc.ok);
     g_hash_table_unref (sc.lacking);
     g_string_free (sc.scripts, TRUE);
@@ -579,8 +601,7 @@ char *walpe_prop_note_text (const char *note)
         return NULL;
     if (!strcmp (note, "needs:scene sound"))
         return g_strdup ("Belongs to the wallpaper's sound: no effect until sound is switched on "
-                         "(walpe-ctl set scene_sound=on, or for this wallpaper only: "
-                         "walpe-ctl setprop walpe_sound=on) and the volume is above 0.");
+                         "(Engine settings: \"Wallpaper sound\") and the volume is above 0.");
     if (g_str_has_prefix (note, "needs:"))
         return g_strdup_printf ("Needs %s, which WalPE does not support yet: no effect.", note + 6);
     if (!strcmp (note, "unused"))

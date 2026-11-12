@@ -48,6 +48,7 @@ struct WalpeSound {
     gboolean rewind;     /* stop (): let the file go, start again at the next play */
     gboolean broken;     /* none of its files can be played: never tried again */
     float volume;
+    gint wp_q16;         /* atomic: the wallpaper's own volume, 16.16 (the group's) */
     WalpeSoundStats st;
 };
 
@@ -56,6 +57,7 @@ struct WalpeSoundGroup {
     int sw;              /* the wallpaper's own switch: -1 none, 0 off, 1 on */
     gboolean active;     /* the scene is shown and not paused */
     gboolean speaking;   /* its players' gates are open */
+    gint vol_q16;        /* the wallpaper's own volume, 16.16 (65536 until set) */
     GPtrArray *players;  /* WalpeSound, one reference each */
 };
 
@@ -1104,7 +1106,8 @@ static gpointer sound_thread (gpointer data)
         g_mutex_lock (&s->lock);
         float vol = CLAMP (s->volume, 0.0f, 1.0f);
         g_mutex_unlock (&s->lock);
-        gint64 k = (gint64) (vol * (float) g_atomic_int_get (&master_q16));
+        /* (... times the wallpaper's own, which is 1 unless the user set it) */
+        gint64 k = (gint64) (vol * (float) g_atomic_int_get (&master_q16)) * g_atomic_int_get (&s->wp_q16) / 65536;
         int peak = scale_block (buf, n, src.channels, k_prev < 0 ? k : k_prev, k, src.rate / 100);
         k_prev = k;
         out_write (&out, buf, n, s->name);
@@ -1162,7 +1165,7 @@ static gboolean group_on_locked (const WalpeSoundGroup *g)
 static gboolean group_wants_locked (const WalpeSoundGroup *g)
 {
     return g->active && group_on_locked (g) && !g_atomic_int_get (&muted) &&
-           g_atomic_int_get (&master_q16) > 0;
+           g_atomic_int_get (&master_q16) > 0 && g->vol_q16 > 0;
 }
 
 static void group_speak_locked (WalpeSoundGroup *g, gboolean speak)
@@ -1215,6 +1218,7 @@ WalpeSoundGroup *walpe_sound_group_new (const char *key, int wallpaper_switch)
      * wallpaper; as text, links are not followed) */
     g->key = key && *key ? g_canonicalize_filename (key, NULL) : g_strdup ("");
     g->sw = wallpaper_switch < 0 ? -1 : wallpaper_switch != 0;
+    g->vol_q16 = 65536;
     g->players = g_ptr_array_new ();
     g_mutex_lock (&reg_lock);
     if (!groups)
@@ -1234,6 +1238,52 @@ void walpe_sound_group_set_active (WalpeSoundGroup *g, gboolean active)
         regroup_locked ();
     }
     g_mutex_unlock (&reg_lock);
+}
+
+/* reg_lock */
+static void group_volume_locked (WalpeSoundGroup *g, double volume)
+{
+    g->vol_q16 = isfinite (volume) ? (gint) (CLAMP (volume, 0.0, 1.0) * 65536.0) : 65536;
+    for (guint i = 0; i < g->players->len; i++)
+        g_atomic_int_set (&((WalpeSound *) g->players->pdata[i])->wp_q16, g->vol_q16);
+}
+
+void walpe_sound_group_set_volume (WalpeSoundGroup *g, double volume)
+{
+    if (!g)
+        return;
+    g_mutex_lock (&reg_lock);
+    group_volume_locked (g, volume);
+    regroup_locked ();   /* volume 0 is silence: nothing runs for it */
+    g_mutex_unlock (&reg_lock);
+}
+
+guint walpe_sound_wallpaper_set (const char *key, int wallpaper_switch, double volume)
+{
+    /* (the spelling walpe_sound_group_new gives a key) */
+    char *k = key && *key ? g_canonicalize_filename (key, NULL) : g_strdup ("");
+    guint n = 0;
+    g_mutex_lock (&reg_lock);
+    for (guint i = 0; groups && i < groups->len; i++) {
+        WalpeSoundGroup *g = groups->pdata[i];
+        if (strcmp (g->key, k))
+            continue;
+        g->sw = wallpaper_switch < 0 ? -1 : wallpaper_switch != 0;
+        group_volume_locked (g, volume);
+        n++;
+    }
+    if (n)
+        regroup_locked ();
+    g_mutex_unlock (&reg_lock);
+    g_free (k);
+    return n;
+}
+
+double walpe_sound_volume_parse (const char *value)
+{
+    char *end = NULL;
+    double v = value && *value ? g_ascii_strtod (value, &end) : 1.0;
+    return end && end != value && !*end && isfinite (v) && v >= 0.0 && v <= 1.0 ? v : 1.0;
 }
 
 gboolean walpe_sound_group_enabled (WalpeSoundGroup *g)
@@ -1306,6 +1356,7 @@ WalpeSound *walpe_sound_new (WalpeSoundGroup *g, const WalpeSoundSpec *spec)
     gboolean room = g->players->len < WALPE_SOUND_MAX_LAYERS;
     if (room) {
         s->gate = g->speaking;
+        s->wp_q16 = g->vol_q16;
         g_ptr_array_add (g->players, s);
     }
     g_mutex_unlock (&reg_lock);

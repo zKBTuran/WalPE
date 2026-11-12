@@ -12,7 +12,8 @@
  *  - sound is switched on for the wallpaper: the setting "scene_sound"
  *    (walpe_sound_set_enabled, OFF by default), over which the wallpaper's
  *    own switch wins (the group's override);
- *  - the volume setting is above 0 and "mute" is off;
+ *  - the volume setting is above 0 and "mute" is off, and the wallpaper's
+ *    own volume (walpe_sound_group_set_volume) is above 0;
  *  - the scene is shown and not paused (walpe_sound_group_set_active), and
  *    no other scene instance of the same wallpaper is already heard: a
  *    wallpaper that two monitors render separately sounds once;
@@ -113,6 +114,18 @@ int walpe_sound_threads (void);
 WalpeSoundGroup *walpe_sound_group_new (const char *key, int wallpaper_switch);
 /* the scene is shown and not paused / is not */
 void walpe_sound_group_set_active (WalpeSoundGroup *g, gboolean active);
+/* the wallpaper's own volume (its option "walpe_volume"), 0..1: a factor on
+ * the volume setting, 1 until set; at 0 the wallpaper is silent like a
+ * muted one (nothing runs for it) */
+void walpe_sound_group_set_volume (WalpeSoundGroup *g, double volume);
+/* The wallpaper's own switch and volume were changed while it is loaded:
+ * every scene instance of the wallpaper `key` (as given to
+ * walpe_sound_group_new) takes them at once - nothing is loaded again, a
+ * player keeps its place. Returns how many instances there are (0: the
+ * wallpaper is not loaded, or has no sound layers). */
+guint walpe_sound_wallpaper_set (const char *key, int wallpaper_switch, double volume);
+/* "0.35" -> 0.35; anything that is no number from 0 to 1 (also NULL) -> 1 */
+double walpe_sound_volume_parse (const char *value);
 /* sound is switched on for this wallpaper (its own switch, else the setting) */
 gboolean walpe_sound_group_enabled (WalpeSoundGroup *g);
 /* its players are the ones that are heard right now */

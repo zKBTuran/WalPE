@@ -329,6 +329,7 @@ JsonNode *walpe_content_property_defs (const char *path, JsonNode **localization
          * scene_sound is off. Scenes have no built-in options that would
          * take the name (below), so the declaration is dropped here. */
         json_object_remove_member (oo, "walpe_sound");
+        json_object_remove_member (oo, "walpe_volume");   /* (the wallpaper's own volume: the same) */
         GList *ks = preset ? json_object_get_members (preset) : NULL;
         for (GList *k = ks; k; k = k->next) {
             JsonNode *pv = json_object_get_member (preset, k->data);

@@ -185,6 +185,54 @@ static void test_players (const char *dir, const char *sine)
     CHECK (st.peak >= 3990 && st.peak <= 4001, "user volume 0.25: peak %d", st.peak);
     walpe_sound_set_master (1.0);
 
+    /* the wallpaper's own volume (its option "walpe_volume"): a factor on
+     * the user's, for every layer of the wallpaper, also one made later */
+    WalpeSoundGroup *wv = group_on ("/w/own-volume");
+    WalpeSound *w1 = snd_new (wv, sine, NULL, WALPE_SOUND_SINGLE, 1.0f);
+    walpe_sound_group_set_volume (wv, 0.5);
+    WalpeSound *w2 = snd_new (wv, sine, NULL, WALPE_SOUND_SINGLE, 0.5f);
+    walpe_sound_play (w1);
+    walpe_sound_play (w2);
+    WAIT (stats_of (w1).plays == 1 && stats_of (w2).plays == 1, 5000);
+    CHECK (stats_of (w1).peak >= 7990 && stats_of (w1).peak <= 8001 && stats_of (w2).peak >= 3990 &&
+           stats_of (w2).peak <= 4001, "wallpaper volume 0.5: peaks %d (layer 1.0) and %d (layer 0.5)",
+           stats_of (w1).peak, stats_of (w2).peak);
+    /* changed while the wallpaper is loaded, by its name (any spelling of
+     * it): both at once, nothing is made anew */
+    CHECK (walpe_sound_wallpaper_set ("/w//own-volume/", 1, 0.25) == 1 &&
+           walpe_sound_wallpaper_set ("/w/nobody", 1, 0.25) == 0, "the wallpaper's players are found by its name");
+    WalpeSound *w3 = snd_new (wv, sine, NULL, WALPE_SOUND_SINGLE, 1.0f);
+    walpe_sound_play (w3);
+    WAIT (stats_of (w3).plays == 1, 5000);
+    CHECK (stats_of (w3).peak >= 3990 && stats_of (w3).peak <= 4001, "wallpaper volume set to 0.25: peak %d",
+           stats_of (w3).peak);
+    /* its own switch off, and on again; its own volume 0 is silence */
+    WalpeSound *wl = snd_new (wv, sine, NULL, WALPE_SOUND_LOOP, 1.0f);
+    walpe_sound_play (wl);
+    WAIT (stats_of (wl).plays >= 2, 5000);
+    walpe_sound_wallpaper_set ("/w/own-volume", 0, 0.25);
+    WAIT (!stats_of (wl).running, 5000);
+    gint64 wf = stats_of (wl).frames;
+    g_usleep (50000);
+    CHECK (!walpe_sound_group_enabled (wv) && !walpe_sound_group_speaking (wv) && stats_of (wl).frames == wf,
+           "the wallpaper's switch off while it plays: silent");
+    walpe_sound_wallpaper_set ("/w/own-volume", -1, 1.0);   /* no switch of its own: the setting, which is off here */
+    g_usleep (50000);
+    CHECK (!walpe_sound_group_enabled (wv) && stats_of (wl).frames == wf, "no switch of its own: as the setting says");
+    walpe_sound_wallpaper_set ("/w/own-volume", 1, 1.0);
+    WAIT (stats_of (wl).frames > wf, 5000);
+    CHECK (walpe_sound_group_speaking (wv) && stats_of (wl).frames > wf, "switched on again: it goes on");
+    walpe_sound_group_set_volume (wv, 0.0);
+    WAIT (!stats_of (wl).running, 5000);
+    wf = stats_of (wl).frames;
+    g_usleep (50000);
+    CHECK (!walpe_sound_group_speaking (wv) && stats_of (wl).frames == wf, "wallpaper volume 0: nothing is put out");
+    walpe_sound_group_free (wv);
+    CHECK (walpe_sound_volume_parse ("0.35") == 0.35 && walpe_sound_volume_parse (NULL) == 1.0 &&
+           walpe_sound_volume_parse ("") == 1.0 && walpe_sound_volume_parse ("loud") == 1.0 &&
+           walpe_sound_volume_parse ("7") == 1.0 && walpe_sound_volume_parse ("-1") == 1.0 &&
+           walpe_sound_volume_parse ("0") == 0.0 && walpe_sound_volume_parse ("nan") == 1.0, "volume words");
+
     /* the WAV kinds: every sample is half scale */
     static const struct { int bits, fmt, ch; } kinds[] = { { 8, 1, 1 }, { 16, 1, 2 }, { 24, 1, 2 }, { 32, 1, 1 }, { 32, 3, 2 } };
     for (guint k = 0; k < G_N_ELEMENTS (kinds); k++) {
