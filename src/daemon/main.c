@@ -401,6 +401,7 @@ static gboolean web_accel_restart (gpointer user);
 #endif
 /* "web_unload": the web module leaves again (web_unload_due) */
 static gboolean web_unload_due (gboolean changed);
+static void web_unload_hidden (void);   /* ... at a moment nobody sees, when it was put off */
 static gboolean web_unload_restart;     /* main: the restart under way is that one */
 static gint64 web_unloaded_us;          /* monotonic time of the last one (main (), 0 = none) */
 static gboolean swap_restart;           /* main: the restart under way follows swaps that fail */
@@ -3648,6 +3649,7 @@ static void apply_pause_state (void)
     fps_refresh ();
     pointer_update ();
     state_touch ();
+    web_unload_hidden ();   /* (a restart that was put off: now, if nobody sees a wallpaper) */
 }
 
 /* The GUI starts the daemon with stdout / stderr appended to
@@ -5047,7 +5049,16 @@ static void sv_done (WalpeImport *job, gboolean ok, const char *dst, const char 
 }
 
 /* main: make the next copy that is waited for, unless something runs */
+static void sv_start_copy (void);
 static void sv_start_next (void)
+{
+    sv_start_copy ();
+    /* (called when a copy, an import or a conversion has ended or was
+     * stopped: what kept a restart waiting may be gone) */
+    web_unload_hidden ();
+}
+
+static void sv_start_copy (void)
 {
     if (Sv.job && Sv.ended)
         sv_job_clear ();
@@ -5216,6 +5227,7 @@ static void ws_done (WalpeWorkshopJob *job, gboolean ok, const char *dir, const 
     else
         g_warning ("workshop install failed: %s", Ws.error);
     state_touch ();
+    web_unload_hidden ();
 }
 
 static GError *start_install (const char *id_or_url)
@@ -8012,6 +8024,7 @@ static char *ipc_handler (const char *req, gpointer user)
             Ws.active = FALSE;
             g_free (Ws.error);
             Ws.error = g_strdup ("cancelled");
+            web_unload_hidden ();
         }
         jb_bool (b, "ok", TRUE);
     } else if (!g_strcmp0 (cmd, "import_cancel")) {
@@ -9405,7 +9418,7 @@ static gboolean web_accel_restart (gpointer user)
  * When: at the change of wallpapers that leaves no monitor with a web
  * wallpaper - none shown, none wanted, none being loaded -, in place of the
  * loads of that change: the new image loads what the monitors are set to.
- * Never on a timer and never later by itself. Not
+ * Never on a timer. Not
  *  - with the setting off ("web_unload", on by default);
  *  - when the restart before this one, for the same reason, is less than
  *    WEB_UNLOAD_GAP_S ago (wallpapers tried one after the other, a script
@@ -9424,11 +9437,30 @@ static gboolean web_accel_restart (gpointer user)
  * shows nothing until it has, and should a wallpaper of this change fail to
  * load, the web wallpaper it replaced is not opened again in its place.
  * WALPE_WEB_UNLOADED carries the time of the restart across the exec, as
- * WALPE_LAYOUT_RESTARTED does for the layout's. */
+ * WALPE_LAYOUT_RESTARTED does for the layout's.
+ *
+ * A restart that was put off - the time between two was not over, something
+ * was being converted or downloaded, the setting was off - used to wait for
+ * the next change of wallpapers, whatever that change was: a scene replaced
+ * by another scene hours later, and every monitor went black for a second.
+ * It still does when nothing else comes first (web_unload_due is asked at
+ * every change). But while it waits (web_unload_put_off) it is also carried
+ * out at the first moment at which what kept it waiting is gone and nobody
+ * can see a wallpaper: the displays sleep or the session is locked, and
+ * pause_dpms is on (wallpapers_unseen). No other pause is taken for such a
+ * moment: `walpe-ctl pause`, the battery, idle, focus and cover rules leave
+ * the picture or a part of it on screen, and under a fullscreen window the
+ * restart would work beside the application that has the machine. No timer and
+ * no polling: web_unload_hidden is called where those states change
+ * (apply_pause_state) and where a conversion, import or download ends. The
+ * time between two restarts ends without an event: a restart it kept
+ * waiting is looked at again at the next of those changes. */
 #define WEB_UNLOAD_GAP_S 60
 
 #ifdef HAVE_WEB
 static gboolean web_unload_pending;     /* main: the restart was decided, its idle has not run */
+static gboolean web_unload_put_off;     /* main: the module is loaded, no monitor has a web
+                                         * wallpaper, and web_unload_due did not restart */
 
 static gboolean web_unload_cb (gpointer user)
 {
@@ -9456,6 +9488,21 @@ static gboolean web_unload_cb (gpointer user)
 }
 #endif
 
+#ifdef HAVE_WEB
+/* is the last restart that unloaded the module long enough ago for another
+ * one? *since, *gap: seconds since it, and the least time between two */
+static gboolean web_unload_gap_over (gint64 *since, gint64 *gap)
+{
+    const char *ge = g_getenv ("WALPE_WEB_UNLOAD_GAP_S");   /* (tests) */
+    const gint64 g = (ge && *ge ? CLAMP (g_ascii_strtoll (ge, NULL, 10), 0, 86400) : WEB_UNLOAD_GAP_S) *
+                     G_USEC_PER_SEC;
+    const gint64 now = g_get_monotonic_time ();
+    *since = web_unloaded_us > 0 ? (now - web_unloaded_us) / G_USEC_PER_SEC : 0;
+    *gap = g / G_USEC_PER_SEC;
+    return !(web_unloaded_us > 0 && now >= web_unloaded_us && now - web_unloaded_us < g);
+}
+#endif
+
 /* main, apply_wallpapers: changed = a monitor was given another wallpaper.
  * TRUE: the restart is on its way and the caller loads nothing */
 static gboolean web_unload_due (gboolean changed)
@@ -9464,26 +9511,31 @@ static gboolean web_unload_due (gboolean changed)
     static gboolean said;
     if (web_unload_pending)
         return TRUE;        /* (a second change before the restart's idle has run) */
-    if (!changed || restore_apply || !D.cfg->web_unload || D.windowed || D.restart || !D.loop ||
+    if (!changed || restore_apply || D.windowed || D.restart || !D.loop ||
         restart_failed ||   /* (it was tried: restart_begin) */
-        !walpe_web_module (FALSE) || Imp.active || Ws.active || sv_converting () ||
+        !walpe_web_module (FALSE) ||
         (load_skip && g_hash_table_size (load_skip) > 0))
         return FALSE;
     for (GList *l = D.mons; l; l = l->next) {
         const Mon *m = l->data;
-        if (m->want_path && *m->want_path && walpe_detect_type (m->want_path, NULL) == WALPE_TYPE_WEB)
+        if (m->want_path && *m->want_path && walpe_detect_type (m->want_path, NULL) == WALPE_TYPE_WEB) {
+            web_unload_put_off = FALSE;     /* the module is in use (again) */
             return FALSE;
+        }
     }
-    const char *ge = g_getenv ("WALPE_WEB_UNLOAD_GAP_S");   /* (tests) */
-    gint64 gap = (ge && *ge ? CLAMP (g_ascii_strtoll (ge, NULL, 10), 0, 86400) : WEB_UNLOAD_GAP_S) *
-                 G_USEC_PER_SEC;
-    gint64 now = g_get_monotonic_time ();
-    if (web_unloaded_us > 0 && now >= web_unloaded_us && now - web_unloaded_us < gap) {
+    /* the module is loaded and no monitor is to show a web wallpaper */
+    if (!D.cfg->web_unload || Imp.active || Ws.active || sv_converting ()) {
+        web_unload_put_off = TRUE;      /* (web_unload_hidden asks all of it again) */
+        return FALSE;
+    }
+    gint64 since = 0, gap = 0;
+    if (!web_unload_gap_over (&since, &gap)) {
         if (!said)
             g_message ("no web wallpaper is shown any more; the web module stays loaded this time "
                        "(the daemon restarted to unload it %d s ago: at most once in %d s)",
-                       (int) ((now - web_unloaded_us) / G_USEC_PER_SEC), (int) (gap / G_USEC_PER_SEC));
+                       (int) since, (int) gap);
         said = TRUE;
+        web_unload_put_off = TRUE;
         return FALSE;
     }
     /* the new image reads the wallpapers from the saved settings. When
@@ -9510,6 +9562,75 @@ static gboolean web_unload_due (gboolean changed)
 #else
     (void) changed;
     return FALSE;
+#endif
+}
+
+#ifdef HAVE_WEB
+/* Nobody can see a wallpaper: the displays sleep or the session is locked,
+ * and the rule that pauses for it is on (want_pause_mon). That is the only
+ * state taken for it. A focused fullscreen window hides its monitor too,
+ * but a restart there would load every wallpaper and make its GL contexts
+ * beside a game that has the machine, and a fullscreen window can be
+ * translucent; a monitor that windows cover is paused at 85 % covered. */
+static gboolean wallpapers_unseen (void)
+{
+    return D.cfg->pause_dpms && D.asleep;
+}
+
+/* the restart that was put off can be carried out now, unseen */
+static gboolean web_unload_hidden_now (void)
+{
+    gint64 since, gap;
+    if (!web_unload_put_off || web_unload_pending || D.restart || !D.loop || D.windowed || restore_apply ||
+        restart_failed ||   /* (it was tried: restart_begin) */
+        !D.cfg->web_unload || !D.mons || !walpe_web_module (FALSE) || Imp.active || Ws.active ||
+        sv_converting () || (load_skip && g_hash_table_size (load_skip) > 0) ||
+        !wallpapers_unseen () || !web_unload_gap_over (&since, &gap))
+        return FALSE;
+    for (GList *l = D.mons; l; l = l->next) {
+        Mon *m = l->data;
+        /* (a load that runs or has failed: what the status says about it
+         * is this image's to keep) */
+        if (m->loading || m->load_error || m->reopen_for || m->restored ||
+            g_atomic_int_get (&m->content_type) == WALPE_TYPE_WEB)
+            return FALSE;
+    }
+    return TRUE;
+}
+
+static guint web_unload_hidden_id;      /* main: the idle of web_unload_hidden */
+
+static gboolean web_unload_hidden_cb (gpointer user)
+{
+    (void) user;
+    web_unload_hidden_id = 0;
+    if (!web_unload_hidden_now ())
+        return G_SOURCE_REMOVE;     /* (seen again, or busy again, meanwhile) */
+    if (!restart_begin ("no web wallpaper is shown any more"))
+        return G_SOURCE_REMOVE;     /* (said once; restart_failed keeps it from being asked again) */
+    if (!walpe_config_save (D.cfg)) {
+        /* the new image would read other wallpapers than are shown: left
+         * to the next change of wallpapers (web_unload_due) */
+        web_unload_put_off = FALSE;
+        return G_SOURCE_REMOVE;
+    }
+    g_message ("no web wallpaper is shown and nobody can see a wallpaper now: restarting in place "
+               "to unload the web module (WebKitGTK, GTK), which was put off at the change that "
+               "replaced the last web wallpaper");
+    web_unload_restart = TRUE;
+    D.restart = TRUE;
+    g_main_loop_quit (D.loop);
+    return G_SOURCE_REMOVE;
+}
+#endif
+
+/* main: a pause state changed, or a conversion, an import or a download
+ * ended. One comparison while no restart waits. */
+static void web_unload_hidden (void)
+{
+#ifdef HAVE_WEB
+    if (web_unload_put_off && !web_unload_hidden_id && web_unload_hidden_now ())
+        web_unload_hidden_id = g_idle_add (web_unload_hidden_cb, NULL);
 #endif
 }
 
