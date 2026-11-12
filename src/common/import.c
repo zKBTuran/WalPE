@@ -545,7 +545,7 @@ static void encode_wait_cb (GObject *o, GAsyncResult *res, gpointer user)
 /* Between fork and exec of a conversion nobody asked for in person (only
  * calls that may be made there): the lowest CPU and disk priority - it gets
  * the time nothing else wants. What the system refuses stays as it was.
- * user: 0 = the daemon's priority (a conversion somebody waits for; or
+ * background 0 = the daemon's priority (a conversion somebody waits for; or
  * WALPE_CONVERT_BACKGROUND=0: for tests on a machine that is never idle,
  * where such a child would not get to run).
  *
@@ -556,9 +556,20 @@ static void encode_wait_cb (GObject *o, GAsyncResult *res, gpointer user)
  * file nobody would ever use, for as long and as much as the source made
  * it, and the next daemon removed that file by name at its start while the
  * child still filled it. */
+typedef struct {
+    gboolean background;    /* the lowest priority (a scene's copy) */
+    gint64 parent;          /* the process that starts the child */
+} ChildSetup;
+
+gboolean walpe_import_child_of (gint64 parent)
+{
+    return (gint64) getppid () == parent;
+}
+
 static void background_child_setup (gpointer user)
 {
-    if (GPOINTER_TO_INT (user)) {
+    const ChildSetup *cs = user;
+    if (cs->background) {
         if (setpriority (PRIO_PROCESS, 0, 19) != 0) {
             /* stays at the daemon's */
         }
@@ -579,6 +590,12 @@ static void background_child_setup (gpointer user)
     }
 #if defined(__linux__) && defined(PR_SET_PDEATHSIG)
     prctl (PR_SET_PDEATHSIG, SIGKILL);
+    /* ... unless the parent was gone before that line was reached (the
+     * child had only just been made): the signal is sent when a parent
+     * dies, not for one that is dead already. A different parent now means
+     * it went away: no program is started. */
+    if (!walpe_import_child_of (cs->parent))
+        _exit (127);
 #endif
 }
 
@@ -597,9 +614,9 @@ static void start_encode (WalpeImport *imp)
         GSubprocessLauncher *l = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE |
                                                             G_SUBPROCESS_FLAGS_STDERR_MERGE);
         const char *bg = g_getenv ("WALPE_CONVERT_BACKGROUND");
-        g_subprocess_launcher_set_child_setup (l, background_child_setup,
-                                               GINT_TO_POINTER (imp->is_scene && !(bg && *bg == '0')),
-                                               NULL);
+        /* (read by the child between fork and exec, inside spawnv) */
+        ChildSetup cs = { imp->is_scene && !(bg && *bg == '0'), (gint64) getpid () };
+        g_subprocess_launcher_set_child_setup (l, background_child_setup, &cs, NULL);
         imp->proc = g_subprocess_launcher_spawnv (l, (const char *const *) argv, &err);
         g_object_unref (l);
     }
@@ -754,7 +771,8 @@ static void start_probe (WalpeImport *imp)
     {
         GSubprocessLauncher *l = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE |
                                                             G_SUBPROCESS_FLAGS_STDERR_PIPE);
-        g_subprocess_launcher_set_child_setup (l, background_child_setup, GINT_TO_POINTER (0), NULL);
+        ChildSetup cs = { FALSE, (gint64) getpid () };
+        g_subprocess_launcher_set_child_setup (l, background_child_setup, &cs, NULL);
         imp->proc = g_subprocess_launcher_spawnv (l, imp->is_scene ? argv_scene : argv, &err);
         g_object_unref (l);
     }

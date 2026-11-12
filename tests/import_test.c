@@ -358,6 +358,22 @@ static int hold_main (const char *src, const char *dst)
     return 0;
 }
 
+/* the question a child of an import asks before it starts ffmpeg: is the
+ * process that made it still its parent? Asked here by a child of this
+ * program about its real parent, and about a process that is not. */
+static void test_child_of (void)
+{
+    gint64 me = (gint64) getpid ();
+    CHECK (walpe_import_child_of ((gint64) getppid ()));
+    CHECK (!walpe_import_child_of (me));
+    pid_t c = fork ();
+    if (c == 0)
+        _exit ((walpe_import_child_of (me) ? 0 : 1) | (walpe_import_child_of ((gint64) getpid ()) ? 2 : 0) |
+               (walpe_import_child_of (me + 1) ? 4 : 0));
+    int st = -1;
+    CHECK (c > 0 && waitpid (c, &st, 0) == c && WIFEXITED (st) && WEXITSTATUS (st) == 0);
+}
+
 static void test_runs (void)
 {
     char *ff = g_find_program_in_path ("ffmpeg"), *fp = g_find_program_in_path ("ffprobe");
@@ -576,6 +592,7 @@ int main (int argc, char **argv)
     test_decisions ();
     test_boxes ();
     test_tidy ();
+    test_child_of ();
     test_runs ();
     g_rmdir (tmp);
     if (fails)

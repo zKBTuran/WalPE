@@ -120,5 +120,10 @@ void         walpe_import_free    (WalpeImport *imp);
  * import that was killed with its daemon left in dir; returns how many.
  * Only for a moment when no import can be running (daemon start-up). */
 guint        walpe_import_tidy_parts (const char *dir);
+/* whether this process is (still) the child of process `parent`. A child
+ * of an import asks between fork and exec: a parent that died before the
+ * child could ask the kernel to end it with its parent has been replaced
+ * by another by then. (Here for the test.) */
+gboolean     walpe_import_child_of (gint64 parent);
 
 G_END_DECLS
