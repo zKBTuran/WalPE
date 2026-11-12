@@ -338,6 +338,19 @@ static gboolean menu_event (int id, const char *ev)
     return TRUE;
 }
 
+/* AboutToShow: does the panel have to ask for this menu's entries again?
+ * For a submenu, yes. LayoutUpdated goes out for the root (parent 0), and
+ * a panel that keeps each menu by itself - KDE Plasma's importer asks for
+ * one level at a time - then asks for the root's entries only: a submenu
+ * it has opened once ("Recent wallpapers", a monitor's list) kept the
+ * entries of that moment for as long as the tray ran. The root is not
+ * asked for again here: LayoutUpdated has said when it changed. */
+static gboolean ask_again (TrayItem *root, int id)
+{
+    TrayItem *it = id ? tray_item_find (root, id) : NULL;
+    return it && it->kind == TRAY_ITEM_SUBMENU;
+}
+
 static void menu_call (GDBusConnection *c, const char *sender, const char *path, const char *iface,
                        const char *method, GVariant *params, GDBusMethodInvocation *inv, gpointer u)
 {
@@ -419,10 +432,20 @@ static void menu_call (GDBusConnection *c, const char *sender, const char *path,
         g_variant_iter_free (it);
         g_dbus_method_invocation_return_value (inv, g_variant_new ("(ai)", &errs));
     } else if (!strcmp (method, "AboutToShow")) {
-        g_dbus_method_invocation_return_value (inv, g_variant_new ("(b)", FALSE));
+        int id;
+        g_variant_get (params, "(i)", &id);
+        g_dbus_method_invocation_return_value (inv, g_variant_new ("(b)", ask_again (root, id)));
     } else if (!strcmp (method, "AboutToShowGroup")) {
-        g_dbus_method_invocation_return_value (inv, g_variant_new ("(@ai@ai)",
-            g_variant_new_array (G_VARIANT_TYPE_INT32, NULL, 0),
+        GVariantIter *ids;
+        g_variant_get (params, "(ai)", &ids);
+        GVariantBuilder need;
+        g_variant_builder_init (&need, G_VARIANT_TYPE ("ai"));
+        int id;
+        while (g_variant_iter_next (ids, "i", &id))
+            if (ask_again (root, id))
+                g_variant_builder_add (&need, "i", id);
+        g_variant_iter_free (ids);
+        g_dbus_method_invocation_return_value (inv, g_variant_new ("(ai@ai)", &need,
             g_variant_new_array (G_VARIANT_TYPE_INT32, NULL, 0)));
     } else {
         g_dbus_method_invocation_return_error (inv, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_METHOD, "%s", method);
