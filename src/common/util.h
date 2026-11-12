@@ -173,5 +173,12 @@ JsonNode *wpj_parse_first (char *text, gsize len, GError **err);
  * To be asked before json-glib parses a text that did not come through
  * wpj_parse_file / wpj_parse_data: its parser recurses once per level. */
 gboolean wpj_depth_ok (const char *data, gsize len, int max_depth);
+/* Every string and every member name under n is valid UTF-8 (NULL: TRUE).
+ * A text that is UTF-8 can still parse into one that is not: json-glib
+ * (seen with 1.8.0) turns the escape of half a surrogate pair, "\ud800",
+ * into the three bytes ED A0 80. Asked where such a string would be kept
+ * and written out again (the daemon's requests: what they set goes into
+ * config.json, which is then no JSON its own loader reads). */
+gboolean wpj_text_is_utf8 (JsonNode *n);
 
 G_END_DECLS

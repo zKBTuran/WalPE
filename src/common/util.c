@@ -906,6 +906,42 @@ gboolean wpj_depth_ok (const char *d, gsize len, int max_depth)
     return TRUE;
 }
 
+gboolean wpj_text_is_utf8 (JsonNode *n)
+{
+    if (!n)
+        return TRUE;
+    switch (json_node_get_node_type (n)) {
+    case JSON_NODE_VALUE: {
+        if (json_node_get_value_type (n) != G_TYPE_STRING)
+            return TRUE;
+        const char *s = json_node_get_string (n);
+        return !s || g_utf8_validate (s, -1, NULL);
+    }
+    case JSON_NODE_ARRAY: {
+        JsonArray *a = json_node_get_array (n);
+        for (guint i = 0, len = a ? json_array_get_length (a) : 0; i < len; i++)
+            if (!wpj_text_is_utf8 (json_array_get_element (a, i)))
+                return FALSE;
+        return TRUE;
+    }
+    case JSON_NODE_OBJECT: {
+        JsonObject *o = json_node_get_object (n);
+        JsonObjectIter it;
+        const char *name;
+        JsonNode *v;
+        if (!o)
+            return TRUE;
+        json_object_iter_init (&it, o);
+        while (json_object_iter_next (&it, &name, &v))
+            if (!g_utf8_validate (name, -1, NULL) || !wpj_text_is_utf8 (v))
+                return FALSE;
+        return TRUE;
+    }
+    default:
+        return TRUE;
+    }
+}
+
 /* One value per text. json-glib (seen with 1.8.0) reads on behind the
  * first top-level value: a second array or object is parsed, never becomes
  * the root and is never freed - its whole tree, about thirty times its

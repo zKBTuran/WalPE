@@ -976,6 +976,18 @@ gboolean walpe_config_save (WalpeConfig *cfg)
     json_generator_set_root (gen, root);
     json_generator_set_pretty (gen, TRUE);
     char *data = json_generator_to_data (gen, NULL);
+    if (!g_utf8_validate (data, -1, NULL)) {
+        /* A string that is not UTF-8 got into the configuration (the
+         * generator writes its bytes as they are). The loader takes such a
+         * file for damaged: it is set aside and every setting starts over.
+         * The bytes that are no text become U+FFFD - inside strings, so the
+         * file stays the JSON it was - and everything else is kept. */
+        char *valid = g_utf8_make_valid (data, -1);
+        g_free (data);
+        data = valid;
+        g_warning ("config: a setting holds text that is not valid UTF-8; it is saved with the "
+                   "bytes that are no text replaced (U+FFFD)");
+    }
     GError *err = NULL;
     /* 0600 (see walpe_config_load), written next to the file and renamed */
     gboolean ok = walpe_write_private (path, data, -1, &err);

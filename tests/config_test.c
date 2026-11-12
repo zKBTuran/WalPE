@@ -369,6 +369,76 @@ static void test_broken (void)
     walpe_config_free (c);
 }
 
+/* Text that is not UTF-8 must not make config.json a file the loader
+ * refuses. json-glib decodes "\ud800", the escape of half a surrogate pair,
+ * into three bytes that are no UTF-8, and its generator writes a string's
+ * bytes as they are: one option set that way (a request on the control
+ * socket) and the next start found a "damaged" file, set it aside and began
+ * with the defaults - wallpaper, mute and volume gone. wpj_text_is_utf8 is
+ * what the daemon refuses such a request by; the save is the second line. */
+static void test_not_utf8 (void)
+{
+    static const struct { const char *json; gboolean ok; } t[] = {
+        { "{\"cmd\":\"setprop\",\"key\":\"k\",\"value\":\"a\\ud800b\"}", FALSE },   /* half a pair, in a value */
+        { "{\"cmd\":\"setprops\",\"props\":{\"k\":[1,{\"deep\":\"x\\udbffy\"}]}}", FALSE },  /* ... further down */
+        { "{\"cmd\":\"setprops\",\"props\":{\"k\\ud800y\":\"v\"}}", FALSE },                 /* ... in a name */
+        { "{\"cmd\":\"set\",\"transparent_windows\":\"st,\\ud83d\"}", FALSE },      /* (json-glib refuses these two */
+        { "{\"cmd\":\"setprop\",\"key\":\"k\",\"value\":\"\\udfff\"}", FALSE },         /* itself) */
+        { "{\"cmd\":\"setprop\",\"key\":\"k\",\"value\":\"\\ud83d\\ude00 \\u00e9 \\u001f\"}", TRUE },   /* a pair, U+001F */
+        { "{\"cmd\":\"status\"}", TRUE },
+        { "{\"a\":[1,2.5,true,null,\"x\",{},[]]}", TRUE },
+    };
+    for (guint i = 0; i < G_N_ELEMENTS (t); i++) {
+        /* (a text json-glib does not parse at all never gets as far) */
+        JsonNode *n = wpj_parse_data (t[i].json, -1);
+        if (t[i].ok)
+            CHECK (n != NULL && wpj_text_is_utf8 (n));
+        else
+            CHECK (!n || !wpj_text_is_utf8 (n));
+        if (!n && g_test_verbose ())
+            g_printerr ("(not parsed: %s)\n", t[i].json);
+        if (n)
+            json_node_unref (n);
+    }
+    CHECK (wpj_text_is_utf8 (NULL));
+
+    /* the save: whatever got into the configuration, the file can be read again */
+    broken_copies (TRUE);
+    g_unlink (cfg_path);
+    WalpeConfig *c = walpe_config_load ();
+    c->mute = TRUE;
+    c->volume = 0.2;
+    g_free (c->current);
+    c->current = g_strdup ("/lib/walls/777");
+    walpe_config_set_prop (c, "/lib/walls/777", "colour", "a\xed\xa0\x80" "b");   /* what "a\ud800b" parses into */
+    walpe_config_set_prop (c, "/lib/walls/777", "speed", "2");
+    g_free (c->transparent_windows);
+    c->transparent_windows = g_strdup ("st,\xff\xfe");
+    CHECK (walpe_config_save (c));
+    walpe_config_free (c);
+    char *txt = NULL;
+    CHECK (g_file_get_contents (cfg_path, &txt, NULL, NULL) && g_utf8_validate (txt, -1, NULL));
+    g_free (txt);
+    c = walpe_config_load ();
+    CHECK (!c->broken_copy && broken_copies (FALSE) == 0);
+    CHECK (c->mute && c->volume == 0.2 && !g_strcmp0 (c->current, "/lib/walls/777"));
+    walpe_config_free (c);
+    c = walpe_config_load ();
+    {
+        char *speed = walpe_config_get_prop ("/lib/walls/777", "speed");
+        char *colour = walpe_config_get_prop ("/lib/walls/777", "colour");
+        CHECK (!g_strcmp0 (speed, "2"));
+        CHECK (colour && g_utf8_validate (colour, -1, NULL) && g_str_has_prefix (colour, "a") &&
+               g_str_has_suffix (colour, "b"));
+        g_free (speed);
+        g_free (colour);
+    }
+    CHECK (c->transparent_windows && g_utf8_validate (c->transparent_windows, -1, NULL) &&
+           g_str_has_prefix (c->transparent_windows, "st,"));
+    walpe_config_free (c);
+    g_unlink (cfg_path);
+}
+
 /* "pause_fullscreen_all" (a focused fullscreen window pauses every monitor,
  * as up to 0.12): off by default and not written then (an untouched config
  * keeps its bytes), written and read back when set, gone from the file
@@ -633,6 +703,7 @@ int main (void)
     test_round12 ();
     test_sound_defaults ();
     test_broken ();
+    test_not_utf8 ();
     test_backend_keys ();
     test_fullscreen_all ();
     test_save_failure ();

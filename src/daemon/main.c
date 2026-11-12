@@ -7969,6 +7969,19 @@ static char *ipc_handler (const char *req, gpointer user)
             json_node_unref (root);
         return g_strdup ("{\"ok\":false,\"error\":\"bad json\"}");
     }
+    /* A request line is UTF-8 (ipc.c) and its strings can still be none:
+     * json-glib makes three bytes that are no UTF-8 of "\ud800", the escape
+     * of half a surrogate pair. What a request sets is kept and saved - a
+     * wallpaper's option, a path, a list of window classes - and one such
+     * string made config.json a file the next start could not read: it was
+     * set aside as damaged and every setting was back at its default.
+     * Nothing a request may say needs such a string. */
+    if (!wpj_text_is_utf8 (root)) {
+        json_node_unref (root);
+        return g_strdup ("{\"ok\":false,\"error\":\"the request holds text that is not valid UTF-8 "
+                         "(the escape of half a surrogate pair, \\\\ud800 to \\\\udfff); nothing was "
+                         "changed\"}");
+    }
     JsonObject *o = json_node_get_object (root);
     const char *cmd = wpj_str (o, "cmd", "");
     JsonBuilder *b = json_builder_new ();
