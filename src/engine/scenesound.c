@@ -36,6 +36,8 @@ struct WalpeSound {
     float mintime, maxtime;
     char *name;          /* printable, short: log lines and the stream's name */
     /* the rest: lock */
+    void (*prepare) (const char *arg);   /* walpe_sound_set_prepare, NULL = none */
+    char *prepare_arg;
     GMutex lock;
     GCond cond;
     gboolean has_thread;
@@ -788,6 +790,7 @@ static void sound_unref (WalpeSound *s)
     g_cond_clear (&s->cond);
     g_strfreev (s->files);
     g_free (s->name);
+    g_free (s->prepare_arg);
     g_free (s);
 }
 
@@ -920,6 +923,7 @@ static gpointer sound_thread (gpointer data)
     Src src;
     Out out = { 0 };
     gboolean have = FALSE;
+    gboolean prepared = FALSE;   /* walpe_sound_set_prepare: its function was called by this thread */
     int idx = -1;
     guint64 bad = 0;          /* files that cannot be played (bit = index) */
     gint64 played = 0;        /* frames of the open file handed out so far */
@@ -994,6 +998,18 @@ static gpointer sound_thread (gpointer data)
             idx = pick_file (s, rng, idx, bad);
             if (idx < 0)
                 continue;   /* (broken: next_action parks the thread) */
+            if (!prepared) {
+                /* the layer is about to be heard for the first time: its
+                 * files are put where their names say */
+                prepared = TRUE;
+                g_mutex_lock (&s->lock);
+                void (*prepare) (const char *) = s->prepare;
+                char *arg = prepare ? g_strdup (s->prepare_arg) : NULL;
+                g_mutex_unlock (&s->lock);
+                if (prepare)
+                    prepare (arg);
+                g_free (arg);
+            }
             char *err = NULL;
             if (!src_open (&src, s->files[idx], &err)) {
                 file_failed (s, idx, err, &bad);
@@ -1298,6 +1314,17 @@ WalpeSound *walpe_sound_new (WalpeSoundGroup *g, const WalpeSoundSpec *spec)
         return NULL;
     }
     return s;
+}
+
+void walpe_sound_set_prepare (WalpeSound *s, void (*prepare) (const char *arg), const char *arg)
+{
+    if (!s)
+        return;
+    g_mutex_lock (&s->lock);
+    g_free (s->prepare_arg);
+    s->prepare = prepare;
+    s->prepare_arg = prepare ? g_strdup (arg) : NULL;
+    g_mutex_unlock (&s->lock);
 }
 
 void walpe_sound_play (WalpeSound *s)

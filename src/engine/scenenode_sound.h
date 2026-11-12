@@ -32,6 +32,13 @@ static WalpeSoundGroup *scene_sound_group (SceneNodeContent *s)
     return s->sound_group;
 }
 
+/* walpe_sound_set_prepare (the player's thread, before its first file is
+ * opened): the sound files the wallpaper's copy was made without */
+static void node_sound_fetch (const char *cache_dir)
+{
+    walpe_pkg_fetch_sound (cache_dir);
+}
+
 static void node_sound_load (SceneNodeContent *s, NodeObj *nv, JsonObject *o)
 {
     s->sound_objects++;
@@ -56,6 +63,7 @@ static void node_sound_load (SceneNodeContent *s, NodeObj *nv, JsonObject *o)
         n = WALPE_SOUND_MAX_FILES;
     }
     GPtrArray *files = g_ptr_array_new_with_free_func (g_free);
+    gboolean later = FALSE;   /* a file of the package that is extracted when sound is switched on */
     for (guint i = 0; i < n; i++) {
         JsonNode *fn = sa ? json_array_get_element (sa, i) : sn;
         const char *f = fn && JSON_NODE_HOLDS_VALUE (fn) && json_node_get_value_type (fn) == G_TYPE_STRING
@@ -69,6 +77,20 @@ static void node_sound_load (SceneNodeContent *s, NodeObj *nv, JsonObject *o)
         char *p = NULL;
         if (walpe_sound_name_ok (f)) {
             p = resolve_asset (s->dir, f);
+            if (!p) {
+                /* a packaged wallpaper loaded while its sound is off has no
+                 * copy of its sound files yet (pkg.h): the layer gets its
+                 * player all the same, with the place the file will have,
+                 * and fetches it before it opens it (node_sound_fetch).
+                 * (No such file outstanding and still none on disk? Then
+                 * another monitor's load has just extracted them: once
+                 * more.) */
+                p = walpe_pkg_deferred_path (s->dir, f);
+                if (p)
+                    later = TRUE;
+                else
+                    p = resolve_asset (s->dir, f);
+            }
             if (!p && walpe_we_assets_dir ())
                 p = resolve_asset (walpe_we_assets_dir (), f);
         }
@@ -96,6 +118,8 @@ static void node_sound_load (SceneNodeContent *s, NodeObj *nv, JsonObject *o)
     };
     if (files->len) {
         nv->sound = walpe_sound_new (g, &spec);
+        if (nv->sound && later)
+            walpe_sound_set_prepare (nv->sound, node_sound_fetch, s->dir);
         if (!nv->sound && !s->sound_full) {
             s->sound_full = TRUE;
             g_message ("scenenode: more than %d sound layers: layer %s and those after it stay silent",

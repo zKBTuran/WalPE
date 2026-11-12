@@ -6,6 +6,7 @@
 #include "scene.h"
 #include "video.h"
 #include "pkg.h"
+#include "scenesound.h" /* is sound on for a wallpaper: its package's sound files */
 #include "scenenode.h" /* walpe_we_assets_hint */
 #include "common/workshop.h"
 #include "common/config.h" /* walpe_default_dir */
@@ -459,6 +460,19 @@ static void pkg_hold_attach (WalpeContent *c, const char *dir)
     g_mutex_unlock (&pkg_hold_lock);
 }
 
+/* Is sound switched on for the wallpaper opened as `origin`, in a program
+ * that plays sound at all? What scenenode_sound.h's group is made with:
+ * the wallpaper's own switch (its option "walpe_sound"), else the setting. */
+static gboolean scene_sound_wanted (const char *origin)
+{
+    if (!walpe_sound_allowed ())
+        return FALSE;
+    char *sw = walpe_config_get_prop (origin, "walpe_sound");
+    int v = walpe_sound_switch_parse (sw);
+    g_free (sw);
+    return v > 0 || (v < 0 && walpe_sound_enabled ());
+}
+
 /* how many presets the load in progress on this thread has followed */
 static _Thread_local int preset_depth;
 
@@ -548,7 +562,10 @@ WalpeContent *walpe_content_new (const char *path, const WalpeLoadOpts *opts, GE
         char *pkg = !g_file_test (sj, G_FILE_TEST_IS_REGULAR) ? find_pkg (abs) : NULL;
         if (pkg) {
             GError *pe = NULL;
-            char *cache = walpe_pkg_extract_cached (pkg, abs, &pe);
+            /* the package's sound files only for a wallpaper that may be
+             * heard right now (pkg.h; the scene's sound layers fetch them
+             * when sound is switched on later) */
+            char *cache = walpe_pkg_extract_cached_opts (pkg, abs, scene_sound_wanted (o2.origin_dir), &pe);
             g_free (pkg);
             if (!cache) {
                 g_propagate_error (err, pe);

@@ -47,6 +47,7 @@
 #include "gpuprof.h"   /* GPUPROF hooks: WALPE_PROF_* in scenenode_gl_render */
 #include "features.h"  /* run-time switches of renderer features */
 #include "scenesound.h" /* sound layers: scenenode_sound.h below */
+#include "pkg.h"        /* ... and the sound files a package's copy was made without */
 #include "memreport.h"  /* walpe-ctl mem: counters, scenenode_mem_stats */
 
 typedef enum { NK_EMPTY, NK_IMAGE, NK_PARTICLE, NK_TEXT } NodeKind;

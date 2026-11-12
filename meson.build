@@ -1151,6 +1151,16 @@ test('scenesound', executable('scenesound-test', 'tests/scenesound_test.c',
   include_directories: inc,
   dependencies: [core_dep],
   install: false, build_by_default: false), env: ['WALPE_SOUND_NULL=1'], timeout: 240)
+# a packaged wallpaper's sound files and the package cache (engine/pkg.c,
+# scenenode_sound.h): a copy made with sound off has none of them (files and
+# bytes counted), they are extracted when sound is switched on - by a later
+# load, by a player, by a scene that is shown at that moment - and the
+# picture is the same in every case. Null device; GL part skipped without
+# a context.
+test('pkgsound', executable('pkgsound-test', 'tests/pkgsound_test.c',
+  include_directories: inc,
+  dependencies: [core_dep],
+  install: false, build_by_default: false), env: ['WALPE_SOUND_NULL=1'], timeout: 180)
 # scene sound and the sound server (engine/scenesound.c, out_connect), with
 # stand-ins for the five functions of libpulse-simple: players that start
 # together open their streams one at a time, one that is refused by a

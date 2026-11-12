@@ -44,6 +44,37 @@ static gboolean safe_rel_path (const char *p)
 #define PKG_MAX_OBJECTS 32768   /* files + directories of one package */
 #define PKG_STAMP ".walpe-pkg-stamp"
 #define PKG_SRC ".walpe-pkg-src"     /* the package the copy was made from */
+#define PKG_NOSOUND ".walpe-pkg-nosound"   /* the sound files the copy does not have yet,
+                                            * one entry path a line (see "sound files") */
+
+/* which entries are extracted */
+enum { PKG_ALL = 0, PKG_BUT_SOUND = 1, PKG_ONLY_SOUND = 2 };
+
+/* ---- sound files ------------------------------------------------------
+ * A scene's sound layers play files of the package: MP3, Ogg, WAV, FLAC -
+ * 29 % of the bytes of 88 Workshop packages, and nothing reads them while
+ * sound is switched off for the wallpaper (the default). Such a copy is
+ * made without them (walpe_pkg_extract_cached_opts, with_sound FALSE): the
+ * names it left out are listed in PKG_NOSOUND, and they are extracted the
+ * moment somebody needs them - a later load with sound on, or a sound
+ * layer that is about to open its first file (walpe_pkg_fetch_sound) -
+ * through the same walk and the same checks as every other entry. Each
+ * file appears under its name complete or not at all (g_file_set_contents
+ * renames a finished file into place), and the list goes only when all of
+ * them are there: an extraction that was interrupted is simply done again.
+ * An entry is a sound file by the end of its name; a sound layer that
+ * names a file of another kind finds it extracted, as always. */
+gboolean walpe_pkg_sound_name (const char *path)
+{
+    static const char *const ext[] = { "mp3", "ogg", "oga", "opus", "wav", "flac", NULL };
+    const char *dot = path ? strrchr (path, '.') : NULL;
+    if (!dot || strchr (dot, '/') || strpbrk (path, "\r\n"))
+        return FALSE;       /* (a name with a line break could not be listed) */
+    for (int i = 0; ext[i]; i++)
+        if (!g_ascii_strcasecmp (dot + 1, ext[i]))
+            return TRUE;
+    return FALSE;
+}
 
 /* Is the first component of an entry's path one of the cache's own two
  * names? Whatever lies under them is the cache's: as a file the stamp says
@@ -66,7 +97,8 @@ static gboolean pkg_reserved_path (const char *p)
     }
     gsize n = strcspn (p, "/");
     return (n == strlen (PKG_STAMP) && !g_ascii_strncasecmp (p, PKG_STAMP, n)) ||
-           (n == strlen (PKG_SRC) && !g_ascii_strncasecmp (p, PKG_SRC, n));
+           (n == strlen (PKG_SRC) && !g_ascii_strncasecmp (p, PKG_SRC, n)) ||
+           (n == strlen (PKG_NOSOUND) && !g_ascii_strncasecmp (p, PKG_NOSOUND, n));
 }
 
 /* number of components of a relative path ("a//b/" has two) */
@@ -112,7 +144,11 @@ static gboolean set_ioerr (GError **err, const char *fmt, ...)
     return FALSE;
 }
 
-gboolean walpe_pkg_extract (const char *pkg_path, const char *dest_dir, GError **err)
+/* mode PKG_BUT_SOUND: the sound files are checked like every entry and not
+ * written; their paths are appended to `left` (one a line). PKG_ONLY_SOUND:
+ * only they are written. */
+static gboolean pkg_extract_mode (const char *pkg_path, const char *dest_dir, int mode, GString *left,
+                                  GError **err)
 {
     /* mmap instead of a heap copy: pkgs can be hundreds of MB.
      * A regular file only (O_NONBLOCK, then fstat): the package is whatever
@@ -233,6 +269,16 @@ gboolean walpe_pkg_extract (const char *pkg_path, const char *dest_dir, GError *
                 }
                 continue;
             }
+            if (mode != PKG_ALL) {
+                gboolean snd = walpe_pkg_sound_name (path);
+                if (mode == PKG_BUT_SOUND && snd) {
+                    if (left)
+                        g_string_append_printf (left, "%s\n", path);
+                    continue;
+                }
+                if (mode == PKG_ONLY_SOUND && !snd)
+                    continue;
+            }
             char *dst = g_build_filename (dest_dir, path, NULL);
             char *dstdir = g_path_get_dirname (dst);
             /* the copy is the user's alone (it was 0755: with a permissive
@@ -263,6 +309,11 @@ fail:
     g_ptr_array_free (paths, TRUE);
     g_mapped_file_unref (map);
     return FALSE;
+}
+
+gboolean walpe_pkg_extract (const char *pkg_path, const char *dest_dir, GError **err)
+{
+    return pkg_extract_mode (pkg_path, dest_dir, PKG_ALL, NULL, err);
 }
 
 /* extract pkg_path into a stable cache dir keyed by the project dir's
@@ -434,7 +485,112 @@ void walpe_pkg_cache_release (const char *cache_dir)
     g_mutex_unlock (&pkg_lock);
 }
 
+/* pkg_lock held. The sound files a cached copy was made without, from the
+ * package it was made from (FALSE: that package is gone or is another one
+ * by now, or the extraction failed - the list stays). `grew`: something
+ * was written. */
+static gboolean pkg_fetch_sound_locked (const char *cache, gboolean *grew)
+{
+    char *list = g_build_filename (cache, PKG_NOSOUND, NULL);
+    if (!g_file_test (list, G_FILE_TEST_IS_REGULAR)) {
+        g_free (list);
+        return TRUE;        /* nothing was left out */
+    }
+    char *stamp = g_build_filename (cache, PKG_STAMP, NULL), *srcf = g_build_filename (cache, PKG_SRC, NULL);
+    char *old = NULL, *src = NULL, *now = NULL;
+    GStatBuf st;
+    gboolean ok = g_file_get_contents (stamp, &old, NULL, NULL) &&
+                  g_file_get_contents (srcf, &src, NULL, NULL) && src && *src == '/' &&
+                  g_stat (src, &st) == 0;
+    if (ok) {
+        now = g_strdup_printf ("v3:%lld:%lld", (long long) st.st_mtime, (long long) st.st_size);
+        ok = !g_strcmp0 (old, now);     /* the package the copy is of, unchanged */
+    }
+    if (ok) {
+        GError *e = NULL;
+        ok = pkg_extract_mode (src, cache, PKG_ONLY_SOUND, NULL, &e);
+        if (!ok)
+            g_warning ("pkg: the sound files of %s could not be extracted: %s", cache,
+                       e ? e->message : "?");
+        g_clear_error (&e);
+        if (grew)
+            *grew = TRUE;
+        if (ok) {
+            g_unlink (list);
+            g_message ("pkg: sound files extracted -> %s", cache);
+        }
+    }
+    g_free (now);
+    g_free (old);
+    g_free (src);
+    g_free (stamp);
+    g_free (srcf);
+    g_free (list);
+    return ok;
+}
+
+/* Is dir a copy in the package cache? The two functions below act on the
+ * cache only: a wallpaper's own folder may hold a file with the list's name
+ * and say what it likes in it. */
+static gboolean pkg_is_cache_copy (const char *dir)
+{
+    if (!dir || !*dir)
+        return FALSE;
+    char *root = g_build_filename (g_get_user_cache_dir (), "walpe", "pkg", NULL);
+    char *parent = g_path_get_dirname (dir);
+    gboolean is = !strcmp (parent, root);
+    g_free (parent);
+    g_free (root);
+    return is;
+}
+
+gboolean walpe_pkg_fetch_sound (const char *cache_dir)
+{
+    if (!pkg_is_cache_copy (cache_dir))
+        return FALSE;
+    g_mutex_lock (&pkg_lock);
+    gboolean grew = FALSE;
+    gboolean ok = pkg_fetch_sound_locked (cache_dir, &grew);
+    if (grew) {
+        /* the cache grew: bring it back under its limit */
+        char *root = g_path_get_dirname (cache_dir);
+        pkg_cache_trim_locked (root, cache_dir);
+        g_free (root);
+    }
+    g_mutex_unlock (&pkg_lock);
+    return ok;
+}
+
+char *walpe_pkg_deferred_path (const char *cache_dir, const char *name)
+{
+    if (!name || !*name || !walpe_pkg_sound_name (name) || !pkg_is_cache_copy (cache_dir))
+        return NULL;
+    char *list = g_build_filename (cache_dir, PKG_NOSOUND, NULL), *text = NULL, *found = NULL;
+    g_mutex_lock (&pkg_lock);
+    gboolean have = g_file_get_contents (list, &text, NULL, NULL);
+    g_mutex_unlock (&pkg_lock);
+    g_free (list);
+    if (!have)
+        return NULL;
+    char **lines = g_strsplit (text, "\n", -1);
+    char *alt = g_build_filename ("assets", name, NULL);   /* as an asset name is looked up on disk */
+    for (int pass = 0; pass < 2 && !found; pass++)
+        for (int i = 0; lines[i] && !found; i++)
+            if (!strcmp (lines[i], pass ? alt : name))
+                found = g_build_filename (cache_dir, lines[i], NULL);
+    g_free (alt);
+    g_strfreev (lines);
+    g_free (text);
+    return found;
+}
+
 char *walpe_pkg_extract_cached (const char *pkg_path, const char *project_dir, GError **err)
+{
+    return walpe_pkg_extract_cached_opts (pkg_path, project_dir, TRUE, err);
+}
+
+char *walpe_pkg_extract_cached_opts (const char *pkg_path, const char *project_dir, gboolean with_sound,
+                                     GError **err)
 {
     char *bn = g_path_get_basename (project_dir);
     char *hash = g_compute_checksum_for_string (G_CHECKSUM_SHA1, project_dir, -1);
@@ -459,9 +615,19 @@ char *walpe_pkg_extract_cached (const char *pkg_path, const char *project_dir, G
                      g_file_test (cpj, G_FILE_TEST_IS_REGULAR);
     g_free (cpj);
     g_free (old);
+    gboolean grew = FALSE;
+    /* a copy made without its sound files, opened with sound on: they are
+     * extracted now (if that fails the copy is made anew, below) */
+    if (fresh && with_sound)
+        fresh = pkg_fetch_sound_locked (cache, &grew);
     if (fresh) {
         g_utime (stamp, NULL);   /* used now: the last to be evicted */
         pkg_hold_locked (cache);
+        if (grew) {
+            char *root = g_path_get_dirname (cache);
+            pkg_cache_trim_locked (root, cache);
+            g_free (root);
+        }
         g_mutex_unlock (&pkg_lock);
         g_free (stampcontent);
         g_free (stamp);
@@ -477,7 +643,23 @@ char *walpe_pkg_extract_cached (const char *pkg_path, const char *project_dir, G
         g_file_test (cache, G_FILE_TEST_IS_DIR) && !g_file_test (cache, G_FILE_TEST_IS_SYMLINK))
         pkg_tree_remove (cache, 0);
     GError *e = NULL;
-    if (!walpe_pkg_extract (pkg_path, cache, &e)) {
+    GString *left = g_string_new (NULL);
+    char *listf = g_build_filename (cache, PKG_NOSOUND, NULL);
+    gboolean ok = pkg_extract_mode (pkg_path, cache, with_sound ? PKG_ALL : PKG_BUT_SOUND, left, &e);
+    /* What was left out is written down before the stamp says that the
+     * copy is usable. Should the list not be writable, the copy is
+     * completed instead: without a list it would pass for a whole copy of
+     * a package whose sound files do not exist. (A copy written over one
+     * that had a list and is complete now has none.) */
+    if (ok && left->len && !g_file_set_contents (listf, left->str, (gssize) left->len, NULL)) {
+        ok = pkg_extract_mode (pkg_path, cache, PKG_ONLY_SOUND, NULL, &e);
+        g_string_truncate (left, 0);
+    }
+    if (ok && !left->len)
+        g_unlink (listf);
+    g_free (listf);
+    g_string_free (left, TRUE);
+    if (!ok) {
         /* what a refused package wrote before it was refused goes again
          * (unless a loaded wallpaper still reads an older copy there) */
         if (!(pkg_live && g_hash_table_contains (pkg_live, cache)) &&
@@ -506,10 +688,10 @@ char *walpe_pkg_extract_cached (const char *pkg_path, const char *project_dir, G
     }
     g_free (srcpj);
     g_free (dstpj);
-    g_file_set_contents (stamp, stampcontent, -1, NULL);
     char *srcf = g_build_filename (cache, PKG_SRC, NULL);
     g_file_set_contents (srcf, pkg_path, -1, NULL);
     g_free (srcf);
+    g_file_set_contents (stamp, stampcontent, -1, NULL);
     pkg_hold_locked (cache);
     /* the cache grew: bring it back under its limit */
     char *root = g_path_get_dirname (cache);

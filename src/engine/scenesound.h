@@ -132,6 +132,12 @@ gboolean walpe_sound_name_ok (const char *file);
 /* created stopped, owned by the group. NULL without a group or a file, or
  * when the group already has WALPE_SOUND_MAX_LAYERS players. */
 WalpeSound *walpe_sound_new (WalpeSoundGroup *g, const WalpeSoundSpec *spec);
+/* Some of the layer's files are not on disk yet (a packaged wallpaper whose
+ * copy was made while its sound was off, pkg.h): the player's own thread
+ * calls prepare (arg) before it opens its first file - that is, not before
+ * the layer is really about to be heard. To be set before the first play;
+ * arg is copied. */
+void walpe_sound_set_prepare (WalpeSound *s, void (*prepare) (const char *arg), const char *arg);
 void walpe_sound_play (WalpeSound *s);    /* start, or go on after pause */
 void walpe_sound_pause (WalpeSound *s);
 void walpe_sound_stop (WalpeSound *s);    /* stop; the next play starts the file again */
