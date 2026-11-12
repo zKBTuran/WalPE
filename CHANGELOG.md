@@ -339,6 +339,13 @@ could do to the daemon. None of these was seen being used.
   (a full disk, a closed pipe). Wayland: the same answer comes while the daemon waits
   for a compositor to come back (the known limitation under 0.13.0 below still says
   "not running"); what it was sent meanwhile is not carried out later, as before.
+- `walpe-ctl` writes titles, paths and layer names as the daemon sent them, in every
+  locale: every character outside ASCII came out as `?` in `status`, `layers` and `mem`,
+  also in the JSON that scripts read. Control characters are still made harmless, now
+  also in the names of outputs that `resolution`, `gpu`, `gpu-stats` and `backend`
+  print. Columns are padded by bytes, as before.
+- "Adjust layers": a layer whose name is longer than 480 bytes has a key that works; it
+  got one that was refused. Keys of shorter names are what they were.
 - Import: a video with `%d` in its name (`take %03d.mp4`) got its thumbnail under another
   name, replaced a picture of that name next to it and was shown without a preview.
 - Import: a width, height or rotation in what `ffprobe` says about a video that no
