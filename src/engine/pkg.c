@@ -596,6 +596,23 @@ static gboolean pkg_is_cache_copy (const char *dir)
     return is;
 }
 
+/* is `line` a line of the list? (One pass over the text: a scene may ask
+ * for 32 x 64 names, and a package may leave 32768 entries out.) */
+static gboolean pkg_list_has (const char *text, gsize len, const char *line)
+{
+    const gsize want = line ? strlen (line) : 0;
+    const char *end = text + len;
+    for (const char *l = text; want && l < end;) {
+        const char *hit = memmem (l, (gsize) (end - l), line, want);
+        if (!hit)
+            return FALSE;
+        if ((hit == text || hit[-1] == '\n') && (hit + want == end || hit[want] == '\n'))
+            return TRUE;
+        l = hit + 1;
+    }
+    return FALSE;
+}
+
 gboolean walpe_pkg_fetch_sound (const char *cache_dir)
 {
     if (!pkg_is_cache_copy (cache_dir))
@@ -619,19 +636,18 @@ char *walpe_pkg_deferred_path (const char *cache_dir, const char *name)
         return NULL;
     char *list = g_build_filename (cache_dir, PKG_NOSOUND, NULL), *text = NULL, *found = NULL;
     g_mutex_lock (&pkg_lock);
-    gboolean have = g_file_get_contents (list, &text, NULL, NULL);
+    gsize len = 0;
+    gboolean have = g_file_get_contents (list, &text, &len, NULL);
     g_mutex_unlock (&pkg_lock);
     g_free (list);
     if (!have)
         return NULL;
-    char **lines = g_strsplit (text, "\n", -1);
     char *alt = g_build_filename ("assets", name, NULL);   /* as an asset name is looked up on disk */
-    for (int pass = 0; pass < 2 && !found; pass++)
-        for (int i = 0; lines[i] && !found; i++)
-            if (!strcmp (lines[i], pass ? alt : name))
-                found = g_build_filename (cache_dir, lines[i], NULL);
+    if (pkg_list_has (text, len, name))
+        found = g_build_filename (cache_dir, name, NULL);
+    else if (pkg_list_has (text, len, alt))
+        found = g_build_filename (cache_dir, alt, NULL);
     g_free (alt);
-    g_strfreev (lines);
     g_free (text);
     return found;
 }
