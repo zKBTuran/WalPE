@@ -298,6 +298,11 @@ could do to the daemon. None of these was seen being used.
   ending it; `walpe-ctl status` has `restart_failed`.
 - The unfinished copy of a scene's video no longer stays in the cache when the daemon
   ends while the copy is being started.
+- `walpe-ctl quit`, a signal or a restart in place no longer wait until a scene that is
+  being loaded is complete: the load gives up at its next layer. An exit during the
+  load of a large scene took up to four to six seconds in the test and takes under one
+  now. A layer or texture that is being read at that moment, and a frame that is being
+  drawn, are still finished first.
 - The daemon's log file is capped from the start. The cap (16 MiB, `WALPE_LOG_MAX_MB`) was
   looked at only with every 256th line of a run and never for a file a shell had opened
   with `> file`: a daemon started from an autostart entry at every login, saying little
