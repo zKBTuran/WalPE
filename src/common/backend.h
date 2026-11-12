@@ -6,8 +6,12 @@
  * WALPE_BACKEND in the environment, `walpe-daemon --backend NAME`):
  *   auto    - Wayland when WAYLAND_DISPLAY is set and the compositor offers
  *             the layer shell (zwlr_layer_shell_v1), else X11 when DISPLAY
- *             is set. The default.
- *   x11     - X11 only (also inside a Wayland session, through Xwayland).
+ *             is set - but never X11 in the session of a Wayland compositor
+ *             that answers and has no layer shell (GNOME): that DISPLAY is
+ *             Xwayland, where the wallpaper window lies above every other
+ *             window instead of below. The default.
+ *   x11     - X11 only (also inside a Wayland session, through Xwayland:
+ *             asked for by name it is taken, whatever it looks like).
  *   wayland - Wayland only; no fallback to X11.
  * It is read when the daemon starts; a change takes a restart of the daemon.
  * A build may hold one backend only (meson -Dx11=disabled / -Dwayland=disabled):
@@ -163,10 +167,28 @@ static inline void walpe_backend_choose (const WalpeBackendEnv *e, WalpeBackendC
         wl_miss = NULL;         /* not a Wayland session: nothing to say */
     else if (e->layer_shell < 0)
         wl_miss = "WAYLAND_DISPLAY is set but the compositor does not answer";
-    else if (e->layer_shell == 0 && !e->windowed)
-        wl_miss = "the Wayland compositor has no layer shell (zwlr_layer_shell_v1), which a "
-                  "wallpaper needs";
-    else {
+    else if (e->layer_shell == 0 && !e->windowed) {
+        /* The compositor answers and cannot place a wallpaper. A DISPLAY
+         * in its session is Xwayland, and the X11 backend's window is not a
+         * desktop background there: the compositor shows it above every
+         * other window (seen on Mutter 46 and KWin 5.27; clicks pass through
+         * it to windows nobody can see). No wallpaper and a sentence is the
+         * better start than that, so the automatic choice ends here; X11
+         * asked for by name is still taken. */
+        const char *none = "the Wayland compositor has no layer shell (zwlr_layer_shell_v1), "
+                           "which a wallpaper needs";
+        if (e->built_x11 && e->x_display)
+            out->why = g_strdup_printf (
+                "no display to draw on: %s. DISPLAY is set, but in this session it is Xwayland, "
+                "where the wallpaper would lie above every other window, so X11 is not taken "
+                "by itself: use an X11 session where there is one (GNOME: \"GNOME on Xorg\"), or "
+                "ask for it by name to see it (walpe-daemon --backend x11)", none);
+        else if (e->built_x11)
+            out->why = g_strdup_printf ("no display to draw on: %s, and DISPLAY is not set", none);
+        else
+            out->why = g_strdup_printf ("no display to draw on: %s (built: %s)", none, built);
+        return;
+    } else {
         out->backend = WALPE_BACKEND_WAYLAND;
         out->why = g_strdup (e->windowed && e->layer_shell == 0
                                  ? "wayland (auto: WAYLAND_DISPLAY is set; --windowed needs no "

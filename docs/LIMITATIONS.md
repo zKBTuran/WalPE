@@ -65,7 +65,9 @@ software renderer only ([Known limitations](#known-limitations)).
   chosen above 2048 pixels makes them sharper ([RESOLUTION.md](RESOLUTION.md)).
 - **Wayland: tested headless only.** The Wayland backend needs a compositor with the
   layer shell (`zwlr_layer_shell_v1`); GNOME's Wayland session and weston's desktop shell
-  have none and are not supported. Wallpapers were shown on a headless sway 1.9 with the
+  have none and are not supported: the daemon ends there and says why (through Xwayland
+  the wallpaper would lie above every window, so X11 is taken there only when asked for
+  by name). Wallpapers were shown on a headless sway 1.9 with the
   software renderer and on nothing else: no real output, no GPU, no other compositor (a
   headless weston 13 served only as the compositor without layer shell that the daemon
   has to turn down). On Wayland

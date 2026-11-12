@@ -9693,7 +9693,8 @@ static void web_unload_hidden (void)
  * Which window system the daemon draws on (common/backend.h has the
  * rules and the wording): --backend, else WALPE_BACKEND, else the saved
  * setting, else automatic - Wayland when WAYLAND_DISPLAY is set and the
- * compositor offers the layer shell, else X11 when DISPLAY is set. Decided
+ * compositor offers the layer shell, else X11 when DISPLAY is set (not in
+ * the session of a compositor without the layer shell: Xwayland). Decided
  * once, before anything connects; the answer is logged and shown by
  * `status`. An image restarted because the display went away goes back
  * to the window system it had. */
@@ -9752,16 +9753,19 @@ static gboolean backend_decide (const char *cli, gboolean windowed, gboolean qui
     }
     if (!quiet)
         g_message ("display backend: %s", Bk.why);
-    /* automatic, a Wayland compositor that answers but cannot show a
-     * wallpaper, and X11 reached through Xwayland: an X window is not a
-     * desktop background there - whether it stays below the session's own
-     * windows is the compositor's choice. Said once, not decided here. */
-    if (!quiet && ch.asked == WALPE_BACKEND_AUTO && ch.backend == WALPE_BACKEND_X11 &&
-        e.wayland_display && e.layer_shell == 0)
-        g_warning ("this is a Wayland session whose compositor has no layer shell: the X11 "
-                   "backend draws through Xwayland, where the wallpaper window may not stay "
-                   "below other windows. On GNOME use the X11 session; backend = x11 or "
-                   "wayland (walpe-ctl backend) makes the choice explicit");
+    /* X11 asked for by name inside a Wayland session: that X server is
+     * Xwayland, and an X window is not a desktop background there - the
+     * compositor shows the wallpaper window above the session's windows
+     * (Mutter 46, KWin 5.27), which is why the automatic choice never ends
+     * here (common/backend.h). Asked for, it is done, and said. Not after
+     * a restart in place: the image before has said it. */
+    if (!quiet && !Bk.lost && ch.asked == WALPE_BACKEND_X11 && ch.backend == WALPE_BACKEND_X11 &&
+        e.wayland_display)
+        g_warning ("WAYLAND_DISPLAY is set: if this is a Wayland session, the X11 backend draws "
+                   "through Xwayland, where the wallpaper window lies above the other windows "
+                   "instead of below them (clicks pass through it). Stop it with `walpe-ctl "
+                   "quit`; a compositor with the layer shell is drawn on with backend = "
+                   "wayland or auto");
     walpe_backend_choice_clear (&ch);
     return TRUE;
 }
@@ -9935,7 +9939,7 @@ int main (int argc, char **argv)
                      "[--backend auto|x11|wayland]\n"
                      "  --backend / WALPE_BACKEND / the saved setting (walpe-ctl set backend=...):\n"
                      "  the window system to draw on; auto = Wayland where the compositor has\n"
-                     "  the layer shell, else X11\n"
+                     "  the layer shell, X11 on an X session (never Xwayland by itself)\n"
                      "  WALPE_SOFTWARE=1|0 in the environment: render on the CPU (Mesa llvmpipe)\n"
                      "  or on the GPU, whatever the saved setting says "
                      "(walpe-ctl set software=on|off)\n"

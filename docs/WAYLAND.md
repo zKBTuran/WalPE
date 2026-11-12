@@ -37,9 +37,13 @@ A compositor that offers the layer shell (protocol `zwlr_layer_shell_v1`), and a
 | Hyprland, river, labwc, Wayfire, niri, COSMIC | yes | expected to work, not tested |
 | GNOME (Mutter), weston's desktop shell | no | not supported: use an X11 session |
 
-Without the layer shell the daemon says so and names the protocol. With `backend=auto` it
-then uses X11 if `DISPLAY` is set; under Xwayland an X window is not a desktop background
-(it floats above the compositor's windows), so on GNOME the practical answer is its X11
+Without the layer shell the daemon says so, names the protocol and ends with status 1,
+also when `DISPLAY` is set: in such a session `DISPLAY` is Xwayland, and an X window is
+not a desktop background there. The compositor shows the X11 backend's wallpaper window
+above every other window instead of below, and clicks pass through it to windows nobody
+can see (run on Mutter 46 and on KWin 5.27). Up to 0.14.0 `backend=auto` went on to X11
+there by itself. X11 asked for by name (`--backend x11`, `walpe-ctl backend x11`) is
+still taken and the log says what it means; on GNOME the practical answer is its X11
 session where the distribution still offers one.
 
 Used when the compositor offers them, not required: `xdg-output` (monitor names and
@@ -62,9 +66,12 @@ walpe-daemon --backend wayland    # for this start only; beats both
 ```
 
 - `auto`: Wayland when `WAYLAND_DISPLAY` is set and the compositor offers the layer
-  shell; otherwise X11 when `DISPLAY` is set; otherwise the daemon ends with
-  `walpe-daemon: no display to draw on: ...` and says what was missing.
+  shell; X11 when `DISPLAY` is set and there is no Wayland compositor (or one that does
+  not answer); otherwise the daemon ends with `walpe-daemon: no display to draw on: ...`
+  and says what was missing. A Wayland compositor that answers and has no layer shell is
+  such an end, whatever `DISPLAY` says (see above).
 - `x11` / `wayland` by name: that backend or an error. No silent fallback to the other.
+  `x11` inside a Wayland session draws through Xwayland, above the other windows.
 - The setting is read when the daemon starts. Changing it does not move a running daemon:
   `walpe-ctl` answers `restart_needed` and the daemon keeps its backend until it is started
   again.

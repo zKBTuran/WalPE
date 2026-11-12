@@ -64,8 +64,10 @@ not what the daemon believes it drew. Each case starts its own daemon:
   noshell   a compositor without the layer shell (weston when installed,
             else sway with the layer shell ignored through
             WALPE_WL_IGNORE): the Wayland backend asked for by name ends
-            with status 1 and says why; without a setting and with an X
-            server there too, X11 is taken.
+            with status 1 and says why; without a setting the daemon ends
+            the same way also with an X server there (in a session that
+            is Xwayland, where the wallpaper would lie above every
+            window) and says so; `--backend x11` takes X11 there.
   lost      the compositor goes away: the daemon ends with status 1 and
             leaves no socket behind.
   cycles    (only with --only cycles) an output is created and unplugged
@@ -828,48 +830,45 @@ def case_noshell(env, W):
             os.makedirs(xtmp)
             x = displayenv.make("xvfb", xtmp, PATIENCE)
             if check(x.start(640, 360), "noshell: an X server next to that compositor"):
+                # In a real session that X server is Xwayland, where the X11 backend's
+                # window lies above every other window: the automatic choice does not
+                # go there. (Here it is an Xvfb; the daemon cannot and need not tell.)
                 denv["DISPLAY"] = x.display
-                with open(env.log, "ab") as log:
-                    env.daemon = subprocess.Popen([env.daemon_bin], env=denv, stdout=log, stderr=subprocess.STDOUT,
-                                                  cwd=env.tmp)
-                up = wait_for(lambda: env.daemon.poll() is not None or bool(env.state()), 30, 0.2)
-                st = env.state()
-                check(bool(up) and st.get("display_backend") == "x11",
-                      "noshell: without a setting, X11 is taken when the compositor has no layer shell",
-                      {k: v for k, v in st.items() if k.startswith("display_backend")})
-                env.stop_daemon()
+                p = subprocess.run([env.daemon_bin], env=denv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, timeout=60 * PATIENCE, cwd=env.tmp)
+                check(p.returncode == 1 and b"layer shell" in p.stdout and b"Xwayland" in p.stdout and
+                      b"--backend x11" in p.stdout,
+                      "noshell: without a setting X11 is not taken although DISPLAY is set: status 1, and the "
+                      "sentence names the layer shell, Xwayland and --backend x11", (p.returncode, p.stdout[-500:]))
+                check(not os.path.exists(env.sock), "noshell: ... and leaves no socket", env.sock)
                 # The same with the compositor's socket handed over as a descriptor
-                # (WAYLAND_SOCKET, which can be connected to once): the first look at the
-                # compositor keeps that connection for the Wayland backend - and has to
-                # give it back when the X11 backend is opened instead
+                # (WAYLAND_SOCKET, which can be connected to once)
                 sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 try:
                     sk.connect(denv["WAYLAND_DISPLAY"])
                     henv = dict(denv, WAYLAND_SOCKET=str(sk.fileno()))
                     del henv["WAYLAND_DISPLAY"]
-                    with open(env.log, "ab") as log:
-                        env.daemon = subprocess.Popen([env.daemon_bin], env=henv, stdout=log, stderr=subprocess.STDOUT,
-                                                      cwd=env.tmp, pass_fds=(sk.fileno(),))
-                    up = wait_for(lambda: env.daemon.poll() is not None or bool(env.state()), 30, 0.2)
-                    st = env.state()
-                    check(bool(up) and st.get("display_backend") == "x11",
+                    p = subprocess.run([env.daemon_bin], env=henv, stdin=subprocess.DEVNULL,
+                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60 * PATIENCE,
+                                       cwd=env.tmp, pass_fds=(sk.fileno(),))
+                    check(p.returncode == 1 and b"Xwayland" in p.stdout,
                           "noshell: the same with the compositor's socket handed over (WAYLAND_SOCKET)",
-                          {k: v for k, v in st.items() if k.startswith("display_backend")})
-                    # (the socket is known by its inode: a number the daemon has closed may be
-                    # another file's by now)
-                    mine, held = os.readlink("/proc/self/fd/%d" % sk.fileno()), []
-                    if env.daemon.poll() is None:
-                        fds = "/proc/%d/fd" % env.daemon.pid
-                        for n in os.listdir(fds):
-                            try:
-                                if os.readlink(os.path.join(fds, n)) == mine:
-                                    held.append(n)
-                            except OSError:
-                                pass
-                    check(bool(up) and not held, "noshell: ... and the X11 daemon does not keep the connection to the "
-                          "compositor open", "descriptor %s is still the compositor's socket" % ", ".join(held))
+                          (p.returncode, p.stdout[-500:]))
                 finally:
                     sk.close()
+                # asked for by name, X11 is taken there, and the log says what that means
+                mark = env.mark()
+                with open(env.log, "ab") as log:
+                    env.daemon = subprocess.Popen([env.daemon_bin, "--backend", "x11"], env=denv, stdout=log,
+                                                  stderr=subprocess.STDOUT, cwd=env.tmp)
+                up = wait_for(lambda: env.daemon.poll() is not None or bool(env.state()), 30, 0.2)
+                st = env.state()
+                check(bool(up) and st.get("display_backend") == "x11",
+                      "noshell: asked for by name (--backend x11), X11 is taken next to that compositor",
+                      {k: v for k, v in st.items() if k.startswith("display_backend")})
+                check("lies above the other windows" in env.since(mark),
+                      "noshell: ... and the log says that the window lies above the others under Xwayland",
+                      env.since(mark)[-400:])
                 env.stop_daemon()
     finally:
         env.stop_daemon()

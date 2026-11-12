@@ -112,10 +112,21 @@ static void test_auto (void)
     CHECK (picks (&e, WALPE_BACKEND_WAYLAND, "default", "layer shell"));
     e.x_display = TRUE;                 /* Xwayland there as well: still Wayland */
     CHECK (picks (&e, WALPE_BACKEND_WAYLAND, "default", NULL));
-    /* a compositor without the layer shell (GNOME): X11 through Xwayland ... */
+    /* a compositor without the layer shell (GNOME): nothing, and not X11
+     * through Xwayland, where the wallpaper window lies above every other
+     * window; the sentence names both the layer shell and Xwayland ... */
     e.layer_shell = 0;
-    CHECK (picks (&e, WALPE_BACKEND_X11, "default", "no layer shell"));
-    /* ... and nothing at all without DISPLAY, said plainly */
+    CHECK (picks (&e, WALPE_BACKEND_AUTO, "default", "no layer shell"));
+    CHECK (picks (&e, WALPE_BACKEND_AUTO, NULL, "Xwayland"));
+    CHECK (picks (&e, WALPE_BACKEND_AUTO, NULL, "--backend x11"));
+    /* ... X11 asked for by name is taken there all the same ... */
+    e.cli = "x11";
+    CHECK (picks (&e, WALPE_BACKEND_X11, "--backend", "asked for"));
+    e.cli = NULL;
+    e.cfg = WALPE_BACKEND_X11;
+    CHECK (picks (&e, WALPE_BACKEND_X11, "config", "asked for"));
+    e.cfg = WALPE_BACKEND_AUTO;
+    /* ... and without DISPLAY the sentence is the one it always was */
     e.x_display = FALSE;
     CHECK (picks (&e, WALPE_BACKEND_AUTO, "default", "no layer shell"));
     CHECK (picks (&e, WALPE_BACKEND_AUTO, NULL, "DISPLAY is not set"));

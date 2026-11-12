@@ -2745,14 +2745,14 @@ static const char *wl_no_layer_shell_text (void)
     const char *desk = g_getenv ("XDG_CURRENT_DESKTOP");
     gboolean gnome = wl_global_find ("gtk_shell1") != NULL ||
                      (desk && (strstr (desk, "GNOME") || strstr (desk, "gnome")));
+    /* (not "use the X11 backend": through Xwayland its window lies above
+     * every other window - common/backend.h) */
     return gnome
         ? "this Wayland compositor (GNOME's Mutter) has no layer shell (zwlr_layer_shell_v1), the "
-          "protocol a wallpaper surface needs. On GNOME use the X11 backend - `walpe-daemon "
-          "--backend x11` runs through Xwayland - or an X11 session"
+          "protocol a wallpaper surface needs. On GNOME use an X11 session where there is one (\"GNOME on Xorg\")"
         : "this Wayland compositor has no layer shell (zwlr_layer_shell_v1), the protocol a "
-          "wallpaper surface needs. Use the X11 backend (`walpe-daemon --backend x11`, through "
-          "Xwayland) or a compositor that offers it (sway, Hyprland, river, labwc, Wayfire, niri, "
-          "KDE Plasma, COSMIC)";
+          "wallpaper surface needs. Use a compositor that offers it (sway, Hyprland, river, "
+          "labwc, Wayfire, niri, KDE Plasma, COSMIC) or an X11 session";
 }
 
 /* Which layer the wallpaper surfaces go on (wayland_logic.h says why KWin
