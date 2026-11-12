@@ -251,6 +251,26 @@ could do to the daemon. None of these was seen being used.
   first; and a layer with an id of ten digits could not be adjusted at all. Every layer
   has a key of its own now. Keys of layers with ordinary ids are what they were: saved
   adjustments keep their meaning. Found by fuzzing.
+- Library window:
+  - the performance panel asks the daemon nothing while its window is minimised or on a
+    workspace that is not shown, and the animated previews stop there too. On X11 this
+    now also holds under tiling window managers that never mark a hidden window (i3,
+    bspwm, awesome, xmonad, dwm): 486 wake-ups of the window and 222 of the daemon per
+    minute on a hidden i3 workspace before, none now;
+  - previews kept in memory are given back while the window is not on screen;
+  - with the daemon stopped the window no longer asks for it every 2 seconds (the
+    performance panel: every 10 seconds);
+  - a wallpaper that is copied into the library slowly is shown complete without Rescan;
+  - the search ignores accents (é = e, ü = u) and treats i, ı, İ and I as one letter;
+  - screen readers get names for the choices and the search field.
+- `walpe-ctl quit` (and "Quit" in the tray) stops the daemon for good while the library
+  window is open: the window used to start it again at once. A daemon that crashed or
+  was killed is still started again by an open window.
+- `walpe-ctl` says "running but did not answer in time" for a daemon that is busy, where
+  it said "not running"; and it ends with status 1 when its output cannot be written
+  (a full disk, a closed pipe). Wayland: the same answer comes while the daemon waits
+  for a compositor to come back (the known limitation under 0.13.0 below still says
+  "not running"); what it was sent meanwhile is not carried out later, as before.
 - Import: a video with `%d` in its name (`take %03d.mp4`) got its thumbnail under another
   name, replaced a picture of that name next to it and was shown without a preview.
 - Import: a width, height or rotation in what `ffprobe` says about a video that no
@@ -286,26 +306,25 @@ could do to the daemon. None of these was seen being used.
   across several pauses).
 - Tests: a test that cannot run at all - no OpenGL context, or nothing but script checks
   in a build without QuickJS - ends with exit status 77, so `meson test` counts it as
-  skipped; 13 such tests ended with 0 and were counted as passed. `meson test
-  daemon-life` builds the web and video modules it uses (in a fresh build directory its
-  video case was left out without a word). New or extended: scene sound against a slow
-  and a refusing sound server; files of another kind under a picture's name; an effect
-  with 1 to 33 passes; rope trails at 10 to 1000 frames a second; the working size of
-  effects on a colour-only layer; scene switches that reload once; more of the fullscreen
-  rule on X11, and its case no longer ends in a crash of the test script when the X
-  server refuses a connection for a moment; the converted copies of scene videos
-  (`scenevideo`, `daemon-scene-video`); the memory report (`memreport`); real pages in
-  WebKitGTK end to end on both page hosts (`web-wayland`, `web-x11`,
-  `scripts/webcheck.py`). Fuzz harnesses
+  skipped; 13 such tests ended with 0 and were counted as passed. `meson test daemon-life`
+  builds the web and video modules it uses (in a fresh build directory its video case was
+  left out without a word). New or extended: scene sound against a slow and a refusing
+  sound server; files of another kind under a picture's name; an effect with 1 to 33
+  passes; rope trails at 10 to 1000 frames a second; the working size of effects on a
+  colour-only layer; scene switches that reload once; more of the fullscreen rule on X11,
+  and its case no longer ends in a crash of the test script when the X server refuses a
+  connection for a moment; the converted copies of scene videos (`scenevideo`,
+  `daemon-scene-video`); the memory report (`memreport`); real pages in WebKitGTK end to
+  end on both page hosts (`web-wayland`, `web-x11`, `scripts/webcheck.py`). Fuzz harnesses
   for the parsers of wallpaper files (`tests/fuzz`: packages, textures, MP4, GIF and JPEG
   checks, JSON, puppets, particles, shader text, sound files, scenes) for libFuzzer
   (`-Dfuzz=enabled`, clang); their seeds and every input that once broke a parser run in
   the suite as `fuzz-regress-<target>`; 22 targets in all, with the control socket,
   `config.json`, Steam's replies, previews, the library scan and layer keys. From the
-  review: the web file server (request
-  bodies, idle connections, parts of files), the login answer, a stand-in music player
-  (`media-player`), import (`%d`, a child without its daemon), old-format layer pictures,
-  the tray and the library window next to a real daemon (`tray-life`, `ui-life`).
+  review: the web file server (request bodies, idle connections, parts of files), the
+  login answer, a stand-in music player (`media-player`), import (`%d`, a child without
+  its daemon), old-format layer pictures, the tray and the library window next to a real
+  daemon (`tray-life`, `ui-life`).
 
 ### Known limitations
 
