@@ -2064,6 +2064,13 @@ if with_tests
 # GUI pieces that used to depend on the session type, without a display:
 # when the dark / light preference is taken from the desktop portal (never
 # on X11) and what it maps to; how a monitor is named while no engine runs.
+# what the window is told about a daemon that gives no answer: no daemon,
+# or one that listens and does not get to its socket (also with its queue
+# of waiting connections full)
+test('ui-ipc', executable('ui-ipc-test', 'tests/uiipc_test.c', 'src/ui/uiipc.c',
+  include_directories: inc,
+  dependencies: [core_dep],
+  install: false, build_by_default: false), timeout: 60)
 test('ui-session', executable('ui-session-test', 'tests/ui_session_test.c',
   include_directories: inc,
   dependencies: [gtk4],

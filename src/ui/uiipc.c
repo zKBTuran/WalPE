@@ -21,6 +21,7 @@ typedef struct {
 } Req;
 
 static const char ERR_DOWN[] = "walpe-daemon is not running";
+static const char ERR_BUSY[] = "walpe-daemon did not answer in time (busy?)";
 /* two lanes, each one worker: user requests stay in order and a status
  * poll stuck on a busy daemon never delays them */
 static GAsyncQueue *queue[2];
@@ -59,7 +60,7 @@ static char *request_once (const char *sock, const char *json, int timeout_ms, c
     if (connect (fd, (struct sockaddr *) &addr, sizeof (addr)) < 0) {
         /* a full listen backlog (daemon main loop busy) answers EAGAIN on
          * a non-blocking unix socket: retry until the deadline */
-        gboolean ok = FALSE;
+        gboolean ok = FALSE, full = FALSE;
         while (errno == EAGAIN || errno == EINPROGRESS) {
             if (errno == EINPROGRESS) {
                 if (wait_fd (fd, POLLOUT, deadline) > 0) {
@@ -70,6 +71,7 @@ static char *request_once (const char *sock, const char *json, int timeout_ms, c
                 }
                 break;
             }
+            full = TRUE;
             if (g_get_monotonic_time () >= deadline)
                 break;
             g_usleep (20000);
@@ -77,10 +79,18 @@ static char *request_once (const char *sock, const char *json, int timeout_ms, c
                 ok = TRUE;
                 break;
             }
+            full = errno == EAGAIN;
         }
         if (!ok) {
             close (fd);
-            *err = ERR_DOWN;
+            /* The backlog was full to the end: somebody listens there and
+             * does not get to its socket - a daemon that hangs or is stopped,
+             * whose queue the requests before this one filled (each of them
+             * stays in it when its time is up). That is "does not answer",
+             * as for the requests before it. "Not running" made the window
+             * start a second daemon, which ended at once because the first
+             * holds the lock, and then report "the engine keeps crashing". */
+            *err = full ? ERR_BUSY : ERR_DOWN;
             return NULL;
         }
     }
@@ -126,8 +136,7 @@ static char *request_once (const char *sock, const char *json, int timeout_ms, c
     if (nl)
         out = g_strndup (acc->str, (gsize) (nl - acc->str));
     else
-        *err = acc->len ? "truncated reply from walpe-daemon"
-                        : "walpe-daemon did not answer in time (busy?)";
+        *err = acc->len ? "truncated reply from walpe-daemon" : ERR_BUSY;
     g_string_free (acc, TRUE);
     return out;
 }
