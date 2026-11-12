@@ -311,6 +311,19 @@ could do to the daemon. None of these was seen being used.
   load of a large scene took up to four to six seconds in the test and takes under one
   now. A layer or texture that is being read at that moment, and a frame that is being
   drawn, are still finished first.
+- Less on disk: the copy of a packaged scene in `~/.cache/walpe/pkg` is made without the
+  scene's sound files (MP3, Ogg, WAV, FLAC - by their names and by how they begin) while
+  sound is off for that wallpaper, which is the default: 29 % of the bytes of 86
+  Workshop packages. They are extracted when sound is switched on (`scene_sound`, or the
+  wallpaper's own switch), also while the scene is shown. With sound on the copy is
+  complete, as before; the cache's limit and what it removes are unchanged. A package
+  with more than 256 sound files is extracted whole even while sound is off, and so is
+  a copy that has to be written over while a wallpaper still shows it.
+  `WALPE_PKG_WHOLE=1` in the daemon's environment extracts every package whole, as
+  before.
+- A package in which one name is both a file and a folder, or with a name too long to
+  write, is refused before anything is extracted - with sound off as well. A package
+  with a folder named `project.json` is refused.
 - The daemon's log file is capped from the start. The cap (16 MiB, `WALPE_LOG_MAX_MB`) was
   looked at only with every 256th line of a run and never for a file a shell had opened
   with `> file`: a daemon started from an autostart entry at every login, saying little
@@ -402,7 +415,7 @@ could do to the daemon. None of these was seen being used.
   for the parsers of wallpaper files (`tests/fuzz`: packages, textures, MP4, GIF and JPEG
   checks, JSON, puppets, particles, shader text, sound files, scenes) for libFuzzer
   (`-Dfuzz=enabled`, clang); their seeds and every input that once broke a parser run in
-  the suite as `fuzz-regress-<target>`; 23 targets in all, with the control socket,
+  the suite as `fuzz-regress-<target>`; 24 targets in all, with the control socket,
   `config.json`, Steam's replies, previews, the library scan and layer keys. From the
   review: the web file server (request bodies, idle connections, parts of files), the
   login answer, a stand-in music player (`media-player`), import (`%d`, a child without
