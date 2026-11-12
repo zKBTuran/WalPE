@@ -747,7 +747,10 @@ static void http_cb (SoupServer *srv, SoupServerMessage *msg, const char *path,
         const goffset total = (goffset) g_bytes_get_size (b);
         SoupRange *ranges = NULL;
         int n_ranges = 0;
-        if (soup_message_headers_get_ranges (rq, total, &ranges, &n_ranges)) {
+        /* (a GET only: a HEAD is answered as without the header, as it
+         * was - with the whole file's length, which is what a page asks a
+         * HEAD for) */
+        if (!strcmp (method, "GET") && soup_message_headers_get_ranges (rq, total, &ranges, &n_ranges)) {
             if (n_ranges == 1 && ranges[0].start < total && ranges[0].end >= ranges[0].start) {
                 const goffset start = MAX (ranges[0].start, 0), end = MIN (ranges[0].end, total - 1);
                 GBytes *part = g_bytes_new_from_bytes (b, (gsize) start, (gsize) (end - start + 1));

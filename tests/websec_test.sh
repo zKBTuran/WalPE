@@ -35,7 +35,8 @@
 #     waited for an answer nobody can type;
 # 10. a part of a large file of the page (Range: bytes=0-, what a media
 #     player sends) with the answer left waiting does not cost the daemon
-#     the file's size in memory - it did, once for every such request.
+#     the file's size in memory - it did, once for every such request;
+#     and a HEAD with that header is answered as a HEAD without it.
 #
 # Skipped (exit 77) without Xvfb / python3 / the web module, or when WebKit
 # does not come up here. Run: meson test -C build websec -v
@@ -230,7 +231,7 @@ fi
 # --- a part of a large file of the page ("Range: bytes=0-", as a media
 # player asks), with the answer left waiting: the daemon made a copy of the
 # whole file in memory for every such request
-RANGE_KB= RANGE_ST=
+RANGE_KB= RANGE_ST= HEAD_ST=
 TOK=$(sed -n 's/.*NP tok \([0-9a-f-]*\).*/\1/p' "$T/daemon.log" | head -1 | tr -d '-')
 anon_kb () { sed -n 's/^RssAnon:[^0-9]*\([0-9]*\).*/\1/p' "/proc/$DPID/status" 2>/dev/null; }
 if [ -n "$HPORT" ] && [ ${#TOK} = 32 ]; then
@@ -251,6 +252,26 @@ time.sleep(5)
     RANGE_ST=$(cat "$T/range" 2>/dev/null)
     [ -n "$A0" ] && [ -n "$A1" ] && RANGE_KB=$((A1 - A0))
     wait "$RPID"
+    # a HEAD that names a part is a HEAD: the whole file's length, no part
+    # (a part is defined for GET alone; a page that asks for a file's size
+    # this way read the part's length)
+    python3 -I -c '
+import socket, sys
+port = int(sys.argv[1])
+s = socket.create_connection(("127.0.0.1", port), timeout=20)
+s.sendall(("HEAD /%s/big.bin HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nRange: bytes=0-99\r\nConnection: close\r\n\r\n" % (sys.argv[2], port)).encode())
+d = b""
+while b"\r\n\r\n" not in d:
+    p = s.recv(4096)
+    if not p:
+        break
+    d += p
+h = [l.decode("latin1") for l in d.split(b"\r\n")]
+cl = [l.split(":", 1)[1].strip() for l in h if l.lower().startswith("content-length:")]
+cr = [l for l in h if l.lower().startswith("content-range:")]
+open(sys.argv[3], "w").write("%s|%s|%d\n" % (h[0], cl[0] if cl else "", len(cr)))
+' "$HPORT" "$TOK" "$T/headrange"
+    HEAD_ST=$(cat "$T/headrange" 2>/dev/null)
 fi
 
 # --- another client's selections while the page selects, and two clicks
@@ -313,6 +334,11 @@ case "$RANGE_ST" in
         bad "an answer to \"Range: bytes=0-\" on a 64 MiB file of the page, left waiting, cost the daemon $((${RANGE_KB:-0} / 1024)) MiB of its own memory" ;;
 "") echo "note: the page's token was not found in the log (the Range request was not made)" ;;
 *) bad "a part of a file of the page was asked for (Range: bytes=0-) and the answer was: $RANGE_ST" ;;
+esac
+case "$HEAD_ST" in
+"HTTP/1.1 200"*"|67108864|0") ;;
+"") [ -z "$RANGE_ST" ] || bad "a HEAD with a Range header got no answer" ;;
+*) bad "a HEAD with \"Range: bytes=0-99\" on a 64 MiB file was not answered as a HEAD without it (status|length|Content-Range lines): $HEAD_ST" ;;
 esac
 [ "$CONN_STATUS" = ok ] || bad "the daemon did not answer on its control socket while $CONN_HELD connections to the page's file server were open"
 grep -q 'NP mousedown trusted=true' "$T/daemon.log" || echo "note: no trusted click reached the page here (CLIPBOARD part not exercised)"
