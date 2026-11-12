@@ -209,7 +209,18 @@ int main (void)
         printf ("media-player: ok\n");
     fflush (NULL);
     /* (not g_test_dbus_down: it waits for every connection to the bus to
-     * be gone, and the media thread keeps the process's for its grace time) */
+     * be gone, and the media thread keeps the process's for its grace time.
+     * That connection is the shared one, which ends its process with
+     * SIGTERM when its bus goes away: not here, where the bus is stopped
+     * on purpose a moment before the test ends by itself - whichever of
+     * the two came first decided between "ok" and "killed by a signal") */
+    {
+        GDBusConnection *shared = g_bus_get_sync (G_BUS_TYPE_SESSION, NULL, NULL);
+        if (shared) {
+            g_dbus_connection_set_exit_on_close (shared, FALSE);
+            g_object_unref (shared);
+        }
+    }
     g_test_dbus_stop (tb);
     _exit (fails ? 1 : 0);
 }
