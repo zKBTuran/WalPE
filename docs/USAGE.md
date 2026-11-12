@@ -81,6 +81,7 @@ the one before it on screen; `walpe-ctl status` says why (`load_error`, `load_re
 | `cancel-import` | stop a running import or conversion |
 | `pause` / `resume` | |
 | `status` | the daemon's state as JSON: monitors, what they show, why one is paused, import progress, renderer, counters |
+| `diag` | the same state in a dozen lines of text, for a bug report: version, session, window system and why it was chosen, what the compositor offers and lacks, GL driver, modules, sound and why it is silent, and per monitor what it shows and which rule pauses it. Wallpapers are named by the last part of their path and the home directory is written `~`. The daemon writes the same lines to its log once, when its first wallpaper is shown |
 | `set key=value ...` | change settings ([SETTINGS.md](SETTINGS.md)); refused as a whole when one key is unknown or one value has the wrong kind |
 | `backend [auto\|x11\|wayland]` | show the window system the daemon draws on, how it was chosen, what the build holds and who reports each pause condition; or save the setting for its next start ([WAYLAND.md](WAYLAND.md)) |
 | `gpu [--json]` | the graphics devices of this machine, the one that renders, and what `set gpu=auto\|integrated\|discrete\|<device>` would pick ([GPU.md](GPU.md)) |

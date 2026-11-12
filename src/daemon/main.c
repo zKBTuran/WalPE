@@ -1338,6 +1338,7 @@ static int mon_content_fps (Mon *m, WalpeType type, int cap)
 typedef struct { Mon *m; char *path; char *msg; gboolean kept; guint tag; } LoadNote;
 
 static void load_ended (Mon *m, const char *path, const char *msg, gboolean kept);
+static gboolean diag_say (gpointer first_gl);   /* diag.h: the summary in the log, once */
 
 static gboolean load_note_cb (gpointer user)
 {
@@ -1352,6 +1353,7 @@ static gboolean load_note_cb (gpointer user)
      * recheck timer that used to pick them up is gone) */
     pointer_update ();
     state_touch ();
+    diag_say (NULL);    /* the first wallpaper is there, or its load has failed */
     return G_SOURCE_REMOVE;
 }
 
@@ -7883,12 +7885,14 @@ static gboolean prof_env_start (gpointer user)
     return G_SOURCE_REMOVE;
 }
 
+#include "diag.h"         /* the summary for a bug report: diag_say, diag_ipc */
+
 /* a request that only reads: it changes nothing a subscriber is told
  * about. "resolution" lists when it names nothing to change. */
 static gboolean ipc_request_reads (const char *cmd, JsonObject *o)
 {
     static const char *const reads[] = { "status", "props", "subscribe", "steam_libraries", "mem",
-                                         "quality", "layers", "profile_result", NULL };
+                                         "quality", "layers", "profile_result", "diag", NULL };
     static const char *const res_changes[] = { "set", "monitor", "value", "texture_limit", "asked",
                                                "forget", "prompt", NULL };
     for (int i = 0; reads[i]; i++)
@@ -8244,6 +8248,8 @@ static char *ipc_handler (const char *req, gpointer user)
                            wpj_bool (o, "sync", FALSE));
     } else if (!g_strcmp0 (cmd, "profile_result")) {
         ipc_profile_result (b);                                 /* GPUPROF */
+    } else if (!g_strcmp0 (cmd, "diag")) {
+        diag_ipc (b);                                           /* walpe-ctl diag */
     } else if (!g_strcmp0 (cmd, "quit")) {
         jb_bool (b, "ok", TRUE);
         quit = TRUE;
@@ -8512,6 +8518,7 @@ static void sw_note_gl (void)
                        "software renderer");
         if (cpu && !Sw.active)
             gpu_note_software_renderer ();   /* no device renders: say so in `status` */
+        g_idle_add (diag_say, &Sw);   /* the summary (diag.h), unless a wallpaper is loading */
     }
     g_mutex_unlock (&Sw.lock);
 }
@@ -10426,6 +10433,7 @@ int main (int argc, char **argv)
 
     if (!D.display_lost)    /* (it can go while the daemon is still starting) */
         g_main_loop_run (D.loop);
+    diag_say (NULL);        /* a daemon that never drew: its summary now */
     /* The daemon ends, or starts itself again. A render thread that is in
      * the middle of loading a scene is not waited for until the scene is
      * complete: the load gives up at its next layer or texture (content.h)

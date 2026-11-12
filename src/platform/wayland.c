@@ -2977,6 +2977,21 @@ static char *wl_describe (void)
 {
     GString *s = g_string_new ("compositor: ");
     wl_describe_globals (s);
+    {
+        /* and what it lacks of the protocols the backend would use: a bug
+         * report from another compositor is read against this list first */
+        const struct { gboolean have; const char *name; } opt[] = {
+            { W.xdg_output_mgr != NULL, "xdg-output" }, { W.viewporter != NULL, "viewporter" },
+            { W.frac_mgr != NULL, "fractional-scale" }, { W.presentation != NULL, "presentation-time" },
+            { W.wm_base != NULL, "xdg-shell" }, { W.dmabuf_version != 0, "linux-dmabuf" },
+        };
+        const char *sep = "; lacks: ";
+        for (guint i = 0; i < G_N_ELEMENTS (opt); i++)
+            if (!opt[i].have) {
+                g_string_append_printf (s, "%s%s", sep, opt[i].name);
+                sep = ", ";
+            }
+    }
     g_string_append_printf (s, "; %u outputs; pointer: %s", g_list_length (W.outputs),
                             wl_pointer_state ());
     return g_string_free (s, FALSE);

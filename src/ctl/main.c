@@ -52,6 +52,11 @@ static void usage (void)
              "  walpe-ctl cancel-import        stop a running import / video conversion\n"
              "  walpe-ctl pause | resume       control playback\n"
              "  walpe-ctl status               show daemon state (+ import progress)\n"
+             "  walpe-ctl diag                 the state in a dozen lines, for a bug report: version,\n"
+             "                                 session, window system and why, what the compositor\n"
+             "                                 offers, GL driver, modules, sound, per monitor what it\n"
+             "                                 shows and which rule pauses it. Wallpapers by the last\n"
+             "                                 part of their path, the home directory as ~\n"
              "  walpe-ctl set fps=N volume=X parallax=on|off fs=on|off\n"
              "  walpe-ctl set scene_sound=on|off  scenes play their sound layers (WAV, MP3, FLAC, Ogg)\n"
              "                                 through PulseAudio / PipeWire; on by default. Heard at\n"
@@ -994,6 +999,31 @@ static int quality_cmd (int argc, char **argv)
     return rc;
 }
 
+/* walpe-ctl diag: the daemon's own summary (daemon/diag.h), as it wrote it
+ * to its log when it started, with the state as it is now. Text made to be
+ * posted: the daemon leaves out what names the user. */
+static int diag_show (void)
+{
+    char *sock = walpe_socket_path ();
+    char *reply = walpe_ipc_request (sock, "{\"cmd\":\"diag\"}", 2000);
+    if (!reply)
+        no_reply (sock);
+    g_free (sock);
+    if (!reply)
+        return 2;
+    JsonNode *rn = wpj_parse_data (reply, -1);
+    JsonObject *ro = rn && JSON_NODE_HOLDS_OBJECT (rn) ? json_node_get_object (rn) : NULL;
+    const char *text = ro && wpj_bool (ro, "ok", FALSE) ? wpj_str (ro, "text", NULL) : NULL;
+    if (text)
+        g_print ("%s\n", tt (text));
+    else
+        note_old_daemon (reply, "diag");
+    if (rn)
+        json_node_unref (rn);
+    g_free (reply);
+    return text ? 0 : 3;
+}
+
 /* walpe-ctl backend: the window system of the running daemon, in words.
  * Exit status as elsewhere: 2 = no daemon, 3 = it refused. */
 static int backend_show (void)
@@ -1266,6 +1296,8 @@ static int run (int argc, char **argv)
         return gpustat_main (argc, argv);
     if (!g_strcmp0 (cmd, "mem"))
         return mem_main (argc, argv);
+    if (!g_strcmp0 (cmd, "diag") && argc == 2)
+        return diag_show ();
     if (!g_strcmp0 (cmd, "backend") && argc == 2)
         return backend_show ();
     if (!g_strcmp0 (cmd, "backend") && argc == 3) {
