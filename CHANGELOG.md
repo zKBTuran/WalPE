@@ -34,6 +34,11 @@ copy.
 - Text layers: the glyphs of a wallpaper's fonts leave the daemon with the wallpaper.
   They stayed until the daemon was stopped: 0.3 to 0.7 MB for every wallpaper with a clock
   and a date that had been shown, more with large text.
+- Text layers, with a text wallpaper on one monitor while others come and go on the next:
+  the font files of a wallpaper that left stayed registered (about 6 kB per file), **and a
+  later wallpaper could be drawn with the wrong font**: when its font had the same family
+  and style name as a font of a wallpaper that had left, the file of that earlier
+  wallpaper was used. A wallpaper's text is drawn from its own font file now.
 - A program keeps no shader object alive after it was linked. Each program held its two
   shader objects with their source text for as long as it lived: 170 shader objects and
   743 kB of source for the 85 programs of one test scene, and whatever the driver keeps
