@@ -147,7 +147,7 @@ static void walk (Scan *sc, JsonNode *n, const char *feature, int depth)
     else if (u && JSON_NODE_HOLDS_OBJECT (u))
         mark (sc, wpj_str (json_node_get_object (u), "name", NULL), feature);
     /* a sound object: whatever is bound on it does something only while
-     * wallpaper sound is switched on (off by default) */
+     * wallpaper sound is switched on (on by default; off up to 0.14.0) */
     const char *sub = feature;
     if (json_object_has_member (o, "sound") && json_object_has_member (o, "id")) {
         sub = "scene sound";

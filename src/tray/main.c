@@ -1128,9 +1128,10 @@ static gboolean tray_silent (void)
     return T.mute || T.volume <= 0.001;
 }
 
-/* The third state, and the one a new configuration is in: wallpaper sound
- * is switched off (the setting scene_sound). That is not "muted": the entry
- * read "Unmute" all the same (the volume is 0 by default), a click set the
+/* The third state, and up to 0.14.0 the one a new configuration was in
+ * (sound is on by default now, at volume 0.5): wallpaper sound is switched
+ * off (the setting scene_sound). That is not "muted": the entry read
+ * "Unmute" all the same (the volume was 0 by default), a click set the
  * volume to 1, the entry then read "Mute" - and nothing was heard, because
  * nothing here switched the sound on. The entry names that state and
  * switches it on. */
