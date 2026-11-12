@@ -37,6 +37,14 @@ typedef struct {
     guint32 keymap_size;
 } WalpeWebInput;
 void walpe_web_input (gpointer viewer, const WalpeWebInput *in);
+/* How loud the sound of web pages is: the volume setting, 0..1, and 0
+ * while wallpaper sound is switched off or "mute" is on. Any thread; applies at once to the pages that run
+ * and to every page made later. The level is kept by the core: a web
+ * module loaded afterwards is told before it makes its first page. Until
+ * a program says otherwise it is 0 - pages are silent (the daemon sets it
+ * at start; the tools and the tests never do). At 0 a page's media play
+ * all the same, without sound. */
+void walpe_web_sound (double level);
 /* where the pages' windows live: "x11" (an off-screen X window; on Wayland
  * through Xwayland), "private" (a Wayland display of the module's own),
  * "" = no page was created yet; g_free. WALPE_WEB_HOST=auto|x11|private.

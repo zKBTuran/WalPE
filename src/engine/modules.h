@@ -54,6 +54,8 @@
  * scene_note (videotex.h: a scene's video played from a converted copy)
  * and, after them, `mem_stats`; WalpeContent ends with `mem_stats`
  * (`walpe-ctl mem`, memreport.h).
+ * 14: WalpeWebModule ends with `web_sound` (the volume setting for the
+ * sound of web pages, web.h walpe_web_sound).
  *
  * NEVER UNLOADED. A module that was loaded stays loaded until the process
  * ends (modload.c closes a library only when it has no entry symbol). The
@@ -65,7 +67,7 @@
  * (scenesound.c). Whoever adds a dlclose of walpe-video.so has to wait for
  * walpe_sound_threads () == 0 first - and those threads may be blocked in
  * the sound server without a time limit. */
-#define WALPE_MODULE_ABI 13
+#define WALPE_MODULE_ABI 14
 
 typedef struct {
     int abi;
@@ -78,6 +80,7 @@ typedef struct {
     char *(*web_input_status) (void);   /* ABI 4 */
     char *(*web_info) (void);           /* ABI 5: what renders WebGL in pages */
     char *(*web_host) (void);           /* ABI 11: where the pages' windows live */
+    void (*web_sound) (double level);   /* ABI 14: how loud pages are (web.h) */
 } WalpeWebModule;
 
 typedef struct {

@@ -6854,9 +6854,22 @@ static gboolean res_set_parse (JsonObject *o, GArray *ch, GString *notes, char *
 
 static void ipc_set_keys (JsonBuilder *b, JsonObject *o);
 
+/* The sound of web pages follows the three settings of wallpaper sound
+ * (web.h walpe_web_sound): as loud as "volume" says while "scene_sound" is
+ * on and "mute" is off, silent otherwise. At start, before a wallpaper is
+ * opened, and after every `set` request: costs nothing while the level is
+ * what it was, and never loads the web module. */
+static void web_sound_apply (void)
+{
+#ifdef HAVE_WEB
+    walpe_web_sound (D.cfg->scene_sound && !D.cfg->mute ? D.cfg->volume : 0.0);
+#endif
+}
+
 static void ipc_set (JsonBuilder *b, JsonObject *o)
 {
     ipc_set_keys (b, o);
+    web_sound_apply ();
     /* one load per scene for everything this request changed, also when it
      * ended early at a key that was not understood */
     reload_flush ();
@@ -10384,6 +10397,8 @@ int main (int argc, char **argv)
     fx_sim_set_enabled (D.cfg->fluid_sim);          /* simulation effects (fx_sim.h) */
     fx_sim_set_quality (walpe_fluid_quality_name ((WalpeFluidQuality) D.cfg->fluid_quality));
     particles_apply ();
+    web_sound_apply ();     /* (web pages; the scenes' sound follows) */
+
     /* wallpaper sound: only this program may play (the settings window,
      * the tools and the tests never do); what is heard follows the three
      * settings (scene_sound is on unless the user switched it off; a

@@ -218,6 +218,9 @@ typedef struct {
     gboolean webgl_off;       /* WebGL was switched off after repeated crashes */
     gboolean js_paused;
     gboolean suspended;       /* page paused + window unmapped (sh_suspend) */
+    WebKitUserScript *snd_script; /* the sound script with the level it starts with */
+    char snd_key[24];         /* what its copies in the page's frames know each other by */
+    int snd_q16;              /* the level the page was last given (-1 = none yet) */
     int view_w, view_h;
     WebInput *input;          /* pointer input + navigation guard (webinput.c) */
     gpointer in_owner;        /* the viewer (monitor) the page's pointer is on */
@@ -1394,12 +1397,161 @@ static void hide_window_offscreen (GtkWidget *win, int w, int h);
 static void web_private_screen (int w, int h);
 #endif
 
-#define JS_MEDIA_SUSPEND \
-    "document.querySelectorAll('video,audio').forEach(function(m){" \
-    "if(!m.paused&&!m.ended){m.__walpeResume=1;m.pause();}});"
-#define JS_MEDIA_RESUME \
-    "document.querySelectorAll('video,audio').forEach(function(m){" \
-    "if(m.__walpeResume){m.__walpeResume=0;var p=m.play();if(p&&p.catch)p.catch(function(){});}});"
+/* ------------------------------------------------------ the page's sound
+ * A wallpaper page plays its sound by itself: <audio> and <video> elements,
+ * Audio objects made by its script, Web Audio. Two things are WalPE's:
+ *
+ * How loud it is: the level of walpe_web_sound (the volume setting; 0
+ * while wallpaper sound is switched off or "mute" is on, and 0 in every
+ * program that never set it). WebKitGTK
+ * has no volume for a page, only a mute, and the mute is of no use here:
+ * an Audio object that is started in a muted page never plays, also not
+ * after the page is unmuted (WebKitGTK 2.52) - and a wallpaper starts
+ * while the volume is still 0, its default. So a script in every frame of
+ * the page (SOUND_JS) scales what the page itself sets: the volume of each
+ * media element - the page reads back the value it wrote - and a gain in
+ * front of each AudioContext's output (an element routed into an
+ * AudioContext is left alone: the gain has it). At level 0 that is
+ * silence: a video goes on playing its pictures, and an element that is
+ * sound alone is not played into nothing - it is held (paused; a play ()
+ * of the page is taken and kept) and starts when there is a level, as a
+ * scene's sound layer does. The script starts with the level of the
+ * moment it was made with, so a page that loads again, and a frame that
+ * is made later, begin right; a change replaces it and tells the running
+ * page (sh_sound_apply), which hands it on to its frames - directly, or
+ * with a message where a frame from another site keeps scripts out (the
+ * message carries a number only this page's copies of the script know).
+ *
+ * Silence while paused: sh_suspend has the script pause every element it
+ * knows and those in the document, and suspend the AudioContexts that
+ * have an output; then the view is muted (what the script did not reach).
+ * Resume unmutes first and starts them again after it. */
+static gint web_sound_q16;          /* atomic: the level, 0..65536 */
+static GPtrArray *sound_pages;      /* main thread: the pages that have a view */
+
+#define SOUND_JS_HEAD "(function(){var W=window;if(W.__walpeVol)return;var K='"
+#define SOUND_JS_MID "',L="
+#define SOUND_JS_TAIL \
+    ",S=0,D=document,H=W.HTMLMediaElement,M=H&&H.prototype,d=M&&Object.getOwnPropertyDescriptor(M,'volume');\n" \
+    "var own=new WeakMap(),routed=new WeakSet(),els=[],outs=[],V=W.HTMLVideoElement,pl=M&&M.play,pa=M&&M.pause;\n" \
+    "function each(a,f){for(var i=a.length-1;i>=0;i--){var x=a[i].deref();if(x)f(x);else a.splice(i,1);}}\n" \
+    "function ap(m){try{d.set.call(m,own.get(m)*(routed.has(m)?1:L));}catch(e){}}\n" \
+    "function reg(m){if(!d||!(m instanceof H)||own.has(m))return;own.set(m,d.get.call(m));\n" \
+    " if(els.length>64)each(els,function(){});els.push(new WeakRef(m));ap(m);}\n" \
+    /* (sound alone, at level 0: not played into nothing, held until there is a level) */ \
+    "function held(m){return L<=0&&!(V&&m instanceof V)&&!routed.has(m);}\n" \
+    "function go(m){try{var p=pl.call(m);if(p&&p.catch)p.catch(function(){});}catch(e){}}\n" \
+    "if(d&&d.set&&d.configurable&&pl&&pa){\n" \
+    " Object.defineProperty(M,'volume',{configurable:true,enumerable:d.enumerable,\n" \
+    "  get:function(){return own.has(this)?own.get(this):d.get.call(this);},\n" \
+    "  set:function(v){v=Number(v);if(!(v>=0&&v<=1)||!(this instanceof H)){d.set.call(this,v);return;}\n" \
+    "   reg(this);own.set(this,v);ap(this);}});\n" \
+    " M.play=function(){reg(this);if(this instanceof H&&held(this)){this.__walpeHeld=1;return Promise.resolve();}\n" \
+    "  return pl.apply(this,arguments);};\n" \
+    " M.pause=function(){if(this instanceof H)this.__walpeHeld=this.__walpeResume=0;return pa.apply(this,arguments);};\n" \
+    " if(M.load){var ld=M.load;M.load=function(){reg(this);return ld.apply(this,arguments);};}\n" \
+    " ['src','srcObject','autoplay'].forEach(function(n){var p=Object.getOwnPropertyDescriptor(M,n);\n" \
+    "  if(p&&p.set&&p.configurable)Object.defineProperty(M,n,{configurable:true,enumerable:p.enumerable,get:p.get,\n" \
+    "   set:function(v){reg(this);p.set.call(this,v);}});});\n" \
+    " D.addEventListener('loadstart',function(e){reg(e.target);},true);\n" \
+    /* (an element that starts by its autoplay attribute) */ \
+    " D.addEventListener('play',function(e){var m=e.target;reg(m);if(m instanceof H&&held(m)){m.__walpeHeld=1;pa.call(m);}},true);\n" \
+    "}\n" \
+    /* (outs holds the contexts and their gains for good: the page may drop \
+     * every reference of its own while the context goes on sounding) */ \
+    "var A=W.AudioNode&&W.AudioNode.prototype,T=W.AudioDestinationNode,O=W.OfflineAudioContext;\n" \
+    "if(A&&T){var oc=A.connect,od=A.disconnect;\n" \
+    " var mg=function(t,make){var c=t.context;if(O&&c instanceof O)return null;\n" \
+    "  for(var i=0;i<outs.length;i++)if(outs[i].c===c)return outs[i].g;\n" \
+    "  if(!make)return null;var g=c.createGain();g.gain.value=L;oc.call(g,t);outs.push({c:c,g:g});return g;};\n" \
+    " A.connect=function(t){var g=null;try{g=t instanceof T?mg(t,1):null;}catch(e){}if(!g)return oc.apply(this,arguments);\n" \
+    "  var a=Array.prototype.slice.call(arguments);a[0]=g;oc.apply(this,a);return t;};\n" \
+    " A.disconnect=function(t){var g=null;try{g=t instanceof T?mg(t,0):null;}catch(e){}if(!g)return od.apply(this,arguments);\n" \
+    "  var a=Array.prototype.slice.call(arguments);a[0]=g;return od.apply(this,a);};\n" \
+    " var C=W.AudioContext&&W.AudioContext.prototype,cs=C&&C.createMediaElementSource;\n" \
+    " if(cs)C.createMediaElementSource=function(m){var r=cs.apply(this,arguments);\n" \
+    "  try{reg(m);if(own.has(m)){routed.add(m);ap(m);}}catch(e){}return r;};\n" \
+    "}\n" \
+    "function kids(n,x){for(var i=0;i<W.frames.length;i++){var k=W.frames[i];\n" \
+    " try{if(k[n]){k[n](x);continue;}}catch(e){}try{var o={};o[K]=n;o.x=x;k.postMessage(o,'*');}catch(e){}}}\n" \
+    "W.__walpeVol=function(v){L=v;each(els,function(m){ap(m);\n" \
+    "  if(held(m)){if(!m.paused&&!m.ended){m.__walpeHeld=1;pa.call(m);}}\n" \
+    "  else if(m.__walpeHeld){m.__walpeHeld=0;if(S)m.__walpeResume=1;else go(m);}});\n" \
+    " outs.forEach(function(o){o.g.gain.value=v;});kids('__walpeVol',v);};\n" \
+    "W.__walpeSnd=function(s){S=s;var seen=new Set();\n" \
+    " function one(m){if(seen.has(m))return;seen.add(m);\n" \
+    "  if(s){if(!m.paused&&!m.ended){m.__walpeResume=1;if(pa)pa.call(m);else m.pause();}}\n" \
+    "  else if(m.__walpeResume){m.__walpeResume=0;if(held(m))m.__walpeHeld=1;else if(pl)go(m);else m.play();}}\n" \
+    " D.querySelectorAll('video,audio').forEach(one);each(els,one);\n" \
+    " outs.forEach(function(o){var c=o.c;try{if(s){if(c.state==='running'){c.__walpeResume=1;c.suspend();}}\n" \
+    "  else if(c.__walpeResume){c.__walpeResume=0;c.resume();}}catch(e){}});\n" \
+    " kids('__walpeSnd',s);};\n" \
+    "if(W.top!==W)W.addEventListener('message',function(e){var o=e.data;try{if(o&&e.source===W.parent){\n" \
+    " if(o[K]==='__walpeVol'&&o.x>=0&&o.x<=1){e.stopImmediatePropagation();W.__walpeVol(o.x);}\n" \
+    " else if(o[K]==='__walpeSnd'){e.stopImmediatePropagation();W.__walpeSnd(o.x?1:0);}}}catch(x){}},true);\n" \
+    "})();"
+
+#define JS_MEDIA_SUSPEND "window.__walpeSnd&&window.__walpeSnd(1);"
+#define JS_MEDIA_RESUME "window.__walpeSnd&&window.__walpeSnd(0);"
+
+static void sh_eval (WebShared *sh, const char *js);
+static void web_random_bytes (void *buf, gsize n);
+
+/* main thread: the page gets the level of now - at its creation (before it
+ * loads anything) and when the level changed */
+static void sh_sound_apply (WebShared *sh)
+{
+    if (!sh->view || sh->dead)
+        return;
+    const int q = g_atomic_int_get (&web_sound_q16);
+    if (q == sh->snd_q16)
+        return;
+    char num[G_ASCII_DTOSTR_BUF_SIZE];
+    g_ascii_formatd (num, sizeof num, "%.4f", q / 65536.0);
+    if (!sh->snd_key[0]) {
+        guint32 r[2];
+        web_random_bytes (r, sizeof r);
+        g_snprintf (sh->snd_key, sizeof sh->snd_key, "walpe%08x%08x", r[0], r[1]);
+    }
+    WebKitUserContentManager *ucm = webkit_web_view_get_user_content_manager (sh->view);
+    if (sh->snd_script) {
+        webkit_user_content_manager_remove_script (ucm, sh->snd_script);
+        webkit_user_script_unref (sh->snd_script);
+    }
+    char *src = g_strconcat (SOUND_JS_HEAD, sh->snd_key, SOUND_JS_MID, num, SOUND_JS_TAIL, NULL);
+    sh->snd_script = webkit_user_script_new (src, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES,
+                                             WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, NULL, NULL);
+    g_free (src);
+    webkit_user_content_manager_add_script (ucm, sh->snd_script);
+    if (sh->snd_q16 >= 0) {     /* a page that runs */
+        char *js = g_strconcat ("window.__walpeVol&&window.__walpeVol(", num, ");", NULL);
+        sh_eval (sh, js);
+        g_free (js);
+    } else {
+        g_message ("web: the page's sound is at %d %%%s", (q * 100 + 32768) / 65536,
+                   q ? "" : " (walpe-ctl set scene_sound=on volume=0.5 mute=off)");
+    }
+    sh->snd_q16 = q;
+}
+
+static gboolean web_sound_main (gpointer user)
+{
+    (void) user;
+    for (guint i = 0; sound_pages && i < sound_pages->len; i++)
+        sh_sound_apply (sound_pages->pdata[i]);
+    return G_SOURCE_REMOVE;
+}
+
+/* any thread (modules.h web_sound): the level changed, or the module was
+ * loaded and is told the level there is */
+static void walpe_web_sound_level (double level)
+{
+    const int q = (int) (CLAMP (level, 0.0, 1.0) * 65536.0);
+    if (g_atomic_int_get (&web_sound_q16) == q)
+        return;
+    g_atomic_int_set (&web_sound_q16, q);
+    g_idle_add (web_sound_main, NULL);
+}
 
 /* Paused = no viewer wants frames: the page itself must stop too (a
  * playing <video> or a requestAnimationFrame loop kept the web process at
@@ -1427,8 +1579,14 @@ static void sh_suspend (WebShared *sh, gboolean suspend)
         web_input_cancel (sh->input);
         web_input_leave (sh->input, 0);
     }
+    /* (in this order: an Audio object that is started while the view is
+     * muted never plays, see "the page's sound") */
+    if (!suspend)
+        webkit_web_view_set_is_muted (sh->view, FALSE);
     if (sh->loaded)
         sh_eval (sh, suspend ? JS_MEDIA_SUSPEND : JS_MEDIA_RESUME);
+    if (suspend)
+        webkit_web_view_set_is_muted (sh->view, TRUE);
     if (suspend) {
         gtk_widget_set_visible (sh->win, FALSE);
     } else {
@@ -3539,6 +3697,12 @@ static gboolean sh_create_real (WebShared *sh)
                                               "user-content-manager", ucm, NULL));
     g_object_unref (ns);
     g_object_unref (ucm);
+    /* how loud, before the page loads anything */
+    sh->snd_q16 = -1;
+    sh_sound_apply (sh);
+    if (!sound_pages)
+        sound_pages = g_ptr_array_new ();
+    g_ptr_array_add (sound_pages, sh);
     webkit_web_view_set_background_color (sh->view, &(GdkRGBA) { 0, 0, 0, 0 });
     WebKitSettings *st = webkit_web_view_get_settings (sh->view);
     gboolean files = use_file_urls ();
@@ -3648,6 +3812,8 @@ static gboolean sh_destroy_main (gpointer user)
          * any more (a re-open of the same wallpaper keeps the page: the new
          * viewer attaches before the old one is freed), so end it now */
         webkit_web_view_terminate_web_process (sh->view);
+        g_ptr_array_remove_fast (sound_pages, sh);
+        g_clear_pointer (&sh->snd_script, webkit_user_script_unref);
         gtk_window_destroy (GTK_WINDOW (sh->win)); /* owns the host and the view */
         sh->win = NULL;
         sh->box = NULL;
@@ -4154,6 +4320,7 @@ WALPE_API const WalpeWebModule *walpe_web_module_entry (void)
         WALPE_MODULE_ABI, walpe_web_new, walpe_web_input, walpe_web_stats,
         walpe_web_media_missing, walpe_web_error, walpe_web_probe_run,
         walpe_web_input_status, walpe_web_info, walpe_web_host,
+        walpe_web_sound_level,
     };
     return &m;
 }
