@@ -367,6 +367,25 @@ static void test_runs (void)
     result_clear (&r);
     g_free (missing);
 
+    /* a name with "%03d" in it: the thumbnail has the video's name, and no
+     * file of the name a frame number would give is written (or replaced) */
+    {
+        char *pat = P ("in/take %03d.mp4"), *data = NULL;
+        char *th = g_build_filename (lib, "take %03d.jpg", NULL), *other = g_build_filename (lib, "take 001.jpg", NULL);
+        gsize len = 0;
+        CHECK (g_file_get_contents (fine, &data, &len, NULL) && g_file_set_contents (pat, data, (gssize) len, NULL));
+        g_file_set_contents (other, "a picture of that name", -1, NULL);
+        r = run_import (pat, lib, 120);
+        CHECK (r.called && r.ok && r.dst && g_str_has_suffix (r.dst, "/take %03d.mp4"));
+        CHECK (g_file_test (th, G_FILE_TEST_IS_REGULAR));
+        g_free (data);
+        data = NULL;
+        CHECK (g_file_get_contents (other, &data, &len, NULL) && !g_strcmp0 (data, "a picture of that name"));
+        CHECK (count_suffix (lib, ".part") == 0 && count_suffix (lib, ".mp4") == 4);
+        result_clear (&r);
+        g_free (pat); g_free (data); g_free (th); g_free (other);
+    }
+
     /* a file that qualifies for a copy, but the copy fails: encoded instead
      * of "ffmpeg failed". An "ffmpeg" in front of the real one in PATH
      * refuses every run that asks for a stream copy and notes that it was
@@ -391,7 +410,7 @@ static void test_runs (void)
                 CHECK (!g_strcmp0 (got, "h264,640,360"));
                 g_free (got);
             }
-            CHECK (count_suffix (lib, ".part") == 0 && count_suffix (lib, ".mp4") == 4);
+            CHECK (count_suffix (lib, ".part") == 0 && count_suffix (lib, ".mp4") == 5);
             result_clear (&r);
         } else {
             CHECK (!"the stand-in ffmpeg could not be written");

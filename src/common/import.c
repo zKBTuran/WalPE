@@ -636,9 +636,14 @@ static void start_thumb (WalpeImport *imp)
     g_ascii_formatd (ss, sizeof (ss), "%.2f", d > 2.0 ? MIN (d * 0.1, 3.0) : 0.0);
     char *in = g_strconcat ("file:", imp->dst, NULL);
     char *out = g_strconcat ("file:", imp->thumb, NULL);
+    /* -update 1: the name is the file to write, as it stands. Without it
+     * the image2 muxer reads a "%d" in the name as the number of the frame:
+     * the thumbnail of "take %03d.mp4" was written to "take 001.jpg" (over
+     * a picture of that name, if there was one) and the video had none. */
     const char *argv[] = { "ffmpeg", "-hide_banner", "-nostdin", "-y", "-v", "error",
                            "-ss", ss, "-i", in, "-frames:v", "1",
-                           "-vf", "scale=440:-2", "-q:v", "3", "-f", "image2", out, NULL };
+                           "-vf", "scale=440:-2", "-q:v", "3", "-f", "image2", "-update", "1",
+                           out, NULL };
     imp->proc = g_subprocess_newv (argv, G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
                                          G_SUBPROCESS_FLAGS_STDERR_SILENCE, NULL);
     g_free (in);
