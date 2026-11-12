@@ -55,6 +55,8 @@ typedef struct {
     gboolean focus_app;      /* the focused window is an application's, on this monitor */
     gboolean fs_here;        /* the focused fullscreen window is on this monitor */
     gboolean destroyed;      /* another client destroyed the window (reported once) */
+    gboolean managed;        /* a window the window manager manages, of the desktop type
+                              * (x11desk.h: Mutter and its forks); else override-redirect */
     Window host;             /* the desktop window this window is a child of (x11desk.h);
                               * None: it is a child of the root */
     int host_x, host_y;      /* where in it */
@@ -88,6 +90,11 @@ static struct {
     guint top_probe_wait;        /* scans left until the root's children are listed again */
     Atom cm_atom;            /* _NET_WM_CM_S<screen> (x11_present_log) */
     gboolean sleep_watching; /* sleep_watch_init ran */
+    WalpeX11WinMode win_mode;    /* WALPE_X11_WINDOW */
+    gboolean managed;        /* the wallpaper windows are managed ones (x11desk.h) */
+    char *wm_name;           /* the window manager's _NET_WM_NAME (NULL: none, or it has none) */
+    Atom a_wmcheck;          /* _NET_SUPPORTING_WM_CHECK */
+    guint wm_timer_id;       /* the window manager came or went: one look at its name */
     WalpeX11DeskMode desk_mode;  /* WALPE_X11_DESKTOP */
     WalpeDeskWin *desks;     /* the desktop windows the last scan of the clients found */
     guint n_desks;
@@ -998,13 +1005,57 @@ static void shape_away_input (Window w)
         XShapeCombineRectangles (X.xd, w, ShapeInput, 0, 0, NULL, 0, ShapeSet, 0);
 }
 
+/* The properties of a wallpaper window the window manager manages
+ * (x11desk.h: Mutter and its forks), set before it is mapped: the desktop
+ * type - the window manager's lowest layer -, no focus, no decorations, on
+ * every workspace, in no window list. WM_DELETE_WINDOW is declared so that
+ * a "close" is a message (which nothing here acts on) and not the end of
+ * this program's connection. */
+static void wallpaper_window_managed_props (Window w, const XRect *g)
+{
+    Atom type = XInternAtom (X.xd, "_NET_WM_WINDOW_TYPE_DESKTOP", False);
+    XChangeProperty (X.xd, w, XInternAtom (X.xd, "_NET_WM_WINDOW_TYPE", False), XA_ATOM, 32,
+                     PropModeReplace, (guchar *) &type, 1);
+    Atom state[3] = { XInternAtom (X.xd, "_NET_WM_STATE_SKIP_TASKBAR", False),
+                      XInternAtom (X.xd, "_NET_WM_STATE_SKIP_PAGER", False),
+                      XInternAtom (X.xd, "_NET_WM_STATE_STICKY", False) };
+    XChangeProperty (X.xd, w, XInternAtom (X.xd, "_NET_WM_STATE", False), XA_ATOM, 32,
+                     PropModeReplace, (guchar *) state, 3);
+    long all = 0xffffffffL;
+    XChangeProperty (X.xd, w, XInternAtom (X.xd, "_NET_WM_DESKTOP", False), XA_CARDINAL, 32,
+                     PropModeReplace, (guchar *) &all, 1);
+    long motif[5] = { 2 /* decorations */, 0, 0 /* none */, 0, 0 };
+    Atom mh = XInternAtom (X.xd, "_MOTIF_WM_HINTS", False);
+    XChangeProperty (X.xd, w, mh, mh, 32, PropModeReplace, (guchar *) motif, 5);
+    XWMHints hints = { .flags = InputHint, .input = False };
+    XSetWMHints (X.xd, w, &hints);
+    XSizeHints size = { .flags = USPosition | USSize | PMinSize | PMaxSize, .x = g->x, .y = g->y,
+                        .width = g->width, .height = g->height, .min_width = g->width,
+                        .min_height = g->height, .max_width = g->width, .max_height = g->height };
+    XSetWMNormalHints (X.xd, w, &size);
+    char res_name[] = "walpe-wallpaper", res_class[] = "Walpe";
+    XClassHint cls = { res_name, res_class };
+    XSetClassHint (X.xd, w, &cls);
+    XStoreName (X.xd, w, "WalPE wallpaper");
+    Atom del = XInternAtom (X.xd, "WM_DELETE_WINDOW", False);
+    XSetWMProtocols (X.xd, w, &del, 1);
+}
+
+typedef enum {
+    X11_WIN_PREVIEW,    /* --windowed: a normal window */
+    X11_WIN_OVERRIDE,   /* a wallpaper window no window manager touches */
+    X11_WIN_MANAGED,    /* a wallpaper window of the desktop type, managed (x11desk.h) */
+} X11WinKind;
+
 /* the wallpaper window: override-redirect so no WM (dwm tiles root children,
- * desktops restack) can manage, tile or raise it; input shaped away so
- * clicks/keys reach whatever is below. This window IS the EGL surface. */
-static Window create_desktop_window (const XRect *g, gboolean or_mode)
+ * desktops restack) can manage, tile or raise it - or, under a window
+ * manager that paints such a window above everything (x11desk.h), a
+ * managed one of the desktop type; input shaped away so clicks/keys reach
+ * whatever is below. This window IS the EGL surface. */
+static Window create_desktop_window (const XRect *g, X11WinKind kind)
 {
     XSetWindowAttributes swa = {
-        .override_redirect = or_mode ? True : False,
+        .override_redirect = kind == X11_WIN_OVERRIDE ? True : False,
         .background_pixel = 0x000000, /* black until the first frame lands */
         /* Expose: without a compositor the server paints a part that
          * comes into view with the background; a scene that skips
@@ -1017,7 +1068,9 @@ static Window create_desktop_window (const XRect *g, gboolean or_mode)
                               CopyFromParent, InputOutput, CopyFromParent,
                               CWOverrideRedirect | CWBackPixel | CWEventMask |
                               CWSaveUnder | CWBackingStore, &swa);
-    if (or_mode) {
+    if (kind != X11_WIN_PREVIEW) {
+        if (kind == X11_WIN_MANAGED)
+            wallpaper_window_managed_props (w, g);
         shape_away_input (w);
         XMapWindow (X.xd, w);
         XLowerWindow (X.xd, w);
@@ -1027,6 +1080,104 @@ static Window create_desktop_window (const XRect *g, gboolean or_mode)
     }
     XFlush (X.xd);
     return w;
+}
+
+/* A wallpaper window becomes the other kind (the window manager came,
+ * went or was replaced by another one after the windows were made): the
+ * same window - its EGL surface stays -, taken off the screen for the
+ * change, as the override-redirect flag counts when a window is mapped. */
+static void wallpaper_window_set_kind (X11Surface *s, gboolean managed)
+{
+    if (s->kind != WALPE_SURFACE_WALLPAPER || s->xid == None || s->destroyed || s->managed == managed)
+        return;
+    s->managed = managed;
+    XUnmapWindow (X.xd, s->xid);
+    XSetWindowAttributes swa = { .override_redirect = managed ? False : True };
+    XChangeWindowAttributes (X.xd, s->xid, CWOverrideRedirect, &swa);
+    if (managed) {
+        wallpaper_window_managed_props (s->xid, &s->geom);
+    } else {
+        XDeleteProperty (X.xd, s->xid, XInternAtom (X.xd, "_NET_WM_WINDOW_TYPE", False));
+        XDeleteProperty (X.xd, s->xid, XInternAtom (X.xd, "_NET_WM_STATE", False));
+    }
+    shape_away_input (s->xid);
+    XMapWindow (X.xd, s->xid);
+    if (s->host == None) {
+        /* (a window manager may have moved a window it managed) */
+        XMoveResizeWindow (X.xd, s->xid, s->geom.x, s->geom.y, (guint) s->geom.width,
+                           (guint) s->geom.height);
+        XLowerWindow (X.xd, s->xid);
+    } else {
+        XRaiseWindow (X.xd, s->xid);
+    }
+}
+
+/* the window manager's name: _NET_WM_NAME of the window that
+ * _NET_SUPPORTING_WM_CHECK on the root names (g_free; NULL: no such
+ * window - no window manager that follows EWMH -, or it has no name).
+ * *present: that window exists */
+static char *wm_name_read (gboolean *present)
+{
+    *present = FALSE;
+    if (X.a_wmcheck == None)
+        return NULL;
+    guchar *data = NULL;
+    gulong n = window_prop32 (X.root, X.a_wmcheck, XA_WINDOW, 1, &data);
+    Window w = data && n == 1 ? *(Window *) data : None;
+    if (data)
+        XFree (data);
+    XWindowAttributes wa;
+    if (w == None || !XGetWindowAttributes (X.xd, w, &wa))
+        return NULL;
+    *present = TRUE;
+    Atom rt = None;
+    int fmt = 0;
+    gulong len = 0, left = 0;
+    guchar *txt = NULL;
+    char *name = NULL;
+    if (XGetWindowProperty (X.xd, w, XInternAtom (X.xd, "_NET_WM_NAME", False), 0, 64, False,
+                            AnyPropertyType, &rt, &fmt, &len, &left, &txt) == Success && txt) {
+        if (fmt == 8 && len > 0)
+            name = g_utf8_make_valid ((const char *) txt, (gssize) len);
+        XFree (txt);
+    }
+    return name;
+}
+
+/* The kind of window the wallpaper windows are follows the window manager
+ * (x11desk.h). Once at start-up, and when the window manager came, went
+ * or was replaced (_NET_SUPPORTING_WM_CHECK on the root changed). */
+static void wm_look (void)
+{
+    gboolean present = FALSE;
+    char *name = wm_name_read (&present);
+    const gboolean managed = walpe_x11_win_managed (X.win_mode, name);
+    const gboolean changed = managed != X.managed || g_strcmp0 (name, X.wm_name) != 0;
+    g_free (X.wm_name);
+    X.wm_name = name;
+    X.managed = managed;
+    if (!changed)
+        return;
+    if (managed)
+        g_message ("x11: the wallpaper windows are managed windows of the desktop type%s%s%s: this "
+                   "window manager paints an override-redirect window above every other window. "
+                   "WALPE_X11_WINDOW=override makes them override-redirect as on other window "
+                   "managers", X.win_mode == WALPE_X11_WIN_MANAGED ? " (WALPE_X11_WINDOW=managed)" : "",
+                   name ? "; window manager: " : "", name ? name : "");
+    for (guint i = 0; X.surfs && i < X.surfs->len; i++)
+        wallpaper_window_set_kind (SURF (i), managed);
+    if (X.surfs && X.surfs->len) {
+        X.stack_dirty = TRUE;
+        XFlush (X.xd);
+    }
+}
+
+static gboolean wm_look_cb (gpointer user)
+{
+    (void) user;
+    X.wm_timer_id = 0;
+    wm_look ();
+    return G_SOURCE_REMOVE;
 }
 
 /* keep the wallpaper window at the bottom of the stack; re-assert often */
@@ -1052,6 +1203,22 @@ static gboolean wallpapers_at_bottom (void)
     if (!XQueryTree (X.xd, X.root, &r, &p, &kids, &n))
         return FALSE;
     gboolean ok = n >= nm;
+    if (X.managed) {
+        /* Managed wallpaper windows (x11desk.h): the window manager keeps
+         * them in its lowest layer, and may have windows of its own below
+         * them (Mutter's guard window). What must not be below them is a
+         * file manager's desktop window - its icons belong above the
+         * wallpaper */
+        gboolean desk_below = FALSE;
+        ok = TRUE;
+        for (guint i = 0; ok && i < n; i++) {
+            if (walpe_x11_desk_is_top (kids[i], X.desks, (int) X.n_desks))
+                desk_below = TRUE;
+            else if (desk_below && window_is_wallpaper (kids[i]))
+                ok = FALSE;
+        }
+        nm = 0;
+    }
     for (guint i = 0; ok && i < nm; i++)
         ok = window_is_wallpaper (kids[i]);
     if (kids)
@@ -1278,6 +1445,12 @@ static gboolean xdata_ready (gint fd, GIOCondition cond, gpointer user)
                     update_active_window ();
                 else if (at == a_clients)
                     cover_schedule (); /* clients appeared/vanished */
+                else if (at == X.a_wmcheck && X.a_wmcheck != None && !X.windowed) {
+                    /* the window manager came, went or was replaced: its
+                     * name a moment later (it names itself after this) */
+                    if (!X.wm_timer_id)
+                        X.wm_timer_id = g_timeout_add (500, wm_look_cb, NULL);
+                }
                 /* anything else on the root (a status bar text set with
                  * xsetroot -name every second, ...) costs this wake-up and
                  * nothing more */
@@ -1854,13 +2027,14 @@ static WalpeSurface *x11_surface_new (const WalpeSurfaceSpec *spec, EGLDisplay d
                             spec->output->height };
         s->out_id = spec->output->id;
         s->index = (int) spec->output->id - 1;
-        s->xid = create_desktop_window (&s->geom, TRUE);
+        s->managed = X.managed;
+        s->xid = create_desktop_window (&s->geom, X.managed ? X11_WIN_MANAGED : X11_WIN_OVERRIDE);
     } else if (spec->kind == WALPE_SURFACE_WINDOW) {
         /* a normal window: the window manager places (and tiles) it */
         s->geom = (XRect) { 0, 0, spec->width, spec->height };
         s->out_id = 1;
         s->index = 0;
-        s->xid = create_desktop_window (&s->geom, FALSE);
+        s->xid = create_desktop_window (&s->geom, X11_WIN_PREVIEW);
     } else {
         /* a test frame: a window with the root's visual as the wallpaper
          * windows have it, never mapped */
@@ -2012,17 +2186,24 @@ static gboolean x11_open (const WalpePlatformOpts *o, char **err)
         g_message ("x11: WALPE_X11_DESKTOP=%s", walpe_x11_desk_mode_name (X.desk_mode));
     int shape_ev, shape_err;
     have_shape = XShapeQueryExtension (X.xd, &shape_ev, &shape_err);
-    Atom wmcheck = XInternAtom (X.xd, "_NET_SUPPORTING_WM_CHECK", True);
-    if (wmcheck != None) {
-        guchar *data = NULL;
-        gulong n = window_prop32 (X.root, wmcheck, XA_WINDOW, 1, &data);
-        if (data) {
-            Window w = n == 1 ? *(Window *) data : None;
-            XFree (data);
-            XWindowAttributes wa;
-            X.has_wm = (w != None && XGetWindowAttributes (X.xd, w, &wa));
-        }
-    }
+    /* what kind of window the wallpaper windows are (x11desk.h) */
+    const char *win = g_getenv ("WALPE_X11_WINDOW");
+    if (walpe_x11_win_parse (win, &X.win_mode) < 0)
+        g_warning ("x11: WALPE_X11_WINDOW=%s: not a word this program knows (auto, override, "
+                   "managed); taken as auto", win);
+    else if (X.win_mode != WALPE_X11_WIN_AUTO)
+        g_message ("x11: WALPE_X11_WINDOW=%s", walpe_x11_win_mode_name (X.win_mode));
+    /* the window manager: is there one, and its name (the windows are
+     * made after this) */
+    X.a_wmcheck = XInternAtom (X.xd, "_NET_SUPPORTING_WM_CHECK", False);
+    X.wm_name = wm_name_read (&X.has_wm);
+    X.managed = !X.windowed && walpe_x11_win_managed (X.win_mode, X.wm_name);
+    if (X.managed)
+        g_message ("x11: the wallpaper windows are managed windows of the desktop type%s%s%s: this "
+                   "window manager paints an override-redirect window above every other window. "
+                   "WALPE_X11_WINDOW=override makes them override-redirect as on other window "
+                   "managers", X.win_mode == WALPE_X11_WIN_MANAGED ? " (WALPE_X11_WINDOW=managed)" : "",
+                   X.wm_name ? "; window manager: " : "", X.wm_name ? X.wm_name : "");
     return TRUE;
 }
 
@@ -2049,6 +2230,11 @@ static char *x11_describe (void)
     }
     if (X.n_desks || X.desk_mode != WALPE_X11_DESK_AUTO)
         g_string_append_printf (s, " [WALPE_X11_DESKTOP: %s]", walpe_x11_desk_mode_name (X.desk_mode));
+    if (X.managed || X.win_mode != WALPE_X11_WIN_AUTO)
+        g_string_append_printf (s, "; wallpaper windows: %s%s%s%s [WALPE_X11_WINDOW: %s]",
+                                X.managed ? "managed, desktop type" : "override-redirect",
+                                X.wm_name ? " (window manager: " : "", X.wm_name ? X.wm_name : "",
+                                X.wm_name ? ")" : "", walpe_x11_win_mode_name (X.win_mode));
     return g_string_free (s, FALSE);
 }
 
@@ -2109,6 +2295,10 @@ static void x11_close (void)
     X.n_layout = 0;
     g_clear_pointer (&X.desks, g_free);
     X.n_desks = 0;
+    g_clear_pointer (&X.wm_name, g_free);
+    if (X.wm_timer_id)
+        g_source_remove (X.wm_timer_id);
+    X.wm_timer_id = 0;
 }
 
 /* requests the main thread has sent to the X server since start (its own
@@ -2120,6 +2310,11 @@ static void x11_status (JsonBuilder *b)
     /* a desktop's own desktop window (x11desk.h): the setting, the windows
      * of that kind the last scan found, and per wallpaper window the
      * window it is a child of ("root", or the desktop window's id) */
+    /* the kind of the wallpaper windows and the window manager it follows */
+    json_builder_set_member_name (b, "x11_window");
+    json_builder_add_string_value (b, X.managed ? "managed" : "override");
+    json_builder_set_member_name (b, "x11_window_manager");
+    json_builder_add_string_value (b, X.wm_name ? X.wm_name : "");
     json_builder_set_member_name (b, "x11_desktop");
     json_builder_add_string_value (b, walpe_x11_desk_mode_name (X.desk_mode));
     json_builder_set_member_name (b, "x11_desktop_windows");

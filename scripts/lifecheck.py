@@ -125,7 +125,12 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             monitor, and back; destroyed with the wallpaper window in it: the
             daemon restarts in place and shows the wallpaper again. With
             WALPE_X11_DESKTOP=root the wallpaper window stays on the root,
-            behind the desktop window, and the log says so.
+            behind the desktop window, and the log says so. A window manager
+            that names itself as Mutter does (Cinnamon's Muffin, GNOME Shell):
+            the wallpaper windows are managed windows of the desktop type,
+            not override-redirect ones; they change kind, without a restart,
+            when that window manager goes or comes while the daemon runs,
+            and stay as they are for one of another name.
   convert   a video wallpaper the player cannot read: one whose conversion
             cannot start is refused with the reason, one that is being
             converted can be cancelled (and started again); the wallpaper on
@@ -2168,6 +2173,47 @@ class XClient:
             self.x.XFree(kids)
         return out
 
+    def override_redirect(self, win):
+        """the window's override-redirect flag (None: the window is gone)"""
+        c = self.c
+
+        class Attrs(c.Structure):
+            _fields_ = [("x", c.c_int), ("y", c.c_int), ("width", c.c_int), ("height", c.c_int),
+                        ("border_width", c.c_int), ("depth", c.c_int), ("visual", c.c_void_p),
+                        ("root", c.c_ulong), ("cls", c.c_int), ("bit_gravity", c.c_int),
+                        ("win_gravity", c.c_int), ("backing_store", c.c_int),
+                        ("backing_planes", c.c_ulong), ("backing_pixel", c.c_ulong),
+                        ("save_under", c.c_int), ("colormap", c.c_ulong), ("map_installed", c.c_int),
+                        ("map_state", c.c_int), ("all_event_masks", c.c_long),
+                        ("your_event_mask", c.c_long), ("do_not_propagate_mask", c.c_long),
+                        ("override_redirect", c.c_int), ("screen", c.c_void_p)]
+        a = Attrs()
+        self.x.XGetWindowAttributes.argtypes = [c.c_void_p, c.c_ulong, c.c_void_p]
+        if not self.x.XGetWindowAttributes(self.d, win, c.byref(a)):
+            return None
+        return bool(a.override_redirect)
+
+    def window_manager(self, name):
+        """a window manager of this name runs (None: none does): the window that
+        _NET_SUPPORTING_WM_CHECK on the root names, and its _NET_WM_NAME"""
+        if name is None:
+            self.x.XDeleteProperty(self.d, self.root, self.atom("_NET_SUPPORTING_WM_CHECK"))
+            self.x.XSync(self.d, 0)
+            return
+        if not getattr(self, "wmwin", None):
+            self.wmwin = self.x.XCreateSimpleWindow(self.d, self.root, -10, -10, 1, 1, 0, 0, 0)
+            self.wins.append(self.wmwin)
+        text = name.encode()
+        self.x.XChangeProperty.argtypes = [self.c.c_void_p, self.c.c_ulong, self.c.c_ulong, self.c.c_ulong,
+                                           self.c.c_int, self.c.c_int, self.c.c_char_p, self.c.c_int]
+        self.x.XChangeProperty(self.d, self.wmwin, self.atom("_NET_WM_NAME"), self.atom("UTF8_STRING"), 8, 0,
+                               text, len(text))
+        self.x.XChangeProperty.argtypes = [self.c.c_void_p, self.c.c_ulong, self.c.c_ulong, self.c.c_ulong,
+                                           self.c.c_int, self.c.c_int, self.c.POINTER(self.c.c_long),
+                                           self.c.c_int]
+        self.prop(self.wmwin, "_NET_SUPPORTING_WM_CHECK", self.XA_WINDOW, [self.wmwin])
+        self.prop(self.root, "_NET_SUPPORTING_WM_CHECK", self.XA_WINDOW, [self.wmwin])
+
     def wtype(self, win, name):
         """the window's type, as its toolkit sets it (_NET_WM_WINDOW_TYPE_DESKTOP: a file manager's desktop)"""
         self.prop(win, "_NET_WM_WINDOW_TYPE", self.XA_ATOM, [self.atom(name)])
@@ -2198,7 +2244,7 @@ class XClient:
     def close(self):
         if not self.d:
             return      # closed already: its Display is freed memory
-        for name in ("_NET_ACTIVE_WINDOW", "_NET_CLIENT_LIST"):
+        for name in ("_NET_ACTIVE_WINDOW", "_NET_CLIENT_LIST", "_NET_SUPPORTING_WM_CHECK"):
             self.x.XDeleteProperty(self.d, self.root, self.atom(name))
         for win in reversed(self.wins):
             self.x.XDestroyWindow(self.d, win)
@@ -3102,6 +3148,74 @@ def case_desktop(env, W):
               "desktop: root: the log says once that the wallpaper is behind the desktop window",
               env.since(mark)[-300:])
         check(paused() == [False, False], "desktop: root: nothing is paused for it", paused())
+        env.stop_daemon()
+        xc.destroy(d3)
+        xc.clients([])
+
+        # ---- a window manager that paints override-redirect windows above everything (Mutter
+        # and its forks: the wallpaper would cover the screen): managed windows of the desktop type
+        def kind():
+            st = env.state()
+            return st.get("x11_window"), st.get("x11_window_manager")
+
+        def flags():
+            return [xc.override_redirect(w) for w in ours]
+
+        xc.window_manager("Mutter (Muffin)")
+        mark = env.mark()
+        if not check(env.start_daemon([A, B]), "desktop: daemon started under a window manager named as Cinnamon's"):
+            return
+        pid = env.daemon.pid
+        env.open(W["red"])
+        loaded(env, W["red"])
+        check(kind() == ("managed", "Mutter (Muffin)"),
+              "desktop: Mutter (Muffin): status: the wallpaper windows are managed ones", kind())
+        ours = [w for w in xc.children(xc.root) if xc.override_redirect(w) is False and w not in xc.wins]
+        check(len(ours) == 2, "desktop: ... the X server: two windows of the daemon that are not "
+              "override-redirect", ours)
+        check(is_red(colour_is(env, A, is_red)) and is_red(colour_is(env, B, is_red)),
+              "desktop: ... the scene is on both monitors", (rc.name_of(env.colour(A)), rc.name_of(env.colour(B))))
+        check("the wallpaper windows are managed windows of the desktop type" in env.since(mark),
+              "desktop: ... the log says so and why", env.since(mark)[-300:])
+        text = (env.ipc({"cmd": "diag"}) or {}).get("text") or ""
+        check("wallpaper windows: managed, desktop type (window manager: Mutter (Muffin))" in text,
+              "desktop: ... walpe-ctl diag too", text[:600])
+        # the window manager goes: override-redirect again, the same windows
+        xc.window_manager(None)
+        ok = wait_for(lambda: kind()[0] == "override" and flags() == [True, True], 10, 0.1)
+        check(bool(ok), "desktop: the window manager gone: the same windows are override-redirect again",
+              (kind(), flags()))
+        check(is_red(colour_is(env, A, is_red)) and is_red(colour_is(env, B, is_red)),
+              "desktop: ... and show the scene", (rc.name_of(env.colour(A)), rc.name_of(env.colour(B))))
+        check(all(w in ours for w in xc.lowest(2)), "desktop: ... as the lowest windows of the root",
+              (xc.lowest(2), ours))
+        # another window manager: nothing changes
+        xc.window_manager("dwm")
+        time.sleep(1.5 * PATIENCE)
+        check(kind() == ("override", "dwm") and flags() == [True, True],
+              "desktop: a window manager named dwm: override-redirect, as without one", (kind(), flags()))
+        # GNOME's
+        xc.window_manager("GNOME Shell")
+        ok = wait_for(lambda: kind() == ("managed", "GNOME Shell") and flags() == [False, False], 10, 0.1)
+        check(bool(ok), "desktop: a window manager named GNOME Shell: managed windows", (kind(), flags()))
+        check(is_red(colour_is(env, A, is_red)) and is_red(colour_is(env, B, is_red)),
+              "desktop: ... that show the scene", (rc.name_of(env.colour(A)), rc.name_of(env.colour(B))))
+        check(env.daemon.poll() is None and env.daemon.pid == pid and "restarts in place" not in env.since(mark),
+              "desktop: all of that in the same process, without a restart")
+        env.stop_daemon()
+        xc.window_manager(None)
+        # WALPE_X11_WINDOW=override under that window manager, =managed without one
+        xc.window_manager("Mutter (Muffin)")
+        if check(env.start_daemon([A], extra={"WALPE_X11_WINDOW": "override"}),
+                 "desktop: daemon started with WALPE_X11_WINDOW=override"):
+            check(kind() == ("override", "Mutter (Muffin)"),
+                  "desktop: WALPE_X11_WINDOW=override: override-redirect under Mutter too", kind())
+            env.stop_daemon()
+        xc.window_manager(None)
+        if check(env.start_daemon([A], extra={"WALPE_X11_WINDOW": "managed"}),
+                 "desktop: daemon started with WALPE_X11_WINDOW=managed"):
+            check(kind() == ("managed", ""), "desktop: WALPE_X11_WINDOW=managed: managed without a window "
+                  "manager's name", kind())
     finally:
         xc.close()
     env.stop_daemon()

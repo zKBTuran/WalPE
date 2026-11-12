@@ -135,8 +135,43 @@ static void test_several (void)
     CHECK (walpe_x11_desk_hides (M (0, 0, 1920, 1080), w, 3, TRUE) == 1);
 }
 
+/* WALPE_X11_WINDOW and the window managers that paint an
+ * override-redirect window above everything */
+static void test_window_kind (void)
+{
+    WalpeX11WinMode m = WALPE_X11_WIN_MANAGED;
+    CHECK (walpe_x11_win_parse (NULL, &m) == 0 && m == WALPE_X11_WIN_AUTO);
+    CHECK (walpe_x11_win_parse ("", &m) == 0 && m == WALPE_X11_WIN_AUTO);
+    CHECK (walpe_x11_win_parse ("auto", &m) == 1 && m == WALPE_X11_WIN_AUTO);
+    CHECK (walpe_x11_win_parse ("override", &m) == 1 && m == WALPE_X11_WIN_OVERRIDE);
+    CHECK (walpe_x11_win_parse ("Managed", &m) == 1 && m == WALPE_X11_WIN_MANAGED);
+    CHECK (walpe_x11_win_parse ("desktop", &m) == -1 && m == WALPE_X11_WIN_AUTO);
+    CHECK (!g_strcmp0 (walpe_x11_win_mode_name (WALPE_X11_WIN_AUTO), "auto"));
+    CHECK (!g_strcmp0 (walpe_x11_win_mode_name (WALPE_X11_WIN_OVERRIDE), "override"));
+    CHECK (!g_strcmp0 (walpe_x11_win_mode_name (WALPE_X11_WIN_MANAGED), "managed"));
+
+    /* the names the window managers give themselves (wmctrl -m) */
+    static const char *const mutter[] = { "Mutter (Muffin)", "GNOME Shell", "Mutter", "Mutter(Budgie)",
+                                          "Mutter(Gala)", "mutter" };
+    static const char *const others[] = { "dwm", "Xfwm4", "Openbox", "Metacity (Marco)", "i3", "IceWM 3.4.5 (Linux/x86_64)",
+                                          "Fluxbox", "bspwm", "awesome", "KWin", "LG3D", "", NULL };
+    for (guint i = 0; i < G_N_ELEMENTS (mutter); i++) {
+        CHECK (walpe_x11_wm_is_mutter (mutter[i]));
+        CHECK (walpe_x11_win_managed (WALPE_X11_WIN_AUTO, mutter[i]));
+        CHECK (!walpe_x11_win_managed (WALPE_X11_WIN_OVERRIDE, mutter[i]));
+        CHECK (walpe_x11_win_managed (WALPE_X11_WIN_MANAGED, mutter[i]));
+    }
+    for (guint i = 0; i < G_N_ELEMENTS (others); i++) {
+        CHECK (!walpe_x11_wm_is_mutter (others[i]));
+        CHECK (!walpe_x11_win_managed (WALPE_X11_WIN_AUTO, others[i]));
+        CHECK (!walpe_x11_win_managed (WALPE_X11_WIN_OVERRIDE, others[i]));
+        CHECK (walpe_x11_win_managed (WALPE_X11_WIN_MANAGED, others[i]));
+    }
+}
+
 int main (void)
 {
+    test_window_kind ();
     test_parse ();
     test_none ();
     test_one_for_the_screen ();

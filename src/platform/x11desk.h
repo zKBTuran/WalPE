@@ -41,6 +41,76 @@ typedef enum {
 
 typedef struct { int x, y, width, height; } WalpeDeskRect;
 
+/* WALPE_X11_WINDOW: what kind of window the wallpaper window is.
+ *
+ * Override-redirect is the kind no window manager touches: none tiles it,
+ * frames it, focuses it or lists it, and it stays where the daemon puts
+ * it - at the bottom of the root's children. That is right wherever
+ * windows are shown in the order the X server has them: without a
+ * compositing manager, and under xfwm4's, marco's and picom's.
+ * Mutter and its forks (Muffin = Cinnamon, GNOME Shell on X11, Budgie,
+ * Gala) do not: an override-redirect window that is no menu, tooltip or
+ * the like goes into their group of windows that are painted above
+ * everything else - every window and the panel. Lowest in the X server's
+ * order, topmost on screen: the wallpaper covers the whole desktop. There
+ * the wallpaper window is one the window manager manages, of the type
+ * _NET_WM_WINDOW_TYPE_DESKTOP: Mutter keeps that type in its lowest
+ * layer, below every window and - lowered - below the file manager's
+ * translucent icons window. It takes no focus and no input, and is on
+ * every workspace. */
+typedef enum {
+    WALPE_X11_WIN_AUTO,     /* managed under Mutter and its forks, else override-redirect */
+    WALPE_X11_WIN_OVERRIDE, /* always override-redirect (as up to 0.14.0) */
+    WALPE_X11_WIN_MANAGED,  /* always a managed window of the desktop type */
+} WalpeX11WinMode;
+
+static inline const char *walpe_x11_win_mode_name (WalpeX11WinMode m)
+{
+    return m == WALPE_X11_WIN_OVERRIDE ? "override" : m == WALPE_X11_WIN_MANAGED ? "managed" : "auto";
+}
+
+/* 1 = s names a mode (*out), 0 = not set or empty (*out = auto), -1 = a
+ * word that is none (*out = auto) */
+static inline int walpe_x11_win_parse (const char *s, WalpeX11WinMode *out)
+{
+    *out = WALPE_X11_WIN_AUTO;
+    if (!s || !*s)
+        return 0;
+    if (!g_ascii_strcasecmp (s, "auto"))
+        return 1;
+    if (!g_ascii_strcasecmp (s, "override")) {
+        *out = WALPE_X11_WIN_OVERRIDE;
+        return 1;
+    }
+    if (!g_ascii_strcasecmp (s, "managed")) {
+        *out = WALPE_X11_WIN_MANAGED;
+        return 1;
+    }
+    return -1;
+}
+
+/* Does the window manager of this name (_NET_WM_NAME of its
+ * _NET_SUPPORTING_WM_CHECK window; NULL = none runs or it says none)
+ * paint override-redirect windows above everything? "Mutter (Muffin)",
+ * "GNOME Shell", "Mutter", "Mutter(Budgie)", "Mutter(Gala)". */
+static inline gboolean walpe_x11_wm_is_mutter (const char *wm_name)
+{
+    if (!wm_name || !*wm_name)
+        return FALSE;
+    char *low = g_ascii_strdown (wm_name, -1);
+    gboolean hit = strstr (low, "mutter") != NULL || strstr (low, "gnome shell") != NULL ||
+                   strstr (low, "muffin") != NULL;
+    g_free (low);
+    return hit;
+}
+
+/* is the wallpaper window a managed one under this window manager? */
+static inline gboolean walpe_x11_win_managed (WalpeX11WinMode mode, const char *wm_name)
+{
+    return mode == WALPE_X11_WIN_MANAGED ||
+           (mode == WALPE_X11_WIN_AUTO && walpe_x11_wm_is_mutter (wm_name));
+}
+
 /* a mapped client window of type _NET_WM_WINDOW_TYPE_DESKTOP */
 typedef struct {
     unsigned long client;   /* the window itself */
