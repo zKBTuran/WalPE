@@ -739,6 +739,29 @@ static void scenario_a (void)
     CHECK (g_atomic_int_get (&S.handles_destroyed) == destroyed + 1, "A: the closed window's handle was given back");
     CHECK (Stub.batches > 0 && Stub.depth == 0, "A: values of one pass arrive as one batch");
 
+    /* a new window that is fullscreen and has the focus from the start,
+     * its output not named yet: a compositor tells the state when the
+     * window is mapped and the output when the window has its place, a
+     * moment later. No monitor has it meanwhile (counted for every output,
+     * it paused the other monitors for that moment); then the one it is on */
+    win_add (3, "game", A_ | F_, 0);
+    EXPECT (FS, WALPE_SIG_FULLSCREEN, 0, 1, "A: a new fullscreen window has the focus");
+    settle ();
+    CHECK (stub_value (FS, ON, ALL) != 1 && stub_value (FS, ON, 11) != 1 && stub_value (FS, ON, 22) != 1,
+           "A: its output is not named yet: no monitor has it meanwhile (every %d, first %d, second %d)",
+           stub_value (FS, ON, ALL), stub_value (FS, ON, 11), stub_value (FS, ON, 22));
+    CHECK (walpe_sig_wl_fullscreen_everywhere () == NULL, "A: and status has nothing to explain");
+    win_set (3, A_ | F_, 1u << 1);
+    EXPECT (FS, ON, 22, 1, "A: the compositor names its output: that monitor");
+    CHECK (stub_value (FS, ON, ALL) != 1 && stub_value (FS, ON, 11) != 1, "A: and no other");
+    /* it leaves that output without entering another: now nobody can tell */
+    win_set (3, A_ | F_, 0);
+    EXPECT (FS, ON, ALL, 1, "A: a window that was on an output and is on none: every output");
+    EXPECT (FS, ON, 22, 0, "A: not under the id of the output it left");
+    srv_run (s_win_close, GINT_TO_POINTER (3));
+    EXPECT (FS, ON, ALL, 0, "A: that window closed");
+    EXPECT (FS, WALPE_SIG_FULLSCREEN, 0, 0, "A: that window closed");
+
     /* ---- idle */
     CHECK (stub_wait (idle_count_is, GINT_TO_POINTER (1), 3000) && g_atomic_int_get (&S.last_idle_ms) == 60000,
            "A: one notification for 60 s (%d objects, %d ms)", g_atomic_int_get (&S.n_idle),
@@ -930,9 +953,15 @@ static void scenario_g (void)
     walpe_sigprov_set_output_lookup (lookup, NULL);
     walpe_sigprov_set_see_through (NULL);
     walpe_sigprov_set_idle_timeout (0);
-    win_add (0, "mpv", A_ | F_, 1u << 0);
+    /* (no window is given an output before the providers have looked: a
+     * compositor that has named no output for any window may be one that
+     * never does, and its fullscreen window counts for every output) */
+    win_add (0, "mpv", A_ | F_, 0);
     providers_start ();
     CHECK (started (FS) && started (WIN), "G: both window providers start (%s|%s)", why_of (FS), why_of (WIN));
+    EXPECT (FS, ON, ALL, 1, "G: no output named for any window so far: every output");
+    win_set (0, A_ | F_, 1u << 0);
+    EXPECT (FS, ON, ALL, 0, "G: the compositor names the window's output");
     CHECK (!g_strcmp0 (walpe_signal_sources (ON), "wl-fullscreen"), "G: status names who tells the output");
     EXPECT (FS, WALPE_SIG_FULLSCREEN, 0, 1, "G: a focused fullscreen window");
     EXPECT (FS, ON, 7, 1, "G: no names, one monitor: the window is on that one");

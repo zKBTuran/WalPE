@@ -37,6 +37,7 @@ typedef struct {
     guint state;            /* WALPE_TL_*, as of the last done */
     guint pending;          /* as of the last state event */
     GPtrArray *outs;        /* struct wl_output * of the session (borrowed) */
+    gboolean had_output;    /* the compositor has named an output for it at some time */
     char *app_id;
 } Tl;
 
@@ -52,6 +53,8 @@ static struct {
     GArray *fs_reported;    /* guint32: output ids fullscreen_on was given for */
     WalpeTlWhere fs_where;  /* why fullscreen_on is reported for every output now
                              * (WALPE_TL_WHERE_KNOWN = it is not) */
+    gboolean names_outputs; /* this compositor has named an output for a window
+                             * (output_enter) since the tracker came up */
 } W;
 
 static void tl_free (gpointer p)
@@ -118,6 +121,18 @@ static void tl_recompute_fullscreen (void)
         if (!walpe_tl_is_fullscreen_focus (t->state))
             continue;
         fs = TRUE;
+        /* A new window whose output has not been named yet. A compositor
+         * tells a window's state when the window is mapped and its output
+         * when the window has its place, which is later (sway: after the
+         * client's first frame, tens of milliseconds). Counted for every
+         * output meanwhile, a window that starts in fullscreen paused the
+         * wallpapers of all other monitors for that moment. A compositor
+         * that has named outputs before will name this one: until then
+         * the window is on none. (One that never names any, and a window
+         * that has lost the outputs it had, count for every output as
+         * before.) */
+        if (!t->outs->len && !t->had_output && W.names_outputs)
+            continue;
         WalpeTlWhere w = tl_where (t, ids);
         if (w != WALPE_TL_WHERE_KNOWN && where == WALPE_TL_WHERE_KNOWN)
             where = w;
@@ -228,6 +243,8 @@ static void h_output_enter (void *data, struct zwlr_foreign_toplevel_handle_v1 *
 {
     (void) h;
     Tl *t = data;
+    t->had_output = TRUE;
+    W.names_outputs = TRUE;
     /* NULL: an output this connection has already let go of */
     if (out && !g_ptr_array_find (t->outs, out, NULL))
         g_ptr_array_add (t->outs, out);
@@ -386,6 +403,7 @@ static gboolean tracker_up (char **why)
     W.reported = g_array_new (FALSE, FALSE, sizeof (guint32));
     W.fs_reported = g_array_new (FALSE, FALSE, sizeof (guint32));
     W.fs_where = WALPE_TL_WHERE_KNOWN;
+    W.names_outputs = FALSE;
     W.mgr = walpe_wlsess_bind (s, &zwlr_foreign_toplevel_manager_v1_interface, 3, &W.version);
     if (!W.mgr) {
         if (why)
