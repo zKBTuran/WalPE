@@ -632,7 +632,9 @@ endif
 # built) and, with the Wayland backend and libwayland-client, the
 # compositor's idle notification and window list on a connection of their
 # own, and for KWin, which has no window list, a script loaded into it over
-# the session bus (HAVE_WL_SIGNALS). The registry starts those only on the Wayland
+# the session bus, and for GNOME Shell, which has no window list, what the WalPE
+# extension (contrib/gnome) reports on the session bus
+# (HAVE_WL_SIGNALS). The registry starts those only on the Wayland
 # backend, so a build without that backend (-Dwayland=disabled) leaves
 # them out: its daemon has no Wayland code and links no Wayland library.
 # The daemon links signals_dep and calls walpe_sigprov_register ().
@@ -643,6 +645,7 @@ have_wl_signals = have_wayland and have_wl_scan and wl_client_dep.found()
 if have_wl_signals
   signals_srcs += ['src/signals/wl_session.c', 'src/signals/wl_idle.c', 'src/signals/wl_toplevel.c',
     'src/signals/kwin.c',
+    'src/signals/gnome.c',
     wl_gen['ext-idle-notify-v1'][0], wl_gen['ext-idle-notify-v1'][2],
     wl_gen['wlr-foreign-toplevel-management-unstable-v1'][0],
     wl_gen['wlr-foreign-toplevel-management-unstable-v1'][2]]
@@ -703,6 +706,19 @@ test('sig-logind', executable('sig-logind-test', 'tests/sig_logind_test.c',
 # Skipped (77) without dbus-daemon.
 if have_wl_signals
   test('sig-kwin', executable('sig-kwin-test', 'tests/sig_kwin_test.c',
+    include_directories: inc,
+    dependencies: [signals_dep],
+    install: false, build_by_default: false), timeout: 120)
+endif
+
+# the provider for GNOME Shell against a stand-in for the WalPE extension
+# on a private bus (GTestDBus + a thread of the test owning
+# io.github.walpe.Gnome): not started while nobody owns the name, the state
+# asked for with the see-through list, reports turned into values per
+# output, only the owner believed, outputs whose ids change, the extension
+# leaving the bus and coming back. Skipped (77) without dbus-daemon.
+if have_wl_signals
+  test('sig-gnome', executable('sig-gnome-test', 'tests/sig_gnome_test.c',
     include_directories: inc,
     dependencies: [signals_dep],
     install: false, build_by_default: false), timeout: 120)

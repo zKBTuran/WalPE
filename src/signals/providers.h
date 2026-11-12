@@ -13,6 +13,8 @@
  *   wl-windows      covered, focus_app (per output)  zwlr_foreign_toplevel_manager_v1
  *   kwin            fullscreen, fullscreen_on,       KWin (KDE Plasma) on the session bus:
  *                   covered, focus_app (per output)  a script the daemon loads into it
+ *   gnome           fullscreen, fullscreen_on,       GNOME Shell with the WalPE extension
+ *                   covered, focus_app (per output)  (contrib/gnome) on the session bus
  *
  * The Wayland providers use a connection of their own (wl_session.c), not
  * the one the wallpaper surfaces live on: a protocol error or a compositor
@@ -31,6 +33,7 @@ extern const WalpeSignalProvider walpe_sig_wl_idle;         /* builds with HAVE_
 extern const WalpeSignalProvider walpe_sig_wl_fullscreen;   /* " */
 extern const WalpeSignalProvider walpe_sig_wl_windows;      /* " */
 extern const WalpeSignalProvider walpe_sig_kwin;            /* " */
+extern const WalpeSignalProvider walpe_sig_gnome;           /* " */
 
 /* Register the providers of this file's family with the registry
  * (walpe_signals_register); call once, before walpe_signals_start.
@@ -131,3 +134,12 @@ void walpe_sig_kwin_use_address (const char *address);
  * it is doing; and, while a rule is on and it cannot report, why */
 const char *walpe_sig_kwin_state (void);
 const char *walpe_sig_kwin_trouble (void);
+
+/* ---- GNOME Shell (gnome.c; with HAVE_WL_SIGNALS) */
+void walpe_sig_gnome_outputs_changed (void);
+/* tests: the bus to connect to instead of the session bus (an address);
+ * before the provider starts. NULL = the session bus again. */
+void walpe_sig_gnome_use_address (const char *address);
+/* for status: NULL where the provider did not start (not GNOME Shell, or
+ * no extension), else what it is doing or why it reports nothing */
+const char *walpe_sig_gnome_state (void);

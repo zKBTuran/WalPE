@@ -33,6 +33,10 @@ void walpe_sigprov_register (WalpeBackend backend)
     /* KWin has no window list: there the two above decline and this one
      * answers (on other compositors it declines, without a word) */
     walpe_signals_register (&walpe_sig_kwin);
+    /* Mutter has no window list: there the two above decline and this one
+     * answers when the WalPE extension for GNOME Shell is on the session
+     * bus (on other compositors it declines, without a word) */
+    walpe_signals_register (&walpe_sig_gnome);
 #endif
 }
 
@@ -53,6 +57,7 @@ void walpe_sigprov_outputs_changed (void)
 #ifdef HAVE_WL_SIGNALS
     walpe_sig_wl_outputs_changed ();
     walpe_sig_kwin_outputs_changed ();
+    walpe_sig_gnome_outputs_changed ();
 #endif
 }
 
@@ -95,6 +100,7 @@ void walpe_sigprov_set_see_through (const char *app_ids)
     if (walpe_sig_wl_windows.recheck)
         walpe_sig_wl_windows.recheck (&walpe_sig_wl_windows, WALPE_SIG_COVERED, FALSE);
     walpe_sig_kwin.recheck (&walpe_sig_kwin, WALPE_SIG_COVERED, FALSE);
+    walpe_sig_gnome.recheck (&walpe_sig_gnome, WALPE_SIG_COVERED, FALSE);
 #endif
 }
 
@@ -186,6 +192,11 @@ void walpe_sigprov_status_json (JsonBuilder *b, const WalpeConfig *cfg)
     if (walpe_sig_kwin_pointer_state ()) {
         json_builder_set_member_name (b, "wl_plasma_pointer");
         json_builder_add_string_value (b, walpe_sig_kwin_pointer_state ());
+    }
+    if (walpe_sig_gnome_state ()) {
+        /* GNOME Shell: what the provider "gnome" is doing (gnome.c) */
+        json_builder_set_member_name (b, "pause_gnome_extension");
+        json_builder_add_string_value (b, walpe_sig_gnome_state ());
     }
 #endif
 }

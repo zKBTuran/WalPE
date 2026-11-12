@@ -34,6 +34,7 @@
 
 typedef struct {
     gboolean connected;         /* a compositor answered */
+    gboolean mutter;            /* the compositor is GNOME's: a global only it announces */
     guint32 seat;               /* wl_seat: highest version offered, 0 = none */
     guint32 output;             /* wl_output: LOWEST version among the outputs, 0 = none */
     guint n_outputs;
@@ -49,7 +50,9 @@ static inline void walpe_wlcaps_add (WalpeWlCaps *c, const char *interface, guin
     c->connected = TRUE;
     if (!interface)
         return;
-    if (!strcmp (interface, "wl_seat"))
+    if (!strcmp (interface, "gtk_shell1"))
+        c->mutter = TRUE;       /* (asked through the WalPE extension instead: gnome.c) */
+    else if (!strcmp (interface, "wl_seat"))
         c->seat = MAX (c->seat, version);
     else if (!strcmp (interface, "wl_output")) {
         c->output = c->n_outputs ? MIN (c->output, version) : version;

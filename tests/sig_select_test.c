@@ -65,7 +65,12 @@ static void test_plans (void)
     /* GNOME Shell: idle notification, no window list of any kind */
     static const Glob gnome[] = {
         { "wl_compositor", 6 }, { "wl_seat", 8 }, { "wl_output", 4 }, { "xdg_wm_base", 6 },
-        { "ext_idle_notifier_v1", 1 }, { NULL, 0 } };
+        { "gtk_shell1", 6 }, { "ext_idle_notifier_v1", 1 }, { NULL, 0 } };
+    WalpeWlCaps caps;
+    plan_of (gnome, &p, &caps);
+    CHECK (caps.mutter, "GNOME: known by the global only Mutter announces (the provider \"gnome\")");
+    plan_of (sway19, &p, &caps);
+    CHECK (!caps.mutter, "sway is not taken for it");
     plan_of (gnome, &p, NULL);
     CHECK (p.idle, "GNOME: idle");
     CHECK (!p.fullscreen && !p.windows, "GNOME: no window rules");
@@ -377,6 +382,11 @@ static void test_real_unavailable (void)
         CHECK (sp && sp->why && strstr (sp->why, "no connection"), "%s says why: %s", wl[i]->name,
                sp && sp->why ? sp->why : "(nothing)");
     }
+    /* the provider for GNOME Shell asks no bus where the compositor is not
+     * Mutter, and gives no reason: the window list's stands */
+    sp = stub_prov (&walpe_sig_gnome);
+    CHECK (sp && sp->failed && !sp->started && !sp->why, "gnome declines without a word");
+    CHECK (walpe_sig_gnome_state () == NULL, "and has nothing for the status");
     CHECK (Stub.n_val == 0 || !walpe_signal_get (WALPE_SIG_IDLE, 0), "nothing is reported as on");
     CHECK (*walpe_signal_sources (WALPE_SIG_FULLSCREEN) == 0, "no source for fullscreen");
     CHECK (strstr (walpe_signal_missing (WALPE_SIG_FULLSCREEN), "no connection") != NULL,
