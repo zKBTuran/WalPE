@@ -42,7 +42,9 @@
  * 15. a timer callback that arms its successor and never returns is not
  *     paid for in every frame for good;
  * 16. the time limit striking while a call into the scene converts an
- *     argument ends the script, not (later) all scripts.
+ *     argument ends the script, not (later) all scripts;
+ * 17. built-ins that never return, as the script's own statement: stopped
+ *     by the watchdog, with QuickJS in the program or as a shared library.
  * `meson test -C build script-hostile` */
 #include "walpe-build-config.h"
 #include <glib.h>
@@ -1172,6 +1174,49 @@ static void swallowed (void)
     }
 }
 
+/* ------------------------------------ 17. built-ins that never come back */
+
+/* The watchdog takes the thread out of a built-in function that does not
+ * return (a regular expression, join () of a huge array) - where the
+ * thread is in the script engine's code. That was looked for in the
+ * program only: with QuickJS as a shared library the watchdog never found
+ * the thread there, and such a script kept the render thread for good.
+ * The two cases above that reach such a built-in through an argument's
+ * conversion (8) stop the same way; these are the plain statements. What
+ * they show depends on the build: set one up with a shared libquickjs
+ * (-Dquickjs_libdir=<its directory>) to see the library's case. */
+static gpointer builtin_thread (gpointer data)
+{
+    WalpeSceneScript *ss = make ();
+    add (ss, 0, "text", data);
+    start (ss);
+    for (int f = 1; f <= 3; f++)
+        tick (ss, f);
+    walpe_ss_free (ss);
+    g_mutex_lock (&hang_lock);
+    hang_done = 1;
+    g_cond_signal (&hang_cond);
+    g_mutex_unlock (&hang_lock);
+    return NULL;
+}
+
+static void builtins (void)
+{
+    static const char *const js[][2] = {
+        { "a regular expression that backtracks without end",
+          "'use strict';\nexport function update(v) { return /(x+x+)+y/.test('x'.repeat(64)) ? 'a' : 'b'; }\n" },
+        { "join () of an array of 4 294 967 295 holes, at the top of the module",
+          "'use strict';\nconst a = []; a.length = 4294967295; const s = a.join();\n"
+          "export function update(v) { return v; }\n" },
+    };
+    for (guint k = 0; k < G_N_ELEMENTS (js); k++) {
+        gint64 t0 = g_get_monotonic_time ();
+        back_in_time (builtin_thread, (gpointer) js[k][1], js[k][0]);
+        double t = (g_get_monotonic_time () - t0) / 1e6;
+        CHECK (t < 30.0, "%s: ended by the limits of the scripts, not by the test (%.1f s)", js[k][0], t);
+    }
+}
+
 int main (int argc, char **argv)
 {
     if (argc > 2 && !strcmp (argv[1], "memory-child"))
@@ -1213,6 +1258,8 @@ int main (int argc, char **argv)
         timers_rearmed ();
     if (!only || !strcmp (only, "swallowed"))
         swallowed ();
+    if (!only || !strcmp (only, "builtins"))
+        builtins ();
     if (!only || !strcmp (only, "driver")) {
         int before = contract_breaks;
         /* 6 seeds by default (each takes seconds: its scripts run into the

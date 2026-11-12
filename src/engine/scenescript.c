@@ -107,6 +107,9 @@ gboolean walpe_ss_uses_cursor (WalpeSceneScript *ss) { (void) ss; return FALSE; 
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <ucontext.h>
+#if defined (__linux__) && (defined (__x86_64__) || defined (__aarch64__))
+#include <link.h>   /* dl_iterate_phdr: see ss_wd_probe */
+#endif
 
 struct SsHeap;
 
@@ -1828,16 +1831,50 @@ static void arm_deadline (gint64 budget_ns) { ss_tls.deadline = ss_cpu_ns () + b
 #ifndef sigev_notify_thread_id
 #define sigev_notify_thread_id _sigev_un._tid
 #endif
-/* text of the program itself (QuickJS is linked statically into it) */
+/* text of the program itself (a libquickjs.a is linked into it) */
 extern char __executable_start[] __attribute__ ((weak));
 extern char etext[] __attribute__ ((weak));
+/* ... and the text QuickJS's code is in, wherever that is: with a shared
+ * libquickjs it is the library's, not the program's. The watchdog knew the
+ * program's only: a built-in that did not return was then never found "in
+ * QuickJS's code", and the render thread stayed in it for good. Found once
+ * per process, before the first entry into JS (ss_wd_probe). */
+static const char *ss_qjs_text[2];
+
+static int ss_wd_phdr (struct dl_phdr_info *info, size_t size, void *data)
+{
+    (void) size;
+    const char *at = data;
+    for (int i = 0; i < info->dlpi_phnum; i++) {
+        const ElfW (Phdr) *ph = &info->dlpi_phdr[i];
+        const char *lo = (const char *) info->dlpi_addr + ph->p_vaddr;
+        if (ph->p_type == PT_LOAD && (ph->p_flags & PF_X) && at >= lo && at < lo + ph->p_memsz) {
+            ss_qjs_text[0] = lo;
+            ss_qjs_text[1] = lo + ph->p_memsz;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* QuickJS calls this function: the address it returns to is in QuickJS's
+ * code (the address of one of its functions, taken here, can be that of a
+ * stub in the program instead) */
+static JSValue __attribute__ ((noinline))
+ss_wd_probe (JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv)
+{
+    (void) ctx; (void) t; (void) argc; (void) argv;
+    dl_iterate_phdr (ss_wd_phdr, __builtin_extract_return_addr (__builtin_return_address (0)));
+    return JS_UNDEFINED;
+}
 
 static int ss_wd_sig;   /* signal of the timers, 0 = none free */
 
 /* Leaving from a signal handler is only safe where no lock can be held:
  * in QuickJS's own code, i.e. the interrupted instruction is in the
- * program text and no host callback is running. Inside libc (malloc), the
- * loader or a host function the timer simply fires again 50 ms later. */
+ * program text or in the text of the library QuickJS is in, and no host
+ * callback is running. Inside libc (malloc), the loader or a host function
+ * the timer simply fires again 50 ms later. */
 static void ss_wd_handler (int sig, siginfo_t *si, void *uctx)
 {
     (void) sig; (void) si;
@@ -1849,7 +1886,8 @@ static void ss_wd_handler (int sig, siginfo_t *si, void *uctx)
 #else
     const char *pc = (const char *) uc->uc_mcontext.pc;
 #endif
-    if (!__executable_start || !etext || pc < __executable_start || pc >= etext)
+    if (!(__executable_start && etext && pc >= __executable_start && pc < etext) &&
+        !(pc >= ss_qjs_text[0] && pc < ss_qjs_text[1]))
         return;
     ss_tls.armed = 0;
     siglongjmp (ss_tls.jmp, 1);
@@ -1861,13 +1899,16 @@ static void ss_wd_timer_free (gpointer p)
 }
 static GPrivate ss_wd_key = G_PRIVATE_INIT (ss_wd_timer_free);
 
-static void ss_wd_thread_init (void)
+static void ss_wd_thread_init (JSContext *ctx)
 {
     static gsize once;
     if (ss_tls.timer_tried)
         return;
     ss_tls.timer_tried = TRUE;
     if (g_once_init_enter (&once)) {
+        JSValue probe = JS_NewCFunction (ctx, ss_wd_probe, "probe", 0);
+        JS_FreeValue (ctx, JS_Call (ctx, probe, JS_UNDEFINED, 0, NULL));
+        JS_FreeValue (ctx, probe);
         /* a real-time signal nobody handles yet */
         int found = 0;
         for (int sg = SIGRTMIN + 9; sg <= SIGRTMAX - 1 && !found; sg++) {
@@ -1919,7 +1960,7 @@ static void ss_wd_set (gint64 first_ns, gint64 again_ns)
     syscall (SYS_timer_settime, ss_tls.timer, 0, &its, NULL);
 }
 #else
-static void ss_wd_thread_init (void) { }
+static void ss_wd_thread_init (JSContext *ctx) { (void) ctx; }
 static void ss_wd_set (gint64 first_ns, gint64 again_ns) { (void) first_ns; (void) again_ns; }
 #endif
 
@@ -2073,7 +2114,7 @@ static gboolean ss_run (WalpeSceneScript *ss, const char *what, JSValueConst fn,
 {
     if (ss->dead)
         return FALSE;
-    ss_wd_thread_init ();
+    ss_wd_thread_init (ss->ctx);
     ss_tls.interrupted = FALSE;
     const gint64 load_t0 = ss->loaded ? 0 : ss_cpu_ns ();
     arm_deadline (SS_SOFT_NS);
