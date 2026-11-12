@@ -127,6 +127,8 @@ struct WalpeSceneScript {
                                * by block (heap), not through QuickJS */
     int unblamed;             /* entries in a row that ran out of time with no
                                * script or timer to blame */
+    gint64 load_ns;           /* CPU time of the entries before the first frame */
+    gboolean loaded;          /* the first frame has begun: load_ns is final */
     JSValue fn[12];           /* the prelude's entry points (SsFn) */
     JSValue f32_proto;        /* Float32Array.prototype as the engine made it (h_audio) */
     GArray *collect;          /* walpe_ss_cursor_layers: layers reported so far */
@@ -1596,6 +1598,12 @@ static char *ss_env_locale (const char *category, gboolean we_code)
  *    given back without QuickJS's help, see SsHeap): the wallpaper goes
  *    on without its scripts instead of freezing its monitor - and the
  *    daemon's quit, which waits for the thread.
+ *  - SS_LOAD_NS: a scene enters JS once or twice per script while it
+ *    loads, and each entry has the budget above, so a scene of 80 layers
+ *    whose scripts loop at their first line kept the load - and a daemon
+ *    asked to quit meanwhile - busy for 20 s. All entries before the
+ *    first frame together have this budget; when it is spent every script
+ *    of the wallpaper stops (a scene of 86 scripts loads in 0.03 s).
  * Memory: SS_HEAP_BYTES for everything a wallpaper's scripts hold, and
  * SS_STACK_BYTES of C stack for their calls. */
 #define SS_HEAP_BYTES (64 * 1024 * 1024)
@@ -1604,6 +1612,7 @@ static char *ss_env_locale (const char *category, gboolean we_code)
 #define SS_BLAME_NS (50 * G_GINT64_CONSTANT (1000000))
 #define SS_HARD_NS (1500 * G_GINT64_CONSTANT (1000000))
 #define SS_HARD_RETRY_NS (50 * G_GINT64_CONSTANT (1000000))
+#define SS_LOAD_NS (5000 * G_GINT64_CONSTANT (1000000))
 #define SS_MAX_JOBS 10000    /* promise reactions run per entry */
 
 static __thread struct {
@@ -2049,6 +2058,7 @@ static gboolean ss_run (WalpeSceneScript *ss, const char *what, JSValueConst fn,
         return FALSE;
     ss_wd_thread_init ();
     ss_tls.interrupted = FALSE;
+    const gint64 load_t0 = ss->loaded ? 0 : ss_cpu_ns ();
     arm_deadline (SS_SOFT_NS);
     ss_tls.heap_full = 0;
     if (sigsetjmp (ss_tls.jmp, 1) != 0) {
@@ -2076,6 +2086,14 @@ static gboolean ss_run (WalpeSceneScript *ss, const char *what, JSValueConst fn,
     ss_tls.armed = 0;
     ss_wd_set (0, 0);
     ss_tls.deadline = 0;
+    /* the load's budget (SS_LOAD_NS) */
+    if (!ss->loaded && !ss->dead && (ss->load_ns += ss_cpu_ns () - load_t0) > SS_LOAD_NS) {
+        ss->dead = TRUE;
+        g_warning ("scenescript: %s: the scripts of this wallpaper used %.1f s of CPU time while "
+                   "it loaded (they have %.0f s for that). All scripts of this wallpaper are "
+                   "stopped; the wallpaper keeps running", walpe_log_str (what),
+                   ss->load_ns / 1e9, SS_LOAD_NS / 1e9);
+    }
     return ok;
 }
 
@@ -2676,6 +2694,7 @@ void walpe_ss_tick (WalpeSceneScript *ss, double frametime, double runtime,
 {
     if (!ss || !ss->count || ss->dead)
         return;
+    ss->loaded = TRUE;
     JSValue a[5] = { JS_NewFloat64 (ss->ctx, frametime), JS_NewFloat64 (ss->ctx, runtime),
                      JS_NewFloat64 (ss->ctx, cursor_x), JS_NewFloat64 (ss->ctx, cursor_y),
                      JS_NewBool (ss->ctx, left_down) };

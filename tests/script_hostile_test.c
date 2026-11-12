@@ -36,7 +36,9 @@
  *     lock: the call runs to its end;
  * 13. the script memory filled to the last block, in every place a script
  *     runs (QuickJS ends the process there, old releases and current
- *     ones): the wallpaper goes on, each case in a child process.
+ *     ones): the wallpaper goes on, each case in a child process;
+ * 14. many scripts that each use up the time limit of their first entry,
+ *     or stay just under it: the load has one budget for all of them.
  * `meson test -C build script-hostile` */
 #include "walpe-build-config.h"
 #include <glib.h>
@@ -1019,6 +1021,67 @@ static void memory_full (void)
     g_free (exe);
 }
 
+/* ------------------------------------------------- 14. the time of a load */
+
+/* Every entry into a script has its own time limit, and a scene has as
+ * many entries at load as it has scripts: n scripts that each use theirs
+ * up kept the load (and a daemon asked to quit meanwhile) busy for n times
+ * the limit - 20 s with 80 layers. A load has one budget for all of them. */
+static void load_time (guint n)
+{
+    WalpeSceneScript *ss = make ();
+    double t0 = thread_cpu ();
+    guint added = 0;
+    for (guint i = 0; i < n; i++)
+        added += add (ss, (int) (i % NLAYERS), "text", "'use strict';\nfor (;;) {}\nexport function update(v) { return v; }\n");
+    start (ss);
+    double load = thread_cpu () - t0;
+    CHECK (load < 6.5, "load: %u scripts that never come back from their first line cost %.2f s of "
+           "CPU time (5 s for a load; %u were taken)", n, load, added);
+    t0 = thread_cpu ();
+    for (int f = 1; f <= 5; f++)
+        tick (ss, f);
+    WalpeSsMem m;
+    walpe_ss_mem (ss, &m);
+    CHECK (m.dead && thread_cpu () - t0 < 0.1, "load: after that the wallpaper's scripts are stopped "
+           "(%s; 5 frames %.3f s)", m.dead ? "stopped" : "running", thread_cpu () - t0);
+    walpe_ss_free (ss);
+
+    /* just under the limit of an entry, each: nothing runs out of time,
+     * and the load still ends */
+    ss = make ();
+    t0 = thread_cpu ();
+    for (guint i = 0; i < n; i++)
+        add (ss, (int) (i % NLAYERS), "text", "'use strict';\nconst t = Date.now();\n"
+                                               "while (Date.now() - t < 200) {}\n"
+                                               "export function update(v) { return v; }\n");
+    start (ss);
+    load = thread_cpu () - t0;
+    CHECK (load < 6.5, "load: %u scripts that each stay just under an entry's limit cost %.2f s", n, load);
+    walpe_ss_free (ss);
+
+    /* a load of many scripts that behave is far from the budget, and the
+     * budget is the load's: frames are not counted against it */
+    ss = make ();
+    added = 0;
+    for (guint i = 0; i < 86; i++)
+        added += add (ss, (int) (i % NLAYERS), "text",
+                      "'use strict';\nlet n = 0; const tab = []; for (let i = 0; i < 2000; i++) tab.push(Math.sin(i));\n"
+                      "export function init(v) { return 'i'; }\n"
+                      "export function update(v) { return 'n' + (++n); }\n");
+    add (ss, 0, "alpha", "'use strict';\nexport function update(v) { const t = Date.now(); while (Date.now() - t < 200) {} return v; }\n");
+    start (ss);
+    t0 = thread_cpu ();
+    for (int f = 1; f <= 28; f++)
+        tick (ss, f);
+    walpe_ss_mem (ss, &m);
+    CHECK (added == 86 && !m.dead && text[5] && !strcmp (text[5], "n28"),
+           "load: 86 scripts that behave are all taken, and 28 frames of %.2f s in all leave them "
+           "running (%u, %s, %s)", thread_cpu () - t0, added, m.dead ? "stopped" : "running",
+           text[5] ? text[5] : "-");
+    walpe_ss_free (ss);
+}
+
 int main (int argc, char **argv)
 {
     if (argc > 2 && !strcmp (argv[1], "memory-child"))
@@ -1054,6 +1117,8 @@ int main (int argc, char **argv)
         slow_call ();
     if (!only || !strcmp (only, "memory"))
         memory_full ();
+    if (!only || !strcmp (only, "load"))
+        load_time (argc > 2 ? (guint) atoi (argv[2]) : 40);
     if (!only || !strcmp (only, "driver")) {
         int before = contract_breaks;
         /* 6 seeds by default (each takes seconds: its scripts run into the
