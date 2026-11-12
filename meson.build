@@ -713,7 +713,8 @@ if with_tests
 # which page host a web wallpaper gets (src/engine/webhostsel.h): X11
 # sessions unchanged, a Wayland backend through Xwayland too and on the
 # private display only without an X display (elsewhere opt-in), with the
-# fallback to Xwayland, forced names, one-sided builds. Pure.
+# fallback to Xwayland and the one from an X display that does not answer
+# to the private display, forced names, one-sided builds. Pure.
 test('webhost-select', executable('webhost-select-test', 'tests/webhost_select_test.c',
   include_directories: inc,
   dependencies: [glib],

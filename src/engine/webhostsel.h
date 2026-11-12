@@ -14,15 +14,27 @@
  *            reach the page as real Wayland events; the session's
  *            clipboard and selections are simply not there.
  *
+ * Each of the two is a compile-time part of the web module (meson.build):
+ * x11 where libX11 and GTK's X11 backend are found and -Dx11 is not
+ * disabled, private where the Wayland backend is built and
+ * libwayland-server and GTK's Wayland backend are found. A module has at
+ * least one.
+ *
  * WALPE_WEB_HOST = auto (default) | x11 | private.
  * auto: x11 wherever an X display is there (DISPLAY set) - an X11 backend
  * exactly as before, a Wayland backend through Xwayland - and private
  * only when there is no X display at all. So with an X display the
- * private page host is opt-in (WALPE_WEB_HOST=private): it has not run on
- * real compositors yet, a failure of its display ends the daemon, and the
- * X window through Xwayland is the tested path. (Should the private
- * display fail WebKit's start-up test where auto chose it, x11 is taken
- * when DISPLAY is set after all.) */
+ * private page host is opt-in (WALPE_WEB_HOST=private): a failure of its
+ * display ends the daemon, and the X window through Xwayland is the path
+ * that was used first.
+ * On a Wayland backend auto also changes hosts when its first choice
+ * turns out not to work: x11 that cannot open its display (DISPLAY names
+ * no running X server: a stale variable in a session without Xwayland) or
+ * fails WebKit's start-up test gives way to private, and private that
+ * fails the test gives way to x11 when DISPLAY is set. The second choice
+ * is tested like the first; when both fail, web wallpapers are off. A
+ * host asked for by name is never replaced, and on an X11 backend
+ * nothing is: there the X display is the one the daemon itself draws on. */
 #pragma once
 #include <glib.h>
 #include <string.h>
@@ -43,6 +55,9 @@ typedef struct {
     gboolean built_x11;         /* GTK's X11 backend + Xlib are in this build */
     gboolean built_private;     /* webhost_wl.c is in this build */
     gboolean private_failed;    /* the private display failed its start-up test */
+    gboolean x11_failed;        /* the X11 page host could not open its display, or
+                                 * failed its start-up test (looked at on a Wayland
+                                 * backend only) */
 } WebHostEnv;
 
 static inline const char *web_host_name (WebHost h)
@@ -96,7 +111,7 @@ static inline WebHost web_host_choose (const WebHostEnv *e, const char **why)
         else
             w = "no X display for the page's window (DISPLAY is not set) and no private "
                 "page host in this build";
-    } else if (e->built_x11 && e->x_display) {
+    } else if (e->built_x11 && e->x_display && !e->x11_failed) {
         /* Wayland with an X display (Xwayland): the off-screen X window,
          * as on X11; the private page host only by name */
         h = WEB_HOST_X11;
@@ -104,8 +119,20 @@ static inline WebHost web_host_choose (const WebHostEnv *e, const char **why)
             w = "the private page host failed its start-up test: using an off-screen X "
                 "window through Xwayland instead";
     } else if (e->built_private && !e->private_failed) {
-        /* no X display at all: the one place left for a page's window */
+        /* no X display at all, or none that works: the one place left for
+         * a page's window */
         h = WEB_HOST_PRIVATE;
+        if (e->x11_failed)
+            w = "the X11 page host did not come up (DISPLAY is set, but no X server or "
+                "Xwayland answers there, or WebKit failed its start-up test on it): using "
+                "the private page host instead";
+    } else if (e->x11_failed) {
+        w = e->built_private
+                ? "the X11 page host and the private page host both failed their start-up "
+                  "test"
+                : "the X11 page host did not come up (DISPLAY is set, but no X server or "
+                  "Xwayland answers there, or WebKit failed its start-up test on it) and "
+                  "this build has no private page host";
     } else {
         w = e->private_failed
                 ? "the private page host failed its start-up test and there is no Xwayland "

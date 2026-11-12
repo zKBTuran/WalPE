@@ -2587,6 +2587,14 @@ static void on_clipboard_changed (GdkClipboard *cb, gpointer user)
 static WebHost web_host = WEB_HOST_NONE;    /* in use once GTK is up; main thread */
 static gboolean web_private_failed;         /* its start-up test failed: not tried again */
 static gint web_host_shown = WEB_HOST_NONE; /* for status (any thread) */
+#ifdef WEB_HAVE_PRIVATE
+/* the X11 page host could not open its display or failed its start-up
+ * test: not tried again (only a module with a second host keeps track) */
+static gboolean web_x11_failed;
+/* the host in use is not the first choice: why, for status (static text;
+ * set once on the main thread, read by any) */
+static const char *web_host_note;
+#endif
 
 static WebHost web_host_pick (const char **why)
 {
@@ -2610,6 +2618,9 @@ static WebHost web_host_pick (const char **why)
     e.built_private = TRUE;
 #endif
     e.private_failed = web_private_failed;
+#ifdef WEB_HAVE_PRIVATE
+    e.x11_failed = web_x11_failed;
+#endif
     return web_host_choose (&e, why);
 }
 
@@ -2707,20 +2718,44 @@ static gboolean ensure_gtk (void)
         if (!gtk_is_initialized ())
             gtk_disable_setlocale ();
         if (!gtk_init_check ()) {
-            g_warning ("web: gtk_init failed (no display?)");
-            return FALSE;
+#ifdef WEB_HAVE_PRIVATE
+            /* DISPLAY is set and no X server answers there (a variable
+             * left over in a session without Xwayland): GTK has opened
+             * nothing, so where the choice was this module's (a Wayland
+             * backend, WALPE_WEB_HOST not x11) the private page host is
+             * taken instead. The start-up test's process comes this way
+             * too, and so tests the host this daemon ends up with. */
+            web_x11_failed = TRUE;
+            host = web_host_pick (&host_why);
+            if (host == WEB_HOST_PRIVATE) {
+                g_warning ("web: %s", host_why);
+                if (!gtk_init_private ())
+                    return FALSE;
+            } else
+#endif
+            {
+                g_warning ("web: gtk_init failed (no display?)");
+                return FALSE;
+            }
         }
         /* gtk_init replaces the process-wide Xlib error handler (the daemon's
          * walpe_xerror) with GDK's, which _exit(1)s on any X error on its
          * display that no GDK trap covers - the daemon vanished without a
          * trace. A trap that is never popped covers them all; GDK's own nested
          * traps still get their errors (innermost first). */
-        gdk_x11_display_error_trap_push (gdk_display_get_default ());
+        if (host == WEB_HOST_X11)
+            gdk_x11_display_error_trap_push (gdk_display_get_default ());
 #else
         return FALSE;   /* web_host_pick does not choose a host that is not built */
 #endif
     }
     web_host = host;
+#ifdef WEB_HAVE_PRIVATE
+    if (host == WEB_HOST_PRIVATE && web_x11_failed)
+        g_atomic_pointer_set (&web_host_note, "the X11 page host did not come up");
+    else if (host == WEB_HOST_X11 && web_private_failed)
+        g_atomic_pointer_set (&web_host_note, "the private page host failed its start-up test");
+#endif
     g_atomic_int_set (&web_host_shown, (gint) host);
     /* a page can select text in a form field by script: WebKit then made
      * the daemon the owner of the X PRIMARY selection with page-chosen
@@ -2917,6 +2952,28 @@ static void probe_done (GObject *src, GAsyncResult *res, gpointer user)
             p = NULL;
         }
     }
+#ifdef WEB_HAVE_PRIVATE
+    else if (!ok && probe_host == WEB_HOST_X11 && !web_x11_failed) {
+        /* the other way round: the X11 page host did not get through (no
+         * X server behind DISPLAY, or WebKit failed on it). Where it was
+         * this module's choice on a Wayland backend, the private page
+         * host is tried before web wallpapers are switched off. */
+        web_x11_failed = TRUE;
+        const char *hw = NULL;
+        if (web_host_pick (&hw) == WEB_HOST_PRIVATE) {
+            g_warning ("web: %s (%s)", hw ? hw : "falling back to the private page host", why);
+            g_free (why);
+            g_free (out);
+            g_object_unref (p);
+            if (probe_spawn ())
+                return;
+            ok = FALSE;
+            why = g_strdup ("the start-up test for the private page host could not be run");
+            out = NULL;
+            p = NULL;
+        }
+    }
+#endif
     probe_state = ok ? PROBE_OK : PROBE_FAILED;
     if (ok) {
         g_message ("web: WebKit start-up test passed");
@@ -3713,10 +3770,17 @@ void walpe_web_input (gpointer viewer, const WalpeWebInput *in)
 
 /* how pointer input reaches the live pages: "native", "native
  * (unconfirmed)", "js", "off"; "" = no page; g_free */
-/* where pages live, for status: "x11", "private", "" = no page yet */
+/* where pages live, for status: "x11", "private", "" = no page yet. A
+ * host that is not the first choice has the reason after its name:
+ * "private (the X11 page host did not come up)" */
 char *walpe_web_host (void)
 {
     WebHost h = (WebHost) g_atomic_int_get (&web_host_shown);
+#ifdef WEB_HAVE_PRIVATE
+    const char *note = g_atomic_pointer_get (&web_host_note);
+    if (h != WEB_HOST_NONE && note)
+        return g_strdup_printf ("%s (%s)", web_host_name (h), note);
+#endif
     return g_strdup (h == WEB_HOST_NONE ? "" : web_host_name (h));
 }
 

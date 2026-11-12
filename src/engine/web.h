@@ -39,7 +39,9 @@ typedef struct {
 void walpe_web_input (gpointer viewer, const WalpeWebInput *in);
 /* where the pages' windows live: "x11" (an off-screen X window; on Wayland
  * through Xwayland), "private" (a Wayland display of the module's own),
- * "" = no page was created yet; g_free. WALPE_WEB_HOST=auto|x11|private. */
+ * "" = no page was created yet; g_free. WALPE_WEB_HOST=auto|x11|private.
+ * A host taken because the first choice did not work has the reason after
+ * its name: "private (the X11 page host did not come up)". */
 char *walpe_web_host (void);
 /* how pointer input reaches the live pages: "native" (real input events,
  * confirmed by the page), "native (unconfirmed)", "js" (script-dispatched

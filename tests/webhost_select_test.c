@@ -2,8 +2,11 @@
  * (src/engine/webhostsel.h): X11 sessions stay on the off-screen X
  * window, a Wayland backend uses it through Xwayland as well and takes
  * the private display only where there is no X display (elsewhere it is
- * opt-in by name), forced names, builds that hold only one of the two.
- * Pure: no display, no GTK. */
+ * opt-in by name), forced names, builds that hold only one of the two,
+ * and what follows a host that did not come up: on a Wayland backend
+ * the other one, with the reason (DISPLAY set and no X server behind it
+ * ends on the private display), by name or on an X11 backend nothing
+ * else. Pure: no display, no GTK. */
 #include "engine/webhostsel.h"
 #include <stdio.h>
 
@@ -67,6 +70,43 @@ int main (void)
                "DISPLAY set but no X11 page host in the build: private");
         e.private_failed = TRUE;
         CHECK (web_host_choose (&e, &why) == WEB_HOST_NONE && why, "private failed in a build without X: nothing");
+    }
+
+    /* ---- the X11 page host did not come up: DISPLAY names no running X
+     * server, or WebKit failed its start-up test there */
+    {
+        WebHostEnv e = { .backend = 2, .x_display = TRUE, .wayland_display = TRUE, .built_x11 = TRUE,
+                         .built_private = TRUE, .x11_failed = TRUE };
+        CHECK (web_host_choose (&e, &why) == WEB_HOST_PRIVATE && why && strstr (why, "private page host instead"),
+               "Wayland backend, x11 failed: private, and it says why");
+        e.private_failed = TRUE;
+        CHECK (web_host_choose (&e, &why) == WEB_HOST_NONE && why && strstr (why, "both"),
+               "both failed: nothing, and it names both");
+        e.private_failed = FALSE;
+        e.built_private = FALSE;
+        CHECK (web_host_choose (&e, &why) == WEB_HOST_NONE && why && strstr (why, "no private page host"),
+               "x11 failed in a build without the private host: nothing");
+        /* asked for by name: the name is kept */
+        e.built_private = TRUE;
+        e.setting = "x11";
+        CHECK (web_host_choose (&e, &why) == WEB_HOST_X11 && !why, "x11 by name stays x11 after a failure");
+        e.setting = "private";
+        CHECK (web_host_choose (&e, &why) == WEB_HOST_PRIVATE && !why, "private by name: nothing to say");
+        /* an X11 backend draws on that X display itself: nothing changes there */
+        e.setting = NULL;
+        e.backend = 1;
+        CHECK (web_host_choose (&e, &why) == WEB_HOST_X11 && !why,
+               "X11 backend: x11 whatever its start-up test said (the private host is never started there)");
+        e.wayland_display = FALSE;
+        CHECK (web_host_choose (&e, &why) == WEB_HOST_X11 && !why, "X11 session: the same");
+        /* the start-up test's process on a Wayland backend, told so by WALPE_BACKEND */
+        e.backend = 0;
+        e.backend_env = "wayland";
+        CHECK (web_host_choose (&e, &why) == WEB_HOST_PRIVATE && why,
+               "the test process on a Wayland backend follows the same rule");
+        /* without the failure the same environment is on x11 */
+        e.x11_failed = FALSE;
+        CHECK (web_host_choose (&e, &why) == WEB_HOST_X11 && !why, "no failure: x11 as before");
     }
 
     /* ---- asked for by name */
