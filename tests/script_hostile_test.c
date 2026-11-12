@@ -38,7 +38,9 @@
  *     runs (QuickJS ends the process there, old releases and current
  *     ones): the wallpaper goes on, each case in a child process;
  * 14. many scripts that each use up the time limit of their first entry,
- *     or stay just under it: the load has one budget for all of them.
+ *     or stay just under it: the load has one budget for all of them;
+ * 15. a timer callback that arms its successor and never returns is not
+ *     paid for in every frame for good.
  * `meson test -C build script-hostile` */
 #include "walpe-build-config.h"
 #include <glib.h>
@@ -1082,6 +1084,51 @@ static void load_time (guint n)
     walpe_ss_free (ss);
 }
 
+/* --------------------------------------- 15. timers that arm themselves */
+
+/* A timer callback that runs out of time is removed - but the callback
+ * armed its successor first, which did the same in the next frame: the
+ * limit of an entry was paid in every frame, for as long as the wallpaper
+ * was shown. Entries that run out of time are counted per wallpaper. */
+static void timers_rearmed (void)
+{
+    WalpeSceneScript *ss = make ();
+    add (ss, 0, "text", "'use strict';\nlet n = 0;\nexport function update(v) { return 'n' + (++n); }\n");
+    add (ss, 1, "text", "'use strict';\nfunction again() { engine.setTimeout(again, 0); for (;;) {} }\n"
+                        "export function init(v) { engine.setTimeout(again, 0); return v; }\n"
+                        "export function update(v) { return v; }\n");
+    start (ss);
+    double t0 = thread_cpu ();
+    for (int f = 1; f <= 22; f++)
+        tick (ss, f);
+    double first = thread_cpu () - t0;
+    t0 = thread_cpu ();
+    for (int f = 23; f <= 30; f++)
+        tick (ss, f);
+    double later = thread_cpu () - t0;
+    WalpeSsMem m;
+    walpe_ss_mem (ss, &m);
+    CHECK (later < 0.25 && m.dead, "a timer that arms itself again and never returns: 22 frames cost "
+           "%.2f s, the 8 after them %.3f s (scripts %s)", first, later, m.dead ? "stopped" : "running");
+    walpe_ss_free (ss);
+
+    /* what runs out of time once (a script, a timer) is stopped alone, as before */
+    ss = make ();
+    add (ss, 0, "text", "'use strict';\nlet n = 0;\nexport function update(v) { return 'n' + (++n); }\n");
+    add (ss, 1, "text", "'use strict';\nexport function init(v) { engine.setInterval(() => { for (;;) {} }, 1); return v; }\n"
+                        "export function update(v) { return v; }\n");
+    add (ss, 2, "text", "'use strict';\nexport function update(v) { for (;;) {} }\n");
+    start (ss);
+    for (int f = 1; f <= 30; f++)
+        tick (ss, f);
+    walpe_ss_mem (ss, &m);
+    /* (the frame in which the timer ran out of time ended there) */
+    CHECK (!m.dead && text[0] && atoi (text[0] + 1) >= 28, "a timer and a script that ran out of time once: "
+           "the other scripts run on (%s, %s of 30 frames)", m.dead ? "stopped" : "running",
+           text[0] ? text[0] : "-");
+    walpe_ss_free (ss);
+}
+
 int main (int argc, char **argv)
 {
     if (argc > 2 && !strcmp (argv[1], "memory-child"))
@@ -1119,6 +1166,8 @@ int main (int argc, char **argv)
         memory_full ();
     if (!only || !strcmp (only, "load"))
         load_time (argc > 2 ? (guint) atoi (argv[2]) : 40);
+    if (!only || !strcmp (only, "timers"))
+        timers_rearmed ();
     if (!only || !strcmp (only, "driver")) {
         int before = contract_breaks;
         /* 6 seeds by default (each takes seconds: its scripts run into the

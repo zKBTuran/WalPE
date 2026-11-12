@@ -127,6 +127,7 @@ struct WalpeSceneScript {
                                * by block (heap), not through QuickJS */
     int unblamed;             /* entries in a row that ran out of time with no
                                * script or timer to blame */
+    int timeouts;             /* entries that ran out of time, in all */
     gint64 load_ns;           /* CPU time of the entries before the first frame */
     gboolean loaded;          /* the first frame has begun: load_ns is final */
     JSValue fn[12];           /* the prelude's entry points (SsFn) */
@@ -1604,6 +1605,12 @@ static char *ss_env_locale (const char *category, gboolean we_code)
  *    asked to quit meanwhile - busy for 20 s. All entries before the
  *    first frame together have this budget; when it is spent every script
  *    of the wallpaper stops (a scene of 86 scripts loads in 0.03 s).
+ *  - SS_TIMEOUTS_MAX: the script or timer that ran out of time is stopped,
+ *    but a timer callback can arm its successor before it loops, and the
+ *    successor does the same in the next frame: the budget of an entry
+ *    was paid in every frame for as long as the wallpaper was shown. A
+ *    wallpaper whose entries ran out of time this many times in all has
+ *    every script stopped.
  * Memory: SS_HEAP_BYTES for everything a wallpaper's scripts hold, and
  * SS_STACK_BYTES of C stack for their calls. */
 #define SS_HEAP_BYTES (64 * 1024 * 1024)
@@ -1613,6 +1620,7 @@ static char *ss_env_locale (const char *category, gboolean we_code)
 #define SS_HARD_NS (1500 * G_GINT64_CONSTANT (1000000))
 #define SS_HARD_RETRY_NS (50 * G_GINT64_CONSTANT (1000000))
 #define SS_LOAD_NS (5000 * G_GINT64_CONSTANT (1000000))
+#define SS_TIMEOUTS_MAX 20
 #define SS_MAX_JOBS 10000    /* promise reactions run per entry */
 
 static __thread struct {
@@ -2044,6 +2052,15 @@ ss_run_armed (WalpeSceneScript *ss, const char *what, JSValueConst fn, int argc,
         }
     } else if (timed_out || ok) {
         ss->unblamed = 0;
+    }
+    /* ... and so they do when entries ran out of time SS_TIMEOUTS_MAX
+     * times in all, whoever was blamed */
+    if (timed_out && ++ss->timeouts >= SS_TIMEOUTS_MAX && !ss->dead) {
+        ss->dead = TRUE;
+        ss_host_enter ();
+        g_warning ("scenescript: scripts and timers of this wallpaper ran out of time %d times: "
+                   "all scripts of this wallpaper are stopped", SS_TIMEOUTS_MAX);
+        ss_host_leave ();
     }
     return ok;
 }
