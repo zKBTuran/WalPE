@@ -2186,6 +2186,54 @@ static void gl_part (void)
             }
             g_free (of);
         }
+        /* The bytes decide, and the name where they say nothing: a TGA
+         * picture (2 x 2, 32 bits) under a PNG's name is a TGA picture;
+         * one whose second byte is damaged is still handed to the TGA
+         * decoder under its own name, and to none under another. */
+        {
+            guint8 tga[18 + 16] = { 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 2, 0, 32, 0x28 };
+            memset (tga + 18, 0xc0, 16);
+            mkfile ("gl/other/real-tga.png", tga, sizeof tga);
+            tga[1] = 0xff;
+            mkfile ("gl/other/odd.tga", tga, sizeof tga);
+            mkfile ("gl/other/odd.dat", tga, sizeof tga);
+            static const struct { const char *file; gboolean loads; } named[] = {
+                { "gl/other/real-tga.png", TRUE }, { "gl/other/odd.tga", TRUE }, { "gl/other/odd.dat", FALSE } };
+            for (guint i = 0; i < G_N_ELEMENTS (named); i++) {
+                char *nf = P (named[i].file);
+                WalpeGlTex nt = walpe_gl_tex_from_file (nf);
+                if ((nt.tex != 0) != named[i].loads)
+                    g_printerr ("parsers-test: %s %s\n", named[i].file, nt.tex ? "loaded" : "refused");
+                CHECK ((nt.tex != 0) == named[i].loads && (!nt.tex || (nt.width == 2 && nt.height == 2)));
+                if (nt.tex)
+                    glDeleteTextures (1, &nt.tex);
+                g_free (nf);
+            }
+        }
+        /* a PNG that ends before its last chunk (here: behind its header,
+         * a file of under 64 bytes) is refused, not shown as an empty
+         * picture: the decoder fed piece by piece does not say that the
+         * file ended early */
+        {
+            save_png ("gl/other/whole.png", 4, 4);
+            char *wf = P ("gl/other/whole.png"), *data = NULL;
+            gsize wl = 0;
+            if (g_file_get_contents (wf, &data, &wl, NULL) && wl > 48) {
+                /* the header chunk, then the picture data's chunk begun */
+                guint8 cut[33 + 8 + 6];
+                memcpy (cut, data, 33);
+                memcpy (cut + 33, "\0\0\0\x10IDAT\x78\x01\x63\x60\x60\x60", 14);
+                mkfile ("gl/other/cut.png", cut, sizeof cut);
+                char *cf = P ("gl/other/cut.png");
+                WalpeGlTex ct = walpe_gl_tex_from_file (cf);
+                CHECK (ct.tex == 0);
+                if (ct.tex)
+                    glDeleteTextures (1, &ct.tex);
+                g_free (cf);
+            }
+            g_free (data);
+            g_free (wf);
+        }
         /* (where gdk-pixbuf has these loaders built in, or not at all, the
          * check above cannot fail) */
         char *of = P (other[0].file);

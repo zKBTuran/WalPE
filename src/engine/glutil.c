@@ -2746,9 +2746,9 @@ static gboolean tex_scope_over (int w, int h, int bpp)
 }
 
 /* The picture formats a wallpaper's layers and sprites are made of, and the
- * one gdk-pixbuf loader each is read by, from the file's first bytes: "png",
- * "jpeg", "bmp", "gif", "tiff", "webp", "avif", "jxl", "tga". NULL: none of
- * them.
+ * one gdk-pixbuf loader each is read by, from the file's first bytes (from
+ * its name when they say nothing): "png", "jpeg", "bmp", "gif", "tiff",
+ * "webp", "avif", "jxl", "tga". NULL: none of them.
  * gdk-pixbuf left to choose (gdk_pixbuf_get_file_info, gdk_pixbuf_new_from_
  * file) picks a loader by the bytes itself, whatever the name, and the name
  * of the format can be asked only after that loader has read the file's
@@ -2790,6 +2790,20 @@ static const char *tex_file_kind (const char *path)
                    (h[1] == 0 && (h[2] == 2 || h[2] == 3 || h[2] == 10 || h[2] == 11))) &&
         !(h[0] == 0 && h[1] == 0 && h[2] == 2 && h[3] == 0 && h[4] != 0 && h[5] == 0))
         return "tga";
+    /* bytes that say nothing: the name decides, as it did when gdk-pixbuf
+     * chose (a picture whose first bytes are damaged is still its
+     * format's decoder's to refuse or to show) - among these formats only */
+    static const struct { const char *ext, *kind; } by_name[] = {
+        { ".png", "png" }, { ".jpg", "jpeg" }, { ".jpeg", "jpeg" }, { ".gif", "gif" }, { ".bmp", "bmp" },
+        { ".tif", "tiff" }, { ".tiff", "tiff" }, { ".webp", "webp" }, { ".avif", "avif" },
+        { ".jxl", "jxl" }, { ".tga", "tga" },
+    };
+    const gsize l = strlen (path);
+    for (guint i = 0; i < G_N_ELEMENTS (by_name); i++) {
+        const gsize el = strlen (by_name[i].ext);
+        if (l > el && !g_ascii_strcasecmp (path + l - el, by_name[i].ext))
+            return by_name[i].kind;
+    }
     return NULL;
 }
 
@@ -2828,6 +2842,33 @@ static gboolean tex_file_size (const char *path, const char *kind, int *w, int *
     *w = z.w;
     *h = z.h;
     return z.seen;
+}
+
+/* a PNG file has its last chunk (IEND): the chunks are walked by their
+ * lengths. gdk-pixbuf's PNG decoder fed piece by piece says nothing when
+ * the file ends early and hands out the rows it has (none: an empty
+ * picture); reading the file in one go, as this path did, it refused. */
+static gboolean tex_file_png_whole (const char *path)
+{
+    FILE *f = fopen (path, "rb");
+    guint8 c[8];
+    gboolean whole = FALSE;
+    if (f && fseek (f, 8, SEEK_SET) == 0) {
+        for (guint n = 0; n < 100000 && fread (c, 1, 8, f) == 8; n++) {
+            const guint32 len = (guint32) c[0] << 24 | (guint32) c[1] << 16 | (guint32) c[2] << 8 | c[3];
+            if (!memcmp (c + 4, "IEND", 4)) {
+                guint8 crc[4];
+                whole = len == 0 && fread (crc, 1, 4, f) == 4;
+                break;
+            }
+            /* the chunk's data and its checksum are in the file */
+            if (len > 0x7fffffff || fseek (f, (long) len + 3, SEEK_CUR) != 0 || fgetc (f) == EOF)
+                break;
+        }
+    }
+    if (f)
+        fclose (f);
+    return whole;
 }
 
 static void tex_file_scale (GdkPixbufLoader *ld, int w, int h, gpointer user)
@@ -2924,6 +2965,8 @@ WalpeGlTex walpe_gl_tex_from_file (const char *path)
      * loader above for what its decoder would reserve, not read here either) */
     const char *kind = walpe_bmp_file_header_ok (path) ? tex_file_kind (path) : NULL;
     const gint64 max_side = 16384, max_px = (gint64) 8192 * 8192;
+    if (kind && !strcmp (kind, "png") && !tex_file_png_whole (path))
+        kind = NULL;
     if (!kind || !tex_file_size (path, kind, &iw, &ih) || iw <= 0 || ih <= 0) {
         g_debug ("texture %s: not a picture format a wallpaper texture can have", path);
         return out;
