@@ -15,6 +15,30 @@
  * native libpipewire-0.3 stream was implemented and measured earlier:
  * it was no better, so libpulse stays.
  *
+ * Which source: what the computer plays, never what a microphone hears.
+ * "@DEFAULT_MONITOR@" names the monitor of the default output when the
+ * stream is made; where it is afterwards is the server's business unless
+ * the stream says otherwise. PulseAudio moves every recording stream that
+ * sits on the default source when another source becomes the default, and
+ * on a machine without a microphone the default source IS the monitor of
+ * the output: plug in a headset or a camera and the server moved this
+ * stream onto its microphone (measured with PulseAudio 16.1; the status
+ * went on saying "capturing @DEFAULT_MONITOR@" and a web wallpaper was
+ * handed the spectrum of the room). So:
+ *  - the stream carries PA_STREAM_DONT_MOVE: the server leaves it where
+ *    it is (and ends it when its source goes away);
+ *  - nothing is analysed before the server has said which source the
+ *    stream reads, and a source that is no output's monitor is refused
+ *    (walpe_audio_source_ok). Asked again whenever the stream is moved
+ *    all the same;
+ *  - following the user to another output is done here: when the default
+ *    output changes (one server event), or the stream ends because its
+ *    output is gone, the stream is made again on the new default's
+ *    monitor. PulseAudio left it on the old output's monitor: the bars
+ *    stood still after a switch from loudspeakers to headphones.
+ * WALPE_AUDIO_SOURCE=<source name> is the user's own choice of a source,
+ * a microphone included: taken as it is, never moved, not followed.
+ *
  * Analysis (best-effort match of WE's behaviour; WE does not document its
  * normalisation): 44.1 kHz stereo float, one 4096-point Hann-windowed FFT
  * for both channels (left as the real part, right as the imaginary part:
@@ -233,6 +257,11 @@ float walpe_audio_level (const WalpeAudioSpectrum *s)
     return sum / 16.0f;
 }
 
+gboolean walpe_audio_source_ok (gboolean is_monitor, const char *chosen)
+{
+    return is_monitor || (chosen && *chosen);
+}
+
 #ifdef HAVE_PULSE
 #define HAVE_CAPTURE 1
 static pa_mainloop *cap_ml;        /* lock: the capture thread's loop while it runs */
@@ -365,6 +394,17 @@ typedef struct {
     Ring *ring;
     gboolean ctx_ready, st_ready, failed;
     char *why;
+    const char *chosen;     /* WALPE_AUDIO_SOURCE: the user named the source */
+    gboolean checked;       /* the server said which source the stream reads,
+                             * and it may be read: samples are analysed */
+    gboolean restart;       /* make the stream again (another default output,
+                             * or its output is gone): no error */
+    char *source;           /* the source the stream reads */
+    char *sink;             /* the output it is the monitor of */
+    char *def_sink;         /* the default output, as far as known */
+    char **followed;        /* the default output the stream was last made
+                             * again for (kept from stream to stream) */
+    pa_stream *st;
 } Cap;
 
 static void cap_fail (Cap *c, const char *what, pa_context *ctx)
@@ -387,15 +427,131 @@ static void cap_ctx_state (pa_context *ctx, void *user)
     }
 }
 
+/* the stream is made again when the default output is another one than
+ * the one it listens to (both names known) */
+static void cap_follow (Cap *c)
+{
+    if (c->chosen || c->restart || !c->checked || !c->sink || !c->def_sink ||
+        !strcmp (c->sink, c->def_sink))
+        return;
+    /* once per default output: a server that names one output as the
+     * default and hands out the monitor of another when asked for the
+     * default's would have the stream made again for ever */
+    if (*c->followed && !strcmp (*c->followed, c->def_sink))
+        return;
+    g_message ("audio: the default output is %s now (was %s): capturing its monitor", c->def_sink,
+               c->sink);
+    g_free (*c->followed);
+    *c->followed = g_strdup (c->def_sink);
+    c->restart = TRUE;
+}
+
+static void cap_source_info (pa_context *ctx, const pa_source_info *i, int eol, void *user)
+{
+    Cap *c = user;
+    if (eol < 0) {
+        /* (nothing is read from a source the server tells nothing about) */
+        cap_fail (c, "the stream's source", ctx);
+        return;
+    }
+    if (!i)
+        return;
+    const gboolean is_monitor = i->monitor_of_sink != PA_INVALID_INDEX;
+    g_free (c->source);
+    c->source = g_strdup (i->name ? i->name : "?");
+    g_free (c->sink);
+    c->sink = is_monitor && i->monitor_of_sink_name ? g_strdup (i->monitor_of_sink_name) : NULL;
+    if (!walpe_audio_source_ok (is_monitor, c->chosen)) {
+        if (!c->failed) {
+            g_free (c->why);
+            c->why = g_strdup_printf ("its source %s is not the monitor of an output (a microphone?): "
+                                      "not read. WALPE_AUDIO_SOURCE=<source> names a source to read", c->source);
+        }
+        c->failed = TRUE;
+        return;
+    }
+    if (!c->checked) {
+        if (c->chosen)
+            g_message ("audio: capturing %s (WALPE_AUDIO_SOURCE)", c->source);
+        else
+            g_message ("audio: capturing %s (what the output %s plays)", c->source, c->sink ? c->sink : "?");
+        set_status ("capturing %s%s", c->source, c->chosen ? " (WALPE_AUDIO_SOURCE)" : "");
+    }
+    c->checked = TRUE;
+    cap_follow (c);
+}
+
+/* which source does the stream read? Until the answer is in, its samples
+ * are dropped (cap_read) */
+static void cap_ask_source (Cap *c)
+{
+    c->checked = FALSE;
+    pa_context *ctx = pa_stream_get_context (c->st);
+    pa_operation *o = pa_context_get_source_info_by_index (ctx, pa_stream_get_device_index (c->st),
+                                                           cap_source_info, c);
+    if (o)
+        pa_operation_unref (o);
+    else
+        cap_fail (c, "the stream's source", ctx);
+}
+
+static void cap_server_info (pa_context *ctx, const pa_server_info *i, void *user)
+{
+    (void) ctx;
+    Cap *c = user;
+    /* (a name, not a placeholder: pipewire-pulse says "@DEFAULT_SINK@"
+     * for a moment after the default output was removed) */
+    if (!i || !i->default_sink_name || !*i->default_sink_name || *i->default_sink_name == '@')
+        return;
+    g_free (c->def_sink);
+    c->def_sink = g_strdup (i->default_sink_name);
+    cap_follow (c);
+}
+
+/* a server event: the default output may be another one now */
+static void cap_event (pa_context *ctx, pa_subscription_event_type_t t, uint32_t idx, void *user)
+{
+    (void) idx;
+    if ((t & PA_SUBSCRIPTION_EVENT_FACILITY_MASK) != PA_SUBSCRIPTION_EVENT_SERVER)
+        return;
+    pa_operation *o = pa_context_get_server_info (ctx, cap_server_info, user);
+    if (o)
+        pa_operation_unref (o);
+}
+
 static void cap_stream_state (pa_stream *st, void *user)
 {
     Cap *c = user;
     switch (pa_stream_get_state (st)) {
-    case PA_STREAM_READY: c->st_ready = TRUE; break;
-    case PA_STREAM_FAILED: cap_fail (c, "stream", pa_stream_get_context (st)); break;
+    case PA_STREAM_READY:
+        c->st_ready = TRUE;
+        cap_ask_source (c);
+        break;
+    case PA_STREAM_FAILED:
+        /* a stream that was running and is ended by the server while the
+         * connection stands: its output is gone (unplugged, switched off).
+         * Not an error: the next default output's monitor is taken */
+        if (c->checked && !c->chosen &&
+            pa_context_get_state (pa_stream_get_context (st)) == PA_CONTEXT_READY) {
+            g_message ("audio: the stream on %s was ended by the server (%s): connecting again",
+                       c->source ? c->source : "?", pa_strerror (pa_context_errno (pa_stream_get_context (st))));
+            c->checked = FALSE;
+            c->restart = TRUE;
+        } else {
+            cap_fail (c, "stream", pa_stream_get_context (st));
+        }
+        break;
     case PA_STREAM_TERMINATED: c->failed = TRUE; break;
     default: break;
     }
+}
+
+/* the server moved the stream (it is asked not to): it is on another
+ * source now, which is looked at before anything of it is analysed */
+static void cap_moved (pa_stream *st, void *user)
+{
+    (void) st;
+    cap_ask_source (user);
 }
 
 static void cap_read (pa_stream *st, size_t nbytes, void *user)
@@ -411,16 +567,23 @@ static void cap_read (pa_stream *st, size_t nbytes, void *user)
         }
         if (!n)
             return;
-        ring_push (c->ring, data, (int) (n / (2 * sizeof (float))), 2);
+        if (c->checked)
+            ring_push (c->ring, data, (int) (n / (2 * sizeof (float))), 2);
         pa_stream_drop (st);
     }
 }
+
+/* a stream that is made again and again (a server that ends it each time)
+ * is an error like any other: so many times in a row without a wait */
+#define CAP_RESTARTS 3
 
 static gpointer capture_thread (gpointer data)
 {
     (void) data;
     Ring *ring = g_new0 (Ring, 1);
     gboolean warned = FALSE;
+    int restarts = 0;
+    char *followed = NULL;
     for (;;) {
         /* unused for AUDIO_IDLE_EXIT_S (a wallpaper switch unrefs and refs
          * again within it): the thread ends, nothing stays resident */
@@ -432,17 +595,19 @@ static gpointer capture_thread (gpointer data)
             thread_running = FALSE;
             g_mutex_unlock (&lock);
             g_free (ring);
+            g_free (followed);
             fft_buffers_free ();
             g_message ("audio: capture thread ended (no audio-reactive wallpaper)");
             return NULL;
         }
         g_mutex_unlock (&lock);
 
-        const char *dev = g_getenv ("WALPE_AUDIO_SOURCE");
-        if (!dev || !*dev)
-            dev = "@DEFAULT_MONITOR@";
+        const char *chosen = g_getenv ("WALPE_AUDIO_SOURCE");
+        if (chosen && !*chosen)
+            chosen = NULL;
+        const char *dev = chosen ? chosen : "@DEFAULT_MONITOR@";
         ring_reset (ring, RATE);
-        Cap cap = { .ring = ring };
+        Cap cap = { .ring = ring, .chosen = chosen, .followed = &followed };
         pa_mainloop *ml = pa_mainloop_new ();
         pa_context *ctx = ml ? pa_context_new (pa_mainloop_get_api (ml), "walpe") : NULL;
         pa_stream *st = NULL;
@@ -461,6 +626,17 @@ static gpointer capture_thread (gpointer data)
             if (pa_mainloop_iterate (ml, 1, NULL) < 0)
                 cap.failed = TRUE;
         if (!cap.failed && cap.ctx_ready) {
+            if (!chosen) {
+                /* the default output, now and whenever it changes (one
+                 * event per change of the server's settings: nothing
+                 * while they stay as they are) */
+                pa_operation *o;
+                pa_context_set_subscribe_callback (ctx, cap_event, &cap);
+                if ((o = pa_context_subscribe (ctx, PA_SUBSCRIPTION_MASK_SERVER, NULL, NULL)))
+                    pa_operation_unref (o);
+                if ((o = pa_context_get_server_info (ctx, cap_server_info, &cap)))
+                    pa_operation_unref (o);
+            }
             pa_sample_spec ss = { .format = PA_SAMPLE_FLOAT32LE, .rate = RATE, .channels = 2 };
             /* one fragment per spectrum; the latency follows it (as the
              * simple API asked for) */
@@ -471,19 +647,25 @@ static gpointer capture_thread (gpointer data)
             if (!st) {
                 cap_fail (&cap, "stream", ctx);
             } else {
+                cap.st = st;
                 pa_stream_set_state_callback (st, cap_stream_state, &cap);
                 pa_stream_set_read_callback (st, cap_read, &cap);
+                pa_stream_set_moved_callback (st, cap_moved, &cap);
                 /* DONT_INHIBIT_AUTO_SUSPEND: watching the output must not
-                 * keep an idle output device running */
+                 * keep an idle output device running. DONT_MOVE: the
+                 * server must not put the stream on another source (the
+                 * head of this file) */
                 if (pa_stream_connect_record (st, dev, &ba, PA_STREAM_ADJUST_LATENCY |
-                                              PA_STREAM_DONT_INHIBIT_AUTO_SUSPEND) < 0)
+                                              PA_STREAM_DONT_INHIBIT_AUTO_SUSPEND |
+                                              PA_STREAM_DONT_MOVE) < 0)
                     cap_fail (&cap, "stream", ctx);
             }
-            while (!cap.failed && !cap.st_ready && wanted ())
+            /* (until the server has said which source it is) */
+            while (!cap.failed && !cap.restart && !(cap.st_ready && cap.checked) && wanted ())
                 if (pa_mainloop_iterate (ml, 1, NULL) < 0)
                     cap.failed = TRUE;
         }
-        if (cap.failed || !cap.st_ready) {
+        if (cap.failed || cap.restart || !cap.st_ready) {
             if (cap.failed) {
                 if (!warned)
                     g_warning ("audio: cannot capture %s: %s (audio-reactive wallpapers stay "
@@ -493,30 +675,34 @@ static gpointer capture_thread (gpointer data)
             }
         } else {
             warned = FALSE;
-            g_message ("audio: capturing %s", dev);
-            set_status ("capturing %s", dev);
+            gint64 since = g_get_monotonic_time ();
             /* sleeps in poll() until a fragment arrives (nothing arrives
-             * while the server has the device suspended) or
-             * walpe_audio_unref wakes the loop */
-            while (wanted () && !cap.failed)
+             * while the server has the device suspended), the server
+             * says that its settings changed, or walpe_audio_unref wakes
+             * the loop */
+            while (wanted () && !cap.failed && !cap.restart)
                 if (pa_mainloop_iterate (ml, 1, NULL) < 0)
                     cap.failed = TRUE;
             if (cap.failed) {
                 g_warning ("audio: capture lost: %s", cap.why ? cap.why : "?");
                 set_status ("error: %s", cap.why ? cap.why : "?");
             }
+            if (g_get_monotonic_time () - since > 10 * G_TIME_SPAN_SECOND)
+                restarts = 0;
         }
         g_mutex_lock (&lock);
         cap_ml = NULL;
         g_mutex_unlock (&lock);
-        gboolean failed = cap.failed;
+        gboolean failed = cap.failed, restart = cap.restart && !cap.failed;
         if (st) {
             pa_stream_set_read_callback (st, NULL, NULL);
             pa_stream_set_state_callback (st, NULL, NULL);
+            pa_stream_set_moved_callback (st, NULL, NULL);
             pa_stream_disconnect (st);
             pa_stream_unref (st);
         }
         if (ctx) {
+            pa_context_set_subscribe_callback (ctx, NULL, NULL);
             pa_context_set_state_callback (ctx, NULL, NULL);
             pa_context_disconnect (ctx);
             pa_context_unref (ctx);
@@ -524,13 +710,26 @@ static gpointer capture_thread (gpointer data)
         if (ml)
             pa_mainloop_free (ml);
         g_free (cap.why);
-        if (failed) {
+        g_free (cap.source);
+        g_free (cap.sink);
+        g_free (cap.def_sink);
+        if (restart && ++restarts > CAP_RESTARTS) {
+            g_warning ("audio: the capture stream was made %d times in a row and ended each time: "
+                       "waiting 5 s", restarts);
+            set_status ("error: %s: the server ends the stream again and again", dev);
+            restarts = 0;
+            restart = FALSE;
+            failed = TRUE;
+        }
+        if (failed || restart) {
+            /* consumers read silence until the next stream delivers */
             g_mutex_lock (&lock);
             have_data = FALSE;
             cur_zero = TRUE;
             memset (&cur, 0, sizeof (cur));
             g_mutex_unlock (&lock);
-            retry_wait ();
+            if (failed)
+                retry_wait ();
         } else {
             capture_ended ();
         }

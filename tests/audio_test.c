@@ -90,6 +90,47 @@ int main (void)
     for (int b = 0; b < 16; b++)
         CHECK (d.left16[b] == 0 && d.right16[b] == 0);
 
+    /* the bands as numbers (what a wallpaper sees; measured the same end
+     * to end, through a sound server, in a web page's listener, a scene's
+     * shader uniforms and SceneScript's buffers): 64 bands from 30 Hz to
+     * 16 kHz, each a 64th of the nine octaves between them. A 440 Hz tone
+     * is band 27 of 64, 13 of 32, 6 of 16. (Below about 110 Hz a band is
+     * narrower than one bin of the transform and neighbours read alike:
+     * no tone from there in this table) */
+    static const struct { double hz; int b64, b32, b16; } tones[] = {
+        { 200, 19, 9, 4 }, { 440, 27, 13, 6 }, { 1000, 35, 17, 8 },
+        { 5000, 52, 26, 13 }, { 10000, 59, 29, 14 }, { 15000, 63, 31, 15 },
+    };
+    for (guint i = 0; i < G_N_ELEMENTS (tones); i++) {
+        memset (&s, 0, sizeof s);
+        tone (l, tones[i].hz, 0.25);
+        walpe_audio_analyze (l, l, N, RATE, &s, 1.0f / 30);
+        CHECK (peak (s.left, 64) == tones[i].b64);
+        CHECK (peak (s.right, 64) == tones[i].b64);
+        CHECK (peak (s.left32, 32) == tones[i].b32);
+        CHECK (peak (s.left16, 16) == tones[i].b16);
+        CHECK (peak (s.right16, 16) == tones[i].b16);
+        if (fails)
+            fprintf (stderr, "  (tone %g Hz: band %d / %d / %d)\n", tones[i].hz, peak (s.left, 64),
+                     peak (s.left32, 32), peak (s.left16, 16));
+        /* a quarter of full scale (-12 dBFS) reads 1.0: louder reads more
+         * (full scale 1.57), as Wallpaper Engine's values "may exceed 1" */
+        CHECK (s.left[tones[i].b64] > 0.90f && s.left[tones[i].b64] < 1.01f);
+        for (int b = 0; b < 64; b++)
+            CHECK (s.left[b] >= 0 && s.left[b] < 1.01f);
+    }
+
+    /* which source the capture reads: the monitor of an output, or the
+     * one source the user named - never one the server chose that is no
+     * monitor (PulseAudio moves a recording stream to the microphone that
+     * was just plugged in when the stream sat on the default source) */
+    CHECK (walpe_audio_source_ok (TRUE, NULL));
+    CHECK (walpe_audio_source_ok (TRUE, ""));
+    CHECK (!walpe_audio_source_ok (FALSE, NULL));
+    CHECK (!walpe_audio_source_ok (FALSE, ""));
+    CHECK (walpe_audio_source_ok (FALSE, "alsa_input.usb-headset"));
+    CHECK (walpe_audio_source_ok (TRUE, "some.monitor"));
+
     /* silence in: silence out */
     memset (&s, 0, sizeof s);
     walpe_audio_analyze (zero, zero, N, RATE, &s, 1.0f / 30);
@@ -97,6 +138,7 @@ int main (void)
         CHECK (s.left[b] == 0 && s.right[b] == 0);
 
     if (!fails)
-        printf ("audio: channel separation, band values, folding, silence decay OK\n");
+        printf ("audio: channel separation, band values, bands of six tones, folding, silence decay, "
+                "source rule OK\n");
     return fails ? 1 : 0;
 }

@@ -1160,11 +1160,24 @@ test('respolicy', executable('respolicy-test', 'tests/respolicy_test.c',
   dependencies: [core_dep],
   install: false, build_by_default: false), timeout: 60)
 
-# spectrum analysis: both channels from one FFT, band values, silence
+# spectrum analysis: both channels from one FFT, band values (a tone's
+# band of 64 / 32 / 16), silence; which source the capture may read
 test('audio', executable('audio-test', 'tests/audio_test.c',
   include_directories: inc,
   dependencies: [core_dep],
   install: false, build_by_default: false))
+# the capture (common/audio.c) against a sound server of the test's own - a
+# private PulseAudio with null sinks in a temporary directory, nothing is
+# heard and the user's server is not contacted; skipped where pulseaudio or
+# pactl is not installed: the stream reads the monitor of the default
+# output, is not moved to a microphone that appears, follows the default
+# output, survives the loss of its output; WALPE_AUDIO_SOURCE. No display.
+if have_pulse
+  test('audio-server', executable('audio-server-test', 'tests/audio_server_test.c',
+    include_directories: inc,
+    dependencies: [core_dep],
+    install: false, build_by_default: false), timeout: 120)
+endif
 
 # scene sound (engine/scenesound.c) on the null device, with WAV files the
 # test writes: players, the switches (the setting, a wallpaper's own, volume,
