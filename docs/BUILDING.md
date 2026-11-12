@@ -257,6 +257,22 @@ daemon loads the modules from its own directory, and the GUI starts `walpe-tray`
 there). Without the modules video and web wallpapers do not load; `walpe-ctl status` then
 shows `"modules": "... not loaded"`.
 
+On a Wayland session the window of a WalPE that is not installed has the desktop's generic
+icon, in its title bar and in the task bar: there a window gets its icon from the desktop
+entry named after its application id, `io.github.walpe.ui.desktop`, and only `meson
+install` puts that file in place. Two files of your own do the same without installing
+(from the source directory; start the window again afterwards):
+
+```sh
+install -Dm644 data/icons/walpe.svg ~/.local/share/icons/hicolor/scalable/apps/walpe.svg
+mkdir -p ~/.local/share/applications
+sed "s|^Exec=walpe|Exec=$PWD/build/walpe|" data/io.github.walpe.ui.desktop \
+  > ~/.local/share/applications/io.github.walpe.ui.desktop
+```
+
+This also puts WalPE into the desktop's application menu. Seen on KDE Plasma 5.27 (KWin);
+X11 needs neither file.
+
 Starting the daemon with your session: [USAGE.md](USAGE.md#starting-with-the-session).
 
 ## Licence
