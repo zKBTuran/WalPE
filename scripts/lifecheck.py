@@ -15,7 +15,9 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             not concern alone (a picture is not loaded again), and reaches
             a scene that is still being loaded; preset Maximum reloads for
             "Downscale oversized textures" also when the texture slack was
-            0 already.
+            0 already. The scene feature switches that are read at load
+            (script_texanim, sprite_sheets): one load when the value
+            changes, none when it does not.
   restart   a restart in place (the monitor layout changed) keeps the
             control socket there the whole time, keeps the process id,
             leaves no child process of the old image behind, starts from
@@ -372,6 +374,30 @@ def case_reload(env, W):
     n, mib, pics = quiet(env, mark)
     check(n == 1 and mib is not None and mib > FULL * 0.9,
           "reload: Maximum applies at once (the scene is loaded again, layer picture in full)", (n, mib))
+
+    # scene feature switches that are read when a scene loads
+    # (docs/SCENE-FEATURES.md): switching one loads the scene once; the
+    # value it has already, a switch scenes take up with their next frame
+    # and a setting that concerns no scene load nothing
+    for sw in ("script_texanim", "sprite_sheets"):
+        mark = env.mark()
+        check(setv(sw + "=off"), "reload: set %s=off" % sw)
+        n, mib, pics = quiet(env, mark)
+        check(n == 1 and pics == 0, "reload: %s=off loads the scene once, not the picture" % sw, (n, pics))
+        mark = env.mark()
+        check(setv(sw + "=off"), "reload: set %s=off once more" % sw)
+        n, mib, pics = quiet(env, mark, 0, 5)
+        check(n == 0 and pics == 0, "reload: ... which loads nothing", (n, pics))
+    mark = env.mark()
+    check(setv("script_texanim=on", "sprite_sheets=on", "bloom=off"),
+          "reload: set script_texanim=on sprite_sheets=on bloom=off")
+    n, mib, pics = quiet(env, mark)
+    check(n == 1 and pics == 0, "reload: two such switches in one request: one load", (n, pics))
+    mark = env.mark()
+    check(setv("bloom=on", "camera_shake=off", "fps=30"), "reload: set bloom=on camera_shake=off fps=30")
+    n, mib, pics = quiet(env, mark, 0, 5)
+    check(n == 0 and pics == 0, "reload: next-frame switches and another setting load nothing", (n, pics))
+    setv("camera_shake=on")
 
     env.stop_daemon()
 
