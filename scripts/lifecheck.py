@@ -35,6 +35,18 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             status lines it is sent while nothing changes which wallpapers
             were shown last do not make it write its list of them again.
             Skipped in a build without the tray.
+  traymenu  the tray's menu as a panel keeps it that reads it once and then
+            follows the tray's signals by the rules of KDE Plasma's menu
+            importer (tests/tray/sni_host_stub.c --follow, on a private
+            session bus): the tray is there before the engine, then the
+            engine starts, wallpapers are opened, the engine goes and comes
+            back. After each step the panel shows what a panel shows that
+            reads the menu only then - no label on the entry of another
+            one, no heading where a separator was, "Quit WalPE" there once
+            - also inside a submenu that was opened before; and the click
+            on "Quit WalPE" ends the engine and the tray. Skipped without
+            the tray, the stub (a build without -Dtests=true) or
+            dbus-daemon.
   window    the library window next to a running engine: open, idle and
             without the focus its main thread sleeps (no timer of a panel
             that shows nothing); status lines that say what the last one
@@ -1004,6 +1016,168 @@ def case_tray(env, W):
         except subprocess.TimeoutExpired:
             tray.kill()
             tray.wait()
+    env.stop_daemon()
+
+
+# ----------------------------------------------------------------- traymenu
+class Panel:
+    """sni-host-stub --follow: a StatusNotifierWatcher and host that keeps the
+    item's menu the way a panel with Plasma's dbusmenu importer does"""
+
+    def __init__(self, stub, env, log):
+        self.log = log
+        self.proc = subprocess.Popen([stub, "--follow", "--seconds", str(int(3600 * PATIENCE))], env=env,
+                                     stdin=subprocess.PIPE, stdout=open(log, "w"), stderr=subprocess.STDOUT)
+
+    def text(self, mark=0):
+        with open(self.log, errors="replace") as f:
+            f.seek(mark)
+            return f.read()
+
+    def ask(self, command, done):
+        """one command -> what the stub printed for it (up to the line that starts with `done`)"""
+        mark = os.path.getsize(self.log)
+        try:
+            self.proc.stdin.write((command + "\n").encode())
+            self.proc.stdin.flush()
+        except OSError:
+            return ""
+        wait_for(lambda: any(ln.startswith(done) for ln in self.text(mark).splitlines()), 10, 0.05)
+        return self.text(mark)
+
+    def menu(self):
+        """-> (the entries as the panel shows them, is that what a panel shows that reads the menu now)"""
+        out = self.ask("dump", "menu end")
+        shown = out.split("menu as the panel shows it:\n", 1)[-1]
+        shown = shown.split("menu DIFFERS", 1)[0].split("menu is what", 1)[0]
+        return [ln.strip() for ln in shown.splitlines() if ln.strip()], "menu is what a panel" in out, out
+
+    def close(self):
+        self.proc.terminate()
+        try:
+            self.proc.wait(timeout=10 * PATIENCE)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait()
+
+
+def case_traymenu(env, W):
+    """A panel keeps the entry it made for an item's id; KDE Plasma's decides once, when it
+    first sees the id, whether that is a separator, has a check box or a submenu. The tray
+    numbered its items by position, so "Start engine" and its separator going (the engine
+    came up after the tray) moved every label onto the entry of another item: headings
+    where separators had been, a check box at "Settings…", and no "Quit WalPE" - or one
+    whose click was a click on a separator."""
+    tray_bin = env.tray_bin or os.path.join(env.build, "walpe-tray")
+    stub = os.path.join(env.build, "sni-host-stub")
+    lack = [n for n, there in (("walpe-tray", os.path.exists(tray_bin)), ("sni-host-stub", os.path.exists(stub)),
+                               ("dbus-daemon", bool(shutil.which("dbus-daemon")))) if not there]
+    if lack:
+        print("lifecheck: traymenu skipped (no %s)" % ", ".join(lack))
+        return
+    A, B = ("A", 640, 360, 0, 0), ("B", 640, 360, 640, 0)
+    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False})
+    put(os.path.join(os.path.dirname(env.config), "tray.ini"), "[tray]\nstart_with_gui=false\nconfirm_quit=false\n")
+    tenv = dict(env.env)
+    tenv["GTK_A11Y"] = "none"
+    bus = subprocess.Popen(["dbus-daemon", "--session", "--nofork", "--print-address=1",
+                            "--address=unix:path=" + os.path.join(env.env["XDG_RUNTIME_DIR"], "traymenu-bus")],
+                           env=tenv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    tenv["DBUS_SESSION_BUS_ADDRESS"] = bus.stdout.readline().decode().strip()
+    panel = tray = None
+    try:
+        if not check(bool(tenv["DBUS_SESSION_BUS_ADDRESS"]), "traymenu: a private session bus"):
+            return
+        panel = Panel(stub, tenv, os.path.join(env.tmp, "traymenu-panel.log"))
+        wait_for(lambda: "stub up" in panel.text(), 10, 0.1)
+        log = open(os.path.join(env.tmp, "traymenu-tray.log"), "a")
+        tray = subprocess.Popen([tray_bin], env=tenv, stdout=log, stderr=subprocess.STDOUT, cwd=env.tmp)
+        log.close()
+        if not check(bool(wait_for(lambda: "import: done" in panel.text(), 30, 0.1)),
+                     "traymenu: the tray's item registered and the panel read its menu", panel.text()[-600:]):
+            return
+
+        def has(shown, label, kind="[item"):
+            return [e for e in shown if e.startswith(kind) and e.split("] ", 1)[-1].rsplit(" #", 1)[0] == label]
+
+        def look(what, want=(), gone=(), opened=()):
+            """wait until the panel shows the entries of `want` and none of `gone` (`opened`:
+            the submenus that are open at that time); then: is it what a panel shows that
+            reads the menu now, and is "Quit WalPE" there once"""
+            last = []
+
+            def there():
+                # (a signal of the tray's may be on its way: the two agree a moment later)
+                for label in opened:
+                    panel.ask("open " + label, "open:")
+                last[:] = panel.menu()
+                shown, same = last[0], last[1]
+                return same and all(has(shown, w, "[") for w in want) and not any(has(shown, g, "[") for g in gone)
+            wait_for(there, 20, 0.3)
+            shown, same, out = last
+            if not check(all(has(shown, w, "[") for w in want) and not any(has(shown, g, "[") for g in gone),
+                         "traymenu: %s: the panel's menu follows" % what,
+                         "wanted %s, not %s:\n%s" % (list(want), list(gone), out)):
+                return []
+            check(same, "traymenu: %s: the panel shows what a panel shows that reads the menu now" % what, out)
+            check(len(has(shown, "Quit WalPE", "[")) == 1 and len(has(shown, "Quit WalPE")) == 1,
+                  "traymenu: %s: \"Quit WalPE\" is there once, as an entry" % what, out)
+            check(not [e for e in shown if e.startswith("[heading]")],
+                  "traymenu: %s: no label stands where a separator was made" % what, out)
+            return shown
+
+        # the tray before the engine: this is the menu the panel makes its entries from
+        look("no engine yet", want=("Start engine", "Settings…"), gone=("Restart engine",))
+        if not check(env.start_daemon([A, B]), "traymenu: daemon started"):
+            return
+        look("the engine is there", want=("Restart engine", "Pause all wallpapers"), gone=("Start engine",))
+        env.open(W["red"])
+        loaded(env, W["red"], 0)
+        recent = "Recent (all monitors)"
+        look("a first wallpaper", want=(recent, "Monitors"))
+        # a submenu the panel has opened keeps its entries until the panel asks again
+        shown = look("the recent list opened", want=(recent,), opened=(recent,))
+        check(bool(has(shown, "red", "[radio")), "traymenu: the opened recent list has the wallpaper", shown)
+        env.open(W["blue"])
+        loaded(env, W["blue"], 0)
+        shown = look("a second wallpaper, the recent list opened again", want=(recent, "blue"), opened=(recent,))
+        check(bool(has(shown, "blue", "[radio")) and bool(has(shown, "red", "[radio")),
+              "traymenu: the recent list opened again has both wallpapers", shown)
+        # the engine goes and comes back: every entry is the one it was
+        env.stop_daemon()
+        look("the engine is gone", want=("Start engine",), gone=("Restart engine", "Monitors"))
+        if not check(env.start_daemon([A, B]), "traymenu: daemon started again"):
+            return
+        look("the engine is back", want=("Restart engine", "Monitors"), gone=("Start engine",), opened=(recent,))
+        # and the entry does what it says
+        daemon = env.daemon
+        out = panel.ask("click Quit WalPE", "click:")
+        gone = wait_for(lambda: daemon.poll() is not None and tray.poll() is not None, 15, 0.1)
+        check(bool(gone) and daemon.returncode == 0 and tray.returncode == 0,
+              "traymenu: the click on \"Quit WalPE\" ends the engine and the tray",
+              "%s; engine %s, tray %s" % (out.strip(), daemon.poll(), tray.poll()))
+        if gone:
+            env.daemon = None
+            if os.path.exists(env.sock):
+                os.unlink(env.sock)
+    finally:
+        for p in (tray, ):
+            if p and p.poll() is None:
+                p.terminate()
+                try:
+                    p.wait(timeout=10 * PATIENCE)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                    p.wait()
+        if panel:
+            panel.close()
+        bus.terminate()
+        try:
+            bus.wait(timeout=10 * PATIENCE)
+        except subprocess.TimeoutExpired:
+            bus.kill()
+            bus.wait()
+        bus.stdout.close()
     env.stop_daemon()
 
 
@@ -2822,7 +2996,7 @@ def case_scan(env, W):
 
 
 CASES = [("logcap", case_logcap), ("pointer", case_pointer), ("reload", case_reload), ("restart", case_restart),
-         ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("scan", case_scan), ("tray", case_tray), ("window", case_window), ("panel", case_panel), ("busy", case_busy), ("probe", case_probe),
+         ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("scan", case_scan), ("tray", case_tray), ("traymenu", case_traymenu), ("window", case_window), ("panel", case_panel), ("busy", case_busy), ("probe", case_probe),
          ("fullscreen", case_fullscreen), ("video", case_video), ("webunload", case_webunload),
          ("winlost", case_winlost), ("convert", case_convert),
          ("swaplost", case_swaplost), ("norestart", case_norestart),

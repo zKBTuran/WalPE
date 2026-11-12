@@ -2136,7 +2136,7 @@ if have_tray
   # dev/test helper (not installed): a StatusNotifierWatcher + host stub
   # that registers walpe-tray's item, dumps icon/tooltip/menu and clicks
   # menu items over dbusmenu
-  executable('sni-host-stub', 'tests/tray/sni_host_stub.c',
+  sni_host_stub = executable('sni-host-stub', 'tests/tray/sni_host_stub.c',
     dependencies: [gio, glib, dependency('cairo')],
     install: false, build_by_default: false)
   if have_tray_xembed
@@ -2160,13 +2160,26 @@ if have_tray
     install: false, build_by_default: false))
   # walpe-tray next to a real daemon (scripts/lifecheck.py, case tray: own
   # Xvfb, private XDG dirs): what it writes while the engine sends status
-  # lines. Skipped (77) without Xvfb.
+  # lines; and (case traymenu: a private session bus, sni-host-stub as the
+  # panel) its menu as a panel keeps it that follows the tray from before
+  # the engine ran, and the click on "Quit WalPE". Skipped (77) without
+  # Xvfb; the case traymenu alone is left out without dbus-daemon.
   if lifecheck_py.found() and have_x11
     test('tray-life', lifecheck_py,
       args: ['-I', meson.current_source_dir() / 'scripts/lifecheck.py',
-             '--build', meson.current_build_dir(), '--display', 'xvfb', '--only', 'tray'],
+             '--build', meson.current_build_dir(), '--display', 'xvfb', '--only', 'tray,traymenu'],
       env: ['WALPE_BACKEND=x11'],
-      depends: [daemon, ctl, tray],
+      depends: [daemon, ctl, tray, sni_host_stub],
+      is_parallel: false,
+      timeout: 300)
+  endif
+  # the menu again where the report came from: the tray and the daemon as
+  # Wayland clients (a private headless sway). Skipped (77) without sway + grim.
+  if lifecheck_py.found() and have_wayland
+    test('tray-life-wayland', lifecheck_py,
+      args: ['-I', meson.current_source_dir() / 'scripts/lifecheck.py',
+             '--build', meson.current_build_dir(), '--display', 'sway', '--only', 'traymenu'],
+      depends: [daemon, ctl, tray, sni_host_stub],
       is_parallel: false,
       timeout: 300)
   endif
