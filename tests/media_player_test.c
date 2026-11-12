@@ -162,6 +162,15 @@ int main (void)
     /* 1. found, published */
     walpe_media_ref ();
     CHECK (wait_title ("first", 20) == 5);
+    {
+        /* a player that names no file is playing music: the word
+         * Wallpaper Engine's wallpapers compare contentType with */
+        WalpeNowPlaying np;
+        walpe_media_get (&np);
+        CHECK (np.content_type && !strcmp (np.content_type, "music"));
+        CHECK (np.state == WALPE_MEDIA_PLAYING || np.state == WALPE_MEDIA_PAUSED || np.state == WALPE_MEDIA_STOPPED);
+        walpe_media_now_clear (&np);
+    }
 
     /* 2. the same key again and again: 40 messages, each with 2 x 8 values
      * of 256 KiB that are replaced within the message (160 MiB in all) */

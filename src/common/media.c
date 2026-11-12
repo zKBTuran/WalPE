@@ -351,7 +351,11 @@ static void publish (void)
     const char *ctype = "";
     if (p) {
         static const char *const vext[] = { ".mp4", ".mkv", ".webm", ".avi", ".mov", ".m4v", NULL };
-        ctype = "audio";
+        /* Wallpaper Engine's three values are "music", "video" and
+         * "image" (MediaPropertiesEvent.contentType, and the same member
+         * of the web listener's event); this said "audio", which no
+         * wallpaper compares with */
+        ctype = "music";
         for (int k = 0; p->url && vext[k]; k++)
             if (g_str_has_suffix (p->url, vext[k]))
                 ctype = "video";
