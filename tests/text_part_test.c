@@ -124,6 +124,23 @@ static gsize heap_in_use (void)
 #endif
 }
 
+/* What the heap holds more than `base`, once that is at most `limit` or
+ * after 3 s. Pango and fontconfig finish work on threads of their own, and
+ * what such a thread holds for a moment is no leftover of the text code; a
+ * real leftover is still there after the wait, and is what is returned. */
+static gsize heap_grown (gsize base, gsize limit)
+{
+    gsize grown = 0;
+    for (int i = 0; i < 60; i++) {
+        gsize now = heap_in_use ();
+        grown = now > base ? now - base : 0;
+        if (grown <= limit)
+            break;
+        g_usleep (50000);
+    }
+    return grown;
+}
+
 static const char *const STRINGS[] = {
     "12:34:56", "12:34:57", "12:35:00", "9", "Wednesday, 10 November", "fjgpqy|/\\_W",
     "\xc3\x85\xc3\x89\xc3\x9c \xc3\xa7\xc3\xb1 \xe2\x80\x94 \xe2\x82\xac",   /* accents, dash, euro */
@@ -292,8 +309,7 @@ static void font_files_leave (void)
         if (cyc == 1)
             after2 = heap_in_use ();
     }
-    gsize now = heap_in_use ();
-    gsize grown = now > after2 ? now - after2 : 0;
+    gsize grown = heap_grown (after2, 96 * 1024);
     CHECK (grown <= 96 * 1024, "24 more wallpapers with a font file of their own, next to one with "
            "text: %" G_GSIZE_FORMAT " bytes more on the heap", grown);
     printf ("text-part: 24 wallpapers with a font file of their own, next to one with text, leave %"
@@ -321,6 +337,11 @@ static void font_files_leave (void)
 
 int main (void)
 {
+    /* fontconfig's default configuration (about half a megabyte) is loaded
+     * here, before any heap is measured: Pango loads it on a thread of its
+     * own when the first font map is made, which could be in the middle of
+     * a measurement */
+    FcInit ();
     walpe_text_hold ();
     /* styles: box (0 = grows with the text), padding, alignment, wrapping, size */
     static const struct { float bw, bh, pad, pt, maxw; int ha, va; gboolean limw; int rows; gboolean ell; } S[] = {
@@ -393,8 +414,7 @@ int main (void)
             if (cyc == 1)
                 after2 = heap_in_use ();
         }
-        gsize now = heap_in_use ();
-        grown = now > after2 ? now - after2 : 0;
+        grown = heap_grown (after2, 8 * 32 * 1024);
         CHECK (grown <= 8 * 32 * 1024,
                "8 more rounds of text set up and released: %" G_GSIZE_FORMAT " bytes more on the heap", grown);
         printf ("text-part: 8 rounds of set-up and release leave %" G_GSIZE_FORMAT " bytes more on the heap\n", grown);
@@ -433,8 +453,7 @@ int main (void)
             if (cyc == 1)
                 after2 = heap_in_use ();
         }
-        gsize now = heap_in_use ();
-        gsize grown = now > after2 ? now - after2 : 0;
+        gsize grown = heap_grown (after2, 1024 * 1024);
         CHECK (grown <= 1024 * 1024,
                "24 more scenes with a text size of their own%s: %" G_GSIZE_FORMAT " bytes more on "
                "the heap", other ? ", next to a scene with text" : "", grown);
