@@ -226,8 +226,10 @@ typedef struct {
  * imports and conversions already use) and played by the scene sound player
  * (scenesound.h), as one "single" layer of a group of its own. So it obeys
  * what scene sound obeys - the setting "scene_sound" or the wallpaper's own
- * switch "walpe_sound", "volume", "mute", silent while the wallpaper is
- * paused, heard once when two monitors show the same video - and costs
+ * switch "walpe_sound", "volume" and the wallpaper's "walpe_volume", "mute",
+ * silent while the wallpaper is paused (the daemon's set_paused, the one
+ * rule a scene's sound follows too), heard once when two monitors show the
+ * same video - and costs
  * what a silent scene layer costs while it is not heard: no thread, no
  * stream, no file opened, ffmpeg never started. The track is taken out by
  * the player's own thread when it is about to be heard for the first time
@@ -285,9 +287,14 @@ static void vc_sound_new (VideoContent *s, const char *origin)
         g_free (file);      /* (the empty file: this video has no sound track) */
         return;
     }
+    /* the wallpaper's own switch and volume, as a scene has them (applied
+     * to a wallpaper that runs by walpe_sound_wallpaper_set, by this key) */
     char *sw = walpe_config_get_prop (origin, "walpe_sound");
+    char *vol = walpe_config_get_prop (origin, "walpe_volume");
     s->snd_group = walpe_sound_group_new (origin, walpe_sound_switch_parse (sw));
+    walpe_sound_group_set_volume (s->snd_group, walpe_sound_volume_parse (vol));
     g_free (sw);
+    g_free (vol);
     const char *files[1] = { file };
     const WalpeSoundSpec spec = { files, 1, 1.0f, WALPE_SOUND_SINGLE, 0.0f, 0.0f, s->base.title };
     s->snd = walpe_sound_new (s->snd_group, &spec);

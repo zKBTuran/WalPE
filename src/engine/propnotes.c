@@ -2,6 +2,8 @@
 #include "propnotes.h"
 #include "content.h"
 #include "common/util.h"
+#include "common/import.h"   /* walpe_video_sound_file */
+#include <glib/gstdio.h>
 #include <string.h>
 
 /* a particle file's numbers that decide whether "count" can change anything */
@@ -585,6 +587,19 @@ JsonObject *walpe_prop_notes_sound (const char *path, guint *sound_layers)
     }
     if (sound_layers)
         *sound_layers = scan_sound_layers;
+    if (sound_layers && t == WALPE_TYPE_VIDEO) {
+        /* a video wallpaper's sound track counts as one (video.c). Whether
+         * the file has one is known once it was asked for: the empty file
+         * in the cache says "none" (import.h walpe_video_sound_file);
+         * until then the video is taken to have one. */
+        char *media = NULL;
+        walpe_detect_type (abs, &media);
+        char *snd = walpe_video_sound_file (media ? media : abs);
+        GStatBuf st;
+        *sound_layers = !(snd && g_stat (snd, &st) == 0 && st.st_size == 0);
+        g_free (snd);
+        g_free (media);
+    }
     g_hash_table_unref (sc.ok);
     g_hash_table_unref (sc.lacking);
     g_string_free (sc.scripts, TRUE);
