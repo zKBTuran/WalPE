@@ -2134,9 +2134,67 @@ static gint64 gl_tex_bytes (void)
     return bytes;
 }
 
+/* is a gdk-pixbuf loader module of that name in this process? */
+static gboolean loader_mapped (const char *name)
+{
+    char *maps = NULL, *lib = g_strdup_printf ("libpixbufloader-%s.", name);
+    gboolean in = g_file_get_contents ("/proc/self/maps", &maps, NULL, NULL) && strstr (maps, lib);
+    g_free (maps);
+    g_free (lib);
+    return in;
+}
+
 static void gl_part (void)
 {
     walpe_glutil_init ();
+    /* 0. (first: nothing below may have opened these loaders yet) a layer
+     * picture that is a file of another kind does not reach that kind's
+     * decoder. The format used to be asked from gdk-pixbuf, which hands
+     * the file to whichever loader matches its bytes before it can say
+     * what it is: a PNM, a Windows icon, an XPM or an SVG under a
+     * picture's name was read by those loaders and refused afterwards. */
+    {
+        static const guint8 ico[] = { 0, 0, 1, 0, 1, 0, 16, 16, 0, 0, 1, 0, 32, 0, 0x28, 0, 0, 0, 22, 0, 0, 0,
+                                      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        /* a Windows cursor: its first bytes are also those of a TGA
+         * picture, and gdk-pixbuf took it for the cursor */
+        static const guint8 cur[] = { 0, 0, 2, 0, 1, 0, 16, 16, 0, 0, 1, 0, 1, 0, 0x28, 0, 0, 0, 22, 0, 0, 0,
+                                      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        static const struct { const char *file, *loader; const void *data; gssize len; } other[] = {
+            { "gl/other/pnm.png", "pnm", "P6\n4 4\n255\n" "000000000000000000000000000000000000000000000000", -1 },
+            { "gl/other/ico.png", "ico", ico, sizeof ico },
+            { "gl/other/pnm.tga", "pnm", "P6\n4 4\n255\n" "000000000000000000000000000000000000000000000000", -1 },
+            { "gl/other/cur.tga", "ico", cur, sizeof cur },
+        };
+        for (guint i = 0; i < G_N_ELEMENTS (other); i++) {
+            mkfile (other[i].file, other[i].data, other[i].len);
+            char *of = P (other[i].file);
+            gboolean before = loader_mapped (other[i].loader);
+            WalpeGlTex ot = walpe_gl_tex_from_file (of);
+            CHECK (ot.tex == 0);
+            if (ot.tex)
+                glDeleteTextures (1, &ot.tex);
+            if (!before) {
+                if (loader_mapped (other[i].loader))
+                    g_printerr ("parsers-test: %s was read by gdk-pixbuf's %s loader\n", other[i].file,
+                                other[i].loader);
+                CHECK (!loader_mapped (other[i].loader));
+            }
+            g_free (of);
+        }
+        /* (where gdk-pixbuf has these loaders built in, or not at all, the
+         * check above cannot fail) */
+        char *of = P (other[0].file);
+        GdkPixbuf *direct = gdk_pixbuf_new_from_file (of, NULL);
+        if (!loader_mapped ("pnm"))
+            g_printerr ("parsers-test: gdk-pixbuf's pnm loader is no module here (check cannot fail)\n");
+        g_clear_object (&direct);
+        g_free (of);
+    }
     /* 1. direct loads: only picture formats a wallpaper is made of */
     save_png ("gl/a.png", 16, 16);
     mkfile ("gl/vector.png",
