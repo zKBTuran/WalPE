@@ -51,7 +51,14 @@
  *    counted: the pass stays on probation and is asked again behind draws
  *    64, 128, ... (each a power of two: next to nothing while the layer
  *    stays empty); the first comparison that sees a picture starts the
- *    count of draws anew, so the other five follow within 32 draws;
+ *    count of draws anew, so the other five follow within 32 draws. A
+ *    pass that still draws one colour behind draw FXS_VERIFY_FLAT_DRAWS
+ *    keeps the generic program and lets its candidate go: there are
+ *    passes whose output is one colour for good (a circle-of-confusion
+ *    value that is the same all over the picture), and those were
+ *    compared again behind draw 8192, 16384, ... for as long as the
+ *    wallpaper ran - a scratch target, a read-back and a buffer of
+ *    2 MiB each at 1080p, every time, for a program that never came;
  *  - the verdict belongs to the program text: passes that share it are
  *    not compared again, and a rejected text is not compiled again on
  *    this render thread;
@@ -80,6 +87,10 @@
 #define FXS_VERIFY_MAX 256      /* pixels a side of one compared picture */
 #define FXS_VERIFY_PROBES 4     /* pictures per program and comparison */
 #define FXS_VERIFY_TOL 1
+/* the last draw behind which a pass that has drawn one colour so far is
+ * compared (a power of two; about a minute of drawing at 60 frames a
+ * second) */
+#define FXS_VERIFY_FLAT_DRAWS 4096
 
 static gboolean fxs_rw_inexact (guint rw)
 {
@@ -337,7 +348,14 @@ static void fxs_verify (EffectChain *ch, EffPass *pass)
             cand->owner = NULL;     /* it holds this draw's values now: nobody's */
             if (same && flat) {
                 sp->flat = 1;       /* one colour: proves nothing, ask again later */
-                return;
+                if (nth < FXS_VERIFY_FLAT_DRAWS)
+                    return;
+                /* ... but not for ever: the generic program it is (the
+                 * candidate's text keeps no verdict: a pass that shares
+                 * it and draws a picture decides) */
+                g_debug ("fx: %s: one colour in every comparison up to draw %u: the pass keeps the "
+                         "generic program", sp->name ? sp->name : "a shader", nth);
+                goto settled;
             }
             if (same && sp->flat) {
                 /* the first picture after an empty start: the remaining
@@ -361,6 +379,7 @@ static void fxs_verify (EffectChain *ch, EffPass *pass)
                          same ? "same" : "rejected", md, nth);
         }
     }
+settled:
     sp->probation = 0;
     if (cand->verdict != 1) {
         fxs_prog_put (cand, NULL);

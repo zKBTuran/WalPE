@@ -619,6 +619,40 @@ static void verify_checks (GLuint in)
                 "verify: comparisons over a one-colour picture are not counted", d);
         g_free (d);
         fx_free_for_object (set);
+        /* ... but a pass that draws one colour for good is not asked for
+         * ever (it was: behind draw 8192, 16384, ... a scratch target and
+         * a read-back each time, for as long as the wallpaper ran): the
+         * comparison behind draw FXS_VERIFY_FLAT_DRAWS is its last, it
+         * keeps the generic program and holds no candidate any more. A
+         * picture that comes later is the generic program's. */
+        const char *gk = "[" FXC ("gain", "\"gain\":0.57,\"tint\":\"1 0.5 0.25\"") "]";
+        set = build_set (gk, FALSE);
+        fx_verify_stats (&v0, &x0);
+        for (guint i = 0; i + 1 < FXS_VERIFY_FLAT_DRAWS; i++)
+            frame_of (set, black, 0.11 * i, i + 1, 1, FALSE, FALSE, NULL, NULL, NULL);
+        sp = set->chains[0]->passes[0].spec;
+        gboolean asking = sp->probation && sp->cand && sp->flat && sp->draws == FXS_VERIFY_FLAT_DRAWS - 1;
+        frame_of (set, black, 0.11 * FXS_VERIFY_FLAT_DRAWS, FXS_VERIFY_FLAT_DRAWS, 1, FALSE, FALSE, NULL, NULL, NULL);
+        sp = set->chains[0]->passes[0].spec;
+        gboolean settled = !sp->probation && !sp->cand && sp->prog == sp->gen && sp->n_baked == 0;
+        generic_pic (gk, in, 5.0, ref);
+        worst = 0;
+        for (guint i = 0; i < 70; i++) {
+            frame_of (set, in, 5.0, FXS_VERIFY_FLAT_DRAWS + 1 + i, 1, FALSE, FALSE, a, NULL, NULL);
+            worst = MAX (worst, max_diff (a, ref));
+        }
+        sp = set->chains[0]->passes[0].spec;
+        fx_verify_stats (&v1, &x1);
+        d = g_strdup_printf ("behind draw %d: %s; behind draw %d: %s; 70 frames of a picture after it: worst difference to "
+                             "the generic picture %d, draws counted %u, baked %d", FXS_VERIFY_FLAT_DRAWS - 1,
+                             asking ? "still asked" : "not on probation", FXS_VERIFY_FLAT_DRAWS,
+                             settled ? "generic program, no candidate" : "still on probation", worst, sp->draws,
+                             sp->n_baked);
+        result (asking && settled && worst == 0 && !sp->probation && !sp->cand && sp->n_baked == 0 &&
+                sp->draws == FXS_VERIFY_FLAT_DRAWS && v1 == v0 && x1 == x0,
+                "verify: a pass that draws one colour for good is compared for the last time behind draw 4096", d);
+        g_free (d);
+        fx_free_for_object (set);
         glDeleteTextures (1, &black);
     }
     /* the comparison itself, on two programs that differ only above 1:
