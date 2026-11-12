@@ -26,7 +26,7 @@ What to include:
 | File | Limit |
 |---|---|
 | texture / picture | 16384 px per side and 8192 x 8192 px; all textures of a scene 1024 MiB (`WALPE_TEX_BUDGET_MB=<MiB>`, 0 = none), the largest are stored smaller beyond that |
-| picture inside a `.tex`, layer picture of the old scene format | PNG, JPEG, WebP (plain picture files also GIF, BMP, TIFF; old-format layers also TGA, AVIF, JXL), each read by its own decoder only, also when only its size is asked for |
+| picture inside a `.tex`, layer picture of the old scene format | PNG, JPEG, WebP (plain picture files also GIF, BMP, TIFF; old-format layers also TGA, AVIF, JXL), each read by its own decoder only, also when only its size is asked for; a JPEG above the texture size is decoded smaller, and one that its decoder has to hold whole (progressive) is not decoded beyond 256 MiB of that store |
 | picture or GIF wallpaper (a picture file chosen as the wallpaper) | shown only when gdk-pixbuf takes the file for a PNG, JPEG, GIF, BMP, TIFF, WebP, TGA, AVIF or JPEG XL picture, whatever its name says: a file it takes for anything else (an SVG document, XPM text, a Windows icon ...) is refused and not decoded as a picture; that loader has read the file's header by then, which is how the format is found out |
 | GIF (wallpaper, preview, cover art) | checked before any of it is decoded: the picture and every frame at least 1 x 1 pixel, every frame inside the picture; a GIF that fails is refused like a damaged picture |
 | `.json` | 32 MiB, 512 levels of nesting |
@@ -36,7 +36,7 @@ What to include:
 | font of a text layer | a TrueType / OpenType font file or a collection of them, at most 256 faces and named instances in all and 512 tables per face; anything else is not handed to fontconfig, and the layer is drawn with a system font |
 | text layer | 16 KiB of text, 8192 px, a font size of at most 15000 points; the text layers of a scene together 1024 MiB of texture (the same `WALPE_TEX_BUDGET_MB`, counted apart from the pictures), a layer beyond that is not drawn |
 | particles | 20000 per system, 128 systems per particle object, 400000 alive in all systems together; a system at a limit emits no more until particles end |
-| names of files a wallpaper refers to | below the wallpaper's own folder (or the Wallpaper Engine `assets/`): no absolute path, no `..`, no symbolic link that leads out, regular files only |
+| names of files a wallpaper refers to | below the wallpaper's own folder (or the Wallpaper Engine `assets/`): no absolute path, no `..`, no symbolic link that leads out, regular files only; the preview picture the library window shows for a wallpaper is one of these |
 
 A file beyond a limit is not loaded (the log says which); the rest of the wallpaper is.
 

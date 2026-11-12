@@ -9,7 +9,8 @@ Release names are album titles by the band Boris, one per release.
 The development version. It contains everything of 0.13.0 "PINK" below, which was not
 released on its own. On top of it: memory and CPU that the daemon kept or spent for
 things that were not in use, corrections to the fullscreen pause per monitor, a fix for
-scene sound, and a report of where the daemon's memory is. **The state of testing is that
+scene sound, a report of where the daemon's memory is, and what a review of the things
+the daemon takes from outside found (under Security). **The state of testing is that
 of 0.13.0: Mesa's software renderer (llvmpipe), Xvfb, a headless Wayland compositor (sway
 1.9) and a PulseAudio null sink. Nothing of it has been run on real graphics hardware.**
 Two settings are new and on by default: `video_scene_convert` (under Video) and
@@ -48,6 +49,10 @@ copy.
   did that four times within a few seconds, several times an hour, for as long as it ran:
   23 buffers made in an hour on a 1920x1080 monitor, 3 now. The smaller buffer (0.5 MiB at
   1920x1080) now stays while the layer is in use.
+- Particles: a particle system takes its memory when it makes its first particle, not
+  when the wallpaper is loaded. A system that never emits - its object is not visible, it
+  waits for an event, a script keeps its count at 0 - held room for up to 256 particles
+  for nothing.
 - Text layers: the glyphs of a wallpaper's fonts leave the daemon with the wallpaper.
   They stayed until the daemon was stopped: 0.3 to 0.7 MB for every wallpaper with a clock
   and a date that had been shown, more with large text.
@@ -127,6 +132,65 @@ Corrections to "Pause for fullscreen apps" per monitor, which is new in 0.13.0:
   a paused monitor that follows the other one sleeps. It was woken for every frame of the
   monitor that draws, 52 times a second in the test, to find that it had nothing to show.
 
+### Security
+
+What a wallpaper's files, a web page, a music player or another program on the machine
+could do to the daemon. None of these was seen being used.
+
+- Web wallpapers, the file server that hands a page its files (it listens on 127.0.0.1,
+  where every program on the machine can connect):
+  - a request for a part of a file - what a page sends to play or to seek in a video or a
+    sound - made the daemon copy the whole file into its memory for as long as the answer
+    was on its way: 200 MB for a 200 MB clip, per request. A part is now answered without
+    a copy. The copy was also where a file that shrank meanwhile (a wallpaper being
+    updated) ended the daemon;
+  - the body of a request was read whole into memory before anything was checked: one
+    request of 192 MB took the daemon's memory up by 388 MB for good. A body is read and
+    dropped piece by piece now;
+  - connections that sent nothing stayed open for ever: a thousand of them used up the
+    daemon's open files, and `walpe-ctl`, the tray and the window then said the daemon
+    was not running. At most 128 are open; for one more, the one that has waited longest
+    is closed.
+- Web wallpapers: a server that answers "login required" (401, or a proxy with 407) made
+  WebKit put its own name-and-password dialog over the wallpaper, which nobody can
+  answer; a page behind such a proxy was never shown. The request now goes on without a
+  login.
+- Pictures:
+  - BMP: a file of 60 bytes that calls itself a BMP could make gdk-pixbuf's decoder
+    reserve up to 4 GiB of memory, because the decoder takes three sizes from the file's
+    first bytes before it checks anything. Those three fields are checked first now,
+    wherever a BMP can come from: a texture, a layer picture, a picture wallpaper, a
+    preview, cover art. A BMP that fails is not shown; a BMP as the format defines it
+    passes. Found by fuzzing;
+  - layer pictures of the old scene format are read by the decoder of their own format
+    only: a file of another kind under a picture's name (SVG, XPM, PNM, a Windows icon
+    ...) no longer reaches that kind's loader;
+  - a JPEG layer picture of the old scene format that is larger than a texture and has
+    to be held whole by its decoder (progressive) is refused beyond 256 MiB of that store:
+    136 bytes of file could take gigabytes.
+- Library window: the preview picture a wallpaper names is one of its own files. A name
+  with `..`, or a link in the folder, could put any picture you can read on the
+  wallpaper's tile.
+- Deleting a Workshop item no longer waits for ever, or reads gigabytes, when another
+  item's `project.json` is a pipe, a device or a huge file.
+- Music players (media integration): a cover file that was cut short while it was being
+  decoded ended the daemon; it is read into memory first now. What a player says about
+  its track is bounded: a repeated entry is freed (a program with a player name could
+  grow the daemon by megabytes per message), and title, artist, album and the other
+  texts are kept up to 4096 bytes.
+- Video import and conversion: the `ffmpeg` of an import or of a conversion ends with
+  the daemon. It used to go on after the daemon was killed or had crashed, without
+  anything watching its limits of time, size and disk space.
+- Two files that name wallpaper paths are written for your account alone (mode 0600),
+  like `config.json`: the marker of wallpapers being loaded next to the control socket,
+  and the tray's list of recent wallpapers.
+- A layer key with ten digits (`walpe-ctl layer`, `config.json`) overflowed a number
+  before it was refused; nothing came of it with the compilers in use.
+- [SECURITY.md](docs/SECURITY.md) has a new section on web wallpapers: what a page gets
+  (the file server, network access - on by default, also to the local network -, where it
+  may navigate, which permissions and dialogs it does not get) and what WebKit's sandbox
+  keeps from a page process.
+
 ### Other
 
 - `walpe-ctl mem` says where the daemon's memory is: resident memory by kind of mapping
@@ -137,7 +201,8 @@ Corrections to "Pause for fullscreen apps" per monitor, which is new in 0.13.0:
   framebuffers, buffers and programs are made and deleted and pixels are read back;
   `--events off` stops it. The report is computed when it is asked for and at no other
   time: no timer, no thread, nothing per frame; nothing counts the OpenGL events before
-  they are switched on.
+  they are switched on. File names in the report are printed with their control
+  characters made visible.
 - A daemon that has shown a web wallpaper gives WebKit back. The web module (WebKitGTK,
   JavaScriptCore, GTK) cannot be unloaded, so after the last web wallpaper had been
   replaced it stayed in the daemon until the daemon was stopped: about 50 MB of its
@@ -153,18 +218,27 @@ Corrections to "Pause for fullscreen apps" per monitor, which is new in 0.13.0:
   is being made. `walpe-ctl set web_unload=off` keeps the module loaded as before;
   `walpe-ctl status` shows `modules`. The video module (FFmpeg) is small and stays
   loaded.
-- BMP pictures: a file of 60 bytes that calls itself a BMP could make gdk-pixbuf's
-  decoder reserve up to 4 GiB of memory, because the decoder takes three sizes from the
-  file's first bytes before it checks anything. Those three fields are checked first now
-  (the header size is one the format knows, the pixel data starts inside the file, the
-  palette is no larger than the bits of a pixel can name), wherever a BMP can come from: a
-  texture, a layer picture, a picture wallpaper, a preview, cover art. A BMP that fails
-  is not shown; a BMP as the format defines it passes. Found by fuzzing.
 - The daemon, `walpe-video.so` and `walpe-web.so` have to come from the same build, as
   before: the number of the module interface changed, and a module of 0.13.0 next to a
   daemon of 0.14.0 is refused.
 - README: "One scene's picture depends on reused effect targets" is no known limitation
   any more; 0.13.0 fixed it (a layer with a tint and effects keeps its effects).
+- Less work while nothing happens:
+  - the daemon no longer sends its whole status to the library window and the tray for
+    requests that only read (the performance panel asked every 2 seconds: 5 kB each time
+    to both);
+  - the tray no longer rewrites its list of recent wallpapers for every status line when
+    two monitors show different wallpapers (a new file, two `fsync` and a rename each
+    time, for every pause, resume or cover change);
+  - the library window no longer lays itself out, draws and queries the X server for
+    every status line of the daemon that says what the last one said;
+  - the library window's main thread no longer wakes every 2 seconds for a performance
+    panel that is closed;
+  - the animated previews of a library window that is not on screen - on another
+    workspace or tag, minimised - stop playing and give their frames back (up to 48 MiB,
+    and a timer 20 times a second).
+- Import: a video with `%d` in its name (`take %03d.mp4`) got its thumbnail under another
+  name, replaced a picture of that name next to it and was shown without a preview.
 - Build: **the tests and the developer tools are no part of a build unless asked for.**
   The new build option `tests` is off by default, and a build directory set up without it
   has no test, no test program and no developer tool: `ninja`, `meson compile` and `meson
@@ -209,7 +283,10 @@ Corrections to "Pause for fullscreen apps" per monitor, which is new in 0.13.0:
   for the parsers of wallpaper files (`tests/fuzz`: packages, textures, MP4, GIF and JPEG
   checks, JSON, puppets, particles, shader text, sound files, scenes) for libFuzzer
   (`-Dfuzz=enabled`, clang); their seeds and every input that once broke a parser run in
-  the suite as `fuzz-regress-<target>`.
+  the suite as `fuzz-regress-<target>`. From the review: the web file server (request
+  bodies, idle connections, parts of files), the login answer, a stand-in music player
+  (`media-player`), import (`%d`, a child without its daemon), old-format layer pictures,
+  the tray and the library window next to a real daemon (`tray-life`, `ui-life`).
 
 ### Known limitations
 
