@@ -281,6 +281,14 @@ could do to the daemon. None of these was seen being used.
   notice: that monitor showed the root window for as long as the daemon ran. It now
   restarts itself in place, at most once in ten seconds.
 - A video conversion that cannot start, or is cancelled, leaves no memory behind.
+- Scenes: `texture_limit` and the texture quality reach a scene that stands still from
+  its load on. They are applied in a scene's third frame, and a scene without anything
+  that moves drew two and waited: its textures stayed as large as without the setting
+  (921600 bytes of layer texture instead of 57600 with `texture_limit=256` in the test)
+  until a pause and resume, an exposure or a moved layer brought that frame. With a
+  number as the limit or the quality preset Low a still wallpaper now looks as the
+  setting says at once. Nothing changes with the defaults (limit `auto`, full quality).
+- Old-format scenes: a text texture that OpenGL refuses is deleted; it was kept.
 - A lost GL context (suspend and resume, a GPU reset) no longer leaves a black monitor
   and a log line per frame: `walpe-ctl status` names it per monitor (`swap_error`), and
   the daemon restarts in place once, at most once a minute. Tried by making swaps fail
