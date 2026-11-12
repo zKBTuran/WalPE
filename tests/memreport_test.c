@@ -23,6 +23,23 @@
 #include "engine/memreport.h"
 #include "common/util.h"
 
+/* The checks of glibc's own heap ("[heap]", mallinfo2): not in a build with
+ * the address sanitizer, whose allocator replaces malloc - the brk heap
+ * stays empty and mallinfo2 counts nothing. Everything else is checked
+ * there too. */
+#if defined (__GLIBC__) && !defined (__SANITIZE_ADDRESS__)
+#  if defined (__has_feature)
+#    if __has_feature (address_sanitizer)
+#      define GLIBC_HEAP 0
+#    endif
+#  endif
+#  ifndef GLIBC_HEAP
+#    define GLIBC_HEAP 1
+#  endif
+#else
+#  define GLIBC_HEAP 0
+#endif
+
 static int fails;
 
 static void check (gboolean ok, const char *what)
@@ -225,9 +242,10 @@ static void test_process (void)
     const gint64 fds = num (o, "fds.count");
     check (fds >= 3 && fds < 4096, "open descriptors are counted");
     check (num (o, "mappings.count") > 10 && num (o, "mappings.libraries.count") > 0 &&
-           num (o, "mappings.stack.count") == 1 && num (o, "mappings.heap.rss_kb") > 0,
+           num (o, "mappings.stack.count") == 1 &&
+           (!GLIBC_HEAP || num (o, "mappings.heap.rss_kb") > 0),
            "the mappings of this process: libraries, one stack, a heap");
-#ifdef __GLIBC__
+#if GLIBC_HEAP
     check (num (o, "malloc.arenas") >= 1 && num (o, "malloc.in_use_kb") > 0 &&
            num (o, "malloc.arena_kb") >= num (o, "malloc.in_use_kb"),
            "the allocator: arenas, bytes handed out, bytes its heaps hold");
@@ -250,7 +268,8 @@ static void test_process (void)
             heap_row |= !strcmp (nm, "[heap]");
             dirs |= nm[0] == '/' && !strcmp (wpj_str (wpj_arr_obj (bn, i), "kind", ""), "libraries");
         }
-        check (heap_row && !dirs, "the heap has a row; libraries are named without their directory");
+        check ((heap_row || !GLIBC_HEAP) && !dirs,
+               "the heap has a row; libraries are named without their directory");
         JsonArray *tn = wpj_arr (wpj_obj (o, "threads"), "by_name");
         gint64 tsum = 0;
         for (guint i = 0; i < wpj_arr_len (tn); i++)
@@ -273,7 +292,7 @@ static void test_process (void)
     check (num (o2, "fds.count") == fds + 1, "an opened file is one more descriptor");
     check (num (o2, "process.rss_anon_kb") >= 60 * 1024,
            "64 MiB of touched heap are resident anonymous memory");
-#ifdef __GLIBC__
+#if GLIBC_HEAP
     check (num (o2, "malloc.in_use_kb") + num (o2, "malloc.mmapped_kb") >= 64 * 1024,
            "... and are in the allocator's count of what it handed out");
 #endif
