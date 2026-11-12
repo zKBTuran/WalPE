@@ -883,6 +883,14 @@ static void update_active_window (void)
             active = *(Window *) data;
         XFree (data);
     }
+    /* Not an application's window: the root, or one of this daemon's own
+     * (any client can write the property, and the --windowed preview gets
+     * the focus from the window manager like any other window). Asking
+     * for such a window's property events below would replace the events
+     * this connection asked for on it - Expose: what another window had
+     * covered was never drawn again - and no wallpaper pauses for itself. */
+    if (active == X.root || window_is_wallpaper (active))
+        active = None;
     gboolean changed = active != X.watched_win;
     if (changed) {
         /* The window's property events are asked for before its state is

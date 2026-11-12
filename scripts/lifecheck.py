@@ -1014,6 +1014,9 @@ class XClient:
         x.XMapWindow.argtypes = [vp, ul]
         x.XMoveResizeWindow.argtypes = [vp, ul, i, i, u, u]
         x.XDestroyWindow.argtypes = [vp, ul]
+        x.XQueryTree.argtypes = [vp, ul, ctypes.POINTER(ul), ctypes.POINTER(ul),
+                                 ctypes.POINTER(ctypes.POINTER(ul)), ctypes.POINTER(u)]
+        x.XFree.argtypes = [vp]
         x.XSync.argtypes = [vp, i]
         x.XCloseDisplay.argtypes = [vp]
         self.x = x
@@ -1041,6 +1044,24 @@ class XClient:
     def move(self, win, x, y, w, h):
         self.x.XMoveResizeWindow(self.d, win, x, y, w, h)
         self.x.XSync(self.d, 0)
+
+    def destroy(self, win):
+        self.x.XDestroyWindow(self.d, win)
+        self.x.XSync(self.d, 0)
+        self.wins.remove(win)
+
+    def lowest(self, n):
+        """the n lowest windows of the screen (children of the root, bottom first)"""
+        c = self.c
+        root, parent, count = c.c_ulong(), c.c_ulong(), c.c_uint()
+        kids = c.POINTER(c.c_ulong)()
+        if not self.x.XQueryTree(self.d, self.root, c.byref(root), c.byref(parent), c.byref(kids),
+                                 c.byref(count)):
+            return []
+        out = [kids[k] for k in range(min(n, count.value))]
+        if count.value:
+            self.x.XFree(kids)
+        return out
 
     def fullscreen(self, win, on):
         self.prop(win, "_NET_WM_STATE", self.XA_ATOM, [self.atom("_NET_WM_STATE_FULLSCREEN")] if on else [])
@@ -1236,6 +1257,33 @@ def case_fullscreen(env, W):
         xc.focus(0)
         xc.fullscreen(w5, False)
         is_state([False, False], [False, False], "after those rounds")
+
+        # Another client names the daemon's own windows in _NET_ACTIVE_WINDOW (any
+        # client can write the property) and gives them the fullscreen state: they are
+        # not application windows. Nothing pauses for them, and the daemon keeps the
+        # events it asked for on them: what a window covered is drawn again.
+        walls = xc.lowest(2)
+        for wp in walls:
+            xc.fullscreen(wp, True)
+            xc.focus(wp)
+            time.sleep(0.3)
+        is_state([False, False], [False, False], "a wallpaper window named as the focused fullscreen window")
+        xc.focus(0)
+        for wp in walls:
+            xc.fullscreen(wp, False)
+        for win in (w1, w2, frame, w5):         # out of the way: the wallpapers are looked at
+            xc.move(win, 0, 0, 8, 8)
+        env.open(W["red"])
+        loaded(env, W["red"])
+        seen = []
+        for mon in (A, B):
+            before = rc.name_of(colour_is(env, mon, lambda c: rc.name_of(c) == "red"))
+            over = xc.window(mon[3] + 220, 100, 200, 160)       # over the middle of the monitor
+            colour_is(env, mon, lambda c: rc.name_of(c) == "black")
+            xc.destroy(over)
+            seen.append((before, rc.name_of(colour_is(env, mon, lambda c: rc.name_of(c) == "red"))))
+        check(seen == [("red", "red")] * 2, "fullscreen: after that the daemon still draws again what a "
+              "window covered (a scene that stands still)", seen)
         lc_bad = [ln for ln in env.since(mark).splitlines()
                   if re.search(r"CRITICAL \*\*|AddressSanitizer|runtime error:|Segmentation fault", ln)]
         check(env.daemon.poll() is None and not lc_bad, "fullscreen: the daemon runs, its log is clean", lc_bad[:5])
