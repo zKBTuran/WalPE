@@ -18,6 +18,20 @@
 static const char *tt (const char *s);
 static void print_json (const char *reply);
 
+/* No reply. "walpe-daemon is not running" was the answer to every one of
+ * them, also when a daemon was there and did not answer in time (busy
+ * loading, stopped in a debugger, hung): the request had been handed to it
+ * all the same and was carried out later, and the sentence invited
+ * starting a second daemon. The exit status stays 2 for both. */
+static void no_reply (const char *sock)
+{
+    if (walpe_ipc_listening (sock))
+        g_printerr ("walpe-daemon is running but did not answer in time (busy?); a request it was "
+                    "sent may still be carried out (%s)\n", sock);
+    else
+        g_printerr ("walpe-daemon is not running (no reply on %s)\n", sock);
+}
+
 #include "layers_ctl.h"   /* walpe-ctl layers ... */
 #include "gpu_ctl.h"      /* walpe-ctl gpu */
 #include "gpustat_ctl.h"  /* walpe-ctl gpu-stats ... */
@@ -290,7 +304,8 @@ static void usage (void)
              "  walpe-ctl mem --diff FILE1 FILE2\n"
              "                                 what changed between two reports saved with --json\n"
              "  walpe-ctl quit                 stop the daemon\n"
-             "exit status: 0 done, 1 usage, 2 no daemon, 3 the daemon refused the command\n");
+             "exit status: 0 done, 1 usage, 2 no daemon (or it did not answer in time: the message\n"
+             "             says which), 3 the daemon refused the command\n");
 }
 
 /* is v a number as JSON spells it? g_ascii_strtod also takes nan, inf,
@@ -538,8 +553,10 @@ static int install_and_wait (char *id)
     JsonNode *rn = reply ? wpj_parse_data (reply, -1) : NULL;
     JsonObject *ro = rn && JSON_NODE_HOLDS_OBJECT (rn) ? json_node_get_object (rn) : NULL;
     if (!ro || !wpj_bool (ro, "ok", FALSE)) {
-        g_printerr ("%s\n", ro ? tt (wpj_str (ro, "error", "install failed"))
-                                : "walpe-daemon is not running");
+        if (ro)
+            g_printerr ("%s\n", tt (wpj_str (ro, "error", "install failed")));
+        else
+            no_reply (sock);
         rc = ro ? 3 : 2;
     } else {
         char *last = NULL;
@@ -606,7 +623,10 @@ static int profile_and_wait (double seconds, gboolean json, gboolean sync)
         const char *e = ro ? wpj_str (ro, "error", "the profile could not be started") : NULL;
         if (e && !g_strcmp0 (e, "unknown cmd"))
             e = "the running walpe-daemon is older than this walpe-ctl and has no profiler";
-        g_printerr ("%s\n", e ? tt (e) : "walpe-daemon is not running");
+        if (e)
+            g_printerr ("%s\n", tt (e));
+        else
+            no_reply (sock);
         rc = ro ? 3 : 2;
     } else {
         double left = wpj_num (ro, "seconds", seconds);
@@ -913,7 +933,7 @@ static int quality_cmd (int argc, char **argv)
             json_node_unref (rn);
     }
     if (!reply) {
-        g_printerr ("walpe-daemon is not running (no reply on %s)\n", sock);
+        no_reply (sock);
         rc = 2;
     } else {
         JsonNode *rn = wpj_parse_data (reply, -1);
@@ -937,11 +957,11 @@ static int backend_show (void)
 {
     char *sock = walpe_socket_path ();
     char *reply = walpe_ipc_request (sock, "{\"cmd\":\"status\"}", 2000);
+    if (!reply)
+        no_reply (sock);
     g_free (sock);
-    if (!reply) {
-        g_printerr ("walpe-daemon is not running\n");
+    if (!reply)
         return 2;
-    }
     JsonNode *rn = wpj_parse_data (reply, -1);
     JsonObject *so = rn && JSON_NODE_HOLDS_OBJECT (rn) ? wpj_obj (json_node_get_object (rn), "state")
                                                        : NULL;
@@ -1159,7 +1179,7 @@ static int resolution_cmd (int argc, char **argv)
     char *sock = walpe_socket_path ();
     char *reply = walpe_ipc_request (sock, req->str, 4000);
     if (!reply) {
-        g_printerr ("walpe-daemon is not running (no reply on %s)\n", sock);
+        no_reply (sock);
         rc = 2;
     } else {
         JsonNode *rn = wpj_parse_data (reply, -1);
@@ -1535,7 +1555,7 @@ int main (int argc, char **argv)
                         "(API, device, codec profile) - \"software\" there after hwdec=auto or a "
                         "name means it was not available or failed, and the same line says why\n");
     } else {
-        g_printerr ("walpe-daemon is not running (no reply on %s)\n", sock);
+        no_reply (sock);
         g_free (sock);
         g_free (req);
         return 2;

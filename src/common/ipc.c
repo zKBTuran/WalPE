@@ -653,6 +653,26 @@ char *walpe_ipc_request (const char *sock_path, const char *request_json, int ti
     return out;
 }
 
+gboolean walpe_ipc_listening (const char *sock_path)
+{
+    struct sockaddr_un addr = { .sun_family = AF_UNIX };
+    if (!sock_path || strlen (sock_path) >= sizeof (addr.sun_path))
+        return FALSE;
+    int fd = socket (AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (fd < 0)
+        return FALSE;
+    memcpy (addr.sun_path, sock_path, strlen (sock_path) + 1);
+    int r;
+    do
+        r = connect (fd, (struct sockaddr *) &addr, sizeof (addr));
+    while (r < 0 && errno == EINTR);
+    /* EAGAIN: the listen backlog is full - somebody listens and is busy.
+     * No socket, or one nobody listens on: ENOENT / ECONNREFUSED */
+    gboolean there = r == 0 || errno == EAGAIN;
+    close (fd);
+    return there;
+}
+
 gboolean walpe_daemon_running (const char *sock_path)
 {
     gint64 deadline = g_get_monotonic_time () + 300 * 1000;

@@ -556,7 +556,7 @@ static int mem_main (int argc, char **argv)
     g_free (req);
     int rc = 0;
     if (!reply) {
-        g_printerr ("walpe-daemon is not running (no reply on %s)\n", sock);
+        no_reply (sock);
         g_free (sock);
         return 2;
     }

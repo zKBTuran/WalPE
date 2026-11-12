@@ -358,8 +358,9 @@ angles in radians, as in Wallpaper Engine.
 
 ## walpe-ctl
 
-`walpe-ctl help` prints the full list. Exit status: 0 done, 1 bad input, 2 no daemon runs,
-3 the daemon refused (the reason is in the reply). A wallpaper that cannot be loaded leaves
+`walpe-ctl help` prints the full list. Exit status: 0 done, 1 bad input, 2 no daemon runs
+(or one runs and did not answer in time: the message says which), 3 the daemon refused (the
+reason is in the reply). A wallpaper that cannot be loaded leaves
 the one before it on screen; `walpe-ctl status` says why (`load_error`, `load_restored`).
 
 | Command | Does |

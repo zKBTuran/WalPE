@@ -40,3 +40,7 @@ void walpe_ipc_broadcast (const char *line);
 /* Client helpers (blocking, short-lived): returns reply string or NULL. */
 char *walpe_ipc_request (const char *sock_path, const char *request_json, int timeout_ms);
 gboolean walpe_daemon_running (const char *sock_path);
+/* something listens on the socket (a connection is taken, or its queue of
+ * waiting connections is full): tells a daemon that is there but does not
+ * answer - busy, stopped, hung - from none at all. Sends nothing. */
+gboolean walpe_ipc_listening (const char *sock_path);

@@ -20,6 +20,9 @@
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 #include "common/config.h"
 #include "common/ipc.h"
@@ -892,6 +895,33 @@ int main (int argc, char **argv)
     g_main_loop_run (loop);
     g_thread_join (t);
     walpe_ipc_release (sock);
+
+    /* ---- 2b. a daemon that is there and does not answer (busy, stopped):
+     * exit status 2 as without one, but not "is not running" - and the
+     * same sentence as ever when nothing listens */
+    {
+        char *e = NULL;
+        CHECK (!walpe_ipc_listening (sock));
+        CHECK (run_ctl (&e, "status", NULL) == 2);
+        CHECK (e && strstr (e, "is not running") && !strstr (e, "did not answer"));
+        g_clear_pointer (&e, g_free);
+        struct sockaddr_un a = { .sun_family = AF_UNIX };
+        int lfd = socket (AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        g_strlcpy (a.sun_path, sock, sizeof (a.sun_path));
+        g_unlink (sock);
+        CHECK (lfd >= 0 && bind (lfd, (struct sockaddr *) &a, sizeof (a)) == 0 && listen (lfd, 4) == 0);
+        CHECK (walpe_ipc_listening (sock));     /* nothing is ever accepted or answered */
+        CHECK (run_ctl (&e, "status", NULL) == 2);
+        CHECK (e && strstr (e, "did not answer") && !strstr (e, "is not running"));
+        g_clear_pointer (&e, g_free);
+        CHECK (run_ctl (&e, "backend", NULL) == 2);
+        CHECK (e && strstr (e, "did not answer"));
+        g_clear_pointer (&e, g_free);
+        if (lfd >= 0)
+            close (lfd);
+        g_unlink (sock);
+        CHECK (!walpe_ipc_listening (sock));
+    }
 
 table:
     /* ---- 3. the daemon's check of a "set" request */

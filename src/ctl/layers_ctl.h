@@ -296,7 +296,7 @@ static int layers_main (int argc, char **argv)
     char *reply = walpe_ipc_request (sock, req, 4000);
     g_free (req);
     if (!reply) {
-        g_printerr ("walpe-daemon is not running (no reply on %s)\n", sock);
+        no_reply (sock);
         g_free (sock);
         return 2;
     }
