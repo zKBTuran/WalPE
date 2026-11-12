@@ -40,7 +40,7 @@ is stored only, and `backend` in status is the video backend that plays, always 
 
 | Key | Default | set name | Meaning |
 |---|---|---|---|
-| `wallpapers_dir` | `~/.local/share/walpe/workshop` | (file only) | the library: project folders or loose media files |
+| `wallpapers_dir` | `~/.local/share/walpe/workshop` | (file only) | the library: project folders or loose media files. `~` is your home directory; the daemon writes the path back as the file had it |
 | `current` | `""` | (`walpe-ctl open`) | the wallpaper of every monitor that has no entry in `monitor_current` |
 | `monitor_current` | `{}` | (`walpe-ctl open --monitor N`) | output name -> wallpaper path |
 | `paused` | false | (`walpe-ctl pause` / `resume`) | |

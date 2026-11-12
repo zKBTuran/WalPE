@@ -33,7 +33,9 @@ int walpe_skip_hidden_parse (const char *s, int dflt);
 #define WALPE_VIDEO_BACKEND "ffmpeg"
 
 typedef struct WalpeConfig_ {
-    char   *wallpapers_dir;   /* library root */
+    char   *wallpapers_dir;   /* library root, an absolute path */
+    char   *wallpapers_dir_written;   /* the same as the file names it ("~/walls"): what a save
+                                       * writes while it still names wallpapers_dir */
     char   *current;          /* active wallpaper path ("" = none): the default for
                                * every monitor without an entry in monitor_current */
     GHashTable *monitor_current; /* output name (e.g. "HDMI-0") -> wallpaper path

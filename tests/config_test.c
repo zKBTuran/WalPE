@@ -12,7 +12,9 @@
  *    under another name and the defaults apply;
  *  - a save that cannot be written (the disk full in the middle of the
  *    file, no directory to write into) is reported, leaves the file on
- *    disk whole and no temporary file behind. */
+ *    disk whole and no temporary file behind;
+ *  - "wallpapers_dir" is saved in the words the file had ("~/walls"),
+ *    and is an absolute path in memory, with and without a file. */
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <json-glib/json-glib.h>
@@ -720,6 +722,99 @@ static void test_sound_defaults (void)
            !walpe_config_migrate_sound (1, TRUE, FALSE, 0.5));
 }
 
+/* "wallpapers_dir" is the one key that is only ever written by hand. The
+ * loader makes the path absolute and the save wrote that back: with the
+ * first change of any setting after a start, "~/walls" in the file had
+ * become "/home/<name>/walls" (and the default "~/.local/share/walpe/
+ * workshop" its absolute form) - a file that no longer works when the home
+ * directory is moved or the file is shared. */
+static char *saved_dir (void)
+{
+    JsonNode *n = read_config ();
+    char *d = n && JSON_NODE_HOLDS_OBJECT (n)
+        ? g_strdup (wpj_str (json_node_get_object (n), "wallpapers_dir", NULL)) : NULL;
+    if (n)
+        json_node_unref (n);
+    return d;
+}
+
+static void test_dir_as_written (void)
+{
+    static const struct { const char *written, *below_home; } cases[] = {
+        { "~/walls", "walls" },
+        { "~/.local/share/walpe/workshop", ".local/share/walpe/workshop" },
+        { "~/walls/", "walls" },                /* the loader drops the last separator ... */
+        { "~/a/../walls", "walls" },            /* ... and "..": the file keeps both */
+        { "~", "" },
+    };
+    for (guint i = 0; i < G_N_ELEMENTS (cases); i++) {
+        char *json = g_strdup_printf ("{\"config_version\":4,\"wallpapers_dir\":\"%s\",\"fps\":30}",
+                                      cases[i].written);
+        put_config (json);
+        g_free (json);
+        char *abs = *cases[i].below_home ? g_build_filename (g_get_home_dir (), cases[i].below_home, NULL)
+                                         : g_strdup (g_get_home_dir ());
+        /* two rounds: the second load reads what the first save wrote */
+        for (int round = 0; round < 2; round++) {
+            WalpeConfig *c = walpe_config_load ();
+            CHECK (!g_strcmp0 (c->wallpapers_dir, abs));    /* what the programs use: absolute */
+            c->fps = 31 + round;                            /* any change */
+            CHECK (walpe_config_save (c));
+            char *d = saved_dir ();
+            if (g_strcmp0 (d, cases[i].written)) {
+                fails++;
+                g_printerr ("FAIL: wallpapers_dir \"%s\" was saved as \"%s\" (round %d)\n",
+                            cases[i].written, d ? d : "(none)", round);
+            }
+            g_free (d);
+            walpe_config_free (c);
+        }
+        g_free (abs);
+    }
+    {
+        /* an absolute path stays what it is */
+        put_config ("{\"config_version\":4,\"wallpapers_dir\":\"/mnt/walls\"}");
+        WalpeConfig *c = walpe_config_load ();
+        CHECK (!g_strcmp0 (c->wallpapers_dir, "/mnt/walls"));
+        CHECK (walpe_config_save (c));
+        char *d = saved_dir ();
+        CHECK (!g_strcmp0 (d, "/mnt/walls"));
+        g_free (d);
+        /* the folder changed in memory: the save writes the folder, not
+         * the words that named another one */
+        g_free (c->wallpapers_dir);
+        c->wallpapers_dir = g_strdup ("/srv/other");
+        CHECK (walpe_config_save (c));
+        d = saved_dir ();
+        CHECK (!g_strcmp0 (d, "/srv/other"));
+        g_free (d);
+        walpe_config_free (c);
+    }
+    {
+        /* no file at all: the default is an absolute path in memory too
+         * (it was "~/.local/..." as it stands, and a path built from it
+         * without expanding it began with a folder named "~"), and the
+         * first save writes the default as the documentation has it */
+        g_unlink (cfg_path);
+        WalpeConfig *c = walpe_config_load ();
+        char *abs = g_build_filename (g_get_home_dir (), ".local/share/walpe/workshop", NULL);
+        CHECK (g_path_is_absolute (c->wallpapers_dir) && !g_strcmp0 (c->wallpapers_dir, abs));
+        CHECK (!strcmp (walpe_default_dir (), "~/.local/share/walpe/workshop"));
+        CHECK (walpe_config_save (c));
+        char *d = saved_dir ();
+        CHECK (!g_strcmp0 (d, walpe_default_dir ()));
+        g_free (d);
+        g_free (abs);
+        walpe_config_free (c);
+        /* "" in the file: the default, as before */
+        put_config ("{\"config_version\":4,\"wallpapers_dir\":\"\"}");
+        c = walpe_config_load ();
+        CHECK (c->wallpapers_dir && g_path_is_absolute (c->wallpapers_dir));
+        walpe_config_free (c);
+    }
+    g_unlink (cfg_path);
+}
+
 int main (void)
 {
     /* before any GLib call that caches the config dir */
@@ -745,6 +840,7 @@ int main (void)
     test_backend_keys ();
     test_fullscreen_all ();
     test_save_failure ();
+    test_dir_as_written ();
 
     broken_copies (TRUE);
     g_unlink (cfg_path);

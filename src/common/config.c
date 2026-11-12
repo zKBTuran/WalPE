@@ -107,6 +107,24 @@ void walpe_config_quality_sync (WalpeConfig *c)
     c->qsync_scale = c->quality.render_scale;
 }
 
+/* "wallpapers_dir" as a save writes it: the words of the file ("~/walls",
+ * the default "~/.local/share/walpe/workshop") for as long as they name
+ * the folder in use, else the folder. The loader makes the path absolute,
+ * and the save used to write that: the first change of any setting after
+ * a start turned "~/..." in the file into "/home/<name>/...", in a file
+ * that is only ever edited by hand for this key. (g_free) */
+static char *config_dir_text (const WalpeConfig *c)
+{
+    if (c->wallpapers_dir_written) {
+        char *abs = walpe_expand_path (c->wallpapers_dir_written);
+        gboolean same = !g_strcmp0 (abs, c->wallpapers_dir);
+        g_free (abs);
+        if (same)
+            return g_strdup (c->wallpapers_dir_written);
+    }
+    return g_strdup (c->wallpapers_dir);
+}
+
 static JsonNode *config_to_json (WalpeConfig *c)
 {
     walpe_config_quality_sync (c);
@@ -115,7 +133,11 @@ static JsonNode *config_to_json (WalpeConfig *c)
     json_builder_set_member_name (b, "config_version");
     json_builder_add_int_value (b, WALPE_CONFIG_VERSION);
     json_builder_set_member_name (b, "wallpapers_dir");
-    json_builder_add_string_value (b, c->wallpapers_dir);
+    {
+        char *dir = config_dir_text (c);
+        json_builder_add_string_value (b, dir);
+        g_free (dir);
+    }
     json_builder_set_member_name (b, "current");
     json_builder_add_string_value (b, c->current ? c->current : "");
     json_builder_set_member_name (b, "video_backend");
@@ -549,7 +571,13 @@ int walpe_config_get_feature (const WalpeConfig *cfg, const char *name)
 WalpeConfig *walpe_config_load (void)
 {
     WalpeConfig *c = g_new0 (WalpeConfig, 1);
-    c->wallpapers_dir    = g_strdup (walpe_default_dir ());
+    /* absolute here as after every load of a file that names it: without
+     * a config.json the field held the default's "~/..." as it is, and
+     * whoever built a path from it without expanding it (the library
+     * window's "Add files" and "Add folder" before the first save) made a
+     * folder named "~" where the program was started */
+    c->wallpapers_dir    = walpe_expand_path (walpe_default_dir ());
+    c->wallpapers_dir_written = g_strdup (walpe_default_dir ());
     c->current           = g_strdup ("");
     c->video_backend     = g_strdup ("ffmpeg");
     c->fps               = WALPE_FPS_DEFAULT; /* cap; each monitor is paced at
@@ -659,7 +687,12 @@ WalpeConfig *walpe_config_load (void)
         const char *d = wpj_str (o, "wallpapers_dir", NULL);
         /* "" would make the path NULL (walpe_expand_path), which the save
          * and the GUI's library code do not expect: keep the default */
-        if (d && *d) { g_free (c->wallpapers_dir); c->wallpapers_dir = walpe_expand_path (d); }
+        if (d && *d) {
+            g_free (c->wallpapers_dir);
+            c->wallpapers_dir = walpe_expand_path (d);
+            g_free (c->wallpapers_dir_written);
+            c->wallpapers_dir_written = g_strdup (d);   /* (config_dir_text) */
+        }
         const char *cur = wpj_str (o, "current", NULL);
         if (cur) { g_free (c->current); c->current = walpe_expand_path (cur); }
         const char *vb = wpj_str (o, "video_backend", NULL);
@@ -1078,6 +1111,7 @@ void walpe_config_free (WalpeConfig *cfg)
     g_free (cfg->gpu);
     g_free (cfg->preset_gpu_class);
     g_free (cfg->wallpapers_dir);
+    g_free (cfg->wallpapers_dir_written);
     g_free (cfg->current);
     if (cfg->monitor_current)
         g_hash_table_unref (cfg->monitor_current);
