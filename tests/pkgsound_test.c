@@ -668,7 +668,7 @@ static void test_scene (void)
     for (int i = 0; i < 500 && !there; i++) {
         run_frame (&ra);
         g_usleep (10000);
-        there = has (c, "sounds/one.wav");
+        there = has (c, "sounds/one.wav") && !has (c, ".walpe-pkg-nosound");    /* (the whole fetch) */
     }
     list = list_of (c);
     CHECK (there && same_bytes (c, "sounds/one.wav", wav) && !list,
