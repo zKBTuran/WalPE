@@ -31,7 +31,7 @@ body:
     id: session
     attributes:
       label: Session type
-      description: "`echo $XDG_SESSION_TYPE` tells. WalPE draws on X11 only (README, \"Known limitations\")."
+      description: "`echo $XDG_SESSION_TYPE` tells. WalPE draws on X11 and on Wayland compositors with the layer shell (README, \"Known limitations\"); `walpe-ctl backend` says which of the two the daemon uses."
       options:
         - X11
         - Wayland
@@ -89,7 +89,7 @@ body:
     id: status
     attributes:
       label: Output of walpe-ctl status
-      description: One line of JSON with the monitors, what they show and why something is paused. It contains the paths of your wallpapers - please shorten your home path.
+      description: One line of JSON with the monitors, what they show and why something is paused. It contains the paths of your wallpapers and, if you set one, your Steam account name (`steam_user`) - please shorten your home path and blank the account name.
       render: json
   - type: textarea
     id: gpu-report
