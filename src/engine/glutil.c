@@ -2831,6 +2831,20 @@ WalpeGlTex walpe_gl_tex_from_file (const char *path)
             g_warning ("texture %s: %d x %d pixels is too large to load", path, iw, ih);
             return out;
         }
+        /* "JPEG scales while it decodes" holds for a file that is decoded
+         * as it is read. A progressive one (or one with a scan per
+         * component) is first read whole into a store of 128 bytes per
+         * 8 x 8 block of every component at the size the file declares,
+         * whatever size was asked for (util.h): 136 bytes of file that
+         * declare 32000 x 16000 took a gigabyte here, 65500 x 65500 would
+         * ask for 8 to 34. Such a file is refused beyond the store the
+         * largest picture of another format costs decoded, as a preview
+         * is. */
+        if (jpeg && walpe_jpeg_store_bytes_file (path) > WALPE_JPEG_STORE_MAX) {
+            g_warning ("texture %s: a JPEG of %d x %d pixels that has to be held whole to be "
+                       "decoded is too large to load", path, iw, ih);
+            return out;
+        }
         double k = MIN (MIN ((double) max_side / iw, (double) max_side / ih),
                         sqrt ((double) max_px / ((double) iw * ih)));
         int tw = MAX (1, (int) (iw * k)), th = MAX (1, (int) (ih * k));

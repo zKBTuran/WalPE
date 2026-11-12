@@ -2100,6 +2100,31 @@ static void save_png (const char *rel, int w, int h)
     g_free (p);
 }
 
+/* the peak of this process's resident memory in KiB (VmHWM), 0 = not
+ * known; _restart: the peak begins again at what is resident now */
+static gint64 rss_peak_kb (void)
+{
+    char *st = NULL;
+    gint64 kb = 0;
+    if (g_file_get_contents ("/proc/self/status", &st, NULL, NULL)) {
+        const char *p = strstr (st, "VmHWM:");
+        if (p)
+            kb = g_ascii_strtoll (p + 6, NULL, 10);
+    }
+    g_free (st);
+    return kb;
+}
+
+static gint64 rss_peak_restart (void)
+{
+    FILE *f = fopen ("/proc/self/clear_refs", "w");
+    if (!f)
+        return 0;
+    gboolean ok = fputs ("5", f) >= 0;
+    ok = fclose (f) == 0 && ok;
+    return ok ? rss_peak_kb () : 0;
+}
+
 /* bytes of every texture the context holds */
 static gint64 gl_tex_bytes (void)
 {
@@ -2438,6 +2463,51 @@ static void gl_part (void)
             g_clear_error (&err);
             g_free (f);
         }
+    }
+    /* 6. a JPEG layer picture above the size one texture gets is decoded
+     * at a smaller size - but a progressive one is held whole by its
+     * decoder first, at the size its header declares. 136 bytes that
+     * declare 20000 x 16000 pixels (one component, the first scan cut
+     * short): a store of 640 MiB was filled before the decoder found out
+     * that there is no picture. Now the file is refused before it is
+     * opened for decoding; the peak of resident memory says which. */
+    {
+        static const guint8 jpg[] = {
+            0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
+            0x00, 0x01, 0x00, 0x00, 0xff, 0xdb, 0x00, 0x43, 0x00, 0x10, 0x0b, 0x0c, 0x0e, 0x0c, 0x0a, 0x10,
+            0x0e, 0x0d, 0x0e, 0x12, 0x11, 0x10, 0x13, 0x18, 0x28, 0x1a, 0x18, 0x16, 0x16, 0x18, 0x31, 0x23,
+            0x25, 0x1d, 0x28, 0x3a, 0x33, 0x3d, 0x3c, 0x39, 0x33, 0x38, 0x37, 0x40, 0x48, 0x5c, 0x4e, 0x40,
+            0x44, 0x57, 0x45, 0x37, 0x38, 0x50, 0x6d, 0x51, 0x57, 0x5f, 0x62, 0x67, 0x68, 0x67, 0x3e, 0x4d,
+            0x71, 0x79, 0x70, 0x64, 0x78, 0x5c, 0x65, 0x67, 0x63, 0xff, 0xc2, 0x00, 0x0b, 0x08,
+            0x3e, 0x80,     /* height 16000 */
+            0x4e, 0x20,     /* width 20000 */
+            0x01, 0x01, 0x11, 0x00, 0xff, 0xc4, 0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xda, 0x00, 0x08,
+            0x01, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0f, 0xff,
+        };
+        mkfile ("gl/held-whole.jpg", jpg, sizeof jpg);
+        f = P ("gl/held-whole.jpg");
+        int jw = 0, jh = 0;
+        if (gdk_pixbuf_get_file_info (f, &jw, &jh) && jw == 20000 && jh == 16000) {
+            CHECK (walpe_jpeg_store_bytes (jpg, sizeof jpg) == (guint64) 2500 * 2000 * 128);
+            gint64 hwm0 = rss_peak_restart ();
+            t = walpe_gl_tex_from_file (f);
+            gint64 hwm1 = rss_peak_kb ();
+            CHECK (t.tex == 0);
+            if (hwm0 > 0 && hwm1 > 0) {
+                if (hwm1 - hwm0 >= 256 * 1024)
+                    g_printerr ("parsers-test: a refused JPEG layer picture took %.0f MiB\n",
+                                (hwm1 - hwm0) / 1024.0);
+                CHECK (hwm1 - hwm0 < 256 * 1024);
+            } else {
+                g_printerr ("parsers-test: no peak of resident memory here (check cannot fail)\n");
+            }
+            if (t.tex)
+                glDeleteTextures (1, &t.tex);
+        } else {
+            g_printerr ("parsers-test: this gdk-pixbuf does not read the JPEG header (check cannot fail here)\n");
+        }
+        g_free (f);
     }
     while (glGetError () != GL_NO_ERROR)
         ;
