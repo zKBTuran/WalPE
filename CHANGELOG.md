@@ -41,6 +41,14 @@ copy.
 - The table that remembers which effect pass last used a program forgets a program when
   it is deleted. On a driver that gives every new program a new name it grew by a few
   dozen bytes per program with every change of wallpaper.
+- With `fx_specialize` on or `fx_quality=fast`: an effect pass that draws one single
+  colour (the blur-size pass of a bokeh effect, the same value all over the picture) was
+  compared with its faster program again and again for as long as the wallpaper ran -
+  behind draw 8192, 16384, 32768 and so on, at 60 frames a second after 2, 5, 9, 18, 36
+  and 73 minutes - each time with a scratch target, a read-back and a buffer of 2 MiB
+  each on a 1920x1080 monitor. Such a pass now keeps the program it draws with after
+  draw 4096 (about a minute) and is not compared again. The picture is the one it drew
+  before.
 - Scene sound (`scene_sound`, off by default): a scene with many sound layers lost some
   of them for five seconds after a start or a resume on a busy machine, although the
   sound server had answered every stream. The layers open their streams one at a time,
