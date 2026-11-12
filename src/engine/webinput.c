@@ -1064,6 +1064,30 @@ static gboolean on_permission_request (WebKitWebView *v, WebKitPermissionRequest
     return TRUE;
 }
 
+/* A server that asks for a name and a password (401, or 407 from a proxy):
+ * WebKit's default puts its own dialog into the view - "Authentication
+ * Required", two entry fields and a line of text the server chose, over
+ * the dimmed page on the desktop - and holds the request until somebody
+ * answers it. Nobody can: the page never has the keyboard. A page whose
+ * frame got such an answer while it loaded never finished loading and was
+ * never shown; behind a proxy that wants a login that was every page with
+ * a request to the outside. The request goes on without a name, as after
+ * "Cancel": the page gets the server's answer as it is. */
+static gboolean on_authenticate (WebKitWebView *v, WebKitAuthenticationRequest *rq, gpointer user)
+{
+    (void) v;
+    WebInput *wi = user;
+    if (web_log_gate (WEB_LOG_PERMISSION)) {    /* (a page can cause one per request) */
+        char *h = web_log_text (webkit_authentication_request_get_host (rq), 200);
+        g_message ("web: %s asks for a name and a password%s: not asked for, the request goes on "
+                   "without (%s)", *h ? h : "a server",
+                   webkit_authentication_request_is_for_proxy (rq) ? " (proxy)" : "", wi->label);
+        g_free (h);
+    }
+    webkit_authentication_request_authenticate (rq, NULL);
+    return TRUE;
+}
+
 /* --------------------------------------------------------------- lifecycle */
 
 WebInput *web_input_new (GtkWidget *win, WebKitWebView *view, const char *label)
@@ -1111,6 +1135,7 @@ WebInput *web_input_new (GtkWidget *win, WebKitWebView *view, const char *label)
     g_signal_connect (view, "print", G_CALLBACK (on_stop), wi);
     g_signal_connect (view, "enter-fullscreen", G_CALLBACK (on_stop), wi);
     g_signal_connect (view, "permission-request", G_CALLBACK (on_permission_request), wi);
+    g_signal_connect (view, "authenticate", G_CALLBACK (on_authenticate), wi);
     return wi;
 }
 

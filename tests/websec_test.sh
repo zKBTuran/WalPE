@@ -28,7 +28,11 @@
 #     in the daemon's memory - it was, whole, whatever the method;
 #  8. connections to that port that send nothing do not use up the
 #     daemon's open files: 128 are kept, the longest idle one makes room -
-#     every one was kept, for as long as its other end stayed.
+#     every one was kept, for as long as its other end stayed;
+#  9. a frame whose server answers "401, name and password": the page
+#     still finishes loading - it never did: WebKit's own dialog sat in
+#     the page (on the desktop, when the page was shown already) and
+#     waited for an answer nobody can type.
 #
 # Skipped (exit 77) without Xvfb / python3 / the web module, or when WebKit
 # does not come up here. Run: meson test -C build websec -v
@@ -46,12 +50,13 @@ export NO_AT_BRIDGE=1 GTK_A11Y=none
 unset WAYLAND_DISPLAY WAYLAND_SOCKET DBUS_SESSION_BUS_ADDRESS WALPE_WEB_SELECTIONS WALPE_WEB_TIMING WALPE_WEB_SCHEME WALPE_WEB_FILE_URLS
 mkdir -p "$HOME/.config" "$XDG_RUNTIME_DIR" "$T/wp"
 chmod 700 "$XDG_RUNTIME_DIR"
-XPID= DPID= LPID=
+XPID= DPID= LPID= APID=
 cleanup () {
     [ -S "$XDG_RUNTIME_DIR/walpe.sock" ] && "$B/walpe-ctl" quit >/dev/null 2>&1
     sleep 0.3
     [ -n "$DPID" ] && kill "$DPID" 2>/dev/null
     [ -n "$LPID" ] && kill "$LPID" 2>/dev/null
+    [ -n "$APID" ] && kill "$APID" 2>/dev/null
     [ -n "$XPID" ] && kill "$XPID" 2>/dev/null
     sleep 0.3
     if [ -n "$WEBSEC_KEEP" ]; then echo "kept: $T"; return; fi   # (to look at daemon.log after a failure)
@@ -310,6 +315,46 @@ if [ -n "$CH" ] && ! grep -q 'WebKit start-up test' "$T/daemon2.log"; then
     kill -KILL "$CH" 2>/dev/null
 else
     echo "note: the WebKit start-up test was over before it could be stopped (its time limit not exercised)"
+fi
+
+# --- a third daemon, with network access: a frame of the page gets "401,
+# name and password please" from its server
+"$B/walpe-ctl" quit >/dev/null 2>&1
+i=0; while kill -0 "$DPID" 2>/dev/null && [ $i -lt 100 ]; do sleep 0.2; i=$((i+1)); done
+kill "$DPID" 2>/dev/null
+rm -f "$HOME/.config/walpe/config.json"
+python3 -I -c '
+import socket, sys
+s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(16)
+open(sys.argv[1], "w").write(str(s.getsockname()[1]))
+while True:
+    c, a = s.accept()
+    try:
+        c.settimeout(2); c.recv(2000)
+        c.sendall(b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"websec\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    except Exception:
+        pass
+    c.close()
+' "$T/aport" &
+APID=$!
+i=0; while [ ! -s "$T/aport" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+mkdir -p "$T/auth"
+printf '{ "type": "web", "title": "websec auth", "file": "index.html" }\n' > "$T/auth/project.json"
+cat > "$T/auth/index.html" <<PAGE
+<!doctype html><html><body><iframe src="http://127.0.0.1:$(cat "$T/aport" 2>/dev/null)/frame"></iframe>
+<script>console.log('NP auth page');</script></body></html>
+PAGE
+WALPE_WEB_CONSOLE=1 "$B/walpe-daemon" > "$T/daemon3.log" 2>&1 &
+DPID=$!
+i=0; while [ ! -S "$XDG_RUNTIME_DIR/walpe.sock" ] && [ $i -lt 100 ]; do sleep 0.2; i=$((i+1)); done
+"$B/walpe-ctl" open "$T/auth" >/dev/null 2>&1
+i=0; while ! grep -q 'NP auth page' "$T/daemon3.log" && [ $i -lt 240 ]; do sleep 0.5; i=$((i+1)); done
+if [ -s "$T/aport" ] && grep -q 'NP auth page' "$T/daemon3.log"; then
+    i=0; while ! grep -q 'web: loaded' "$T/daemon3.log" && [ $i -lt 60 ]; do sleep 0.5; i=$((i+1)); done
+    grep -q 'web: loaded' "$T/daemon3.log" ||
+        bad "a page with a frame whose server asks for a name and a password never finished loading (WebKit's own dialog waits in the page)"
+else
+    echo "note: the page for the authentication request did not come up here (not exercised)"
 fi
 [ $fail -eq 0 ] && echo "websec: ok"
 exit $fail
