@@ -1063,6 +1063,8 @@ static void scan_job_free (gpointer p)
     g_free (j);
 }
 
+static void arrivals_settle (GList *entries);
+
 static void scan_done (GObject *src, GAsyncResult *res, gpointer u)
 {
     (void) src; (void) u;
@@ -1073,6 +1075,7 @@ static void scan_done (GObject *src, GAsyncResult *res, gpointer u)
         return;
     }
     guint n = g_list_length (entries);
+    arrivals_settle (entries);
     if (U.first_scan_done && n == g_list_model_get_n_items (G_LIST_MODEL (U.model))) {
         /* nothing changed (the dir monitor fires for unrelated writes):
          * keep the model, the scroll position and the recycled tiles */
@@ -1159,13 +1162,114 @@ static void schedule_rescan (void)
     U.rescan_id = g_timeout_add (600, rescan_tick, NULL);
 }
 
-static void on_dir_changed (GFileMonitor *m, GFile *f, GFile *o, GFileMonitorEvent ev, gpointer u)
+/* ---- folders that arrive while the window is open
+ * The rescans above end 13.6 s after the folder appeared. A copy, an
+ * unpacking or a download that takes longer left its tile as the last of
+ * them found it - "Unsupported" (half a project.json), under its folder
+ * name, without its preview, or not listed at all - until F5 or the next
+ * start. A folder that appears in the library is therefore watched itself
+ * (its own files: project.json, the preview) until a scan lists it as a
+ * wallpaper with a preview, at most ARRIVAL_MAX_S; what changes in it
+ * scans the library again. Nothing is watched while nothing arrives. */
+#define ARRIVAL_MAX 64
+#define ARRIVAL_MAX_S (15 * 60)
+
+typedef struct {
+    GFileMonitor *mon;
+    gint64 since_us;
+} Arrival;
+
+static GHashTable *arrivals;    /* folder path -> Arrival */
+
+static void arrival_free (gpointer p)
+{
+    Arrival *a = p;
+    g_signal_handlers_disconnect_by_data (a->mon, a);
+    g_file_monitor_cancel (a->mon);
+    g_object_unref (a->mon);
+    g_free (a);
+}
+
+static gboolean dir_event_counts (GFileMonitorEvent ev)
+{
+    return ev == G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT || ev == G_FILE_MONITOR_EVENT_CREATED ||
+           ev == G_FILE_MONITOR_EVENT_DELETED || ev == G_FILE_MONITOR_EVENT_MOVED_IN ||
+           ev == G_FILE_MONITOR_EVENT_MOVED_OUT || ev == G_FILE_MONITOR_EVENT_RENAMED;
+}
+
+static void on_arrival_changed (GFileMonitor *m, GFile *f, GFile *o, GFileMonitorEvent ev, gpointer u)
 {
     (void) m; (void) f; (void) o; (void) u;
-    if (ev == G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT || ev == G_FILE_MONITOR_EVENT_CREATED ||
-        ev == G_FILE_MONITOR_EVENT_DELETED || ev == G_FILE_MONITOR_EVENT_MOVED_IN ||
-        ev == G_FILE_MONITOR_EVENT_MOVED_OUT || ev == G_FILE_MONITOR_EVENT_RENAMED)
+    if (dir_event_counts (ev))
         schedule_rescan ();
+}
+
+static void arrival_watch (GFile *f)
+{
+    char *path = f ? g_file_get_path (f) : NULL;
+    if (!path || !g_file_test (path, G_FILE_TEST_IS_DIR) ||
+        (arrivals && (g_hash_table_contains (arrivals, path) ||
+                      g_hash_table_size (arrivals) >= ARRIVAL_MAX))) {
+        g_free (path);
+        return;
+    }
+    GFileMonitor *mon = g_file_monitor_directory (f, G_FILE_MONITOR_WATCH_MOVES, NULL, NULL);
+    if (!mon) {
+        g_free (path);
+        return;
+    }
+    if (!arrivals)
+        arrivals = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, arrival_free);
+    Arrival *a = g_new0 (Arrival, 1);
+    a->mon = mon;
+    a->since_us = g_get_monotonic_time ();
+    g_signal_connect (mon, "changed", G_CALLBACK (on_arrival_changed), a);
+    g_hash_table_insert (arrivals, path, a);
+}
+
+static void arrival_drop (GFile *f)
+{
+    char *path = f ? g_file_get_path (f) : NULL;
+    if (path && arrivals)
+        g_hash_table_remove (arrivals, path);
+    g_free (path);
+}
+
+/* a scan is in: the folders it lists as wallpapers with a preview are
+ * complete as far as the window shows them */
+static void arrivals_settle (GList *entries)
+{
+    if (!arrivals || !g_hash_table_size (arrivals))
+        return;
+    gint64 now = g_get_monotonic_time ();
+    GHashTableIter it;
+    gpointer k, v;
+    g_hash_table_iter_init (&it, arrivals);
+    while (g_hash_table_iter_next (&it, &k, &v)) {
+        gboolean done = now - ((Arrival *) v)->since_us > (gint64) ARRIVAL_MAX_S * G_USEC_PER_SEC;
+        for (GList *l = entries; l && !done; l = l->next) {
+            WalpeEntry *e = l->data;
+            done = e->preview && g_strcmp0 (e->type, "unsupported") && same_path (e->path, k);
+        }
+        if (done)
+            g_hash_table_iter_remove (&it);
+    }
+}
+
+static void on_dir_changed (GFileMonitor *m, GFile *f, GFile *o, GFileMonitorEvent ev, gpointer u)
+{
+    (void) m; (void) u;
+    if (!dir_event_counts (ev))
+        return;
+    if (ev == G_FILE_MONITOR_EVENT_CREATED || ev == G_FILE_MONITOR_EVENT_MOVED_IN)
+        arrival_watch (f);
+    else if (ev == G_FILE_MONITOR_EVENT_DELETED || ev == G_FILE_MONITOR_EVENT_MOVED_OUT)
+        arrival_drop (f);
+    else if (ev == G_FILE_MONITOR_EVENT_RENAMED) {
+        arrival_drop (f);
+        arrival_watch (o);
+    }
+    schedule_rescan ();
 }
 
 /* ------------------------------------------------------------ grid tiles */
@@ -3544,6 +3648,7 @@ static void on_win_destroy (GtkWidget *w, gpointer user)
         g_file_monitor_cancel (U.dirmon);
         g_clear_object (&U.dirmon);
     }
+    g_clear_pointer (&arrivals, g_hash_table_unref);
     if (Sup.sub) {      /* the engine's state lines: no more of them */
         walpe_ipc_sub_free (Sup.sub);
         Sup.sub = NULL;
