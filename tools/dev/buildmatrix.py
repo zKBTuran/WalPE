@@ -107,6 +107,8 @@ def cell_options(cell, opts):
     """-> (meson setup arguments, why the cell cannot exist in this tree or None)"""
     backend, kind, tuning, minimal = parse_cell(cell)
     args, na = [], None
+    if "tests" in opts:
+        args.append("-Dtests=true")     # a tree with this option has no tests unless asked
     for ws in ("x11", "wayland"):
         want = backend in (ws, "both")
         if ws in opts:

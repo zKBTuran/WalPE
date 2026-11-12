@@ -260,6 +260,8 @@ def main():
     setup = []
     for c in cross + [local]:
         setup += ["--cross-file", c]
+    if "tests" in opts:
+        setup.append("-Dtests=true")    # a tree with this option has no tests unless asked
     if "native_tuning" in opts:
         setup.append("-Dnative_tuning=generic")
     if "web" in opts and not os.path.exists(os.path.join(libdir, "pkgconfig", "webkitgtk-6.0.pc")):
