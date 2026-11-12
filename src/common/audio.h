@@ -38,6 +38,19 @@ char *walpe_audio_status (void);
 /* bass level (mean of the lowest bands, both channels), 0..~1 */
 float walpe_audio_level (const WalpeAudioSpectrum *s);
 
+/* Sound after silence, for a consumer that would otherwise look for it at
+ * its frame rate (a scene in which nothing moves but what follows the
+ * spectrum draws no frame in silence, and woke 60 times a second to find
+ * that out). TRUE: the published spectrum is silence now, and fn (user)
+ * will be called once, from the capture thread, when a spectrum that is
+ * not silence is published; then it is forgotten. FALSE: there is sound
+ * right now (or no room for another waiter): nothing was noted, go on
+ * looking. fn must not block and must not call into this file.
+ * walpe_audio_wake_cancel takes the note back; when it returns, fn is
+ * not running and will not be called for it. */
+WALPE_API gboolean walpe_audio_wake_on_sound (void (*fn) (gpointer user), gpointer user);
+WALPE_API void walpe_audio_wake_cancel (void (*fn) (gpointer user), gpointer user);
+
 /* What the capture may read (pure; the capture thread asks it for the
  * source its stream is on, and again when the server moves the stream).
  * is_monitor: the source is the monitor of an output - what the computer

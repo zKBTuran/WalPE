@@ -84,6 +84,11 @@ static WalpeAudioSpectrum cur;
 static gboolean have_data;
 static gboolean cur_zero = TRUE;   /* cur holds silence */
 static G_GNUC_UNUSED char *status_msg;
+/* who waits for sound (walpe_audio_wake_on_sound; lock): one per monitor
+ * at most */
+#define AUDIO_WAITERS 16
+static struct { void (*fn) (gpointer); gpointer user; } waiters[AUDIO_WAITERS];
+static int n_waiters;
 
 /* ------------------------------------------------------------- analysis */
 
@@ -327,10 +332,22 @@ static void ring_reset (Ring *r, int rate)
 
 static void publish (const WalpeAudioSpectrum *s, gboolean zero)
 {
+    /* (a window of digital silence that was analysed - the first ones of
+     * a stream - is silence too: what counts is what consumers read) */
+    gboolean sound = FALSE;
+    for (int b = 0; !zero && !sound && b < WALPE_AUDIO_BANDS; b++)
+        sound = s->left[b] > 0 || s->right[b] > 0;
     g_mutex_lock (&lock);
     cur = *s;
-    cur_zero = zero;
+    cur_zero = !sound;
     have_data = TRUE;
+    if (sound && n_waiters) {
+        /* sound: whoever rested in the silence draws again. (Under the
+         * lock: walpe_audio_wake_cancel returns with no call under way) */
+        for (int i = 0; i < n_waiters; i++)
+            waiters[i].fn (waiters[i].user);
+        n_waiters = 0;
+    }
     g_mutex_unlock (&lock);
 }
 
@@ -790,6 +807,35 @@ void walpe_audio_unref (void)
         pa_mainloop_wakeup (cap_ml);    /* the capture loop sees it at once */
     g_mutex_unlock (&lock);
 #endif
+}
+
+gboolean walpe_audio_wake_on_sound (void (*fn) (gpointer user), gpointer user)
+{
+    gboolean noted = FALSE;
+    g_mutex_lock (&lock);
+    if (fn && cur_zero) {
+        for (int i = 0; i < n_waiters && !noted; i++)
+            noted = waiters[i].fn == fn && waiters[i].user == user;
+        if (!noted && n_waiters < AUDIO_WAITERS) {
+            waiters[n_waiters].fn = fn;
+            waiters[n_waiters].user = user;
+            n_waiters++;
+            noted = TRUE;
+        }
+    }
+    g_mutex_unlock (&lock);
+    return noted;
+}
+
+void walpe_audio_wake_cancel (void (*fn) (gpointer user), gpointer user)
+{
+    g_mutex_lock (&lock);
+    for (int i = 0; i < n_waiters; i++)
+        if (waiters[i].fn == fn && waiters[i].user == user) {
+            waiters[i] = waiters[--n_waiters];
+            break;
+        }
+    g_mutex_unlock (&lock);
 }
 
 gboolean walpe_audio_get (WalpeAudioSpectrum *out)

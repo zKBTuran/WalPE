@@ -10,7 +10,8 @@
  * the spectrum the capture publishes.
  *
  *  1. The capture reads the monitor of the default output and says so by
- *     name; a 1 kHz tone played there is band 35 of 64.
+ *     name; a 1 kHz tone played there is band 35 of 64. A consumer that
+ *     waits for sound is called once when the tone starts.
  *  2. A microphone appears - a source that is no monitor - and becomes
  *     the default source, as it does on a machine that had none. The
  *     server moves every recording stream that sat on the default source
@@ -159,6 +160,13 @@ static float most_of (int band, int ms)
     return most;
 }
 
+static gint woke;
+
+static void on_sound (gpointer user)
+{
+    g_atomic_int_inc ((gint *) user);
+}
+
 static gboolean status_is (const char *want, int ms)
 {
     for (int w = 0; w < ms; w += 20) {
@@ -209,6 +217,14 @@ int main (void)
     g_setenv ("XDG_CONFIG_HOME", tmpdir, TRUE);
     g_setenv ("HOME", tmpdir, TRUE);
     g_setenv ("PULSE_SERVER", srv, TRUE);
+    /* no session bus for the server: on the user's bus the name
+     * org.PulseAudio1 belongs to the sound server of the session, and a
+     * second PulseAudio that sees it there ends at once (the test was
+     * skipped exactly where a sound server runs). An address nobody
+     * listens on: it goes on without the bus */
+    char *nobus = g_strdup_printf ("unix:path=%s/no-bus", tmpdir);
+    g_setenv ("DBUS_SESSION_BUS_ADDRESS", nobus, TRUE);
+    g_free (nobus);
     g_unsetenv ("PULSE_SINK");
     g_unsetenv ("PULSE_SOURCE");
     g_unsetenv ("PULSE_COOKIE");
@@ -241,6 +257,40 @@ int main (void)
     Tone *t = tone_start ("out1", 1000.0);
     CHECK (hears (35, 5000), "a 1 kHz tone on the output is not band 35");
     tone_stop (t);
+
+    /* 1b. sound after silence (walpe_audio_wake_on_sound): noted while
+     * the spectrum is silence, called once with the first sound, not
+     * noted while there is sound, not called after it was taken back */
+    {
+        gboolean noted = FALSE;
+        for (int w = 0; w < 5000 && !noted; w += 50) {
+            noted = walpe_audio_wake_on_sound (on_sound, &woke);
+            if (!noted)
+                g_usleep (50000);
+        }
+        CHECK (noted, "silence, and a waiter for sound was not noted");
+        g_usleep (300000);
+        CHECK (g_atomic_int_get (&woke) == 0, "woken in silence");
+        t = tone_start ("out1", 1000.0);
+        for (int w = 0; w < 3000 && !g_atomic_int_get (&woke); w += 10)
+            g_usleep (10000);
+        CHECK (g_atomic_int_get (&woke) == 1, "sound, and the waiter was called %d times", g_atomic_int_get (&woke));
+        CHECK (hears (35, 3000), "the tone that woke the waiter is not band 35");
+        CHECK (!walpe_audio_wake_on_sound (on_sound, &woke), "a waiter was noted while there is sound");
+        tone_stop (t);
+        noted = FALSE;
+        for (int w = 0; w < 5000 && !noted; w += 50) {
+            noted = walpe_audio_wake_on_sound (on_sound, &woke);
+            if (!noted)
+                g_usleep (50000);
+        }
+        CHECK (noted, "silence again, and a waiter was not noted");
+        walpe_audio_wake_cancel (on_sound, &woke);
+        t = tone_start ("out1", 1000.0);
+        CHECK (hears (35, 3000), "the second tone is not heard");
+        tone_stop (t);
+        CHECK (g_atomic_int_get (&woke) == 1, "a waiter that was taken back was called");
+    }
 
     /* 2. a microphone appears: what the sink "room" is played is what it
      * hears. The server makes it the default source by itself where the

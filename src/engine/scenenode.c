@@ -287,6 +287,12 @@ typedef struct {
     gboolean needs_audio;  /* g_AudioSpectrum effects / audio emitters */
     gboolean audio_ref;    /* holds a capture reference (visible + unpaused) */
     WalpeAudioSpectrum audio;
+    /* silence (scene_audio_rest): frames in a row that were found unchanged
+     * while the spectrum was silence, and whether the frame clock is
+     * stopped for it - the capture thread asks for a frame when there is
+     * sound again (walpe_audio_wake_on_sound) */
+    guint audio_quiet;
+    gboolean audio_rest;
     /* sound layers (scenenode_sound.h, scenesound.h) */
     WalpeSoundGroup *sound_group; /* this scene's players (NULL = none) */
     gboolean sound_tried;       /* the group was asked for */
@@ -5531,6 +5537,80 @@ static void scenenode_particles_changed (SceneNodeContent *s)
     s->base.picture_serial++;   /* the frame skip and the bake see it */
 }
 
+/* Nothing in the scene moves but what follows the audio spectrum: no
+ * script, particle system, puppet, video, sprite sheet, media picture or
+ * camera parallax, and no effect that reads the time, the pointer, the
+ * time of day or its own last frame. (Asked when the scene has stood
+ * still for a while, not once: options switch effects on and off.) */
+static gboolean scene_only_audio_moves (SceneNodeContent *s)
+{
+    if (!s->needs_audio || s->ss || s->needs_media || s->has_sprites || s->par_on ||
+        s->videos->len > 0 || scene_post_view_moves (s))
+        return FALSE;
+    for (guint i = 0; i < s->nodes->len; i++) {
+        NodeObj *nv = &g_array_index (s->nodes, NodeObj, i);
+        if (nv->parts || nv->weparts || nv->puppet || nv->systex || nv->video >= 0 ||
+            fx_has_simulation (nv->fxset))
+            return FALSE;
+        if (fx_has_effects (nv->fxset) && (fx_dynamic_inputs (nv->fxset) & ~(guint) FX_DYN_AUDIO))
+            return FALSE;
+    }
+    return TRUE;
+}
+
+static void scene_audio_rest_end (SceneNodeContent *s)
+{
+    s->audio_quiet = 0;
+    if (s->audio_rest) {
+        s->audio_rest = FALSE;
+        walpe_audio_wake_cancel (s->base.request_redraw, s->base.request_user);
+    }
+}
+
+/* render thread, at the end of a frame of a scene with a frame clock:
+ * TRUE = no next frame is due. A scene in which only the spectrum moves
+ * draws nothing while there is no sound (its frames are found unchanged),
+ * but its render thread still woke at the frame rate to find that out: 60
+ * times a second for a picture with audio bars, all the time nothing
+ * plays. After two seconds of such frames the clock stops; the capture
+ * thread asks for a frame with the first spectrum that is not silence
+ * (and the owner for any other reason a still scene is drawn for), and
+ * the first frame that is drawn starts the clock again.
+ * WALPE_AUDIO_REST=0: never (the clock runs on, as it did). */
+static gboolean scene_audio_rest (SceneNodeContent *s, WalpeContent *c)
+{
+    static gsize off;
+    if (g_once_init_enter (&off)) {
+        const char *e = g_getenv ("WALPE_AUDIO_REST");
+        g_once_init_leave (&off, e && !strcmp (e, "0") ? 2 : 1);
+    }
+    gboolean quiet = off == 1 && s->audio_ref && c->frame_unchanged && c->request_redraw;
+    for (int b = 0; quiet && b < WALPE_AUDIO_BANDS; b++)
+        quiet = s->audio.left[b] == 0 && s->audio.right[b] == 0;
+    if (!quiet) {
+        scene_audio_rest_end (s);
+        return FALSE;
+    }
+    if (s->audio_rest) {
+        /* a frame the owner asked for, and nothing changed. (Noted again:
+         * the capture thread forgets a waiter when it has called it) */
+        if (walpe_audio_wake_on_sound (c->request_redraw, c->request_user))
+            return TRUE;
+        s->audio_rest = FALSE;
+        return FALSE;
+    }
+    const guint fps = (guint) (s->fps_cap > 0 ? s->fps_cap : 30);
+    if (++s->audio_quiet < 2 * fps)
+        return FALSE;
+    s->audio_quiet = 0;
+    if (!scene_only_audio_moves (s) ||
+        !walpe_audio_wake_on_sound (c->request_redraw, c->request_user))
+        return FALSE;   /* (looked at again after two more seconds) */
+    s->audio_rest = TRUE;
+    g_debug ("scenenode: silence and nothing else moves: no frame clock until there is sound");
+    return TRUE;
+}
+
 static gboolean scenenode_gl_render (WalpeContent *c, int w, int h, float px, float py)
 {
     SceneNodeContent *s = (SceneNodeContent *) c;
@@ -6717,7 +6797,8 @@ frame_done:
          * video has (a 30 fps clip under a 60 fps cap) */
         if (s->only_video_anim && video_iv > iv)
             iv = video_iv;
-        c->next_frame_us = walpe_frame_clock_next (&s->due_us, iv);
+        if (!scene_audio_rest (s, c))
+            c->next_frame_us = walpe_frame_clock_next (&s->due_us, iv);
     } else if (par_run || cam_run) {
         /* frames while the lagging pointer travels. Once it has arrived
          * nothing is asked for: the caller draws a frame when the pointer
@@ -6789,6 +6870,7 @@ static void scenenode_gl_free (WalpeContent *c)
         s->px_state = 0;
     }
     fx_set_quality (1, FALSE, WALPE_POST_FULL, 60.0, 0);
+    scene_audio_rest_end (s);
     if (s->audio_ref) {
         s->audio_ref = FALSE;
         walpe_audio_unref ();
@@ -7053,6 +7135,8 @@ static void scenenode_set_paused (WalpeContent *c, gboolean p)
         scenenode_drop_targets (s);
         scenenode_trim_heap (s);
     }
+    if (p)
+        scene_audio_rest_end (s);
     /* capture only while some audio-reactive scene is actually shown */
     if (s->needs_audio && !g_getenv ("WALPE_NO_AUDIO") && p == s->audio_ref) {
         s->audio_ref = !p;
