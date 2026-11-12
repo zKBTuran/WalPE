@@ -76,6 +76,11 @@ that into the daemon's log). Nothing of the user's is read or written.
             the page read nothing of them.
   offline   network access off (WALPE_WEB_OFFLINE=1): the page's own file loads, and
             nothing reaches another port of this machine.
+  sound     a page with an <audio> element, an Audio object and an AudioContext, no sound
+            server needed: with wallpaper sound off the Audio object is held, not
+            refused; `walpe-ctl set scene_sound=on volume=0.3` starts it without a click
+            and changes the element's real volume (the page reads back its own value);
+            `mute` and a paused wallpaper hold it again.
 
 --display xvfb runs the cases that need no real output on a private X server instead
 (the daemon draws on X11); with --host x11 the pages are then on the X11 page host, with
@@ -1623,13 +1628,87 @@ def case_offline(env, W):
         srv.close()
 
 
+# ------------------------------------------------------------------- sound
+SOUNDPAGE = """<!doctype html><html><body style="background:#103050"><audio id="a" loop></audio><script>
+var S = {user: 0, vc: 0, play: 'pending', v: null, dp: null, ctx: null, born: Date.now()};
+var el = document.getElementById('a'); el.volume = 0.5;
+el.addEventListener('volumechange', function () { S.vc++; });
+var det = new Audio('tone.wav'); det.loop = true;
+var pr = det.play();
+if (pr && pr.then) pr.then(function () { S.play = 'ok'; }, function (e) { S.play = e.name; });
+var AC = window.AudioContext || window.webkitAudioContext, ctx = null;
+try { ctx = new AC(); var o = ctx.createOscillator(); o.connect(ctx.destination); o.start(); } catch (e) {}
+function say() { S.v = el.volume; S.dp = det.paused; S.ctx = ctx ? ctx.state : null;
+  console.log('WCsound ' + JSON.stringify(S)); }
+window.wallpaperPropertyListener = {applyUserProperties: function () { S.user++; say(); }};
+setInterval(say, 300); window.addEventListener('load', say);
+</script></body></html>
+"""
+
+
+def gen_sound(out):
+    import math
+    import struct
+    import wave
+    os.makedirs(out)
+    rc.jdump(os.path.join(out, "project.json"), {"type": "web", "title": "webcheck sound", "file": "index.html"})
+    with open(os.path.join(out, "index.html"), "w") as f:
+        f.write(SOUNDPAGE)
+    w = wave.open(os.path.join(out, "tone.wav"), "wb")
+    w.setnchannels(1)
+    w.setsampwidth(2)
+    w.setframerate(8000)
+    w.writeframes(b"".join(struct.pack("<h", int(8000 * math.sin(2 * math.pi * 440 * i / 8000))) for i in range(8000)))
+    w.close()
+
+
+def case_sound(env, W):
+    # (no sound server here: what is checked is what the page is told and allowed, which
+    # needs none; what is heard was measured against a sound server, docs/SOUND.md)
+    if not start(env, [("A", 1280, 720, 0, 0)], "sound"):
+        return
+    mark = env.mark()
+    st = open_page(env, W["sound"], "sound", "sound")
+    if not st:
+        return
+    time.sleep(1.0)
+    st = state(env, "sound", fresh=True)
+    check(st.get("play") != "NotAllowedError",
+          "sound: play() of an Audio object is not refused for want of a click", st.get("play"))
+    check(st.get("dp") is True and st.get("v") == 0.5,
+          "sound: wallpaper sound is off: the Audio object is held, the element has the page's volume",
+          (st.get("dp"), st.get("v")))
+    vc0 = st.get("vc", 0)
+    env.ctl("set", "scene_sound=on", "volume=0.3")
+    st = wait_state(env, "sound", lambda s: s.get("dp") is False and s.get("vc", 0) > vc0, 20, env.mark())
+    check(st.get("dp") is False, "sound: switched on: the Audio object plays, without a click", st.get("dp"))
+    check(st.get("vc", 0) > vc0 and st.get("v") == 0.5,
+          "sound: the volume setting reached the element; the page reads back its own value",
+          (vc0, st.get("vc"), st.get("v")))
+    note("sound: the AudioContext is %s" % st.get("ctx"))
+    for on, off in (("mute=on", "mute=off"), ("scene_sound=off", "scene_sound=on")):
+        env.ctl("set", on)
+        st = wait_state(env, "sound", lambda s: s.get("dp") is True, 20, env.mark())
+        check(st.get("dp") is True, "sound: %s holds it" % on, st.get("dp"))
+        env.ctl("set", off)
+        st = wait_state(env, "sound", lambda s: s.get("dp") is False, 20, env.mark())
+        check(st.get("dp") is False, "sound: %s lets it play again" % off, st.get("dp"))
+    env.ctl("pause")
+    time.sleep(1.5)
+    env.ctl("resume")
+    st = wait_state(env, "sound", lambda s: s.get("dp") is False, 20, env.mark())
+    check(st.get("dp") is False and st.get("born") is not None,
+          "sound: after a pause of the wallpaper it plays again", st.get("dp"))
+    healthy(env, mark, "sound")
+
+
 CASES = [("start", case_start), ("live", case_live), ("props", case_props), ("audio", case_audio),
          ("pointer", case_pointer), ("two", case_two), ("outputs", case_outputs), ("pause", case_pause),
          ("pausedopen", case_pausedopen), ("firstsecond", case_firstsecond),
          ("mixedpause", case_mixedpause),
          ("restart", case_restart), ("crash", case_crash), ("stale", case_stale), ("leftover", case_leftover),
          ("sandbox", case_sandbox), ("widgets", case_widgets), ("clipboard", case_clipboard),
-         ("offline", case_offline)]
+         ("offline", case_offline), ("sound", case_sound)]
 # cases that need outputs that can be made, changed and removed
 NEED_OUTPUTS = ("two", "outputs", "mixedpause")
 
@@ -1695,13 +1774,15 @@ def main():
                   "pass --tmp <a short directory>")
             return 2
         wp = os.path.join(env.tmp, "wallpapers")
-        W = {k: os.path.join(wp, k) for k in ("still", "live", "other", "widgets", "clip", "offline", "intro")}
+        W = {k: os.path.join(wp, k) for k in ("still", "live", "other", "widgets", "clip", "offline", "intro",
+                                              "sound")}
         gen_page(W["still"], "still", False)
         gen_page(W["live"], "live", True)
         gen_page(W["other"], "other", False)
         gen_widgets(W["widgets"])
         gen_clip(W["clip"])
         gen_intro(W["intro"])
+        gen_sound(W["sound"])
         if not env.start_x(1280, 720):
             print("webcheck: skipped (the %s display did not start)" % display)
             if display == "sway":

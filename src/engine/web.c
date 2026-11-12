@@ -1399,7 +1399,14 @@ static void web_private_screen (int w, int h);
 
 /* ------------------------------------------------------ the page's sound
  * A wallpaper page plays its sound by itself: <audio> and <video> elements,
- * Audio objects made by its script, Web Audio. Two things are WalPE's:
+ * Audio objects made by its script, Web Audio. Three things are WalPE's:
+ *
+ * It may start. WebKit's default lets media with a sound track start only
+ * after the user has clicked the page, as in a browser: a wallpaper's
+ * background music never began, `new Audio (...).play ()` was refused
+ * (NotAllowedError), an AudioContext stayed "interrupted", and a <video
+ * autoplay> that has a sound track and is not muted showed its first
+ * picture for ever. The page gets WEBKIT_AUTOPLAY_ALLOW (sh_create_real).
  *
  * How loud it is: the level of walpe_web_sound (the volume setting; 0
  * while wallpaper sound is switched off or "mute" is on, and 0 in every
@@ -3692,9 +3699,14 @@ static gboolean sh_create_real (WebShared *sh)
     }
     webkit_user_content_manager_register_script_message_handler (ucm, "walpe", NULL);
     g_signal_connect (ucm, "script-message-received::walpe", G_CALLBACK (on_script_message), sh);
+    /* a wallpaper's media start by themselves, with their sound (see "the
+     * page's sound" above): nobody clicks a wallpaper to start its music */
+    WebKitWebsitePolicies *pol = webkit_website_policies_new_with_policies ("autoplay", WEBKIT_AUTOPLAY_ALLOW, NULL);
     sh->view = WEBKIT_WEB_VIEW (g_object_new (WEBKIT_TYPE_WEB_VIEW, "web-context", web_ctx,
                                               "network-session", ns,
-                                              "user-content-manager", ucm, NULL));
+                                              "user-content-manager", ucm,
+                                              "website-policies", pol, NULL));
+    g_object_unref (pol);
     g_object_unref (ns);
     g_object_unref (ucm);
     /* how loud, before the page loads anything */
