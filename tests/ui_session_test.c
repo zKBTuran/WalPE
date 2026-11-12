@@ -110,6 +110,12 @@ int main (void)
         CHECK (walpe_sup_poll_secs (&p) == 0, "pushed state, window in the background: no timer");
         p.active = TRUE;
         CHECK (walpe_sup_poll_secs (&p) == 10, "pushed state, active window: every 10 s");
+        /* the connection stands but the engine did not answer: it will
+         * push nothing when it answers again, so it is asked */
+        p = (WalpeSupPoll) { .live = TRUE, .watching = TRUE };
+        CHECK (walpe_sup_poll_secs (&p) == 10, "pushed state, engine not answering, background: every 10 s");
+        p.active = TRUE;
+        CHECK (walpe_sup_poll_secs (&p) == 10, "the same, active");
         p = (WalpeSupPoll) { .unsupported = TRUE, .up = TRUE, .watching = TRUE };
         CHECK (walpe_sup_poll_secs (&p) == 0, "an engine that cannot push, background: no timer");
         p.active = TRUE;
