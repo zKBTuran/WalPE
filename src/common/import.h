@@ -47,6 +47,15 @@ char   **walpe_import_build_argv (const char *src, const char *dst_part,
                                   const WalpeMediaInfo *mi, const char *encoder,
                                   gboolean remux, const WalpeVideoBox *box);
 
+/* the same run for an import into the library (walpe_import_start): the
+ * video's first sound track is kept, as AAC (192 kbit/s, two channels) -
+ * the imported file is all that is left of the video, and the player takes
+ * a video wallpaper's sound from the wallpaper's own file. A video without
+ * a sound track is imported as before. */
+char   **walpe_import_library_argv (const char *src, const char *dst_part,
+                                    const WalpeMediaInfo *mi, const char *encoder,
+                                    gboolean remux, const WalpeVideoBox *box);
+
 typedef struct _WalpeImport WalpeImport;
 /* called once on the main context; ok=FALSE carries a human-readable error */
 typedef void (*WalpeImportDone) (WalpeImport *imp, gboolean ok, const char *dst,
@@ -115,6 +124,25 @@ char   **walpe_import_scene_argv (const char *src, const WalpeImportScene *sc, c
  * plain name the copies had while that size was built in, so those stay
  * in use. NULL when src cannot be stat'ed. g_free. */
 char        *walpe_video_cache_file (const char *src, const WalpeVideoBox *box);
+/* The sound track of a video wallpaper. The player (engine/video.c) does
+ * not decode it out of the video: it is taken out once, with ffmpeg, into
+ * <user cache dir>/walpe/video/<hash of path, size, mtime>-sound.flac
+ * (lossless, 16 bit, two channels; the scene sound player reads it), and
+ * that file is what sounds from then on. A file of length 0 under that
+ * name means "this video has no sound track". NULL when src is not a
+ * regular file. g_free. */
+char        *walpe_video_sound_file (const char *src);
+/* Makes that file: runs ffmpeg and waits for it - for a thread that may
+ * wait (the sound player's own, when the track is about to be heard for
+ * the first time), never the main or a render thread. The child runs at
+ * the lowest CPU and disk priority, ends with this process, reads src
+ * under the limits of every conversion (local file, container formats
+ * only) and is stopped after WALPE_CONVERT_MAX_MIN minutes. 1 = dst is
+ * there; 0 = the video has no sound track (dst is the empty file that says
+ * so); -1 = failed, *err (g_free) says why and nothing is left behind. */
+int          walpe_video_sound_extract (const char *src, const char *dst, char **err);
+/* argv of that run (tests; NULL-terminated, g_strfreev) */
+char       **walpe_video_sound_argv (const char *src, const char *dst_part);
 int          walpe_import_percent (WalpeImport *imp); /* -1 = unknown */
 const char  *walpe_import_label   (WalpeImport *imp); /* source file stem */
 const char  *walpe_import_mode    (WalpeImport *imp); /* "probe" "remux" "transcode:<enc>" */

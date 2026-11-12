@@ -14,6 +14,8 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/wait.h>
 #include <math.h>
 #include <sched.h>
 #include <signal.h>
@@ -225,7 +227,7 @@ static void push (GPtrArray *a, const char *s)
 /* sc: the clip is a scene's (walpe_import_start_scene), else NULL */
 static char **build_argv (const char *src, const char *dst_part, const WalpeMediaInfo *mi,
                           const char *encoder, gboolean remux, const WalpeVideoBox *box,
-                          const WalpeImportScene *sc)
+                          const WalpeImportScene *sc, gboolean sound)
 {
     GPtrArray *a = g_ptr_array_new ();
     push (a, "ffmpeg");
@@ -249,6 +251,10 @@ static char **build_argv (const char *src, const char *dst_part, const WalpeMedi
     g_ptr_array_add (a, input_url (src, sc));
     push (a, "-map");
     push (a, "0:v:0");
+    if (sound) {
+        push (a, "-map");
+        push (a, "0:a:0?");         /* its first sound track, where it has one */
+    }
     if (remux) {
         push (a, "-c:v");
         push (a, "copy");
@@ -302,7 +308,22 @@ static char **build_argv (const char *src, const char *dst_part, const WalpeMedi
         push (a, "-pix_fmt");
         push (a, "yuv420p");
     }
-    push (a, "-an");                 /* the renderer has no audio path */
+    if (sound) {
+        /* An import into the library keeps the sound track: the imported
+         * file is all that is left of the video, and the player takes a
+         * video wallpaper's sound from the wallpaper's own file
+         * (walpe_video_sound_extract). AAC, which every ffmpeg encodes and
+         * MP4 holds, also in a stream copy of the pictures: a track of
+         * another codec may be one MP4 does not take. */
+        push (a, "-c:a");
+        push (a, "aac");
+        push (a, "-b:a");
+        push (a, "192k");
+        push (a, "-ac");
+        push (a, "2");
+    } else {
+        push (a, "-an");             /* the pictures only: a copy made to be decoded */
+    }
     push (a, "-sn");
     push (a, "-dn");
     push (a, "-map_metadata");
@@ -323,13 +344,20 @@ char **walpe_import_build_argv (const char *src, const char *dst_part,
                                 const WalpeMediaInfo *mi, const char *encoder,
                                 gboolean remux, const WalpeVideoBox *box)
 {
-    return build_argv (src, dst_part, mi, encoder, remux, box, NULL);
+    return build_argv (src, dst_part, mi, encoder, remux, box, NULL, FALSE);
+}
+
+char **walpe_import_library_argv (const char *src, const char *dst_part,
+                                  const WalpeMediaInfo *mi, const char *encoder,
+                                  gboolean remux, const WalpeVideoBox *box)
+{
+    return build_argv (src, dst_part, mi, encoder, remux, box, NULL, TRUE);
 }
 
 char **walpe_import_scene_argv (const char *src, const WalpeImportScene *sc, const char *dst_part,
                                 const char *encoder)
 {
-    return build_argv (src, dst_part, NULL, encoder, FALSE, NULL, sc);
+    return build_argv (src, dst_part, NULL, encoder, FALSE, NULL, sc, FALSE);
 }
 
 /* ------------------------------------------------------------ the job */
@@ -365,6 +393,7 @@ struct _WalpeImport {
      * a byte range of src, the output has exactly the size asked for, and
      * ffmpeg runs at the lowest priority */
     gboolean is_scene;
+    gboolean keep_sound;             /* an import into the library: the sound track stays */
     WalpeImportScene scene;
 };
 
@@ -655,7 +684,7 @@ static void start_encode (WalpeImport *imp)
     else
         g_snprintf (imp->mode, sizeof (imp->mode), "transcode:%s", imp->used_encoder);
     char **argv = build_argv (imp->src, imp->dst_part, &imp->mi, imp->used_encoder, imp->remux,
-                              &imp->box, imp->is_scene ? &imp->scene : NULL);
+                              &imp->box, imp->is_scene ? &imp->scene : NULL, imp->keep_sound);
     GError *err = NULL;
     {
         GSubprocessLauncher *l = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE |
@@ -959,6 +988,161 @@ char *walpe_video_cache_file (const char *src, const WalpeVideoBox *box)
     return p;
 }
 
+/* ------------------------------------------- the sound track of a video */
+
+char *walpe_video_sound_file (const char *src)
+{
+    GStatBuf st;
+    if (!src || g_stat (src, &st) != 0 || !S_ISREG (st.st_mode))
+        return NULL;
+    char *key = g_strdup_printf ("%s\n%" G_GINT64_FORMAT "\n%" G_GINT64_FORMAT ".%ld", src,
+                                 (gint64) st.st_size, (gint64) st.st_mtim.tv_sec,
+                                 (long) st.st_mtim.tv_nsec);
+    char *sum = g_compute_checksum_for_string (G_CHECKSUM_SHA256, key, -1);
+    sum[32] = 0;
+    char *name = g_strconcat (sum, "-sound.flac", NULL);
+    char *p = g_build_filename (g_get_user_cache_dir (), "walpe", "video", name, NULL);
+    g_free (name);
+    g_free (sum);
+    g_free (key);
+    return p;
+}
+
+char **walpe_video_sound_argv (const char *src, const char *dst_part)
+{
+    GPtrArray *a = g_ptr_array_new ();
+    push (a, "ffmpeg");
+    push (a, "-hide_banner");
+    push (a, "-nostdin");
+    push (a, "-y");
+    push (a, "-v");
+    push (a, "error");
+    push_input_limits (a, FALSE);
+    push (a, "-i");
+    g_ptr_array_add (a, input_url (src, NULL));
+    push (a, "-map");
+    push (a, "0:a:0");
+    push (a, "-vn");
+    push (a, "-sn");
+    push (a, "-dn");
+    push (a, "-map_metadata");
+    push (a, "-1");
+    push (a, "-ac");
+    push (a, "2");
+    push (a, "-c:a");
+    push (a, "flac");
+    push (a, "-sample_fmt");
+    push (a, "s16");
+    /* what the player takes of a sound file at most (scenesound.h: six
+     * hours, 2 GiB) */
+    push (a, "-t");
+    push (a, "21600");
+    push (a, "-fs");
+    push (a, "2000000000");
+    push (a, "-f");
+    push (a, "flac");                /* explicit: ".part" hides the extension */
+    g_ptr_array_add (a, g_strconcat ("file:", dst_part, NULL));
+    g_ptr_array_add (a, NULL);
+    return (char **) g_ptr_array_free (a, FALSE);
+}
+
+int walpe_video_sound_extract (const char *src, const char *dst, char **err)
+{
+    static GMutex one;      /* one at a time in this process: they share the ".part" of a video */
+    int res = -1;
+    if (err)
+        *err = NULL;
+    g_mutex_lock (&one);
+    if (g_file_test (dst, G_FILE_TEST_EXISTS)) {    /* made while this call waited */
+        GStatBuf st;
+        res = g_stat (dst, &st) == 0 && st.st_size > 0 ? 1 : 0;
+        g_mutex_unlock (&one);
+        return res;
+    }
+    char *dir = g_path_get_dirname (dst);
+    char *part = g_strconcat (dst, ".part", NULL);
+    char **argv = walpe_video_sound_argv (src, part);
+    ChildSetup cs = { TRUE, (gint64) getpid () };
+    GPid pid = 0;
+    int efd = -1;
+    GError *e = NULL;
+    GString *said = g_string_new (NULL);
+    gboolean timed_out = FALSE;
+    int status = -1;
+    if (g_mkdir_with_parents (dir, 0700) != 0) {
+        g_string_printf (said, "%s: %s", dir, g_strerror (errno));
+    } else if (!g_spawn_async_with_pipes (NULL, argv, NULL,
+                                          G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD |
+                                          G_SPAWN_STDOUT_TO_DEV_NULL,
+                                          background_child_setup, &cs, &pid, NULL, NULL, &efd, &e)) {
+        g_string_assign (said, e->message);
+        g_error_free (e);
+    } else {
+        /* its own child, waited for here: bounded like every conversion of
+         * a file nobody chose in person (WALPE_CONVERT_MAX_MIN) */
+        const gint64 max_us = limit_env ("WALPE_CONVERT_MAX_MIN", 60) * 60 * G_USEC_PER_SEC;
+        const gint64 t0 = g_get_monotonic_time ();
+        /* (what ffmpeg says is read while it runs: a full pipe would stop it) */
+        fcntl (efd, F_SETFL, fcntl (efd, F_GETFL) | O_NONBLOCK);
+        for (;;) {
+            char buf[512];
+            ssize_t n;
+            while ((n = read (efd, buf, sizeof buf)) > 0)
+                if (said->len < 2000)
+                    g_string_append_len (said, buf, n);
+            pid_t r = waitpid (pid, &status, WNOHANG);
+            if (r == pid)
+                break;
+            if (r < 0 && errno != EINTR) {
+                status = -1;
+                break;
+            }
+            if (max_us > 0 && g_get_monotonic_time () - t0 > max_us) {
+                kill (pid, SIGKILL);
+                while (waitpid (pid, &status, 0) < 0 && errno == EINTR)
+                    ;
+                timed_out = TRUE;
+                break;
+            }
+            g_usleep (20000);
+        }
+        {
+            char buf[512];
+            ssize_t n;
+            while ((n = read (efd, buf, sizeof buf)) > 0)
+                if (said->len < 2000)
+                    g_string_append_len (said, buf, n);
+        }
+        close (efd);
+        g_spawn_close_pid (pid);
+        GStatBuf st;
+        if (!timed_out && WIFEXITED (status) && WEXITSTATUS (status) == 0 &&
+            g_stat (part, &st) == 0 && st.st_size > 0 && g_rename (part, dst) == 0) {
+            res = 1;
+        } else if (!timed_out && strstr (said->str, "matches no streams")) {
+            /* the video has no sound track: an empty file says so from now
+             * on, and nobody asks ffmpeg again */
+            g_remove (part);
+            if (g_file_set_contents (dst, "", 0, NULL))
+                res = 0;
+        } else if (timed_out) {
+            g_string_assign (said, "stopped: it took longer than WALPE_CONVERT_MAX_MIN minutes");
+        }
+    }
+    if (res < 0) {
+        g_remove (part);
+        g_strchomp (said->str);
+        if (err)
+            *err = g_strdup (*said->str ? said->str : "ffmpeg failed");
+    }
+    g_string_free (said, TRUE);
+    g_strfreev (argv);
+    g_free (part);
+    g_free (dir);
+    g_mutex_unlock (&one);
+    return res;
+}
+
 static WalpeImport *import_start (const char *src, const char *dest_dir, const char *dst_file,
                                   const char *encoder, const WalpeVideoBox *box,
                                   const WalpeImportScene *sc,
@@ -1066,6 +1250,7 @@ static WalpeImport *import_start (const char *src, const char *dest_dir, const c
         *dot = 0;
     imp->label = base;
     imp->dst = dst_file ? g_strdup (dst_file) : unique_dst (dest_dir, base, src);
+    imp->keep_sound = !dst_file;
     imp->dst_part = g_strconcat (imp->dst, ".part", NULL);
     if (!jobs)
         jobs = g_ptr_array_new ();

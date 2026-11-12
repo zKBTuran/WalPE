@@ -169,6 +169,26 @@ static void test_decisions (void)
     av = walpe_import_build_argv ("/in/a.mp4", "/out/a.mp4.part", &mi, "libx264", TRUE, &hd);
     CHECK (have_arg (av, "-c:v", "copy") && !have_arg (av, "-vf", NULL));
     g_strfreev (av);
+    /* an import into the library keeps the first sound track, where the
+     * video has one (as AAC, also beside a stream copy of the pictures);
+     * everything else about the run is the same */
+    for (int remux = 0; remux < 2; remux++) {
+        av = walpe_import_library_argv ("/in/a.mkv", "/out/a.mp4.part", &mi, "libx264", remux, &hd);
+        CHECK (!have_arg (av, "-an", NULL) && have_arg (av, "-map", "0:v:0") && have_arg (av, "-map", "0:a:0?") &&
+               have_arg (av, "-c:a", "aac") && have_arg (av, "-ac", "2") && have_arg (av, "-sn", NULL) &&
+               have_arg (av, "-protocol_whitelist", "file") && have_arg (av, "-f", "mp4") &&
+               have_arg (av, "-c:v", remux ? "copy" : "libx264"));
+        g_strfreev (av);
+    }
+    /* taking the sound track out of a video wallpaper: the same limits on
+     * what is read, the sound only, lossless, bounded */
+    av = walpe_video_sound_argv ("/in/-i evil.mp4", "/c/x-sound.flac.part");
+    CHECK (have_arg (av, "-i", "file:/in/-i evil.mp4") && have_arg (av, "file:/c/x-sound.flac.part", NULL) &&
+           have_arg (av, "-protocol_whitelist", "file") && have_arg (av, "-format_whitelist", NULL) &&
+           have_arg (av, "-map", "0:a:0") && have_arg (av, "-vn", NULL) && have_arg (av, "-c:a", "flac") &&
+           have_arg (av, "-ac", "2") && have_arg (av, "-t", "21600") && have_arg (av, "-fs", NULL) &&
+           have_arg (av, "-f", "flac") && have_arg (av, "-nostdin", NULL));
+    g_strfreev (av);
 
     /* ffprobe's answer */
     WalpeMediaInfo p;
@@ -428,6 +448,54 @@ static void test_runs (void)
         goto out;
     }
     g_file_set_contents (junk, "this is not a video\n", -1, NULL);
+
+    /* the sound track of a video wallpaper (walpe_video_sound_extract) */
+    {
+        char *snd = P ("in/sound.mp4"), *dir = P ("in/x");
+        const char *mk_snd[] = { "ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                                 "testsrc2=size=320x180:rate=30", "-f", "lavfi", "-i",
+                                 "sine=frequency=440:sample_rate=44100", "-t", "1", "-c:v", "libx264",
+                                 "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", snd, NULL };
+        if (run_tool (mk_snd)) {
+            char *f1 = walpe_video_sound_file (snd), *f2 = walpe_video_sound_file (fine),
+                 *f3 = walpe_video_sound_file (junk), *err = NULL, *head = NULL;
+            gsize len = 0;
+            CHECK (f1 && f2 && f3 && strcmp (f1, f2) && g_str_has_suffix (f1, "-sound.flac") &&
+                   g_str_has_prefix (f1, tmp) && !walpe_video_sound_file (dir) && !walpe_video_sound_file (in));
+            CHECK (walpe_video_sound_extract (snd, f1, &err) == 1 && !err &&
+                   g_file_get_contents (f1, &head, &len, NULL) && len > 1000 && !memcmp (head, "fLaC", 4));
+            g_free (head);
+            g_free (err);
+            err = NULL;
+            /* no track: the empty file that says so, and no second run */
+            GStatBuf st;
+            CHECK (walpe_video_sound_extract (fine, f2, &err) == 0 && !err && g_stat (f2, &st) == 0 && st.st_size == 0);
+            CHECK (walpe_video_sound_extract (fine, f2, &err) == 0 && walpe_video_sound_extract (snd, f1, &err) == 1);
+            g_free (err);
+            err = NULL;
+            /* not a video: an error that says what ffmpeg said, nothing left behind */
+            char *part = g_strconcat (f3, ".part", NULL);
+            CHECK (walpe_video_sound_extract (junk, f3, &err) == -1 && err && *err &&
+                   !g_file_test (f3, G_FILE_TEST_EXISTS) && !g_file_test (part, G_FILE_TEST_EXISTS));
+            g_free (err);
+            g_free (part);
+            g_remove (f1);
+            g_remove (f2);
+            char *cdir = g_path_get_dirname (f1), *cup = g_path_get_dirname (cdir);
+            g_rmdir (cdir);
+            g_rmdir (cup);
+            g_free (cdir);
+            g_free (cup);
+            g_free (f1);
+            g_free (f2);
+            g_free (f3);
+        } else {
+            g_print ("import-test: this ffmpeg cannot make a clip with sound (aac), that part skipped\n");
+        }
+        g_remove (snd);
+        g_free (snd);
+        g_free (dir);
+    }
 
     /* already fine: copied, thumbnail next to it */
     Result r = run_import (fine, lib, 120);
