@@ -53,6 +53,7 @@ typedef struct {
     gboolean covered;        /* client windows hide this monitor */
     gboolean focus_app;      /* the focused window is an application's, on this monitor */
     gboolean fs_here;        /* the focused fullscreen window is on this monitor */
+    gboolean destroyed;      /* another client destroyed the window (reported once) */
 } X11Surface;
 
 static struct {
@@ -1019,6 +1020,23 @@ static gboolean xdata_ready (gint fd, GIOCondition cond, gpointer user)
                    e.type == DestroyNotify || e.type == ReparentNotify) {
             if (e.type == ConfigureNotify && e.xconfigure.window == X.root)
                 outputs_changed (); /* the screen was resized */
+            /* One of the wallpaper windows is gone: another client destroyed
+             * it (the daemon destroys its windows only when it ends, after
+             * its last look at the events). The render thread goes on
+             * swapping into a drawable that no longer exists - nothing fails
+             * loudly, the monitor shows the root window from then on, and
+             * with shared rendering the monitors that follow this one get
+             * its undefined frames. The surface is reported closed, as a
+             * Wayland compositor's layer surface is: the daemon restarts in
+             * place and makes its windows anew. */
+            if (e.type == DestroyNotify && e.xdestroywindow.event == X.root)
+                for (guint k = 0; k < X.surfs->len; k++)
+                    if (SURF (k)->xid == e.xdestroywindow.window && !SURF (k)->destroyed) {
+                        SURF (k)->destroyed = TRUE;
+                        if (X.ev && X.ev->surface_closed)
+                            X.ev->surface_closed (SURF (k)->user, X.user);
+                        break;
+                    }
             if (e.type == ConfigureNotify && e.xconfigure.event == X.root)
                 stack_event (e.xconfigure.window, e.xconfigure.above);
             else if (e.type == CirculateNotify &&

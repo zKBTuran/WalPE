@@ -81,6 +81,10 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             the window there before it starts. Then again with shared
             rendering (one monitor following the other's frames): each
             monitor still pauses on its own.
+  winlost   another X client destroys one of the daemon's wallpaper windows
+            (X11): the daemon says so and restarts in place - same process -
+            and every monitor shows its wallpaper again, also the monitor
+            that followed the destroyed window's frames (shared rendering).
   video     a video's load ends with its first picture: a clip the decoder
             cannot do anything with (its container reads well) is a failed
             load with a reason in status, and the wallpaper from before
@@ -1918,9 +1922,70 @@ def case_fullscreen(env, W):
     env.stop_daemon()
 
 
+# ------------------------------------------------------------------ winlost
+def case_winlost(env, W):
+    """Another X client destroys a wallpaper window. The daemon drew into a
+    drawable that no longer existed, without a word: that monitor showed the
+    root window for the rest of the daemon's life, and with shared rendering
+    so did the monitors that presented its frames."""
+    A, B = ("A", 640, 360, 0, 0), ("B", 640, 360, 640, 0)
+    if env.display.winsys != "x11":
+        print("skip winlost (an X client destroys the daemon's window: X11 only; a compositor that "
+              "closes a layer surface is scripts/waylandcheck.py's)")
+        return
+    try:
+        xc = XClient(env.env["DISPLAY"])
+    except OSError:
+        print("skip winlost (no libX11 for ctypes: cannot destroy a window)")
+        return
+
+    def is_red(c):
+        return rc.name_of(c) == "red"
+
+    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False})
+    try:
+        if not check(env.start_daemon([A, B]), "winlost: daemon started on two monitors"):
+            return
+        pid = env.daemon.pid
+        env.open(W["red"])
+        loaded(env, W["red"])
+        check(is_red(colour_is(env, A, is_red)) and is_red(colour_is(env, B, is_red)),
+              "winlost: the scene is on both monitors", (env.colour(A), env.colour(B)))
+        wins = xc.lowest(2)     # the wallpaper windows are the lowest children of the root
+        if not check(len(wins) == 2, "winlost: the daemon has two windows", wins):
+            return
+        for n in range(2):
+            win = wins[n]
+            if n:
+                # (restarts for the layout are ten seconds apart; the second one waits for that)
+                time.sleep(1.0 * PATIENCE)
+            mark = env.mark()
+            xc.x.XDestroyWindow(xc.d, win)
+            xc.x.XSync(xc.d, 0)
+            check(bool(wait_for(lambda: "took its surface away" in env.since(mark), 10, 0.1)),
+                  f"winlost: window {n + 1} destroyed: the daemon says that it lost the surface",
+                  env.since(mark)[-300:])
+            check(bool(wait_for(lambda: "restarting to follow it" in env.since(mark), 40, 0.2)),
+                  f"winlost: window {n + 1} destroyed: it restarts in place", env.since(mark)[-300:])
+            check(bool(wait_for(lambda: loaded(env, W["red"], timeout=2), 60, 0.2)),
+                  f"winlost: window {n + 1} destroyed: the wallpaper is loaded again", rc.brief(env.monitors()))
+            check(is_red(colour_is(env, A, is_red, 20)) and is_red(colour_is(env, B, is_red, 20)),
+                  f"winlost: window {n + 1} destroyed: both monitors show it again",
+                  (rc.name_of(env.colour(A)), rc.name_of(env.colour(B))))
+            # (the new image's connection may be given the same window ids again)
+            now = xc.lowest(2)
+            check(len(now) == 2, f"winlost: window {n + 1} destroyed: two windows are there again", now)
+            wins = now
+        check(env.daemon.poll() is None and os.path.exists(f"/proc/{pid}"), "winlost: same process")
+    finally:
+        xc.close()
+    env.stop_daemon()
+
+
 CASES = [("pointer", case_pointer), ("reload", case_reload), ("restart", case_restart),
          ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("tray", case_tray), ("window", case_window), ("busy", case_busy), ("probe", case_probe),
-         ("fullscreen", case_fullscreen), ("video", case_video), ("webunload", case_webunload)]
+         ("fullscreen", case_fullscreen), ("video", case_video), ("webunload", case_webunload),
+         ("winlost", case_winlost)]
 
 
 
