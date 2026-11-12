@@ -4,6 +4,7 @@
 #include "walpe-build-config.h"
 #include "memreport.h"
 #include "glutil.h"   /* walpe_gl_is_software */
+#include <epoxy/egl.h>   /* eglGetProcAddress: the GL events */
 #include <epoxy/gl.h>
 #include <glib/gstdio.h>
 #include <malloc.h>
@@ -30,6 +31,7 @@ static const char *const memc_names[WALPE_MEMC_N] = {
     [WALPE_MEMC_PAUSED_FRAME] = "frames_drawn_while_paused",
     [WALPE_MEMC_TARGET_DROP] = "scene_target_drops",
     [WALPE_MEMC_TEXT_RENDER] = "text_renders",
+    [WALPE_MEMC_FX_COMPARE] = "fx_compares",
 };
 
 const char *walpe_memc_name (WalpeMemCounter c)
@@ -160,14 +162,65 @@ static void top_file_add (WalpeMemMaps *m, gint64 size, gint64 rss, const char *
 
 typedef struct {
     int kind;       /* -1 = no mapping open */
-    gint64 size, rss, dirty, swap;
+    gint64 size, rss, dirty, swap, anon, shared, huge[3];   /* huge: anon, shmem, file */
     char perms[5], name[512];
+    GHashTable *by_name, *by_size;   /* NULL or row name -> WalpeMemMapRow */
 } SmapsCur;
+
+static void row_add (GHashTable *rows, const char *name, const SmapsCur *c)
+{
+    WalpeMemMapRow *r = g_hash_table_lookup (rows, name);
+    if (!r) {
+        r = g_new0 (WalpeMemMapRow, 1);
+        g_strlcpy (r->name, name, sizeof (r->name));
+        r->kind = c->kind;
+        g_hash_table_insert (rows, r->name, r);
+    }
+    /* what is resident: the anonymous pages, and the pages of the object
+     * behind the mapping - shared memory or a file */
+    const gboolean no_object = c->kind == WALPE_MAP_HEAP || c->kind == WALPE_MAP_ANON ||
+                               c->kind == WALPE_MAP_STACK;
+    const gboolean shmem = c->kind == WALPE_MAP_SHM || c->kind == WALPE_MAP_MEMFD ||
+                           g_str_has_prefix (c->name, "/drm mm object") ||
+                           g_str_has_prefix (c->name, "/i915");
+    const gint64 anon = no_object ? c->rss : MIN (c->anon, c->rss);
+    r->n++;
+    r->size_kb += c->size;
+    r->rss_kb += c->rss;
+    r->anon_kb += anon;
+    if (shmem)
+        r->shmem_kb += c->rss - anon;
+    else
+        r->file_kb += c->rss - anon;
+    r->shared_kb += c->shared;
+    r->swap_kb += c->swap;
+    r->huge_kb += c->huge[0] + c->huge[1] + c->huge[2];
+}
 
 static void smaps_flush (WalpeMemMaps *out, SmapsCur *c)
 {
     if (c->kind < 0)
         return;
+    if (c->by_name || c->by_size) {
+        char name[96];
+        const char *base = strrchr (c->name, '/');
+        if (c->kind == WALPE_MAP_HEAP || c->kind == WALPE_MAP_ANON)
+            g_strlcpy (name, c->name[0] ? c->name : "[anon]", sizeof (name));
+        else if (c->kind == WALPE_MAP_LIB || c->kind == WALPE_MAP_FILE)
+            g_strlcpy (name, base ? base + 1 : c->name, sizeof (name));   /* no directories */
+        else
+            g_strlcpy (name, c->name, sizeof (name));
+        if (c->by_name)
+            row_add (c->by_name, name, c);
+        if (c->by_size && (c->kind == WALPE_MAP_ANON || c->kind == WALPE_MAP_NVIDIA ||
+                           c->kind == WALPE_MAP_DRI || c->kind == WALPE_MAP_MEMFD ||
+                           c->kind == WALPE_MAP_SHM)) {
+            char sized[96];
+            name[sizeof (name) - 24] = '\0';
+            g_snprintf (sized, sizeof (sized), "%s %" G_GINT64_FORMAT " kB", name, c->size);
+            row_add (c->by_size, sized, c);
+        }
+    }
     WalpeMemKind *k = &out->kind[c->kind];
     k->n++;
     k->size_kb += c->size;
@@ -175,6 +228,9 @@ static void smaps_flush (WalpeMemMaps *out, SmapsCur *c)
     k->dirty_kb += c->dirty;
     k->swap_kb += c->swap;
     out->n_maps++;
+    out->huge_anon_kb += c->huge[0];
+    out->huge_shmem_kb += c->huge[1];
+    out->huge_file_kb += c->huge[2];
     if (c->kind == WALPE_MAP_ANON || c->kind == WALPE_MAP_HEAP)
         top_anon_add (out, c->size, c->rss, c->perms);
     else if (c->kind == WALPE_MAP_FILE || c->kind == WALPE_MAP_LIB || c->kind == WALPE_MAP_MEMFD ||
@@ -183,10 +239,46 @@ static void smaps_flush (WalpeMemMaps *out, SmapsCur *c)
     c->kind = -1;
 }
 
+static gint map_row_cmp (gconstpointer a, gconstpointer b)
+{
+    const WalpeMemMapRow *x = a, *y = b;
+    if (x->rss_kb != y->rss_kb)
+        return x->rss_kb > y->rss_kb ? -1 : 1;
+    if (x->size_kb != y->size_kb)
+        return x->size_kb > y->size_kb ? -1 : 1;
+    return strcmp (x->name, y->name);
+}
+
+static GArray *map_rows_take (GHashTable *rows)
+{
+    GArray *a = g_array_new (FALSE, TRUE, sizeof (WalpeMemMapRow));
+    GHashTableIter it;
+    gpointer v;
+    g_hash_table_iter_init (&it, rows);
+    while (g_hash_table_iter_next (&it, NULL, &v))
+        g_array_append_vals (a, v, 1);
+    g_hash_table_destroy (rows);
+    g_array_sort (a, map_row_cmp);
+    return a;
+}
+
 void walpe_mem_smaps_parse (const char *text, const char *exe, WalpeMemMaps *out)
 {
+    walpe_mem_smaps_tables (text, exe, out, NULL, NULL);
+}
+
+void walpe_mem_smaps_tables (const char *text, const char *exe, WalpeMemMaps *out, GArray **by_name,
+                             GArray **by_size)
+{
+    WalpeMemMaps scratch;
+    if (!out)
+        out = &scratch;
     memset (out, 0, sizeof (*out));
     SmapsCur c = { .kind = -1 };
+    if (by_name)
+        c.by_name = g_hash_table_new_full (g_str_hash, g_str_equal, NULL, g_free);
+    if (by_size)
+        c.by_size = g_hash_table_new_full (g_str_hash, g_str_equal, NULL, g_free);
     const char *p = text ? text : "";
     for (;;) {
         const char *e = strchr (p, '\n');
@@ -217,10 +309,13 @@ void walpe_mem_smaps_parse (const char *text, const char *exe, WalpeMemMaps *out
             c.kind = walpe_mem_map_kind (c.name);
             if (c.kind == WALPE_MAP_FILE && exe && !strcmp (c.name, exe))
                 c.kind = WALPE_MAP_LIB;   /* the program itself */
-            c.size = c.rss = c.dirty = c.swap = 0;
+            c.size = c.rss = c.dirty = c.swap = c.anon = c.shared = 0;
+            c.huge[0] = c.huge[1] = c.huge[2] = 0;
         } else if (c.kind >= 0 && len > 0) {
             static const struct { const char *key; int which; } keys[] = {
                 { "Size:", 0 }, { "Rss:", 1 }, { "Private_Dirty:", 2 }, { "Swap:", 3 },
+                { "Anonymous:", 4 }, { "Shared_Clean:", 5 }, { "Shared_Dirty:", 5 },
+                { "AnonHugePages:", 6 }, { "ShmemPmdMapped:", 7 }, { "FilePmdMapped:", 8 },
             };
             for (guint i = 0; i < G_N_ELEMENTS (keys); i++) {
                 gsize kl = strlen (keys[i].key);
@@ -233,8 +328,14 @@ void walpe_mem_smaps_parse (const char *text, const char *exe, WalpeMemMaps *out
                     c.rss = v;
                 else if (keys[i].which == 2)
                     c.dirty = v;
-                else
+                else if (keys[i].which == 3)
                     c.swap = v;
+                else if (keys[i].which == 4)
+                    c.anon = v;
+                else if (keys[i].which == 5)
+                    c.shared += v;
+                else
+                    c.huge[keys[i].which - 6] = v;
                 break;
             }
         }
@@ -243,6 +344,10 @@ void walpe_mem_smaps_parse (const char *text, const char *exe, WalpeMemMaps *out
         p = e + 1;
     }
     smaps_flush (out, &c);
+    if (by_name)
+        *by_name = map_rows_take (c.by_name);
+    if (by_size)
+        *by_size = map_rows_take (c.by_size);
 }
 
 static gint64 status_kb (const char *st, const char *key)
@@ -364,6 +469,100 @@ static void malloc_json (JsonBuilder *b)
     json_builder_end_object (b);
 }
 
+/* "by_name", "by_size" and what the rows add up to (to hold against
+ * RssAnon / RssFile / RssShmem of "process": where they differ, the rule
+ * that sorts a mapping's pages into file or shared memory is wrong for
+ * some mapping of this machine - the rows show which) */
+static void map_rows_json (JsonBuilder *b, GArray *by_name, GArray *by_size)
+{
+    gint64 anon = 0, file = 0, shmem = 0;
+    json_builder_set_member_name (b, "by_name");
+    json_builder_begin_array (b);
+    for (guint i = 0; i < by_name->len; i++) {
+        const WalpeMemMapRow *r = &g_array_index (by_name, WalpeMemMapRow, i);
+        anon += r->anon_kb;
+        file += r->file_kb;
+        shmem += r->shmem_kb;
+        /* (a library or file nothing of which is resident says nothing) */
+        if (r->rss_kb == 0 && r->swap_kb == 0 && (r->kind == WALPE_MAP_LIB || r->kind == WALPE_MAP_FILE))
+            continue;
+        json_builder_begin_object (b);
+        walpe_mem_jstr (b, "name", r->name);
+        walpe_mem_jstr (b, "kind", walpe_mem_map_kind_name (r->kind));
+        walpe_mem_jint (b, "count", r->n);
+        walpe_mem_jint (b, "size_kb", r->size_kb);
+        walpe_mem_jint (b, "rss_kb", r->rss_kb);
+        walpe_mem_jint (b, "anon_kb", r->anon_kb);
+        walpe_mem_jint (b, "file_kb", r->file_kb);
+        walpe_mem_jint (b, "shmem_kb", r->shmem_kb);
+        walpe_mem_jint (b, "shared_kb", r->shared_kb);
+        if (r->swap_kb)
+            walpe_mem_jint (b, "swap_kb", r->swap_kb);
+        if (r->huge_kb)
+            walpe_mem_jint (b, "huge_kb", r->huge_kb);
+        json_builder_end_object (b);
+    }
+    json_builder_end_array (b);
+    json_builder_set_member_name (b, "by_name_sum");
+    json_builder_begin_object (b);
+    walpe_mem_jint (b, "anon_kb", anon);
+    walpe_mem_jint (b, "file_kb", file);
+    walpe_mem_jint (b, "shmem_kb", shmem);
+    json_builder_end_object (b);
+    json_builder_set_member_name (b, "by_size");
+    json_builder_begin_array (b);
+    for (guint i = 0; i < by_size->len; i++) {
+        const WalpeMemMapRow *r = &g_array_index (by_size, WalpeMemMapRow, i);
+        json_builder_begin_object (b);
+        walpe_mem_jstr (b, "name", r->name);
+        walpe_mem_jint (b, "count", r->n);
+        walpe_mem_jint (b, "rss_kb", r->rss_kb);
+        json_builder_end_object (b);
+    }
+    json_builder_end_array (b);
+}
+
+/* the threads by name (/proc/self/task/<tid>/comm) */
+static void threads_json (JsonBuilder *b)
+{
+    json_builder_set_member_name (b, "threads");
+    json_builder_begin_object (b);
+    GDir *d = g_dir_open ("/proc/self/task", 0, NULL);
+    GHashTable *names = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+    guint n = 0;
+    const char *e;
+    while (d && (e = g_dir_read_name (d))) {
+        char *path = g_strdup_printf ("/proc/self/task/%s/comm", e), *comm = NULL;
+        if (g_file_get_contents (path, &comm, NULL, NULL)) {
+            g_strchomp (comm);
+            gpointer k = NULL, v = NULL;
+            if (g_hash_table_lookup_extended (names, comm, &k, &v)) {
+                g_hash_table_insert (names, comm, GUINT_TO_POINTER (GPOINTER_TO_UINT (v) + 1));
+            } else {
+                g_hash_table_insert (names, comm, GUINT_TO_POINTER (1));
+            }
+            n++;
+        }
+        g_free (path);
+    }
+    if (d)
+        g_dir_close (d);
+    walpe_mem_jint (b, "count", n);
+    GList *keys = g_list_sort (g_hash_table_get_keys (names), (GCompareFunc) strcmp);
+    json_builder_set_member_name (b, "by_name");
+    json_builder_begin_array (b);
+    for (GList *l = keys; l; l = l->next) {
+        json_builder_begin_object (b);
+        walpe_mem_jstr (b, "name", l->data);
+        walpe_mem_jint (b, "count", GPOINTER_TO_UINT (g_hash_table_lookup (names, l->data)));
+        json_builder_end_object (b);
+    }
+    json_builder_end_array (b);
+    g_list_free (keys);
+    g_hash_table_destroy (names);
+    json_builder_end_object (b);
+}
+
 void walpe_mem_process_json (JsonBuilder *b)
 {
     char *st = NULL;
@@ -395,8 +594,9 @@ void walpe_mem_process_json (JsonBuilder *b)
     json_builder_begin_object (b);
     if (g_file_get_contents ("/proc/self/smaps", &sm, NULL, NULL)) {
         WalpeMemMaps *m = g_new0 (WalpeMemMaps, 1);
+        GArray *by_name = NULL, *by_size = NULL;
         char *exe = g_file_read_link ("/proc/self/exe", NULL);
-        walpe_mem_smaps_parse (sm, exe, m);
+        walpe_mem_smaps_tables (sm, exe, m, &by_name, &by_size);
         g_free (exe);
         g_free (sm);
         walpe_mem_jint (b, "count", m->n_maps);
@@ -430,11 +630,39 @@ void walpe_mem_process_json (JsonBuilder *b)
             json_builder_end_object (b);
         }
         json_builder_end_array (b);
+        {
+            /* transparent huge pages: what is resident in 2 MiB units, and
+             * the system's setting (the word in brackets is the one in
+             * force: "always [madvise] never") */
+            static const char *const files[] = {
+                "/sys/kernel/mm/transparent_hugepage/enabled", "setting",
+                "/sys/kernel/mm/transparent_hugepage/shmem_enabled", "shmem_setting",
+            };
+            json_builder_set_member_name (b, "huge_pages");
+            json_builder_begin_object (b);
+            walpe_mem_jint (b, "anon_kb", m->huge_anon_kb);
+            walpe_mem_jint (b, "shmem_kb", m->huge_shmem_kb);
+            walpe_mem_jint (b, "file_kb", m->huge_file_kb);
+            for (guint i = 0; i < G_N_ELEMENTS (files); i += 2) {
+                char *t = NULL;
+                if (g_file_get_contents (files[i], &t, NULL, NULL)) {
+                    g_strstrip (t);
+                    if (strlen (t) < 120)
+                        walpe_mem_jstr (b, files[i + 1], t);
+                }
+                g_free (t);
+            }
+            json_builder_end_object (b);
+        }
+        map_rows_json (b, by_name, by_size);
+        g_array_unref (by_name);
+        g_array_unref (by_size);
         g_free (m);
     } else {
         walpe_mem_jstr (b, "note", "/proc/self/smaps cannot be read");
     }
     json_builder_end_object (b);
+    threads_json (b);
 }
 
 /* ----------------------------------------------------------- GL census */
@@ -891,5 +1119,331 @@ void walpe_mem_gl_json (JsonBuilder *b, gboolean deep)
         g_array_free (names[t], TRUE);
     gl_clear_errors ();
     walpe_mem_jint (b, "census_us", g_get_monotonic_time () - t0);
+    json_builder_end_object (b);
+}
+
+/* ------------------------------------------------------- GL storage events
+ * See memreport.h. The mechanism is the GPU profiler's (gpuprof.c,
+ * "interposer"): every `glFoo (...)` of this process is a call through the
+ * libepoxy pointer epoxy_glFoo; while counting is on, the pointers of the
+ * entry points below hold a wrapper that adds to a counter and calls the
+ * real entry point, taken from eglGetProcAddress. A wrapper is complete in
+ * itself the moment its address can be seen (it looks its entry point up
+ * when its pointer is still empty), and it only forwards while counting is
+ * off - which is all that is left of it should another holder of the slot
+ * (a GPU profile that started meanwhile) put it back later. */
+
+static const gint64 size_class_kb[] = { 64, 256, 1024, 1536, 2560, 4608, 6656, 9216, 16384 };
+static const char *const size_class_names[] = {
+    "to 64 kB", "to 256 kB", "to 1 MB", "to 1.5 MB", "to 2.5 MB", "to 4.5 MB", "to 6.5 MB",
+    "to 9 MB", "to 16 MB", "over 16 MB",
+};
+#define GLEV_CLASSES ((int) G_N_ELEMENTS (size_class_names))
+
+const char *walpe_mem_size_class (gint64 bytes, int *cls)
+{
+    int c = 0;
+    while (c < (int) G_N_ELEMENTS (size_class_kb) && bytes > size_class_kb[c] * 1024)
+        c++;
+    if (cls)
+        *cls = c;
+    return size_class_names[c];
+}
+
+enum {
+    GLEV_TEX_EMPTY = 0,   /* storage without pixels: render targets, textures filled later */
+    GLEV_TEX_PIXELS,      /* storage with pixels */
+    GLEV_TEX_COMPRESSED,
+    GLEV_BUF_STORAGE,     /* glBufferStorage: buffers that stay mapped (video staging) */
+    GLEV_READBACK,        /* glReadPixels */
+    GLEV_SIZED_N
+};
+static const char *const glev_sized_names[GLEV_SIZED_N] = {
+    "texture_stores_without_pixels", "texture_stores_with_pixels", "texture_stores_compressed",
+    "buffer_storages", "read_backs",
+};
+enum {
+    GLEV_TEX_NAMES = 0, GLEV_TEX_DELETED, GLEV_FBO_MADE, GLEV_FBO_DELETED, GLEV_BUF_MADE,
+    GLEV_BUF_DELETED, GLEV_PROG_LINKED, GLEV_PROG_DELETED, GLEV_TEX_READ, GLEV_PLAIN_N
+};
+static const char *const glev_plain_names[GLEV_PLAIN_N] = {
+    "texture_names_made", "textures_deleted", "framebuffers_made", "framebuffers_deleted",
+    "buffers_made", "buffers_deleted", "programs_linked", "programs_deleted", "texture_read_backs",
+};
+
+static struct {
+    gint on;                                    /* atomic: the wrappers count */
+    gint64 since_us;
+    gint64 n[GLEV_SIZED_N][GLEV_CLASSES];       /* atomic: events by size class */
+    gint64 kb[GLEV_SIZED_N];                    /* atomic: their sizes together */
+    gint64 plain[GLEV_PLAIN_N];                 /* atomic */
+} glev;
+
+static inline void glev_sized (int kind, gint64 bytes)
+{
+    if (!g_atomic_int_get (&glev.on))
+        return;
+    int c = 0;
+    walpe_mem_size_class (bytes, &c);
+    __atomic_fetch_add (&glev.n[kind][c], 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add (&glev.kb[kind], (bytes + 1023) / 1024, __ATOMIC_RELAXED);
+}
+
+static inline void glev_plain (int kind, gint64 n)
+{
+    if (g_atomic_int_get (&glev.on) && n > 0)
+        __atomic_fetch_add (&glev.plain[kind], n, __ATOMIC_RELAXED);
+}
+
+static void (*glev_resolve (const char *name)) (void)
+{
+    void (*f) (void) = (void (*) (void)) eglGetProcAddress (name);
+    if (G_UNLIKELY (!f))   /* (walpe_mem_gl_events found an address before it set the wrapper) */
+        g_error ("mem: no address for %s", name);
+    return f;
+}
+
+#define GLEV_REAL(fn) (__extension__ ({ \
+    __typeof__ (r_##fn) real_ = __atomic_load_n (&r_##fn, __ATOMIC_RELAXED); \
+    if (G_UNLIKELY (!real_)) { \
+        real_ = (__typeof__ (r_##fn)) glev_resolve (#fn); \
+        __atomic_store_n (&r_##fn, real_, __ATOMIC_RELAXED); \
+    } \
+    real_; }))
+
+static void (*r_glTexImage2D) (GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *);
+static void (*r_glTexStorage2D) (GLenum, GLsizei, GLenum, GLsizei, GLsizei);
+static void (*r_glCompressedTexImage2D) (GLenum, GLint, GLenum, GLsizei, GLsizei, GLint, GLsizei, const void *);
+static void (*r_glGenTextures) (GLsizei, GLuint *);
+static void (*r_glDeleteTextures) (GLsizei, const GLuint *);
+static void (*r_glGenFramebuffers) (GLsizei, GLuint *);
+static void (*r_glDeleteFramebuffers) (GLsizei, const GLuint *);
+static void (*r_glGenBuffers) (GLsizei, GLuint *);
+static void (*r_glDeleteBuffers) (GLsizei, const GLuint *);
+static void (*r_glBufferStorage) (GLenum, GLsizeiptr, const void *, GLbitfield);
+static void (*r_glReadPixels) (GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *);
+static void (*r_glGetTexImage) (GLenum, GLint, GLenum, GLenum, void *);
+static void (*r_glLinkProgram) (GLuint);
+static void (*r_glDeleteProgram) (GLuint);
+
+static gint64 glev_tex_bytes (GLint internal, GLsizei w, GLsizei h)
+{
+    int bits = 32;
+    char buf[16];
+    fmt_name (internal, buf, sizeof (buf), &bits);
+    return (gint64) MAX (w, 0) * (gint64) MAX (h, 0) * bits / 8;
+}
+
+static void w_glTexImage2D (GLenum target, GLint level, GLint internal, GLsizei w, GLsizei h, GLint border,
+                            GLenum format, GLenum type, const void *px)
+{
+    if (level == 0)   /* (the further levels belong to the same texture) */
+        glev_sized (px ? GLEV_TEX_PIXELS : GLEV_TEX_EMPTY, glev_tex_bytes (internal, w, h));
+    GLEV_REAL (glTexImage2D) (target, level, internal, w, h, border, format, type, px);
+}
+
+static void w_glTexStorage2D (GLenum target, GLsizei levels, GLenum internal, GLsizei w, GLsizei h)
+{
+    glev_sized (GLEV_TEX_EMPTY, glev_tex_bytes ((GLint) internal, w, h));
+    GLEV_REAL (glTexStorage2D) (target, levels, internal, w, h);
+}
+
+static void w_glCompressedTexImage2D (GLenum target, GLint level, GLenum internal, GLsizei w, GLsizei h,
+                                      GLint border, GLsizei size, const void *data)
+{
+    if (level == 0)
+        glev_sized (GLEV_TEX_COMPRESSED, size);
+    GLEV_REAL (glCompressedTexImage2D) (target, level, internal, w, h, border, size, data);
+}
+
+static void w_glGenTextures (GLsizei n, GLuint *names)
+{
+    glev_plain (GLEV_TEX_NAMES, n);
+    GLEV_REAL (glGenTextures) (n, names);
+}
+
+static void w_glDeleteTextures (GLsizei n, const GLuint *names)
+{
+    glev_plain (GLEV_TEX_DELETED, n);
+    GLEV_REAL (glDeleteTextures) (n, names);
+}
+
+static void w_glGenFramebuffers (GLsizei n, GLuint *names)
+{
+    glev_plain (GLEV_FBO_MADE, n);
+    GLEV_REAL (glGenFramebuffers) (n, names);
+}
+
+static void w_glDeleteFramebuffers (GLsizei n, const GLuint *names)
+{
+    glev_plain (GLEV_FBO_DELETED, n);
+    GLEV_REAL (glDeleteFramebuffers) (n, names);
+}
+
+static void w_glGenBuffers (GLsizei n, GLuint *names)
+{
+    glev_plain (GLEV_BUF_MADE, n);
+    GLEV_REAL (glGenBuffers) (n, names);
+}
+
+static void w_glDeleteBuffers (GLsizei n, const GLuint *names)
+{
+    glev_plain (GLEV_BUF_DELETED, n);
+    GLEV_REAL (glDeleteBuffers) (n, names);
+}
+
+static void w_glBufferStorage (GLenum target, GLsizeiptr size, const void *data, GLbitfield flags)
+{
+    glev_sized (GLEV_BUF_STORAGE, (gint64) size);
+    GLEV_REAL (glBufferStorage) (target, size, data, flags);
+}
+
+static void w_glReadPixels (GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, void *px)
+{
+    const int comps = format == GL_RGBA || format == GL_BGRA ? 4 : format == GL_RGB ? 3 :
+                      format == GL_RG ? 2 : 1;
+    const int each = type == GL_FLOAT || type == GL_UNSIGNED_INT || type == GL_INT ? 4 :
+                     type == GL_HALF_FLOAT || type == GL_UNSIGNED_SHORT || type == GL_SHORT ? 2 : 1;
+    glev_sized (GLEV_READBACK, (gint64) MAX (w, 0) * (gint64) MAX (h, 0) * comps * each);
+    GLEV_REAL (glReadPixels) (x, y, w, h, format, type, px);
+}
+
+static void w_glGetTexImage (GLenum target, GLint level, GLenum format, GLenum type, void *px)
+{
+    glev_plain (GLEV_TEX_READ, 1);
+    GLEV_REAL (glGetTexImage) (target, level, format, type, px);
+}
+
+static void w_glLinkProgram (GLuint program)
+{
+    glev_plain (GLEV_PROG_LINKED, 1);
+    GLEV_REAL (glLinkProgram) (program);
+}
+
+static void w_glDeleteProgram (GLuint program)
+{
+    glev_plain (GLEV_PROG_DELETED, program ? 1 : 0);
+    GLEV_REAL (glDeleteProgram) (program);
+}
+
+typedef void (*GlevFn) (void);
+typedef struct {
+    const char *name;
+    void *slot;        /* &epoxy_glFoo */
+    GlevFn wrap;
+    GlevFn saved;      /* what the slot held when the wrapper went in */
+    gboolean in;       /* the wrapper was put into the slot (and not taken out since) */
+} GlevHook;
+#define GLEV_HOOK(fn) { #fn, &epoxy_##fn, (GlevFn) w_##fn, NULL, FALSE }
+static GlevHook glev_hooks[] = {
+    GLEV_HOOK (glTexImage2D), GLEV_HOOK (glTexStorage2D), GLEV_HOOK (glCompressedTexImage2D),
+    GLEV_HOOK (glGenTextures), GLEV_HOOK (glDeleteTextures), GLEV_HOOK (glGenFramebuffers),
+    GLEV_HOOK (glDeleteFramebuffers), GLEV_HOOK (glGenBuffers), GLEV_HOOK (glDeleteBuffers),
+    GLEV_HOOK (glBufferStorage), GLEV_HOOK (glReadPixels), GLEV_HOOK (glGetTexImage),
+    GLEV_HOOK (glLinkProgram), GLEV_HOOK (glDeleteProgram),
+};
+static GMutex glev_lock;   /* the hook table (whoever asks; the wrappers never take it) */
+
+/* (the slots are function pointers of different types inside libepoxy:
+ * read and written as bytes, one aligned pointer store each) */
+static inline GlevFn glev_slot_get (void *slot)
+{
+    GlevFn f;
+    memcpy (&f, slot, sizeof (f));
+    return f;
+}
+
+static inline void glev_slot_set (void *slot, GlevFn f)
+{
+    memcpy (slot, &f, sizeof (f));
+}
+
+int walpe_mem_gl_events (gboolean on)
+{
+    int n = 0;
+    g_mutex_lock (&glev_lock);
+    for (guint i = 0; i < G_N_ELEMENTS (glev_hooks); i++) {
+        GlevHook *h = &glev_hooks[i];
+        GlevFn cur = glev_slot_get (h->slot);
+        if (on) {
+            /* an entry point this driver does not have stays as it is */
+            if (!h->in && !eglGetProcAddress (h->name))
+                continue;
+            if (cur != h->wrap) {
+                /* first time, or libepoxy stored the entry point it had
+                 * just looked up over the wrapper (it does that once, at
+                 * the first call of an entry point), or a GPU profile's
+                 * wrapper stands in front: what was saved the first time
+                 * stays the value to put back */
+                if (!h->in)
+                    h->saved = cur;
+                glev_slot_set (h->slot, h->wrap);
+            }
+            h->in = TRUE;
+            n++;
+        } else if (h->in) {
+            /* (not ours any more: a profile's wrapper is in front and puts
+             * ours back when it ends; it then only forwards) */
+            if (cur == h->wrap)
+                glev_slot_set (h->slot, h->saved);
+            h->in = FALSE;
+        }
+    }
+    if (on && !g_atomic_int_get (&glev.on)) {
+        glev.since_us = g_get_monotonic_time ();
+        g_atomic_int_set (&glev.on, 1);
+    } else if (!on && g_atomic_int_get (&glev.on)) {
+        g_atomic_int_set (&glev.on, 0);
+        for (int k = 0; k < GLEV_SIZED_N; k++) {
+            __atomic_store_n (&glev.kb[k], 0, __ATOMIC_RELAXED);
+            for (int c = 0; c < GLEV_CLASSES; c++)
+                __atomic_store_n (&glev.n[k][c], 0, __ATOMIC_RELAXED);
+        }
+        for (int k = 0; k < GLEV_PLAIN_N; k++)
+            __atomic_store_n (&glev.plain[k], 0, __ATOMIC_RELAXED);
+    }
+    g_mutex_unlock (&glev_lock);
+    return n;
+}
+
+void walpe_mem_gl_events_json (JsonBuilder *b)
+{
+    json_builder_set_member_name (b, "gl_events");
+    json_builder_begin_object (b);
+    const gboolean on = g_atomic_int_get (&glev.on);
+    json_builder_set_member_name (b, "counting");
+    json_builder_add_boolean_value (b, on);
+    if (!on) {
+        walpe_mem_jstr (b, "note", "not counted: `walpe-ctl mem --events on` starts it");
+        json_builder_end_object (b);
+        return;
+    }
+    /* a slot that lost its wrapper (see walpe_mem_gl_events) gets it again */
+    walpe_mem_jint (b, "entry_points", walpe_mem_gl_events (TRUE));
+    json_builder_set_member_name (b, "seconds");
+    json_builder_add_double_value (b, (double) (g_get_monotonic_time () - glev.since_us) / 1e6);
+    for (int k = 0; k < GLEV_PLAIN_N; k++)
+        walpe_mem_jint (b, glev_plain_names[k], __atomic_load_n (&glev.plain[k], __ATOMIC_RELAXED));
+    for (int k = 0; k < GLEV_SIZED_N; k++) {
+        gint64 total = 0;
+        json_builder_set_member_name (b, glev_sized_names[k]);
+        json_builder_begin_object (b);
+        json_builder_set_member_name (b, "by_size");
+        json_builder_begin_array (b);
+        for (int c = 0; c < GLEV_CLASSES; c++) {
+            const gint64 n = __atomic_load_n (&glev.n[k][c], __ATOMIC_RELAXED);
+            total += n;
+            if (!n)
+                continue;
+            json_builder_begin_object (b);
+            walpe_mem_jstr (b, "what", size_class_names[c]);
+            walpe_mem_jint (b, "count", n);
+            json_builder_end_object (b);
+        }
+        json_builder_end_array (b);
+        walpe_mem_jint (b, "count", total);
+        walpe_mem_jint (b, "total_kb", __atomic_load_n (&glev.kb[k], __ATOMIC_RELAXED));
+        json_builder_end_object (b);
+    }
     json_builder_end_object (b);
 }

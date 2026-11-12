@@ -58,6 +58,14 @@ static gint64 num (JsonObject *o, const char *path)
     return v;
 }
 
+static const WalpeMemMapRow *map_row (GArray *rows, const char *name)
+{
+    for (guint i = 0; rows && i < rows->len; i++)
+        if (!strcmp (g_array_index (rows, WalpeMemMapRow, i).name, name))
+            return &g_array_index (rows, WalpeMemMapRow, i);
+    return NULL;
+}
+
 static void test_maps (void)
 {
     check (walpe_mem_map_kind ("") == WALPE_MAP_ANON && walpe_mem_map_kind (NULL) == WALPE_MAP_ANON,
@@ -137,6 +145,65 @@ static void test_maps (void)
            "the largest files by base name, the parts of one file as one");
     walpe_mem_smaps_parse ("", NULL, &m);
     check (m.n_maps == 0, "an empty text has no mappings");
+
+    /* the same as a table by name, and by name and size */
+    static const char smaps2[] =
+        "7f0000000000-7f0000400000 rw-s 00000000 00:05 99 /dev/nvidiactl\n"
+        "Size: 4096 kB\nRss: 4096 kB\nShared_Clean: 96 kB\nShared_Dirty: 4000 kB\nAnonymous: 0 kB\n"
+        "7f0001000000-7f0001400000 rw-s 00000000 00:05 99 /dev/nvidiactl\n"
+        "Size: 4096 kB\nRss: 1000 kB\nAnonymous: 0 kB\n"
+        "7f0002000000-7f0002200000 rw-s 00000000 00:05 99 /dev/nvidiactl\n"
+        "Size: 2048 kB\nRss: 2048 kB\nAnonymous: 0 kB\n"
+        "7f0003000000-7f0003400000 rw-s 00000000 00:01 5 /memfd:buf (deleted)\n"
+        "Size: 4096 kB\nRss: 4096 kB\nShared_Dirty: 4096 kB\nAnonymous: 0 kB\n"
+        "AnonHugePages: 0 kB\nShmemPmdMapped: 2048 kB\n"
+        "7f0004000000-7f0004200000 rw-s 00000000 00:01 7 /SYSV00000000 (deleted)\n"
+        "Size: 2048 kB\nRss: 2048 kB\nAnonymous: 0 kB\n"
+        "7f0005000000-7f0005100000 r--p 00000000 08:01 12 /usr/lib/libfoo.so.1\n"
+        "Size: 1024 kB\nRss: 600 kB\nAnonymous: 0 kB\n"
+        "7f0005100000-7f0005200000 rw-p 00100000 08:01 12 /usr/lib/libfoo.so.1\n"
+        "Size: 1024 kB\nRss: 100 kB\nAnonymous: 100 kB\n"
+        "7f0006000000-7f0006800000 rw-p 00000000 00:00 0 \n"
+        "Size: 8192 kB\nRss: 8000 kB\nAnonymous: 8000 kB\nAnonHugePages: 6144 kB\n"
+        "ShmemPmdMapped: 0 kB\nFilePmdMapped: 0 kB\n"
+        "7f0007000000-7f0007800000 rw-p 00000000 00:00 0 \n"
+        "Size: 8192 kB\nRss: 192 kB\nAnonymous: 192 kB\n"
+        "7f0008000000-7f0008100000 r--p 00000000 08:01 14 /usr/lib/libunused.so\n"
+        "Size: 1024 kB\nRss: 0 kB\n";
+    GArray *bn = NULL, *bs = NULL;
+    walpe_mem_smaps_tables (smaps2, NULL, &m, &bn, &bs);
+    const WalpeMemMapRow *r = map_row (bn, "/dev/nvidiactl"), *r2 = NULL;
+    check (m.n_maps == 10 && bn->len == 6, "one row per name");
+    check (r && r->n == 3 && r->size_kb == 10240 && r->rss_kb == 7144 && r->file_kb == 7144 &&
+           r->shmem_kb == 0 && r->anon_kb == 0 && r->shared_kb == 4096 && r->kind == WALPE_MAP_NVIDIA,
+           "the mappings of a device node are one row; what is resident of them counts as file");
+    r = map_row (bn, "/memfd:buf (deleted)");
+    check (r && r->n == 1 && r->shmem_kb == 4096 && r->file_kb == 0 && r->shared_kb == 4096,
+           "a memfd is shared memory");
+    r = map_row (bn, "/SYSV00000000 (deleted)");
+    check (r && r->shmem_kb == 2048 && r->file_kb == 0, "a SysV segment is shared memory");
+    r = map_row (bn, "libfoo.so.1");
+    check (r && r->n == 2 && r->rss_kb == 700 && r->anon_kb == 100 && r->file_kb == 600,
+           "a library by its base name: its written pages are anonymous, the rest is file");
+    r = map_row (bn, "[anon]");
+    check (r && r->n == 2 && r->rss_kb == 8192 && r->anon_kb == 8192 && r->file_kb == 0,
+           "the mappings without a name are one row of anonymous memory");
+    r2 = map_row (bn, "/memfd:buf (deleted)");
+    check (r && r->huge_kb == 6144 && r2 && r2->huge_kb == 2048 && m.huge_anon_kb == 6144 &&
+           m.huge_shmem_kb == 2048 && m.huge_file_kb == 0,
+           "what is mapped in 2 MiB units: per row and by kind");
+    check (!strcmp (g_array_index (bn, WalpeMemMapRow, 0).name, "[anon]") &&
+           !strcmp (g_array_index (bn, WalpeMemMapRow, 1).name, "/dev/nvidiactl"),
+           "the rows come most resident first");
+    r = map_row (bs, "/dev/nvidiactl 4096 kB");
+    r2 = map_row (bs, "/dev/nvidiactl 2048 kB");
+    const WalpeMemMapRow *r3 = map_row (bs, "[anon] 8192 kB");
+    check (r && r->n == 2 && r->rss_kb == 5096 && r2 && r2->n == 1 && r3 && r3->n == 2 &&
+           map_row (bs, "/memfd:buf (deleted) 4096 kB") && !map_row (bs, "libfoo.so.1 1024 kB") &&
+           bs->len == 5,
+           "by name and size: a row per size of what a driver or an allocator maps, none for files");
+    g_array_unref (bn);
+    g_array_unref (bs);
     walpe_mem_smaps_parse ("Rss: 5 kB\ngarbage\n\n7f00-7f10 rw-p 0 0:0 0", NULL, &m);
     check (m.n_maps == 1 && m.kind[WALPE_MAP_ANON].n == 1,
            "lines before the first mapping are skipped; a last line without a newline counts");
@@ -165,6 +232,33 @@ static void test_process (void)
            num (o, "malloc.arena_kb") >= num (o, "malloc.in_use_kb"),
            "the allocator: arenas, bytes handed out, bytes its heaps hold");
 #endif
+    {
+        /* the rows by name add up to what the kernel says is resident (the
+         * two are read one after the other: some pages may differ) */
+        const gint64 rows = num (o, "mappings.by_name_sum.anon_kb") +
+                            num (o, "mappings.by_name_sum.file_kb") +
+                            num (o, "mappings.by_name_sum.shmem_kb");
+        const gint64 rss = num (o, "process.rss_kb");
+        JsonArray *bn = wpj_arr (wpj_obj (o, "mappings"), "by_name");
+        JsonArray *bs = wpj_arr (wpj_obj (o, "mappings"), "by_size");
+        check (wpj_arr_len (bn) > 5 && wpj_arr_len (bs) >= 1 && rows > rss - rss / 8 &&
+               rows < rss + rss / 8,
+               "mappings by name, and by name and size; the rows add up to the resident memory");
+        gboolean heap_row = FALSE, dirs = FALSE;
+        for (guint i = 0; i < wpj_arr_len (bn); i++) {
+            const char *nm = wpj_str (wpj_arr_obj (bn, i), "name", "");
+            heap_row |= !strcmp (nm, "[heap]");
+            dirs |= nm[0] == '/' && !strcmp (wpj_str (wpj_arr_obj (bn, i), "kind", ""), "libraries");
+        }
+        check (heap_row && !dirs, "the heap has a row; libraries are named without their directory");
+        JsonArray *tn = wpj_arr (wpj_obj (o, "threads"), "by_name");
+        gint64 tsum = 0;
+        for (guint i = 0; i < wpj_arr_len (tn); i++)
+            tsum += (gint64) wpj_num (wpj_arr_obj (tn, i), "count", 0);
+        check (num (o, "threads.count") >= 1 && tsum == num (o, "threads.count") &&
+               *wpj_str (wpj_arr_obj (tn, 0), "name", "") != '\0',
+               "the threads by name");
+    }
     json_node_unref (root);
 
     /* 64 MiB that are allocated and touched show as resident anonymous
@@ -375,6 +469,113 @@ static void test_gl (void)
     json_node_unref (r2);
 }
 
+static JsonObject *events (JsonNode **root)
+{
+    JsonBuilder *b = begin ();
+    walpe_mem_gl_events_json (b);
+    return wpj_obj (built (b, root), "gl_events");
+}
+
+static gint64 class_count (JsonObject *ev, const char *kind, const char *cls)
+{
+    JsonArray *a = wpj_arr (wpj_obj (ev, kind), "by_size");
+    for (guint i = 0; i < wpj_arr_len (a); i++)
+        if (!strcmp (wpj_str (wpj_arr_obj (a, i), "what", ""), cls))
+            return (gint64) wpj_num (wpj_arr_obj (a, i), "count", 0);
+    return 0;
+}
+
+/* GL storage events: nothing is counted (and no entry point is touched)
+ * until it is asked for; then what is made and deleted is counted by kind
+ * and size, the calls do what they did, and "off" puts everything back */
+static void test_gl_events (void)
+{
+    int cls = -1;
+    check (!strcmp (walpe_mem_size_class (482 * 272 * 4, &cls), "to 1 MB") && cls == 2 &&
+           !strcmp (walpe_mem_size_class (962 * 542 * 4, NULL), "to 2.5 MB") &&
+           !strcmp (walpe_mem_size_class (1024 * 1024 * 4, NULL), "to 4.5 MB") &&
+           !strcmp (walpe_mem_size_class (1920 * 1080 * 4, NULL), "to 9 MB") &&
+           !strcmp (walpe_mem_size_class (3840 * 2160 * 4, NULL), "over 16 MB") &&
+           !strcmp (walpe_mem_size_class (0, NULL), "to 64 kB"),
+           "the size classes");
+    GLuint warm = 0;
+    glGenTextures (1, &warm);   /* (libepoxy has looked the entry points up) */
+    glBindTexture (GL_TEXTURE_2D, warm);
+    glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glDeleteTextures (1, &warm);
+    void *slot_before;
+    memcpy (&slot_before, &epoxy_glTexImage2D, sizeof (slot_before));
+    JsonNode *r0 = NULL, *r1 = NULL, *r2 = NULL;
+    JsonObject *e0 = events (&r0);
+    check (e0 && !wpj_bool (e0, "counting", TRUE) && !json_object_has_member (e0, "textures_deleted"),
+           "GL events are not counted before somebody asks");
+    void *slot_now;
+    memcpy (&slot_now, &epoxy_glTexImage2D, sizeof (slot_now));
+    check (slot_now == slot_before, "... and a report does not touch the entry points");
+
+    const int n = walpe_mem_gl_events (TRUE);
+    check (n >= 12, "counting takes the entry points this driver has");
+    memcpy (&slot_now, &epoxy_glTexImage2D, sizeof (slot_now));
+    check (slot_now != slot_before, "... through their libepoxy slots");
+    GLuint t[2] = { 0, 0 }, f = 0, buf = 0;
+    static const guint8 px[16] = { 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160 };
+    guint8 back[16] = { 0 }, rp[16] = { 0 };
+    glGenTextures (2, t);
+    glBindTexture (GL_TEXTURE_2D, t[0]);
+    glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, 482, 272, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glBindTexture (GL_TEXTURE_2D, t[1]);
+    glPixelStorei (GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei (GL_PACK_ALIGNMENT, 1);
+    glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glGetTexImage (GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, back);
+    glGenFramebuffers (1, &f);
+    glBindFramebuffer (GL_FRAMEBUFFER, f);
+    glFramebufferTexture2D (GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t[1], 0);
+    glReadPixels (0, 0, 2, 2, GL_RGBA, GL_UNSIGNED_BYTE, rp);
+    glBindFramebuffer (GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers (1, &f);
+    glGenBuffers (1, &buf);
+    glDeleteBuffers (1, &buf);
+    glDeleteTextures (2, t);
+    check (!memcmp (back, px, sizeof (px)) && !memcmp (rp, px, sizeof (px)),
+           "the counted calls do what they did: pixels go in and come back");
+    JsonObject *e1 = events (&r1);
+    check (wpj_bool (e1, "counting", FALSE) && num (e1, "entry_points") == n, "the report says it counts");
+    check (num (e1, "texture_stores_without_pixels.count") == 1 &&
+           class_count (e1, "texture_stores_without_pixels", "to 1 MB") == 1 &&
+           num (e1, "texture_stores_without_pixels.total_kb") == (482 * 272 * 4 + 1023) / 1024,
+           "a render target's storage is counted with its size class");
+    check (num (e1, "texture_stores_with_pixels.count") == 1 &&
+           class_count (e1, "texture_stores_with_pixels", "to 64 kB") == 1,
+           "storage with pixels is its own kind");
+    check (num (e1, "texture_names_made") == 2 && num (e1, "textures_deleted") == 2 &&
+           num (e1, "framebuffers_made") == 1 && num (e1, "framebuffers_deleted") == 1 &&
+           num (e1, "buffers_made") == 1 && num (e1, "buffers_deleted") == 1,
+           "textures, framebuffers and buffers made and deleted");
+    check (num (e1, "read_backs.count") == 1 && num (e1, "texture_read_backs") == 1,
+           "read-backs");
+
+    walpe_mem_gl_events (FALSE);
+    memcpy (&slot_now, &epoxy_glTexImage2D, sizeof (slot_now));
+    check (slot_now == slot_before, "\"off\" puts the entry points back");
+    glGenTextures (1, &warm);
+    glBindTexture (GL_TEXTURE_2D, warm);
+    glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glDeleteTextures (1, &warm);
+    JsonObject *e2 = events (&r2);
+    check (!wpj_bool (e2, "counting", TRUE), "... and nothing is counted any more");
+    walpe_mem_gl_events (TRUE);
+    json_node_unref (r2);
+    e2 = events (&r2);
+    check (num (e2, "textures_deleted") == 0 && num (e2, "texture_stores_without_pixels.count") == 0,
+           "counting again starts from nothing");
+    walpe_mem_gl_events (FALSE);
+    json_node_unref (r0);
+    json_node_unref (r1);
+    json_node_unref (r2);
+}
+
 int main (void)
 {
     test_maps ();
@@ -409,6 +610,7 @@ int main (void)
     } else {
         printf ("GL: %s\n", (const char *) glGetString (GL_RENDERER));
         test_gl ();
+        test_gl_events ();
         eglMakeCurrent (dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         eglDestroyContext (dpy, ctx);
         eglTerminate (dpy);

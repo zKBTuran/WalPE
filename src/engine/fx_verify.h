@@ -75,6 +75,7 @@
  * The rewrites of fx_quality = fast that change pixels on purpose are not
  * compared.
  */
+#include "memreport.h"   /* walpe_memc_inc: comparisons made, for `walpe-ctl mem` */
 
 #define FXS_VERIFY_MAX 256      /* pixels a side of one compared picture */
 #define FXS_VERIFY_PROBES 4     /* pictures per program and comparison */
@@ -143,6 +144,7 @@ static void fxs_probe_apply (GLuint prog, guint k)
 static gboolean fxs_compare (EffPass *pass, GLuint cand, guint round, int *maxdiff, gboolean *flat)
 {
     *flat = FALSE;
+    walpe_memc_inc (WALPE_MEMC_FX_COMPARE);   /* (`walpe-ctl mem`: how often this ran) */
     GLint vp[4] = { 0 }, fbo = 0, rfbo = 0, tex = 0, ctype = 0;
     GLfloat cc[4] = { 0 };
     glGetIntegerv (GL_VIEWPORT, vp);

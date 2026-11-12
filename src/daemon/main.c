@@ -7440,7 +7440,9 @@ static void ipc_profile_result (JsonBuilder *b)
  * software renderer is busy with one frame for that long - is reported as
  * busy ({"wait": seconds} waits longer, up to a minute; nothing else is
  * answered meanwhile). {"deep": true} also asks the driver for the size
- * of every program binary. */
+ * of every program binary. {"events": "on"} starts the counting of GL
+ * storage events (memreport.h: nothing counts them before), "off" ends it;
+ * the report says what was counted since. */
 static gint64 daemon_start_us;
 
 static void ipc_mem (JsonBuilder *b, JsonObject *o)
@@ -7448,7 +7450,10 @@ static void ipc_mem (JsonBuilder *b, JsonObject *o)
     static guint serial;
     const gboolean deep = wpj_bool (o, "deep", FALSE);
     const double wait_s = CLAMP (wpj_num (o, "wait", 3.0), 0.1, 60.0);
+    const char *events = wpj_str (o, "events", NULL);
     const gint64 t0 = g_get_monotonic_time ();
+    if (events && (!strcmp (events, "on") || !strcmp (events, "off")))
+        walpe_mem_gl_events (events[1] == 'n');
     if (!++serial)
         serial = 1;
     walpe_memc_inc (WALPE_MEMC_MEM);
@@ -7491,7 +7496,18 @@ static void ipc_mem (JsonBuilder *b, JsonObject *o)
         g_source_unref (probe);
         jb_int (b, "main_loop_sources_created", id);
     }
+    {
+        /* effect pass programs since the start (fx_specialize.h): built,
+         * found equal to the plain program / not equal */
+        int fc = 0, fv = 0, fr = 0;
+        fx_program_stats (&fc, NULL, NULL, NULL, NULL, NULL, FALSE);
+        fx_verify_stats (&fv, &fr);
+        jb_int (b, "fx_programs_compiled", fc);
+        jb_int (b, "fx_verified", fv);
+        jb_int (b, "fx_rejected", fr);
+    }
     json_builder_end_object (b);
+    walpe_mem_gl_events_json (b);                  /* "gl_events" */
     walpe_modules_mem_json (b, daemon_start_us);   /* "modules", "video_module" */
     {
         guint snaps = 0;

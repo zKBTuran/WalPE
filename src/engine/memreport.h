@@ -36,6 +36,8 @@ typedef enum {
     WALPE_MEMC_PAUSED_FRAME,   /* frames drawn on a paused monitor (forced) */
     WALPE_MEMC_TARGET_DROP,    /* a scene gave back all its render targets */
     WALPE_MEMC_TEXT_RENDER,    /* text layers rendered into their texture */
+    WALPE_MEMC_FX_COMPARE,     /* a specialised pass program was compared with the plain one
+                                * (a scratch texture, a framebuffer and one read-back each) */
     WALPE_MEMC_N
 } WalpeMemCounter;
 
@@ -83,14 +85,59 @@ typedef struct {
      * files (the file's base name only) */
     struct { gint64 size_kb, rss_kb; char perms[5]; } top_anon[WALPE_MEM_TOP];
     struct { gint64 size_kb, rss_kb; char name[48]; } top_file[WALPE_MEM_TOP];
+    /* resident memory the kernel maps in 2 MiB units (transparent huge
+     * pages): AnonHugePages, ShmemPmdMapped, FilePmdMapped of all mappings */
+    gint64 huge_anon_kb, huge_shmem_kb, huge_file_kb;
 } WalpeMemMaps;
 /* text = the contents of /proc/<pid>/smaps; exe = the program's own file
  * (counted with the libraries; NULL = not known) */
 void walpe_mem_smaps_parse (const char *text, const char *exe, WalpeMemMaps *out);
 
-/* "process": {...}, "mappings": {...}, "fds": {...}, "malloc": {...} as
- * members of the object being built */
+/* The same mappings as a table by name: one row per file (its base name),
+ * per special name as the kernel prints it ("/dev/nvidiactl", "/memfd:x
+ * (deleted)", "/SYSV00000000 (deleted)", "[stack]"), "[heap]", and one row
+ * "[anon]" for the mappings without a name. What is resident of a row is
+ * split the way /proc/<pid>/status splits it: anonymous pages (RssAnon),
+ * pages of shared memory (RssShmem: /dev/shm, SysV segments, memfd, shared
+ * anonymous mappings, a kernel graphics driver's buffer objects) and the
+ * rest (RssFile: files, and what a device node lets a process map). shared
+ * = resident pages another process maps too; huge = the part of rss that
+ * is mapped in 2 MiB units (it comes and goes 2 MiB at a time). */
+typedef struct {
+    char name[96];
+    int kind;
+    guint n;
+    gint64 size_kb, rss_kb, anon_kb, file_kb, shmem_kb, shared_kb, swap_kb, huge_kb;
+} WalpeMemMapRow;
+/* by_name / by_size: NULL or where a GArray of WalpeMemMapRow goes, the
+ * most resident first (g_array_unref). by_size has one row per name AND
+ * size ("/dev/nvidiactl 4096 kB", "[anon] 65536 kB") for the kinds a driver
+ * or an allocator makes at run time (anonymous, nvidia, dri, memfd, shm):
+ * a mapping that appears, goes or changes its size between two reports is
+ * a row whose count changes. */
+void walpe_mem_smaps_tables (const char *text, const char *exe, WalpeMemMaps *out, GArray **by_name,
+                             GArray **by_size);
+
+/* "process": {...}, "mappings": {...}, "fds": {...}, "malloc": {...},
+ * "threads": {...} as members of the object being built */
 void walpe_mem_process_json (JsonBuilder *b);
+
+/* ---- GL storage events (any thread)
+ * How often storage for a texture was made (with or without pixels, by
+ * size class), textures, framebuffers, buffers and programs were made and
+ * deleted, and pixels were read back - wherever in the process the call
+ * came from. Nothing of this exists until it is asked for: on = TRUE puts
+ * counting wrappers into the libepoxy slots of a dozen entry points that
+ * make or delete objects (the way the GPU profiler does for its runs; no
+ * draw call, nothing that runs per frame in a still scene), FALSE takes
+ * them out again and forgets the counts. While a GPU profile runs, its
+ * wrappers stand in front of five of the slots and those events are not
+ * counted here. Returns the number of entry points being counted. */
+int walpe_mem_gl_events (gboolean on);
+/* "gl_events": {...} as a member of the object being built */
+void walpe_mem_gl_events_json (JsonBuilder *b);
+/* the size class of an event of that many bytes (its name; index in *cls) */
+const char *walpe_mem_size_class (gint64 bytes, int *cls);
 
 /* ---- the GL objects of the current context (a render thread)
  * "gl": {...} as a member of the object being built. deep: also ask every

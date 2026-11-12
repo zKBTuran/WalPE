@@ -200,6 +200,39 @@ static void mem_print (JsonObject *m)
                      MEM_KMIB (mem_n (wpj_arr_obj (lf, i), "rss_kb")));
         g_print ("\n");
     }
+    JsonArray *bn = wpj_arr (maps, "by_name");
+    if (wpj_arr_len (bn)) {
+        JsonObject *sum = wpj_obj (maps, "by_name_sum");
+        g_print ("          by name, the most resident (all of them, and by size, in --json)\n"
+                 "            %-40s %5s %9s = %9s + %8s + %8s  %8s\n", "name", "count", "resident",
+                 "anonymous", "file", "shared m", "of size");
+        for (guint i = 0; i < wpj_arr_len (bn) && i < 14; i++) {
+            JsonObject *r = wpj_arr_obj (bn, i);
+            g_print ("            %-40.40s %5.0f %9.1f   %9.1f   %8.1f   %8.1f  %8.1f\n",
+                     wpj_str (r, "name", "?"), mem_n (r, "count"), MEM_KMIB (mem_n (r, "rss_kb")),
+                     MEM_KMIB (mem_n (r, "anon_kb")), MEM_KMIB (mem_n (r, "file_kb")),
+                     MEM_KMIB (mem_n (r, "shmem_kb")), MEM_KMIB (mem_n (r, "size_kb")));
+        }
+        if (sum)
+            g_print ("            all rows: anonymous %.1f + file %.1f + shared memory %.1f MiB (the "
+                     "kernel's own split is the first line)\n", MEM_KMIB (mem_n (sum, "anon_kb")),
+                     MEM_KMIB (mem_n (sum, "file_kb")), MEM_KMIB (mem_n (sum, "shmem_kb")));
+    }
+    JsonObject *hp = wpj_obj (maps, "huge_pages");
+    if (hp)
+        g_print ("          in 2 MiB units (transparent huge pages, system setting \"%s\"): anonymous "
+                 "%.1f, shared memory %.1f, file %.1f MiB\n", wpj_str (hp, "setting", "?"),
+                 MEM_KMIB (mem_n (hp, "anon_kb")), MEM_KMIB (mem_n (hp, "shmem_kb")),
+                 MEM_KMIB (mem_n (hp, "file_kb")));
+    JsonObject *th = wpj_obj (m, "threads");
+    JsonArray *tn = wpj_arr (th, "by_name");
+    if (wpj_arr_len (tn)) {
+        g_print ("threads   %.0f:", mem_n (th, "count"));
+        for (guint i = 0; i < wpj_arr_len (tn); i++)
+            g_print ("%s %.0f x %s", i ? "," : "", mem_n (wpj_arr_obj (tn, i), "count"),
+                     wpj_str (wpj_arr_obj (tn, i), "name", "?"));
+        g_print ("\n");
+    }
     g_print ("fds       sockets %.0f, pipes %.0f, anonymous inodes %.0f, /dev/nvidia* %.0f, /dev/dri "
              "%.0f, memfd %.0f, files %.0f, other %.0f\n", mem_n (fd, "sockets"), mem_n (fd, "pipes"),
              mem_n (fd, "anon_inodes"), mem_n (fd, "nvidia"), mem_n (fd, "dri"), mem_n (fd, "memfd"),
@@ -216,6 +249,43 @@ static void mem_print (JsonObject *m)
              mem_n (ct, "frames_drawn_while_paused"), mem_n (ct, "scene_target_drops"),
              mem_n (ct, "text_renders"), mem_n (ct, "main_loop_sources_created"),
              mem_n (ct, "config_saves"));
+    if (json_object_has_member (ct, "fx_compares"))
+        g_print ("          effect pass programs built %.0f, compared with the plain program %.0f "
+                 "times (%.0f passes verified, %.0f rejected)\n", mem_n (ct, "fx_programs_compiled"),
+                 mem_n (ct, "fx_compares"), mem_n (ct, "fx_verified"), mem_n (ct, "fx_rejected"));
+    JsonObject *ev = wpj_obj (m, "gl_events");
+    if (ev && wpj_bool (ev, "counting", FALSE)) {
+        static const struct { const char *key, *label; } sized[] = {
+            { "texture_stores_without_pixels", "texture storage without pixels (render targets)" },
+            { "texture_stores_with_pixels", "texture storage with pixels" },
+            { "texture_stores_compressed", "compressed texture storage" },
+            { "buffer_storages", "buffers that stay mapped" },
+            { "read_backs", "read-backs (glReadPixels)" },
+        };
+        g_print ("\nGL events counted for %.0f s (%.0f entry points): textures deleted %.0f (names "
+                 "made %.0f), framebuffers made %.0f / deleted %.0f, buffers made %.0f / deleted "
+                 "%.0f, programs linked %.0f / deleted %.0f, texture read-backs %.0f\n",
+                 mem_n (ev, "seconds"), mem_n (ev, "entry_points"), mem_n (ev, "textures_deleted"),
+                 mem_n (ev, "texture_names_made"), mem_n (ev, "framebuffers_made"),
+                 mem_n (ev, "framebuffers_deleted"), mem_n (ev, "buffers_made"),
+                 mem_n (ev, "buffers_deleted"), mem_n (ev, "programs_linked"),
+                 mem_n (ev, "programs_deleted"), mem_n (ev, "texture_read_backs"));
+        for (guint i = 0; i < G_N_ELEMENTS (sized); i++) {
+            JsonObject *so = wpj_obj (ev, sized[i].key);
+            if (!so || mem_n (so, "count") <= 0)
+                continue;
+            g_print ("          %s: %.0f = %.1f MiB (", sized[i].label, mem_n (so, "count"),
+                     MEM_KMIB (mem_n (so, "total_kb")));
+            JsonArray *bs = wpj_arr (so, "by_size");
+            for (guint k = 0; k < wpj_arr_len (bs); k++)
+                g_print ("%s%s: %.0f", k ? ", " : "", wpj_str (wpj_arr_obj (bs, k), "what", "?"),
+                         mem_n (wpj_arr_obj (bs, k), "count"));
+            g_print (")\n");
+        }
+    } else if (ev) {
+        g_print ("\nGL events not counted (`walpe-ctl mem --events on` starts counting how often "
+                 "textures, framebuffers, buffers and programs are made and deleted)\n");
+    }
     JsonObject *mods = wpj_obj (m, "modules");
     static const char *const mn[] = { "web", "video" };
     for (guint i = 0; mods && i < G_N_ELEMENTS (mn); i++) {
@@ -422,6 +492,10 @@ static int mem_diff (const char *fa, const char *fb)
             g_snprintf (unit, sizeof (unit), "  (%+.1f MiB)", d / 1048576.0);
         else if (g_str_has_suffix (key, "_kb"))
             g_snprintf (unit, sizeof (unit), "  (%+.1f MiB)", d / 1024.0);
+        /* a row only one report has: a mapping, a size, a thread name that
+         * appeared or is gone */
+        if (!x || !y)
+            g_strlcat (unit, x ? "  gone" : "  new", sizeof (unit));
         g_print ("%-84s %14s %14s %+14.0f%s\n", key, sa, sb, d, unit);
         shown++;
     }
@@ -438,6 +512,7 @@ static int mem_diff (const char *fa, const char *fb)
 static int mem_main (int argc, char **argv)
 {
     gboolean json = FALSE, deep = FALSE;
+    const char *events = NULL;
     int wait_s = 3;
     for (int i = 2; i < argc; i++) {
         char *end = NULL;
@@ -449,10 +524,13 @@ static int mem_main (int argc, char **argv)
                    (wait_s = (int) g_ascii_strtoll (argv[i + 1], &end, 10)) >= 1 && wait_s <= 60 &&
                    end && !*end) {
             i++;
+        } else if (!strcmp (argv[i], "--events") && i + 1 < argc &&
+                   (!strcmp (argv[i + 1], "on") || !strcmp (argv[i + 1], "off"))) {
+            events = argv[++i];
         } else if (!strcmp (argv[i], "--diff") && i == 2 && argc == 5) {
             return mem_diff (argv[3], argv[4]);
         } else {
-            g_printerr ("walpe-ctl mem [--json] [--deep] [--wait SECONDS (1..60)]\n"
+            g_printerr ("walpe-ctl mem [--json] [--deep] [--wait SECONDS (1..60)] [--events on|off]\n"
                         "walpe-ctl mem --diff FILE1 FILE2   (two reports saved with --json)\n");
             return 1;
         }
@@ -460,8 +538,9 @@ static int mem_main (int argc, char **argv)
     char *sock = walpe_socket_path ();
     /* (each monitor's render thread writes its part between two frames:
      * the daemon waits that long for them) */
-    char *req = g_strdup_printf ("{\"cmd\":\"mem\",\"deep\":%s,\"wait\":%d}", deep ? "true" : "false",
-                                 wait_s);
+    char *req = g_strdup_printf ("{\"cmd\":\"mem\",\"deep\":%s,\"wait\":%d%s%s%s}",
+                                 deep ? "true" : "false", wait_s, events ? ",\"events\":\"" : "",
+                                 events ? events : "", events ? "\"" : "");
     char *reply = walpe_ipc_request (sock, req, wait_s * 1000 + 7000);
     g_free (req);
     int rc = 0;
