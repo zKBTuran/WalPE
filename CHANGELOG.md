@@ -237,6 +237,11 @@ could do to the daemon. None of these was seen being used.
   - the animated previews of a library window that is not on screen - on another
     workspace or tag, minimised - stop playing and give their frames back (up to 48 MiB,
     and a timer 20 times a second).
+- X11: a wallpaper window that another program destroys (a script that tidies up
+  windows, `xdotool windowclose` on the wrong id) is made again. The daemon did not
+  notice: that monitor showed the root window for as long as the daemon ran. It now
+  restarts itself in place, at most once in ten seconds.
+- A video conversion that cannot start, or is cancelled, leaves no memory behind.
 - Import: a video with `%d` in its name (`take %03d.mp4`) got its thumbnail under another
   name, replaced a picture of that name next to it and was shown without a preview.
 - Build: **the tests and the developer tools are no part of a build unless asked for.**
