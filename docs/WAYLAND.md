@@ -44,7 +44,8 @@ A compositor that offers the layer shell (protocol `zwlr_layer_shell_v1`), and a
 | niri | yes | tested headless (26.04, as a window on another compositor) |
 | COSMIC | yes | tested headless (cosmic-comp 1.11.0, as a window on another compositor; nothing there reports a fullscreen window: see [Pause rules](#pause-rules)) |
 | Hyprland | yes | expected to work, not tested (0.57.2 does not start without a graphics device) |
-| GNOME (Mutter), weston's desktop shell | no | not supported: use an X11 session |
+| GNOME (Mutter) | no | shown with the WalPE extension for GNOME Shell, which is not part of the build: see [GNOME](#gnome). Run on a headless GNOME Shell 46 and 51 |
+| weston's desktop shell | no | not supported: use an X11 session |
 
 Without the layer shell the daemon says so, names the protocol and ends with status 1,
 also when `DISPLAY` is set: in such a session `DISPLAY` is Xwayland, and an X window is
@@ -52,8 +53,9 @@ not a desktop background there. The compositor shows the X11 backend's wallpaper
 above every other window instead of below, and clicks pass through it to windows nobody
 can see (run on Mutter 46 and on KWin 5.27). Up to 0.14.0 `backend=auto` went on to X11
 there by itself. X11 asked for by name (`--backend x11`, `walpe-ctl backend x11`) is
-still taken and the log says what it means; on GNOME the practical answer is its X11
-session where the distribution still offers one.
+still taken and the log says what it means. On GNOME the answer is the extension
+([GNOME](#gnome)): with it the daemon takes Wayland there and no layer shell is needed.
+Its X11 session is the other answer where the distribution still offers one.
 
 Used when the compositor offers them, not required: `xdg-output` (monitor names and
 layout), `wp_viewporter` (pixel-exact rendering at fractional scales, render resolution
@@ -163,15 +165,17 @@ false` means the setting has no effect in this session, whether it is on or off,
 | Pause after N seconds without input (`pause_idle`, new, off by default) | the compositor's idle notification (`ext-idle-notify-v1`). `walpe-ctl set idle=300`; 0 = off. On X11 nothing reports idle time in this version, and status says so |
 | Pause on battery (`pause_battery`) | the kernel's power-supply state, as on X11 |
 
-KWin and GNOME Shell offer other programs no window list. On GNOME the fullscreen and
-focus rules have no source, and of the covered rule the "no longer shown" part is left;
-`pause_rules` says so in the rule's `note`, and the settings window prints it under the
-switch. COSMIC's compositor lists windows without their state
+KWin and GNOME Shell offer other programs no window list. On GNOME the WalPE extension,
+which the wallpaper needs there anyway, tells the daemon instead: fullscreen, focus, and
+covered at 85 % as on X11, per monitor ([GNOME](#gnome); the source is named `gnome` in
+`pause_rules`). COSMIC's compositor lists windows without their state
 (`ext_foreign_toplevel_list_v1`; the state is in a protocol of its own,
 `zcosmic_toplevel_info_v1`, which WalPE does not speak), so the fullscreen and focus
-rules have no source there either, and `pause_rules` says so. A fullscreen window pauses
-the wallpaper on COSMIC all the same, through "pause when covered": cosmic-comp 1.11.0
-stops asking a surface behind a fullscreen window for frames (run headless).
+rules have no source there, and of the covered rule the "no longer shown" part is left;
+`pause_rules` says so in the rule's `note`, and the settings window prints it under the
+switch. A fullscreen window pauses the wallpaper on COSMIC all the same, through "pause
+when covered": cosmic-comp 1.11.0 stops asking a surface behind a fullscreen window for
+frames (run headless).
 
 **On KDE Plasma the three rules work through a script in KWin.** KWin goes on asking a
 wallpaper surface for frames while a window hides it (frame callbacks and presentation
@@ -502,6 +506,65 @@ wallpaper; the add-on works there as on the bottom layer.
 > ([DEVELOPMENT.md](DEVELOPMENT.md#tests)), which is skipped where no KWin of Plasma 6 is
 > installed.
 
+## GNOME
+
+GNOME's compositor, Mutter, has no layer shell and nothing in its place: no protocol with
+which a program can put a surface on the desktop. What Mutter has is a window type,
+DESKTOP, that only GNOME Shell itself can give a window. WalPE therefore comes with an
+extension for GNOME Shell, [contrib/gnome](../contrib/gnome/README.md). It is optional and
+no part of the build: nothing of it is compiled or installed with WalPE, a GNOME user
+installs it for himself, and on every other desktop the daemon does not ask for it.
+
+    contrib/gnome/install.sh install      # then log out and in
+    contrib/gnome/install.sh status
+
+**With the extension** `walpe-daemon` starts on GNOME's Wayland session as anywhere else.
+The start-up log says "GNOME Shell 46.0 with the WalPE extension ...", and `walpe-ctl
+status` has `wl_gnome_extension` and `wl_gnome_connection`. Each wallpaper is an ordinary
+window of the daemon, one per monitor, that the extension makes a desktop window:
+
+- below every window, on all workspaces, not in the overview's window list, the window
+  switcher or the dash; behind the windows while the workspace is changed;
+- below the icons of "Desktop Icons NG" (Ubuntu's desktop icons), whichever starts first;
+- behind the workspaces in the overview, with square corners (GNOME's own background has
+  rounded ones there); on GNOME Shell 46 it stands still while the overview is open, on 51
+  it runs;
+- the pause rules for fullscreen windows, covered monitors and the focused application
+  work, per monitor, from what the extension reports; a locked screen counts as covered.
+  The lock screen itself shows GNOME's own picture;
+- a wallpaper that uses the pointer (web wallpapers, scenes that follow it) gets motion
+  and clicks like any window, where no other window is above it. "Desktop Icons NG" is
+  such a window over the whole monitor: with it the pointer does not reach the wallpaper.
+  A wallpaper that does not use the pointer lets clicks through to GNOME's desktop.
+
+**Without it**, or with it switched off, the daemon ends with status 1 as on any compositor
+without the layer shell, and the sentence names the extension and the command that
+installs or enables it. An extension that is installed and not loaded yet (GNOME Shell
+reads extensions when it starts) is waited for up to three seconds. Switching the
+extension off while the daemon runs leaves the wallpaper where it is; the overview and
+the pause rules for windows go without it until it is back. `WALPE_GNOME_EXT=0` keeps the
+daemon from asking.
+
+**GNOME Shell 46 to 48** can retype only the windows of a program the shell started
+itself. There the daemon asks the extension for its connection to the compositor, and the
+shell starts `walpe-daemon --wayland-socket-to 4`, a second process of the same program
+that hands the connection over and then only waits (2 MB of its own) until the daemon
+ends. From 49 on the shell retypes any window and there is no second process.
+
+**Which GNOME needs this.** GNOME on X11 does not: there WalPE's X11 backend runs as it
+always did. But the X11 session is going: Mutter 49 is built without its X11 backend by
+default ("Disable X11 backend by default", Mutter's NEWS for 49.alpha.0) and Mutter 50
+has none ("Drop the X11 backend", 50.alpha), so GNOME 49 has an X11 session only where a distribution builds it back in, and
+from GNOME 50 on there is only the Wayland session. Xwayland is not affected by that, and
+is no way out: an X11 window there lies above the other windows.
+
+> Run on a headless GNOME Shell 46.0 (Mutter 46.2, Ubuntu 24.04; one and two monitors;
+> with and without "Desktop Icons NG" 47.0.9) and 51.1 (Mutter 51.1, Arch Linux), software
+> renderer. Not run: a real GNOME session with gnome-session, GDM and logind, a GPU,
+> NVIDIA's driver, GNOME Shell 47 to 50 (the extension lists the versions it was run on,
+> and GNOME Shell loads it on those only: [contrib/gnome](../contrib/gnome/README.md#versions)),
+> fractional scaling, a monitor plugged in or pulled while the daemon runs.
+
 ## Compositors that were run
 
 All of this is from one day, 2026-11-12, on one machine without a graphics device: each
@@ -571,6 +634,7 @@ application id than its dialogs in a session without a D-Bus session bus.
   use the pointer; `wayland_pointer=off` keeps it for all wallpapers.
 - **Hyprland** (expected, not run): do not run hyprpaper / swww at the same time.
 - **KDE Plasma**: see [KDE Plasma](#kde-plasma) above.
+- **GNOME**: see [GNOME](#gnome) above.
 - **COSMIC**: its own wallpaper program is a background-layer surface too (expected: it
   was not installed in the run above).
 - **Desktop-icon programs** on a layer above the background stay visible, and hide the

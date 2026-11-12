@@ -109,6 +109,8 @@ static void usage (void)
              "                                 an X session. On a Wayland compositor without the layer\n"
              "                                 shell the daemon ends and says so: X11 is Xwayland there\n"
              "                                 (the wallpaper above every window), taken only by name.\n"
+             "                                 GNOME has no layer shell: Wayland there when the WalPE\n"
+             "                                 extension for GNOME Shell is on (contrib/gnome)\n"
              "                                 WALPE_BACKEND in the daemon's environment beats it\n"
              "  walpe-ctl set wayland_pointer=auto|off  Wayland: the wallpaper takes pointer input while\n"
              "                                 it uses the pointer (auto), or never (off: clicks on the\n"

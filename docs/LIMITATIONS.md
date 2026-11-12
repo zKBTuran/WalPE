@@ -64,8 +64,9 @@ software renderer only ([Known limitations](#known-limitations)).
   on colour-only layers are as in 0.12 at a monitor's own resolution; a render size
   chosen above 2048 pixels makes them sharper ([RESOLUTION.md](RESOLUTION.md)).
 - **Wayland: tested headless only.** The Wayland backend needs a compositor with the
-  layer shell (`zwlr_layer_shell_v1`); GNOME's Wayland session and weston's desktop shell
-  have none and are not supported: the daemon ends there and says why (through Xwayland
+  layer shell (`zwlr_layer_shell_v1`); weston's desktop shell has none and is not
+  supported, and GNOME's Wayland session has none and needs the extension of the next
+  entry: without it the daemon ends there and says why (through Xwayland
   the wallpaper would lie above every window, so X11 is taken there only when asked for
   by name). Wallpapers were shown on a headless sway 1.9 with the
   software renderer and on nothing else: no real output, no GPU, no other compositor (a
@@ -87,6 +88,18 @@ software renderer only ([Known limitations](#known-limitations)).
   later; and a session started with a one-time socket (`WAYLAND_SOCKET`) cannot be
   restarted in place, so the daemon ends at the first change of a monitor there.
   [WAYLAND.md](WAYLAND.md#limits).
+- **GNOME on Wayland: only with the WalPE extension for GNOME Shell.** GNOME's compositor
+  has no layer shell, so the wallpaper there is an ordinary window that an extension for
+  GNOME Shell keeps on the desktop. The extension is in `contrib/gnome`, is not part of
+  the build and is installed per user (`contrib/gnome/install.sh install`, then log out
+  and in). With it the wallpaper is below the windows and the desktop icons and the pause
+  rules for windows work; in the overview it has square corners (and stands still on GNOME
+  Shell 46), the lock
+  screen keeps GNOME's own picture, and under "Desktop Icons NG" the pointer does not
+  reach the wallpaper. It lists GNOME Shell 46 and 51, the two versions it was run on
+  (headless, software renderer; no real session, no GPU), and GNOME Shell loads it on
+  listed versions only: on 47 to 50 the version has to be added by hand.
+  [WAYLAND.md](WAYLAND.md#gnome).
 - **X11 desktops with a file manager's desktop: no desktop icons while a wallpaper is
   shown.** On XFCE, LXQt, LXDE, MATE and KDE Plasma's X11 session the desktop's icons and
   its own picture are one window that nothing is seen through; the wallpaper window is a
