@@ -8924,8 +8924,47 @@ static gboolean web_gl_is_software (const char *r)
     return sw;
 }
 
+#ifdef HAVE_WEBHOST_WL
+/* WebKit starts every page process in a sandbox of its own and binds the
+ * socket of "the" display into it: with the X11 page host the X
+ * server's, and as soon as its toolkit is on a Wayland display the file
+ * $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY. With the private page host that is
+ * not the display the page's window lives on (GTK is given that one by
+ * path, and its socket is gone by then) but the session's compositor: a
+ * page process that was taken over could connect to it like any program
+ * of the session, and on compositors that offer their clipboard, screen
+ * capture and input protocols to every client it could use those. A page
+ * has no business there.
+ * WebKit joins the two names without looking whether the second one is a
+ * path by itself, and libwayland (1.15 on) takes a full path in
+ * WAYLAND_DISPLAY. So on a Wayland backend the variable is replaced by
+ * the full path of the same socket, here, before any thread exists:
+ * everything that connects through libwayland (this daemon, the pause
+ * providers, a program started from it) reaches the compositor as before,
+ * and WebKit finds no file of that name to hand to a page process. A
+ * restart in place starts from the environment the daemon was given
+ * (restart_exec), so the next image does the same again. Nothing is done
+ * for a session with a one-time socket (WAYLAND_SOCKET, no name), and
+ * nothing on an X11 backend. scripts/webcheck.py (sandbox) looks into a
+ * page process for the result: a WebKit that binds differently shows
+ * there. */
+static void web_env_wayland_socket (void)
+{
+    const char *name = g_getenv ("WAYLAND_DISPLAY"), *rt = g_getenv ("XDG_RUNTIME_DIR");
+    if (D.backend != WALPE_BACKEND_WAYLAND || !name || !*name || g_path_is_absolute (name) ||
+        !rt || !g_path_is_absolute (rt))
+        return;
+    char *full = g_build_filename (rt, name, NULL);
+    g_setenv ("WAYLAND_DISPLAY", full, TRUE);
+    g_free (full);
+}
+#endif
+
 static void web_env_setup (gboolean want_accel, int fps)
 {
+#ifdef HAVE_WEBHOST_WL
+    web_env_wayland_socket ();
+#endif
     /* what an earlier image of this process set (it restarts itself after
      * a monitor layout or web_accel change) is not the user's choice */
     web_env_undo (g_getenv ("WALPE_WEB_ENV_OURS"));
