@@ -14,6 +14,11 @@ own socket in the same place. Two cases:
   absent    the file was gone already when the image began (the runtime
             directory was cleared) and another daemon made its own later:
             the same
+  closing   the compositor is still there when the wait begins and is on
+            its way out: it accepts the connection and closes it (seen
+            with cosmic-comp 1.11 for a moment after it was told to end).
+            The daemon waits on as for a socket that is not there, for
+            the whole of wayland_reconnect; it used to end at once
 
 The restarted image is made by hand: a listening socket at the control
 socket's path, handed over the way a restart in place does it (WALPE_IPC_FD,
@@ -29,6 +34,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 WAIT_S = 4          # wayland_reconnect of the daemon under test
@@ -42,7 +48,24 @@ def listener(path):
     return s
 
 
-def run_case(daemon, top, name, replace, absent=False):
+def closing_compositor(path, stop):
+    """a Wayland socket that takes every connection and closes it, until told to stop"""
+    s = listener(path)
+    s.settimeout(0.1)
+
+    def serve():
+        while not stop.is_set():
+            try:
+                s.accept()[0].close()
+            except OSError:
+                pass
+        s.close()
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    return t
+
+
+def run_case(daemon, top, name, replace, absent=False, closing=False):
     d = os.path.join(top, name)
     rt = os.path.join(d, "rt")
     home = os.path.join(d, "home")
@@ -71,6 +94,10 @@ def run_case(daemon, top, name, replace, absent=False):
     })
     logname = os.path.join(d, "log")
     new = None
+    stop = threading.Event()
+    if closing:
+        env["WAYLAND_DISPLAY"] = "wayland-closing"
+        closing_compositor(os.path.join(rt, "wayland-closing"), stop)
     with open(logname, "w+b") as log:
         p = subprocess.Popen([daemon], env=env, cwd=home, stdin=subprocess.DEVNULL,
                              stdout=log, stderr=subprocess.STDOUT, pass_fds=(old.fileno(),))
@@ -95,12 +122,17 @@ def run_case(daemon, top, name, replace, absent=False):
                 print("FAIL %s: the daemon is still there after %.0f s" % (name, LIMIT_S))
                 return 1
         finally:
+            waited = time.monotonic() - t0
+            stop.set()
             if p.poll() is None:
                 p.kill()
                 p.wait()
         log.seek(0)
         text = log.read().decode("utf-8", "replace")
     old.close()
+    if closing and waited < WAIT_S - 0.5:
+        print("FAIL %s: the daemon ended after %.1f s of a wait of %d s:\n%s" % (name, waited, WAIT_S, text[-1500:]))
+        return 1
     if rc != 1:
         print("FAIL %s: exit status %d, wanted 1:\n%s" % (name, rc, text[-1500:]))
         return 1
@@ -114,7 +146,8 @@ def run_case(daemon, top, name, replace, absent=False):
         if there:
             print("FAIL %s: the socket file was left behind" % name)
             return 1
-        print("ok   %s: the handed-over socket file is removed" % name)
+        print("ok   %s: the handed-over socket file is removed%s"
+              % (name, " after the whole wait (%.1f s)" % waited if closing else ""))
         return 0
     reached = False
     if there:
@@ -147,9 +180,9 @@ def main():
     top = tempfile.mkdtemp(prefix="walpe-wlwait-")
     try:
         worst = 0
-        for name, replace, absent in (("alone", False, False), ("replaced", True, False),
-                                      ("absent", True, True)):
-            rc = run_case(daemon, top, name, replace, absent)
+        for name, replace, absent, closing in (("alone", False, False, False), ("replaced", True, False, False),
+                                               ("absent", True, True, False), ("closing", False, False, True)):
+            rc = run_case(daemon, top, name, replace, absent, closing)
             if rc == 77:
                 return 77
             worst = max(worst, rc)

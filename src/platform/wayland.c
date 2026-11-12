@@ -2941,21 +2941,19 @@ static void wl_layer_decide (gboolean say)
 /* the connection the probe had to keep (WAYLAND_SOCKET can be used once) */
 static struct wl_display *wl_kept_dpy;
 
-static gboolean wl_open (const WalpePlatformOpts *opts, char **err)
+/* One try. *going_down: it failed because the compositor took the
+ * connection and closed it, before `deadline` and on a socket that can be
+ * connected to again. */
+static gboolean wl_open_once (const WalpePlatformOpts *opts, char **err, gint64 deadline,
+                              gboolean *going_down)
 {
-    if (W.is_open) {
-        if (err)
-            *err = g_strdup ("the Wayland backend is open already");
-        return FALSE;
-    }
     memset (&W, 0, sizeof W);
     W.opts = *opts;
     W.pres_clock = CLOCK_MONOTONIC;
     W.egl_dpy = EGL_NO_DISPLAY;
 
-    int wait_s = MAX (opts->reconnect_wait_s, opts->wait_for_display ? 2 : 0);
-    gint64 deadline = g_get_monotonic_time () + (gint64) wait_s * G_USEC_PER_SEC;
     int connect_errno = 0;
+    gboolean kept = wl_kept_dpy != NULL;
     if (wl_kept_dpy) {
         W.dpy = wl_kept_dpy;
         wl_kept_dpy = NULL;
@@ -2993,9 +2991,10 @@ static gboolean wl_open (const WalpePlatformOpts *opts, char **err)
     gint64 answer_by = g_get_monotonic_time () + (gint64) WL_START_ANSWER_S * G_USEC_PER_SEC;
     for (int i = 0; i < 3 && !fail; i++) {
         int r = wl_sync_until (W.dpy, NULL, answer_by);
-        if (r < 0)
+        if (r < 0) {
             fail = "the Wayland compositor closed the connection during start-up";
-        else if (r == 0)
+            *going_down = !kept && !g_getenv ("WAYLAND_SOCKET") && g_get_monotonic_time () < deadline;
+        } else if (r == 0)
             fail = "the Wayland compositor accepted the connection but did not answer within "
                    G_STRINGIFY (WL_START_ANSWER_S) " seconds";
     }
@@ -3024,6 +3023,39 @@ static gboolean wl_open (const WalpePlatformOpts *opts, char **err)
     W.outputs_dirty = FALSE;    /* the daemon reads the list next */
     W.motion_dirty = FALSE;
     return TRUE;
+}
+
+static gboolean wl_open (const WalpePlatformOpts *opts, char **err)
+{
+    if (W.is_open) {
+        if (err)
+            *err = g_strdup ("the Wayland backend is open already");
+        return FALSE;
+    }
+    int wait_s = MAX (opts->reconnect_wait_s, opts->wait_for_display ? 2 : 0);
+    gint64 deadline = g_get_monotonic_time () + (gint64) wait_s * G_USEC_PER_SEC;
+    for (;;) {
+        gboolean going_down = FALSE;
+        char *why = NULL;
+        if (wl_open_once (opts, &why, deadline, &going_down))
+            return TRUE;
+        /* A daemon that waits for its compositor to come back (wait_s > 0)
+         * can find the old one still there: told to end, it goes on
+         * accepting connections for a moment and closes them (cosmic-comp
+         * 1.11 does, for some hundredths of a second). That is the
+         * compositor going away, which is what is being waited out, not
+         * the end of the wait: try again as for a socket that is not
+         * there yet. */
+        if (!going_down) {
+            if (err)
+                *err = why;
+            else
+                g_free (why);
+            return FALSE;
+        }
+        g_free (why);
+        g_usleep (200000);
+    }
 }
 
 static void wl_close (void)

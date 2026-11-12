@@ -101,6 +101,11 @@ renders on a laptop's discrete GPU where there is one (under Graphics cards;
   enlarged, the picture in a quarter of the screen, or nothing (sway). It fills the
   output at once now, a little soft until the restart draws it anew; an animated
   wallpaper always did. Seen on niri, COSMIC and sway.
+- `wayland_reconnect`: a daemon that waits for its compositor to come back ended at once
+  when the old compositor was still on its way out and took one more connection only to
+  close it ("the Wayland compositor closed the connection during start-up"; COSMIC's
+  compositor does that for a moment after it is told to end). It waits on now, for the
+  time that was set, as it does for a socket that is not there yet.
 
 ### Sound
 
