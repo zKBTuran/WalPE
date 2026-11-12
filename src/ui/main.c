@@ -37,6 +37,7 @@
 #include "statusline.h"  /* the status line's text and its tool tip */
 #include "monline.h"     /* what each monitor shows, as text */
 #include "winstate.h"    /* is the window on screen at all */
+#include "wlappid.h"     /* Wayland: one application id for all windows */
 #ifdef WALPE_HAVE_WORKSHOP_PAGE
 #include "workshop_page.h"   /* GtkWidget *walpe_workshop_page_new (void); */
 #endif
@@ -3804,6 +3805,7 @@ static void activate (GtkApplication *app, gpointer user)
     }
     load_css ();
     walpe_appearance_follow ();     /* a no-op on X11 */
+    walpe_wl_app_id_follow (WALPE_UI_APP_ID);   /* the same */
     U.bound = g_hash_table_new (g_direct_hash, g_direct_equal);
     struct { const char *act; const char *acc[2]; } accels[] = {
         { "app.find", { "<Control>f", NULL } },

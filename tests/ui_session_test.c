@@ -13,13 +13,17 @@
  *  - src/ui/rescanpace.h: files that keep arriving in a new folder of the
  *    library do not hold its scan off for as long as they come;
  *  - src/ui/monline.h: the texts that say what each monitor shows, and
- *    that a pause which begins or ends writes them again. */
+ *    that a pause which begins or ends writes them again;
+ *  - src/ui/wlappid.h: which windows are given the application's id on
+ *    Wayland - the toplevels GTK would name after the program - and none
+ *    on X11. */
 #include "ui/appearance.h"
 #include "ui/monlist.h"
 #include "ui/suppoll.h"
 #include "ui/rescanpace.h"
 #include "ui/monline.h"
 #include "ui/winstate.h"
+#include "ui/wlappid.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -180,6 +184,12 @@ int main (void)
     CHECK (walpe_appearance_dark (0, TRUE) && !walpe_appearance_dark (0, FALSE),
            "0 = no preference: what GTK's own settings said");
     CHECK (walpe_appearance_dark (7, TRUE) && !walpe_appearance_dark (7, FALSE), "a value from the future: as 0");
+
+    /* ---- which windows are given the application's id */
+    CHECK (walpe_wl_app_id_wanted (TRUE, FALSE), "Wayland, a dialog of the GUI: yes");
+    CHECK (!walpe_wl_app_id_wanted (TRUE, TRUE), "Wayland, the application's own window: GTK did it");
+    CHECK (!walpe_wl_app_id_wanted (FALSE, FALSE) && !walpe_wl_app_id_wanted (FALSE, TRUE),
+           "X11 (no Wayland toplevel): never");
 
     /* ---- monitor text */
     char *t = walpe_ui_monitor_text ("DP-1", 2560, 1440, 1.0);

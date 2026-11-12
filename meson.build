@@ -807,16 +807,20 @@ ui_res = import('gnome').compile_resources('walpe-ui-resources',
 # X11: the GUI sees its window manager hide the window (winstate.c)
 ui_x11_dep = dependency('gtk4-x11', required: false)
 ui_x11_args = ui_x11_dep.found() and x11.found() ? ['-DWALPE_UI_X11'] : []
+# Wayland: every window of the GUI says the application's id (wlappid.c)
+ui_wl_dep = dependency('gtk4-wayland', required: false)
+ui_wl_args = ui_wl_dep.found() ? ['-DWALPE_UI_WAYLAND'] : []
 
 # the Steam Workshop browser is a tab of the GUI (walpe_workshop_page_new)
 ui = executable('walpe', 'src/ui/main.c', 'src/ui/store.c', 'src/ui/props.c', 'src/ui/layers.c',
   'src/ui/perf.c', 'src/ui/appearance.c', 'src/ui/winstate.c',
   'src/ui/resmodel.c', 'src/ui/resdialog.c',   # render resolution per monitor
   'src/ui/uiipc.c', 'src/ui/thumbs.c', 'src/ui/uistats.c', 'src/ui/workshop_page.c',
-  'src/tray/trayconf.c', 'src/ui/delete.c', ui_res,
+  'src/tray/trayconf.c', 'src/ui/delete.c', 'src/ui/wlappid.c', ui_res,
   include_directories: inc,
-  c_args: ['-DWALPE_HAVE_WORKSHOP_PAGE'] + ui_x11_args,
-  dependencies: [core_dep, gtk4] + (ui_x11_args.length() > 0 ? [ui_x11_dep, x11] : []),
+  c_args: ['-DWALPE_HAVE_WORKSHOP_PAGE'] + ui_x11_args + ui_wl_args,
+  dependencies: [core_dep, gtk4] + (ui_x11_args.length() > 0 ? [ui_x11_dep, x11] : []) +
+                (ui_wl_args.length() > 0 ? [ui_wl_dep] : []),
   install: true)
 
 ctl = executable('walpe-ctl', 'src/ctl/main.c',
