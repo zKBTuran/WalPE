@@ -396,7 +396,15 @@ int main (void)
     /* --- 9. a ropetrail is `length` seconds long at every frame rate ---
      * one particle at 100 units a second, a trail of 0.2 s in 24 points
      * (8.3 ms apart: a 60 Hz frame is two of them, a 30 Hz frame four) */
-    for (guint k = 0; k < G_N_ELEMENTS (patterns); k++) {
+    /* (the rates of the other parts, and the ends: a step every
+     * millisecond, the longest step a system is given - a tenth of a
+     * second, also for a frame that took longer - and frames of no length
+     * in between) */
+    const Pattern rope_patterns[] = {
+        patterns[0], patterns[1], patterns[2], patterns[3], patterns[4],
+        { "1000 Hz", 1000, 0 }, { "10 Hz", 10, 0 }, { "60 Hz with empty frames", 60, 7 },
+    };
+    for (guint k = 0; k < G_N_ELEMENTS (rope_patterns); k++) {
         JsonNode *n = wpj_parse_data (
             "{ \"emitter\": [ { \"name\": \"boxrandom\", \"id\": 1, \"distancemax\": \"0 0 0\", \"rate\": 0,"
             "                   \"instantaneous\": 1 } ],"
@@ -411,14 +419,29 @@ int main (void)
             json_node_unref (n);
         if (!p)
             continue;
-        advance (p, &patterns[k], T, NULL);
+        advance (p, &rope_patterns[k], T, NULL);
         float pos[3], vel[3], age, old[3] = { 0, 0, 0 };
         int pts = walpe_weparticles_sys_trail (p, 0, 0, old);
         gboolean have = walpe_weparticles_sys_peek (p, 0, 0, pos, vel, &age);
         float span = have ? (pos[0] - old[0]) / 100.0f : -1.0f;   /* seconds from the particle to the tail's end */
         CHECK (have && pts == 24 && span > 0.2f - 0.2f / 24.0f - 0.012f && span < 0.2f + 0.012f,
-               "ropetrail of 0.2 s, %s: %d points, the tail ends where the particle was %.3f s ago", patterns[k].name,
-               pts, (double) span);
+               "ropetrail of 0.2 s, %s: %d points, the tail ends where the particle was %.3f s ago",
+               rope_patterns[k].name, pts, (double) span);
+        /* a frame after a long pause (the step is cut to a tenth of a
+         * second), then frames of no length: the trail keeps its points */
+        if (p && k == 0) {
+            walpe_weparticles_step (p, 3600.0);
+            int after = walpe_weparticles_sys_trail (p, 0, 0, old);
+            have = walpe_weparticles_sys_peek (p, 0, 0, pos, vel, &age);
+            span = have ? (pos[0] - old[0]) / 100.0f : -1.0f;
+            CHECK (have && after == 24 && span > 0.2f - 0.2f / 24.0f - 0.012f && span < 0.2f + 0.012f,
+                   "ropetrail after a step of an hour: %d points, the tail ends %.3f s back", after, (double) span);
+            for (int z = 0; z < 5; z++)
+                walpe_weparticles_step (p, 0.0);
+            float old2[3] = { 0, 0, 0 };
+            CHECK (walpe_weparticles_sys_trail (p, 0, 0, old2) == 24 && !memcmp (old, old2, sizeof old),
+                   "ropetrail: frames of no length leave the trail as it is");
+        }
         walpe_weparticles_free (p);
     }
 
