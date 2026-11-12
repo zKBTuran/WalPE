@@ -739,6 +739,21 @@ static void http_cb (SoupServer *srv, SoupServerMessage *msg, const char *path,
     g_free (file);
 }
 
+/* The server answers GET and HEAD: the body of a request is never looked
+ * at. libsoup collects a body whole, in memory, before it calls the
+ * handler, whatever the method and before any token is checked: one POST
+ * to the port cost the daemon as much memory as the sender cared to send
+ * (the page itself, whose every request arrives here while its network
+ * access is off, or any other program on this machine: the port takes
+ * connections from every local account). A body is read and dropped piece
+ * by piece instead. Set when the request starts, before its first byte is
+ * read. */
+static void http_request_started (SoupServer *srv, SoupServerMessage *msg, gpointer user)
+{
+    (void) srv; (void) user;
+    soup_message_body_set_accumulate (soup_server_message_get_request_body (msg), FALSE);
+}
+
 static gboolean http_start (void)
 {
     if (http_srv)
@@ -746,6 +761,7 @@ static gboolean http_start (void)
     GError *err = NULL;
     http_srv = soup_server_new ("server-header", "walpe", NULL);
     soup_server_add_handler (http_srv, NULL, http_cb, NULL, NULL);
+    g_signal_connect (http_srv, "request-started", G_CALLBACK (http_request_started), NULL);
     if (!soup_server_listen_local (http_srv, 0, SOUP_SERVER_LISTEN_IPV4_ONLY, &err)) {
         g_warning ("web: loopback file server failed (%s); media in pages may not play",
                    err->message);

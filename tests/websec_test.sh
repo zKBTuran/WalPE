@@ -22,7 +22,10 @@
 #  6. the WebKit start-up test that the daemon runs in a child process
 #     before its first page: a child that never finishes (stopped here) is
 #     ended after 40 s and the reason is in the log and in status - the
-#     pages used to wait for it for good, black, with nothing said.
+#     pages used to wait for it for good, black, with nothing said;
+#  7. a request with a large body sent to the page's file server (the
+#     loopback port takes connections from any local program) is not kept
+#     in the daemon's memory - it was, whole, whatever the method.
 #
 # Skipped (exit 77) without Xvfb / python3 / the web module, or when WebKit
 # does not come up here. Run: meson test -C build websec -v
@@ -149,6 +152,31 @@ if ! grep -q 'NP net done' "$T/daemon.log"; then
     echo "SKIP: WebKit did not show the page here"; tail -5 "$T/daemon.log"; exit 77
 fi
 
+# --- a request with a body to the page's file server: any program on this
+# machine can connect to that port, and the body was kept in the daemon's
+# memory whole (192 MB here) before the request was looked at
+HPORT=$(sed -n 's|.*web: serving wallpapers on http://127\.0\.0\.1:\([0-9]*\)/.*|\1|p' "$T/daemon.log" | head -1)
+rss_kb () { sed -n 's/^VmRSS:[^0-9]*\([0-9]*\).*/\1/p' "/proc/$DPID/status" 2>/dev/null; }
+BODY_KB=
+if [ -n "$HPORT" ]; then
+    R0=$(rss_kb)
+    python3 -I -c '
+import socket, sys
+port = int(sys.argv[1]); mb = 192
+s = socket.create_connection(("127.0.0.1", port), timeout=120)
+s.sendall(b"POST /x HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nContent-Length: %d\r\n\r\n" % (port, mb << 20))
+chunk = b"\0" * (1 << 20)
+try:
+    for i in range(mb):
+        s.sendall(chunk)
+    s.recv(64)      # the answer comes when the whole body was read
+except Exception:
+    pass
+' "$HPORT"
+    R1=$(rss_kb)
+    [ -n "$R0" ] && [ -n "$R1" ] && BODY_KB=$((R1 - R0))
+fi
+
 # --- another client's selections while the page selects, and two clicks
 "$B/websec-selown" 6 > "$T/sel.log" 2>&1 &
 SPID=$!
@@ -177,6 +205,13 @@ bad () { echo "FAIL: $*"; fail=1; }
 grep -q 'message handler: it is stopped' "$T/daemon.log" || bad "a page that posted 480 MB to the message handler was not stopped"
 grep -q 'web_error.*was stopped' "$T/status.json" || bad "status does not report the stopped page (web_error)"
 grep -q 'NP own: ok' "$T/daemon.log" || bad "the page's own file did not load with network access off"
+if [ -z "$BODY_KB" ]; then
+    bad "the port of the page's file server is not in the log, or the daemon's memory could not be read"
+elif grep -q 'libasan\|libtsan' "/proc/$DPID/maps" 2>/dev/null; then
+    echo "note: a sanitizer build keeps freed memory: the request body check is not made"
+elif [ "$BODY_KB" -gt 98304 ]; then
+    bad "a request body of 192 MB sent to the page's file server cost the daemon $((BODY_KB / 1024)) MB"
+fi
 # a run for one page host (WALPE_WEB_HOST=private | x11) has tested that
 # host only if the page really lived there
 case "$WALPE_WEB_HOST" in
