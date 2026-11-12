@@ -46,6 +46,9 @@ fakegl = static_library('walpe-fuzz-fakegl', 'fakegl.c',
   dependencies: [epoxy, egl],
   build_by_default: false)
 
+# the picture files of old-format layers and particle sprites through walpe_gl_tex_from_file
+fuzz_targets += ['layerpic']
+
 foreach t : fuzz_targets
   x = fuzz_extra.get(t, {'src': [], 'args': [], 'deps': []})
   if with_tests
