@@ -946,8 +946,14 @@ static GLuint fxs_build_program (EffPass *pass, char **vsrc, char **fsrc, const 
         return g->program;
     }
     JsonObject *cst = instpass ? wpj_obj (instpass, "constantshadervalues") : NULL;
-    /* the repairs first: they read declarations as WE wrote them */
-    fx_prepass (vsrc, fsrc, shader);
+    /* the repairs first: they read declarations as WE wrote them. (A
+     * source they refuse is not compiled at all - OpenGL ES, beyond the
+     * repairs' limit - and has been named: the generic program below
+     * would only ask, and say it, a second time.) */
+    if (!fx_prepass (vsrc, fsrc, shader)) {
+        g_free (sp);
+        return 0;
+    }
     /* (the scans read the whole source once per uniform it declares: a
      * source the repairs leave alone for its size is not specialised
      * either - no constants, so the generic program below) */

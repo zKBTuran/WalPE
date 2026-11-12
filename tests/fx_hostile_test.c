@@ -1073,6 +1073,26 @@ static void repair_size_checks (void)
         result (!go && !strcmp (size_said->str, m) && !strcmp (v, v0) && !strcmp (f, f0),
                 "repair size, GLSL ES: a source beyond the limit is not compiled, and one line says so");
         g_free (m);
+        /* the builder that shares and specialises programs (fx_specialize
+         * on, fx_quality = fast) asks the same question before anything
+         * else: no program, no state on the pass, and the line once - not
+         * a second time from the generic program it falls back to. No GL
+         * call is made on the way (there is no context here). */
+        {
+            EffPass ps;
+            memset (&ps, 0, sizeof ps);
+            const int spec = g_atomic_int_get (&fxs_spec_on);
+            g_atomic_int_set (&fxs_spec_on, 1);
+            g_string_truncate (size_said, 0);
+            GLuint prog = fxs_build_program (&ps, &v, &f, "large", "test", NULL);
+            g_atomic_int_set (&fxs_spec_on, spec);
+            m = g_strdup_printf ("%d fx: shader large: a source of more than %d KiB is not compiled on OpenGL ES "
+                                 "(no HLSL-semantics repairs, no GLSL ES rewriting)\n",
+                                 (int) G_LOG_LEVEL_WARNING, FX_MAX_REPAIR_SOURCE / 1024);
+            result (!prog && !ps.spec && !strcmp (size_said->str, m) && !strcmp (v, v0) && !strcmp (f, f0),
+                    "repair size, GLSL ES: the specialising builder does not compile it either, and says so once");
+            g_free (m);
+        }
         /* the same pair as GLSL 3.30: compiled as written, the line it always printed */
         fx_set_glsl_es (0);
         g_free (v);
