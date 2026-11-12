@@ -15,6 +15,7 @@ typedef struct {
     GtkWidget *rate, *res, *post, *scale, *tex, *exact, *idle;
     gboolean loading;           /* widgets are being set from the daemon's answer */
     gboolean have;              /* an answer arrived */
+    gboolean mapped;            /* the panel is on screen (its window may be hidden) */
     WalpeQuality q;             /* the knobs shown */
     guint poll_id, scale_id, idle_id;
 } Perf;
@@ -384,28 +385,42 @@ static void perf_request (Perf *P)
 /* the daemon only counts while somebody asks: ask while the panel shows */
 static gboolean perf_poll (gpointer user)
 {
-    Perf *P = user;
-    if (!P->expander || gtk_expander_get_expanded (GTK_EXPANDER (P->expander)))
-        perf_request (P);
+    perf_request (user);
     return G_SOURCE_CONTINUE;
+}
+
+/* The timer runs while there are numbers to show: the panel is mapped
+ * and, where it is one line until opened (a wallpaper's own settings),
+ * open. It used to run whenever the panel was mapped and do nothing while
+ * the line was closed - which is how the library window shows it: one
+ * wake-up every 2 s for as long as the window existed. */
+static void perf_poll_update (Perf *P)
+{
+    gboolean want = P->mapped &&
+                    (!P->expander || gtk_expander_get_expanded (GTK_EXPANDER (P->expander)));
+    if (want && !P->poll_id) {
+        P->poll_id = g_timeout_add_seconds (2, perf_poll, P);
+    } else if (!want && P->poll_id) {
+        g_source_remove (P->poll_id);
+        P->poll_id = 0;
+    }
 }
 
 static void on_map (GtkWidget *w, gpointer user)
 {
     (void) w;
     Perf *P = user;
+    P->mapped = TRUE;
     perf_request (P);
-    if (!P->poll_id)
-        P->poll_id = g_timeout_add_seconds (2, perf_poll, P);
+    perf_poll_update (P);
 }
 
 static void on_unmap (GtkWidget *w, gpointer user)
 {
     (void) w;
     Perf *P = user;
-    if (P->poll_id)
-        g_source_remove (P->poll_id);
-    P->poll_id = 0;
+    P->mapped = FALSE;
+    perf_poll_update (P);
 }
 
 static void on_expanded (GtkExpander *e, GParamSpec *ps, gpointer user)
@@ -413,6 +428,7 @@ static void on_expanded (GtkExpander *e, GParamSpec *ps, gpointer user)
     (void) ps;
     if (gtk_expander_get_expanded (e))
         perf_request (user);
+    perf_poll_update (user);
 }
 
 static void perf_free (gpointer user)

@@ -35,10 +35,11 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             status lines it is sent while nothing changes which wallpapers
             were shown last do not make it write its list of them again.
             Skipped in a build without the tray.
-  window    the library window next to a running engine: status lines
-            that say what the last one said draw no frame in it (counted
-            by the window's own probe, WALPE_UI_STATS). Skipped in a
-            build without the window.
+  window    the library window next to a running engine: open, idle and
+            without the focus its main thread sleeps (no timer of a panel
+            that shows nothing); status lines that say what the last one
+            said draw no frame in it (counted by the window's own probe,
+            WALPE_UI_STATS). Skipped in a build without the window.
   layout    the monitor layout changes while the daemon starts - after it
             read the layout, before it listens for changes, so no event
             tells it: it looks once more when it is up and follows.
@@ -918,10 +919,66 @@ def case_window(env, W):
     loaded(env, W["red"])
     stats = os.path.join(env.tmp, "ui-stats.txt")
     genv = dict(env.run_env)
-    genv.update({"WALPE_UI_STATS": stats, "GSK_RENDERER": "cairo", "GTK_A11Y": "none"})
-    log = open(os.path.join(env.tmp, "window.log"), "a")
-    win = subprocess.Popen([win_bin], env=genv, stdout=log, stderr=subprocess.STDOUT, cwd=env.tmp)
-    log.close()
+    genv.update({"GSK_RENDERER": "cairo", "GTK_A11Y": "none"})
+
+    def start(extra=None):
+        e = dict(genv)
+        e.update(extra or {})
+        log = open(os.path.join(env.tmp, "window.log"), "a")
+        w = subprocess.Popen([win_bin], env=e, stdout=log, stderr=subprocess.STDOUT, cwd=env.tmp)
+        log.close()
+        up = wait_for(lambda: w.poll() is not None or subscribers(env) >= 1, 60, 0.5)
+        return w, bool(up) and w.poll() is None
+
+    def stop(w):
+        w.terminate()
+        try:
+            w.wait(timeout=20 * PATIENCE)
+        except subprocess.TimeoutExpired:
+            w.kill()
+            w.wait()
+        wait_for(lambda: subscribers(env) == 0, 10, 0.3)
+
+    def main_wakeups(pid):
+        """how often the window's main thread has gone to sleep and been woken"""
+        try:
+            with open(f"/proc/{pid}/task/{pid}/status") as f:
+                for ln in f:
+                    if ln.startswith("voluntary_ctxt_switches"):
+                        return int(ln.split()[1])
+        except OSError:
+            pass
+        return None
+
+    # The window open with nothing to do and without the focus (no status
+    # request of its own then): its main thread sleeps. The timer of the
+    # wallpaper's quality panel ran every 2 s while that panel was one closed
+    # line, to do nothing.
+    win, ok = start()
+    try:
+        if not check(ok, "window: it runs and listens to the engine", f"exit status {win.poll()}"):
+            return
+        xc = XClient(env.env["DISPLAY"])
+        try:
+            xc.input_focus(xc.window(1200, 300, 40, 40))     # the focus goes to another window
+            time.sleep(8.0 * PATIENCE)      # the library is read, the first pictures are drawn
+            woke = None
+            for _ in range(6):
+                a = main_wakeups(win.pid)
+                time.sleep(16.0)
+                b = main_wakeups(win.pid)
+                woke = b - a if a is not None and b is not None else None
+                if woke is None or woke <= 3:
+                    break
+            check(woke is not None and woke <= 3,
+                  "window: open, idle and without the focus, its main thread sleeps",
+                  f"{woke} wake-ups in 16 s")
+        finally:
+            xc.close()
+    finally:
+        stop(win)
+
+    win, ok = start({"WALPE_UI_STATS": stats})
 
     def frames(seconds, during=None):
         """frame clock cycles of the window in the next `seconds`, None when it is gone"""
@@ -949,9 +1006,7 @@ def case_window(env, W):
         return got[0] if got else None
 
     try:
-        up = wait_for(lambda: win.poll() is not None or subscribers(env) >= 1, 60, 0.5)
-        if not check(bool(up) and win.poll() is None, "window: it runs and listens to the engine",
-                     f"exit status {win.poll()}"):
+        if not check(ok, "window: it runs again, with its frame probe", f"exit status {win.poll()}"):
             return
         time.sleep(3.0 * PATIENCE)   # the probe is attached with the window; the library is read
         quiet = None
@@ -981,12 +1036,7 @@ def case_window(env, W):
         check(n is not None and n >= 1, "window: a pause is drawn", n)
         env.ipc({"cmd": "resume"})
     finally:
-        win.terminate()
-        try:
-            win.wait(timeout=20 * PATIENCE)
-        except subprocess.TimeoutExpired:
-            win.kill()
-            win.wait()
+        stop(win)
     env.stop_daemon()
 
 
@@ -1456,6 +1506,7 @@ class XClient:
                                  ctypes.POINTER(ctypes.POINTER(ul)), ctypes.POINTER(u)]
         x.XFree.argtypes = [vp]
         x.XSync.argtypes = [vp, i]
+        x.XSetInputFocus.argtypes = [vp, ul, i, ul]
         x.XCloseDisplay.argtypes = [vp]
         self.x = x
         self.d = x.XOpenDisplay(display.encode())
@@ -1507,6 +1558,11 @@ class XClient:
     def focus(self, win):
         """win gets the focus as a window manager says it (0 = no window has it)"""
         self.prop(self.root, "_NET_ACTIVE_WINDOW", self.XA_WINDOW, [win])
+
+    def input_focus(self, win):
+        """the keyboard focus itself (no window manager here to give it)"""
+        self.x.XSetInputFocus(self.d, win, 0, 0)     # RevertToNone, CurrentTime
+        self.x.XSync(self.d, 0)
 
     def clients(self, wins):
         self.prop(self.root, "_NET_CLIENT_LIST", self.XA_WINDOW, wins)
