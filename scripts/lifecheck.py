@@ -1209,6 +1209,33 @@ def case_fullscreen(env, W):
         is_state([True, False], [True, False], "its frame moved to the first monitor")
         xc.focus(0)
         is_state([False, False], [False, False], "no window has the focus")
+
+        # a window that turns fullscreen right after it got the focus (an application
+        # asks for fullscreen as soon as its window is mapped): the daemon must have
+        # asked for the window's property events before it read the window's state, or
+        # a change that falls between the two is told to nobody. A window the client
+        # list does not name, so that nothing else watches it; many rounds, the state
+        # change a little later each time
+        w5 = xc.window(0, 0, 640, 360)
+        missed = []
+        for k in range(60):
+            delay = (0, 50, 100, 200, 400, 800)[k % 6] / 1e6
+            xc.focus(0)
+            xc.fullscreen(w5, False)
+            time.sleep(0.05)        # (the daemon is asleep again: it wakes for the focus change)
+            xc.focus(w5)
+            t0 = time.perf_counter()
+            while time.perf_counter() - t0 < delay:
+                pass
+            xc.fullscreen(w5, True)
+            time.sleep(0.05)
+            if not wait_for(lambda: flags("fullscreen") == [True, False], 2, 0.05):
+                missed.append(int(delay * 1e6))
+        check(not missed, "fullscreen: a window that turns fullscreen right after it got the focus is "
+              "seen every time", "missed in %d of 60 rounds (delays in us: %s)" % (len(missed), missed))
+        xc.focus(0)
+        xc.fullscreen(w5, False)
+        is_state([False, False], [False, False], "after those rounds")
         lc_bad = [ln for ln in env.since(mark).splitlines()
                   if re.search(r"CRITICAL \*\*|AddressSanitizer|runtime error:|Segmentation fault", ln)]
         check(env.daemon.poll() is None and not lc_bad, "fullscreen: the daemon runs, its log is clean", lc_bad[:5])

@@ -883,8 +883,23 @@ static void update_active_window (void)
             active = *(Window *) data;
         XFree (data);
     }
-    gboolean fs = window_is_fullscreen (active);
     gboolean changed = active != X.watched_win;
+    if (changed) {
+        /* The window's property events are asked for before its state is
+         * read. The other way round, a state change that reached the
+         * server between the read and the XSelectInput was told to nobody:
+         * a window that turned fullscreen right after it got the focus (an
+         * application asks for that as soon as its window is mapped) stayed
+         * "not fullscreen" here until the focus moved again, and its
+         * monitor was not paused.
+         * (clients of _NET_CLIENT_LIST are watched anyway: clients_watch) */
+        if (X.watched_win != None && !client_is_watched (X.watched_win))
+            XSelectInput (X.xd, X.watched_win, 0);
+        if (active != None && active != X.root && !client_is_watched (active))
+            XSelectInput (X.xd, active, PropertyChangeMask);
+        X.watched_win = active;
+    }
+    gboolean fs = window_is_fullscreen (active);
     /* one batch: the daemon hears of the window and of its monitor at once */
     walpe_signals_begin ();
     if (fs != X.fs_active) {
@@ -899,14 +914,6 @@ static void update_active_window (void)
     if (placed)
         fs_place_report ();
     walpe_signals_end ();
-    if (active != X.watched_win) {
-        /* clients of _NET_CLIENT_LIST are watched anyway (clients_watch) */
-        if (X.watched_win != None && !client_is_watched (X.watched_win))
-            XSelectInput (X.xd, X.watched_win, 0);
-        if (active != None && active != X.root && !client_is_watched (active))
-            XSelectInput (X.xd, active, PropertyChangeMask);
-        X.watched_win = active;
-    }
     /* focus changes usually accompany stack/geometry churn (a property of
      * the same window that changed nothing here does not). The scan also
      * looks at a resting pointer again: window managers that warp the
