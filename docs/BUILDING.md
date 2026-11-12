@@ -1,0 +1,279 @@
+# Building and installing
+
+How to build WalPE, what it needs, the build options, the build for 64-bit ARM, how to
+install it, and the notices that have to accompany its binaries. Using it is in
+[USAGE.md](USAGE.md); the tests are in [DEVELOPMENT.md](DEVELOPMENT.md#tests).
+
+## Build
+
+```sh
+./build.sh                     # generic build: meson setup (or --reconfigure) build, then ninja
+./build.sh --tuning=alderlake  # the same with -march=alderlake and friends (see below)
+# or by hand:
+meson setup build
+ninja -C build programs        # the installed programs (all a plain `ninja -C build` builds, unless the tests are on)
+```
+
+`build.sh` (POSIX sh) runs ninja with as many jobs as the machine has CPUs (`-j <CPUs> -l
+<CPUs + 2>`); `WALPE_JOBS` / `WALPE_LOAD` override `-j` / `-l`, `WALPE_BUILDDIR` the build
+directory (default `build` in the source directory; a relative path counts from where the
+script is called). `--tuning=<value>` is passed on as `-Dnative_tuning=<value>`,
+every other argument goes to `meson setup` (`./build.sh -Dweb=disabled`). An existing build
+directory is reconfigured, not wiped, and keeps the options it was set up with.
+`build.sh` builds the installed programs only (the ninja target `programs`). **The tests
+and the developer tools are not part of a build unless you ask for them**: a build
+directory has no test program, no test and no tool until it is set up with `-Dtests=true`
+(`./build.sh -Dtests=true`, or `meson configure build -Dtests=true` for a directory that
+exists; [Tests](DEVELOPMENT.md#tests)). Without it `ninja -C build`, `meson compile` and `meson
+install` build what is installed and nothing else.
+
+The default is a release build (`-O3`, `NDEBUG`, LTO, hardening flags) with **generic CPU
+tuning**: the binaries run on any CPU of the architecture they were built for.
+
+## Dependencies
+
+A C compiler (GCC or clang), meson and ninja. Package names are Gentoo's; the pkg-config
+module is what `meson setup` looks for, to map them to another distribution.
+
+| pkg-config module | Gentoo package | Needed for |
+|---|---|---|
+| `glib-2.0`, `gobject-2.0`, `gio-2.0` | `dev-libs/glib` | everything |
+| `json-glib-1.0` | `dev-libs/json-glib` | everything |
+| `gdk-pixbuf-2.0` | `x11-libs/gdk-pixbuf` | pictures |
+| `pangocairo`, `pangoft2` | `x11-libs/pango` | text layers |
+| `fontconfig` | `media-libs/fontconfig` | fonts of text layers |
+| `epoxy` | `media-libs/libepoxy` | OpenGL |
+| `egl` | `media-libs/libglvnd` with `media-libs/mesa` or the NVIDIA driver | OpenGL contexts |
+| `x11`, `xext`, `xinerama` | `x11-libs/libX11`, `libXext`, `libXinerama` | the X11 backend (`-Dx11`); `x11` also for the web module's X11 page host and for the XEmbed tray. A system without them builds the Wayland backend, web wallpapers included |
+| `wayland-client`, `wayland-egl`, the program `wayland-scanner` | `dev-libs/wayland`, `dev-util/wayland-scanner` | the Wayland backend (`-Dwayland`) |
+| `liblz4` | `app-arch/lz4` | `.tex` textures |
+| `gtk4` | `gui-libs/gtk` | the library window `walpe` |
+| `xi` (optional, found automatically) | `x11-libs/libXi` | X11: clicks on the empty desktop |
+| `xrandr` (optional, found automatically) | `x11-libs/libXrandr` | X11: monitor names for per-monitor wallpapers |
+| `wayland-cursor` (optional, found automatically) | `dev-libs/wayland` | Wayland: the pointer image over a wallpaper that takes pointer input |
+| `wayland-client` and `wayland-server` 1.20 or newer, `gtk4-wayland` (optional, found automatically) | `dev-libs/wayland`, `gui-libs/gtk` with its Wayland backend | Wayland: pause rules from the compositor (idle time, window list); the private page host for web wallpapers, which needs no X |
+| `gtk4-x11` (optional, found automatically) | `gui-libs/gtk` with its X11 backend | the X11 page host for web wallpapers |
+
+At least one of the two backends has to be built. The Wayland protocol descriptions the
+build needs are in the source tree (`protocols/`, see [Licence](#licence)), so no
+`wayland-protocols` package is needed. The GPU, OpenGL ES, resolution and hardware decoding
+parts need no new library: graphics devices are read from sysfs, and VA-API, DRM and Vulkan
+devices go through FFmpeg's own interface.
+
+Optional parts (meson `auto`; each takes `-D<option>=enabled|disabled`):
+
+| Option | pkg-config module | Gentoo package | Without it |
+|---|---|---|---|
+| `video` | `libavcodec`, `libavutil` | `media-video/ffmpeg` | video wallpapers and video textures do not load |
+| `web` | `webkitgtk-6.0`, `libsoup-3.0`, and what one of the two page hosts needs: `x11` + `gtk4-x11`, or the Wayland backend + `wayland-server` + `gtk4-wayland` | `net-libs/webkit-gtk:6`, `net-libs/libsoup:3.0` | web wallpapers report an error |
+| `audio` | `libpulse-simple`, `libpulse` | `media-libs/libpulse` | audio spectra stay 0; wallpaper sound has no output |
+| `scenescript` | none: `quickjs/quickjs.h` and `libquickjs` (searched in `<libdir>/quickjs`) | `dev-lang/quickjs` (no longer in the Gentoo tree, see below) | scripted values stay static |
+| `tray` | `gtk4`; `x11` and `xrender` for XEmbed | `x11-libs/libXrender` | no `walpe-tray`. Without libX11 / libXrender the tray is built with StatusNotifierItem only |
+
+`libsoup-3.0` is also used, when present, to fetch album art over http(s).
+
+QuickJS: wallpaper scripts are untrusted and run inside QuickJS, so its age matters. `meson
+setup` warns when the installed library is older than the 2024-01-13 release (the 2021-03-27
+release lacks fixes for memory errors that plain script can reach); see
+[SECURITY.md](SECURITY.md).
+
+The build was made against Gentoo's `dev-lang/quickjs`. That package has left the Gentoo
+tree: `-Dquickjs_libdir=<dir>` points the build at a QuickJS built by hand (`libquickjs.a`
+in that directory; `-Dc_args=-I<dir>` when its `quickjs/quickjs.h` is not on the
+compiler's include path). Whether `dev-libs/quickjs-ng`, which the Gentoo tree has today,
+can take its place is not known.
+
+At run time: `ffmpeg` and `ffprobe` for importing and converting videos, GStreamer elements
+for video inside web pages (`media-libs/gst-plugins-good`, `media-plugins/gst-plugins-vpx`
+or `media-plugins/gst-plugins-libav`; missing ones are named in `walpe-ctl status` as
+`web_missing_gst`), `steamcmd` for Workshop downloads.
+
+## Build options
+
+| Option | Default | Meaning |
+|---|---|---|
+| `-Dx11=auto\|enabled\|disabled` | `auto` | the daemon's X11 backend: built when its libraries are found / configure fails when they are not / not built. `disabled` also leaves the X11 page host out of the web module: `walpe-daemon` and `walpe-web.so` then use no X library |
+| `-Dwayland=auto\|enabled\|disabled` | `auto` | the daemon's Wayland backend (layer shell), likewise. `disabled` also leaves out the Wayland pause providers and the private page host |
+| `-Dnative_tuning=generic` | default | no `-march`, `-mtune` or cache parameters, `-pipe` only. `off` is another name for it |
+| `-Dnative_tuning=alderlake` | | `./build.sh --tuning=alderlake`: `-march=alderlake -mabm -mno-kl -mno-pconfig -mno-sgx -mno-widekl -mshstk --param=l1-cache-line-size=64 --param=l1-cache-size=32 --param=l2-cache-size=18432 -pipe`. **Such a build only runs on Alder Lake-class Intel CPUs** (12th generation Core and newer) and may die with "Illegal instruction" elsewhere |
+| `-Dnative_tuning=native` | | `-march=native -pipe` (`-mcpu=native` on aarch64); an error if the compiler rejects it, and refused in a cross build |
+| `-Dnative_tuning=auto` | | `-march=native -pipe` if the compiler accepts it, else `-pipe` only |
+| `-Dhardening=true` | default | stack protector, stack clash and control-flow protection, `_FORTIFY_SOURCE`, format-security errors, full RELRO and immediate binding |
+| `-Dvideo`, `-Dweb`, `-Daudio`, `-Dscenescript`, `-Dtray` | `auto` | the optional parts above. `-Dweb=enabled` fails at the configure step only when neither page host can be built |
+| `-Dquickjs_libdir=/abs/dir` | | one more directory searched first for `libquickjs.a` (a QuickJS built by hand, or the target's in a cross build) |
+
+```sh
+./build.sh -Dwayland=disabled                  # the X11-only build, as the 0.12 releases are
+./build.sh -Dx11=disabled                      # Wayland only, no X in walpe-daemon and walpe-web.so
+                                               # (what a system without libX11 builds by itself)
+```
+
+A daemon with both backends picks one when it starts: Wayland where the compositor has the
+layer shell, else X11; `walpe-ctl backend` shows and sets it ([WAYLAND.md](WAYLAND.md)).
+The web module holds the page hosts its build found the parts for (the configure summary
+lists them): the off-screen X window, and a Wayland display of its own inside the daemon
+that needs no X at all; which one a page gets is decided when the first page is made
+([WAYLAND.md](WAYLAND.md#web-wallpapers)).
+Which GPU renders (`walpe-ctl gpu`) and whether desktop OpenGL or OpenGL ES is used
+(`walpe-ctl set gl_api=`) are run-time settings too ([GPU.md](GPU.md)); with the
+defaults nothing is chosen differently from 0.12.2 on a machine with one GPU and desktop
+OpenGL.
+
+What the second backend costs: in the X11-only build the daemon and the web module link
+no Wayland library and hold none of the Wayland code (the test `linkage` reads that from
+the binaries). The other way round, a build without the X11 backend and the X11 page host
+(`-Dx11=disabled`, or no libX11 on the system) names no X library and calls no X function
+in `walpe-daemon` and `walpe-web.so` (the same test; GTK and WebKit load libX11 by
+themselves where they were built with X support, and the tray has XEmbed where libX11 and
+libXrender are found, whatever `-Dx11` says). A daemon with both backends needs
+`libwayland-client`, `-cursor` and `-egl`, and the loader maps them in an X11 session too;
+measured on the software renderer that was two libraries and about 20 kB of memory more
+than the X11-only build (Mesa maps `libwayland-client` in either), and no thread,
+descriptor, connection or wake-up of Wayland in an X11 session. The private page host is
+started only when a page is put on it: with a web wallpaper on an X11 session the daemon
+of a build with both backends has the same threads and descriptors as the X11-only build.
+
+**Other architectures.** The source is written for x86-64 and aarch64 (little-endian, 64
+bit; a big-endian target stops at the configure step). The aarch64 side has been
+cross-compiled and run under emulation, not on ARM hardware: see
+[64-bit ARM](#64-bit-arm-aarch64) below.
+
+The code is plain C without hand-written SIMD for a particular `-march`; tuning only steers
+the compiler's auto-vectoriser and scheduling. Each tuning flag is probed first, so a
+compiler that does not know one drops it. With LTO the flags also go on the link line.
+
+The web and video backends are separate modules, `walpe-web.so` and `walpe-video.so`, loaded
+the first time a wallpaper needs them: from `$WALPE_MODULE_DIR`, the daemon's own directory
+(build tree) or `<prefix>/<libdir>/walpe` (where `meson install` puts them). The daemon
+itself links neither WebKit, GTK, GStreamer nor FFmpeg. A loaded module cannot be unloaded
+again. For the web module, which is the large one, the daemon therefore restarts itself in
+place at the wallpaper change that leaves no monitor with a web wallpaper (`web_unload`, on
+by default; [SETTINGS.md](SETTINGS.md)): WebKitGTK and GTK then leave its memory, and
+every monitor loads its wallpaper again as at a start. The video module stays loaded.
+
+## 64-bit ARM (aarch64)
+
+> **Not run on ARM hardware.** The arm64 build was cross-compiled on an x86-64 machine
+> (both backends and every optional part, 0 warnings) and its tests were run under
+> emulation (qemu-user): of the 68 tests that need neither a display nor an OpenGL
+> context, 65 pass, 2 fail in a
+> timing check that means nothing under emulation (`formats`, `scenescript`) and 1 cannot
+> run there (`sec-local` starts itself again). Seven of the tests that draw were run on
+> the emulated software renderer and pass; the tests with a display and a daemon, the
+> window, the tray and the web module were only compiled. No ARM board, no ARM GPU or its
+> driver, no kernel with 16 or 64 KiB pages and no ARM CPU's memory ordering has seen
+> WalPE, and there is no speed figure. Treat all of this section as expected to work, and
+> report.
+
+**Building on the ARM machine** is the same as on x86-64: `./build.sh -Dtests=true`, then
+`meson test -C build`. `--tuning=native` tunes for the CPU that builds (`-mcpu=native`; the binary
+may not run on another ARM CPU), `--tuning=alderlake` is refused. Packages by their
+Debian 13 / Ubuntu 24.04 names (the dependency table above has the pkg-config modules).
+**The list is untested on an ARM machine**: it follows the package names of an x86-64
+system and the library set of the cross build. Nothing was checked for Fedora, Arch
+Linux ARM or Raspberry Pi OS, whose GTK 4 and WebKitGTK can be older:
+
+```
+build-essential meson ninja-build pkg-config python3
+libglib2.0-dev libjson-glib-dev libgdk-pixbuf-2.0-dev libpango1.0-dev libfontconfig-dev
+libepoxy-dev libegl-dev liblz4-dev libgtk-4-dev
+libx11-dev libxext-dev libxinerama-dev libxi-dev libxrandr-dev libxrender-dev   # X11
+libwayland-dev                                                                  # Wayland
+libavcodec-dev libavutil-dev            # video wallpapers
+libwebkitgtk-6.0-dev libsoup-3.0-dev    # web wallpapers
+libpulse-dev                            # audio spectra, scene sound
+libquickjs                              # SceneScript
+```
+
+Ubuntu 24.04's `libquickjs` for arm64 is the 2021-03-27 release, the one `meson setup`
+warns about ([SECURITY.md](SECURITY.md)).
+
+**What is different on ARM.**
+
+- *Graphics.* Most ARM GPUs have OpenGL ES and no desktop OpenGL. With `gl_api=auto`
+  (the default) the daemon asks for desktop OpenGL 3.3, then OpenGL ES 3.2, then 3.1,
+  and `walpe-ctl status` says which it got. **OpenGL ES 3.1 is the minimum**: a GPU or
+  driver with ES 3.0 or 2.0 only (Mali-400 with lima, for example) cannot run WalPE.
+  What differs on the OpenGL ES path is in [GPU.md](GPU.md). Under emulation one
+  scene with effects gave the same frames with OpenGL 4.5 and OpenGL ES 3.2.
+- *Compressed textures.* Many scene textures are DXT (S3TC), which most ARM GPUs do not
+  read. WalPE then decodes them on the CPU: longer loading, four to eight times the
+  video memory for those textures, and minified layers that can look visibly different
+  (their smaller levels are then made from the decoded picture).
+- *Video.* Decoding is on the CPU by default, as everywhere. `hwdec` knows the V4L2
+  decoders of ARM boards (`v4l2m2m`, the last attempt of `hwdec=auto` on ARM; the V4L2
+  request API as `drm`; Rockchip's `rkmpp` by name), all untested on any board, and
+  which of them exist depends on the FFmpeg of the distribution: Ubuntu 24.04's has the
+  `v4l2m2m` ones only ([VIDEO.md](VIDEO.md)).
+- *Speed.* The two pixel loops that have SSE2 / AVX2 versions on x86 (halving a video
+  frame, halving a texture) run as plain C on ARM: the same bytes, slower. The video
+  decoder's thread rules were measured on x86 desktop CPUs.
+- *Pictures.* What WalPE computes itself gives the same numbers on both architectures
+  (the tests compare them, and the build forbids fused multiply-add). What the GPU or
+  the software renderer rounds is its own: frames from Mesa's software renderer on
+  arm64 differ from the x86-64 ones by up to 5 of 255.
+- *Hardening.* `-mbranch-protection=standard` takes the place of `-fcf-protection`
+  (return-address signing and branch target identification, on CPUs that have them). In
+  the Ubuntu 24.04 cross build the programs came out without the BTI mark, because the C
+  library's start files carry none: return addresses are signed there, branch targets
+  are not enforced.
+
+**Cross-building on x86-64.** The tree has two meson cross files:
+`cross/aarch64-linux-gnu.ini` (the `aarch64-linux-gnu-gcc` toolchain and arm64 libraries)
+and `cross/aarch64-qemu-user.ini` (runs the test programs under `qemu-aarch64`; not
+tried yet).
+
+```sh
+meson setup build-arm64 --cross-file cross/aarch64-linux-gnu.ini   # add -Dquickjs_libdir=... or -Dscenescript=disabled
+ninja -C build-arm64 programs      # (-Dtests=true at setup for the test programs)
+```
+
+`--tuning=native` is refused in a cross build; name the target CPU with
+`-Dc_args=-mcpu=...` if you know it. The developer tools have `arm64-sysroot.sh` (the
+arm64 libraries in a directory of their own, without touching the system's packages) and
+`arm64cross.py` (configure, build and run tests under emulation). The figures above were
+made with them: `arm64cross.py --suite portable` made the build and ran the suite
+`portable`; the 68 tests were then started by hand, one by one, under qemu-user in that
+build. Tests that start another program of the build, or
+themselves again, need `binfmt_misc` with qemu registered; timing checks are not valid
+under emulation. The suite `portable` (`meson test --suite portable`) compares this
+machine's results with numbers fixed in the source, needs no display and no OpenGL, and
+is the first thing to run on a real ARM machine: a failure there is a portability bug.
+
+## Install
+
+```sh
+./build.sh --prefix=$HOME/.local     # choose the prefix at setup time
+meson install -C build               # binaries to <prefix>/bin, modules to <prefix>/<libdir>/walpe
+```
+
+`meson install` first runs a plain `ninja`. In a build directory without the tests that
+builds nothing `build.sh` has not built. In one set up with `-Dtests=true` it builds
+every test program as well: `meson install -C build --no-rebuild` installs without that.
+
+Or run from the build directory, or copy by hand: `walpe-daemon`, `walpe`, `walpe-ctl`,
+`walpe-tray` and the two modules `walpe-video.so` / `walpe-web.so` into one directory (the
+daemon loads the modules from its own directory, and the GUI starts `walpe-tray` from
+there). Without the modules video and web wallpapers do not load; `walpe-ctl status` then
+shows `"modules": "... not loaded"`.
+
+Starting the daemon with your session: [USAGE.md](USAGE.md#starting-with-the-session).
+
+## Licence
+
+WalPE is released under the BSD 3-Clause licence: see [LICENSE](../LICENSE). Its relation to
+Wallpaper Engine is stated at the end of the [README](../README.md#disclaimer).
+
+- FFmpeg: `walpe-video.so` links libavcodec / libavutil. A binary linked against an FFmpeg
+  that was built with GPL parts (`--enable-gpl`) is covered by the GPL as a whole.
+- QuickJS: where `libquickjs` is linked statically (the usual case), the binaries contain
+  it; its MIT notice is in [licenses/QuickJS-MIT.txt](../licenses/QuickJS-MIT.txt) and has to
+  accompany them.
+- Wayland protocol descriptions: the ten XML files in `protocols/` are unchanged copies
+  from the wayland-protocols and wlr-protocols projects (`protocols/README` names origin
+  and checksum of each); they are not WalPE's own text. Each carries its own copyright
+  and permission notice (MIT-style terms). The build generates C code from them that is
+  compiled into `walpe-daemon` and `walpe-web.so`; the notices are collected in
+  [licenses/Wayland-protocols.txt](../licenses/Wayland-protocols.txt) and have to accompany
+  the binaries. `meson install` puts all three licence files into
+  `<prefix>/share/licenses/walpe`.

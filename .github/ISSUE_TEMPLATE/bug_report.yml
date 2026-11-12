@@ -31,7 +31,7 @@ body:
     id: session
     attributes:
       label: Session type
-      description: "`echo $XDG_SESSION_TYPE` tells. WalPE draws on X11 and on Wayland compositors with the layer shell (README, \"Known limitations\"); `walpe-ctl backend` says which of the two the daemon uses."
+      description: "`echo $XDG_SESSION_TYPE` tells. WalPE draws on X11 and on Wayland compositors with the layer shell (docs/LIMITATIONS.md); `walpe-ctl backend` says which of the two the daemon uses."
       options:
         - X11
         - Wayland

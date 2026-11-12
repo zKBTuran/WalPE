@@ -42,7 +42,7 @@ layout), `wp_viewporter` (pixel-exact rendering at fractional scales, render res
 per monitor), `wp_fractional_scale_v1`, `wp_presentation`, `linux-dmabuf` (tells which GPU
 the compositor uses). `walpe-ctl status` lists what was found (`wl_compositor_globals`).
 
-Building the backend: see "Build options" in the [README](../README.md).
+Building the backend: see [BUILDING.md](BUILDING.md#build-options).
 
 ## Choosing the backend
 

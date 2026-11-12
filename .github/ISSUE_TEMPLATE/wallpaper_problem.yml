@@ -4,7 +4,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        WalPE plays Wallpaper Engine's formats with its own renderer, so differences are bugs we want to know about. The README lists what is not implemented ("Known limitations") - a look there may save you the report.
+        WalPE plays Wallpaper Engine's formats with its own renderer, so differences are bugs we want to know about. [docs/LIMITATIONS.md](https://github.com/Fired-Cloud/WalPE/blob/main/docs/LIMITATIONS.md) lists what is not implemented - a look there may save you the report.
 
         **Before you post logs or command output, please remove your home path and your user name from them** (for example replace `/home/yourname` with `~`).
   - type: input
@@ -90,7 +90,7 @@ body:
     id: session
     attributes:
       label: Session type
-      description: "`echo $XDG_SESSION_TYPE` tells. WalPE draws on X11 and on Wayland compositors with the layer shell (README, \"Known limitations\"); `walpe-ctl backend` says which of the two the daemon uses."
+      description: "`echo $XDG_SESSION_TYPE` tells. WalPE draws on X11 and on Wayland compositors with the layer shell (docs/LIMITATIONS.md); `walpe-ctl backend` says which of the two the daemon uses."
       options:
         - X11
         - Wayland

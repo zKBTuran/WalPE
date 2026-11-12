@@ -410,6 +410,15 @@ could do to the daemon. None of these was seen being used.
   README's summary, the OpenGL ES shader size limit in SECURITY.md, two rows of
   SETTINGS.md (where `status` shows the window system; which monitors a fullscreen window
   across several pauses).
+- README: shortened to one page. What it held is in `docs/` now: building, dependencies,
+  the arm64 build and installing in [BUILDING.md](docs/BUILDING.md); what is played,
+  `walpe-ctl`, pausing, Wallpaper Engine assets, the Workshop and the tray in
+  [USAGE.md](docs/USAGE.md); the known limitations in
+  [LIMITATIONS.md](docs/LIMITATIONS.md); architecture, tests and developer tools in
+  [DEVELOPMENT.md](docs/DEVELOPMENT.md). Two statements were corrected on the way:
+  Gentoo's `dev-lang/quickjs` has left the Gentoo tree (`-Dquickjs_libdir=` takes a
+  QuickJS built by hand), and `data/walpe.service` is in the source tree and is not
+  installed by `meson install`.
 - Tests: a test that cannot run at all - no OpenGL context, or nothing but script checks
   in a build without QuickJS - ends with exit status 77, so `meson test` counts it as
   skipped; 13 such tests ended with 0 and were counted as passed. `meson test daemon-life`
@@ -435,7 +444,7 @@ could do to the daemon. None of these was seen being used.
 ### Known limitations
 
 - See the state of testing at the top of this section. The full list is in
-  [README.md](README.md#known-limitations).
+  [LIMITATIONS.md](docs/LIMITATIONS.md#known-limitations).
 
 ## 0.13.0 "PINK" (not released)
 
@@ -610,7 +619,7 @@ the final tree with those of that earlier tree.
 ### Known limitations
 
 - See the state of testing at the top of this section. The full list is in
-  [README.md](README.md#known-limitations).
+  [LIMITATIONS.md](docs/LIMITATIONS.md#known-limitations).
 
 ## 0.12.2 "Amplifier Worship"
 
@@ -768,4 +777,4 @@ The first public version.
 
 - X11 only, no sound, and run on one graphics card only (an NVIDIA laptop card; the last
   set of changes on Mesa's software renderer only; nothing on AMD or Intel graphics). The
-  full list is in [README.md](README.md#known-limitations).
+  full list is in [LIMITATIONS.md](docs/LIMITATIONS.md#known-limitations).

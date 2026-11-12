@@ -47,7 +47,7 @@ The other way round, `WALPE_MEM_STATS=1` switches memory numbers by kind in
 
 | Variable | Default | Effect |
 |---|---|---|
-| `WALPE_WE_ASSETS=dir` | auto-detect | Wallpaper Engine install (`assets/` or the install root) for the builtin effects, shaders and sprites; wins over config `we_assets` and the search of the Steam libraries (README, "Wallpaper Engine assets") |
+| `WALPE_WE_ASSETS=dir` | auto-detect | Wallpaper Engine install (`assets/` or the install root) for the builtin effects, shaders and sprites; wins over config `we_assets` and the search of the Steam libraries ([USAGE.md](USAGE.md#wallpaper-engine-assets)) |
 | `WALPE_MODULE_DIR=dir` | the daemon's own directory, then `<prefix>/<libdir>/walpe` | where `walpe-web.so` / `walpe-video.so` are looked for first; must be an absolute path |
 | `WALPE_IMPORT_ENCODER=name` | `libx264` | ffmpeg encoder of the video importer (`h264_nvenc`, ...); falls back to libx264 when it fails |
 | `WALPE_TRAY_BACKEND=sni\|xembed` | `tray.ini` `backend` (auto) | `walpe-tray`: force one tray protocol (`--backend=` on its command line wins) |
