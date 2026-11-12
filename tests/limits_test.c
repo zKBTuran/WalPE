@@ -36,9 +36,11 @@
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <epoxy/gl.h>
 #include <epoxy/egl.h>
+#include <errno.h>
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #ifdef HAVE_SOUP
 #include <libsoup/soup.h>
@@ -605,6 +607,26 @@ static void test_art (void)
     CHECK (!walpe_media_art_probe ("/nonexistent/cover.png", NULL, NULL, &n, &bytes));
     CHECK (n == 2 && bytes == before);
 
+    /* the cover file is cut short while it is decoded (a player writes the
+     * next cover over the same name): the picture may be shown or not, the
+     * process lives. This program, started again, is the one that decodes:
+     * a decoder reading a mapping of the file died there with SIGBUS. */
+    {
+        char *cut = save_pic ("covercut.png", 5000, 5000, "png");
+        char *self = g_file_read_link ("/proc/self/exe", NULL);
+        char *cargv[] = { self, (char *) "--art-cut", cut, NULL };
+        int st = -1;
+        gboolean ran = self && g_spawn_sync (NULL, cargv, NULL, G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL, NULL, NULL, NULL,
+                                             NULL, &st, NULL);
+        CHECK (ran);
+        if (ran && WIFSIGNALED (st))
+            g_printerr ("limits-test: the decode of a cover file that was cut short ended with signal %d\n",
+                        WTERMSIG (st));
+        CHECK (ran && WIFEXITED (st) && WEXITSTATUS (st) == 0);
+        g_free (self);
+        g_free (cut);
+    }
+
     /* a data: URL is its own payload: shown, not cached */
     char *raw = NULL;
     gsize len = 0;
@@ -883,8 +905,37 @@ static void test_art_http (void)
 }
 #endif /* HAVE_SOUP */
 
-int main (void)
+/* limits-test --art-cut <file>: the cover <file> is decoded here, and cut
+ * to nothing while that runs: as soon as this process has the file mapped
+ * (it does not, any more: then a moment after the decode began) */
+static gpointer art_cut_thread (gpointer path)
 {
+    for (int i = 0; i < 300; i++) {
+        char *maps = NULL;
+        gboolean mapped = g_file_get_contents ("/proc/self/maps", &maps, NULL, NULL) && strstr (maps, path);
+        g_free (maps);
+        if (mapped)
+            break;
+        g_usleep (500);
+    }
+    if (truncate (path, 0) != 0)
+        g_printerr ("limits-test: truncate %s: %s\n", (const char *) path, g_strerror (errno));
+    return NULL;
+}
+
+static int art_cut_main (const char *path)
+{
+    GThread *t = g_thread_new ("cut", art_cut_thread, (gpointer) path);
+    walpe_media_art_probe (path, NULL, NULL, NULL, NULL);    /* shown or not: both are fine */
+    g_thread_join (t);
+    walpe_media_art_settled (5000);
+    return 0;
+}
+
+int main (int argc, char **args)
+{
+    if (argc == 3 && !strcmp (args[1], "--art-cut"))
+        return art_cut_main (args[2]);
     root = g_dir_make_tmp ("walpe-limits-XXXXXX", NULL);
     g_setenv ("HOME", root, TRUE);
     g_setenv ("XDG_CONFIG_HOME", root, TRUE);

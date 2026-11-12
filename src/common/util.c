@@ -163,6 +163,60 @@ gboolean walpe_dir_is_private (const char *dir)
            st.st_uid == getuid () && (st.st_mode & (S_IWGRP | S_IWOTH)) == 0;
 }
 
+GBytes *walpe_read_regular (const char *path, gsize max, GError **err)
+{
+    /* O_NONBLOCK: the open of a FIFO returns (and is then refused) */
+    int fd = path ? open (path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY) : -1;
+    struct stat st;
+    if (fd < 0 || fstat (fd, &st) != 0) {
+        int e = fd < 0 && path ? errno : fd < 0 ? EINVAL : errno;
+        g_set_error (err, G_IO_ERROR, g_io_error_from_errno (e), "%s: %s", path ? path : "(no path)",
+                     g_strerror (e));
+        if (fd >= 0)
+            close (fd);
+        return NULL;
+    }
+    if (!S_ISREG (st.st_mode)) {
+        g_set_error (err, G_IO_ERROR, G_IO_ERROR_FAILED, "%s: not a regular file", path);
+        close (fd);
+        return NULL;
+    }
+    if ((guint64) st.st_size > max) {
+        g_set_error (err, G_IO_ERROR, G_IO_ERROR_FAILED, "%s: too large", path);
+        close (fd);
+        return NULL;
+    }
+    /* (one byte more than it had: a file that grew is seen as such) */
+    GByteArray *a = g_byte_array_sized_new ((guint) MIN ((guint64) st.st_size + 1, (guint64) G_MAXUINT / 2));
+    gboolean ok = TRUE;
+    for (;;) {
+        guint8 buf[65536];
+        ssize_t n = read (fd, buf, sizeof (buf));
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n < 0) {
+            int e = errno;
+            g_set_error (err, G_IO_ERROR, g_io_error_from_errno (e), "%s: %s", path, g_strerror (e));
+            ok = FALSE;
+            break;
+        }
+        if (n == 0)
+            break;
+        if ((gsize) a->len + (gsize) n > max) {
+            g_set_error (err, G_IO_ERROR, G_IO_ERROR_FAILED, "%s: too large", path);
+            ok = FALSE;
+            break;
+        }
+        g_byte_array_append (a, buf, (guint) n);
+    }
+    close (fd);
+    if (!ok) {
+        g_byte_array_unref (a);
+        return NULL;
+    }
+    return g_byte_array_free_to_bytes (a);
+}
+
 gboolean walpe_write_private (const char *path, const char *data, gssize len, GError **err)
 {
     if (!path || !data) {

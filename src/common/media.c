@@ -555,19 +555,12 @@ static void art_decode_thread (GTask *t, gpointer src, gpointer data, GCancellab
     GError *err = NULL;
     if (j->path && !j->data) {
         /* the path comes from a D-Bus peer: a regular file only (opening
-         * a FIFO would park this worker thread for good) */
-        GStatBuf st;
-        if (g_stat (j->path, &st) != 0 || !S_ISREG (st.st_mode)) {
-            g_set_error (&err, G_IO_ERROR, G_IO_ERROR_FAILED, "%s: not a regular file", j->path);
-        } else {
-            GMappedFile *mf = g_mapped_file_new (j->path, FALSE, &err);
-            if (mf && g_mapped_file_get_length (mf) <= 4 * ART_MAX_BYTES)
-                j->data = g_mapped_file_get_bytes (mf);
-            else if (mf && !err)
-                g_set_error (&err, G_IO_ERROR, G_IO_ERROR_FAILED, "%s: too large", j->path);
-            if (mf)
-                g_mapped_file_unref (mf);
-        }
+         * a FIFO would park this worker thread for good), and read, not
+         * mapped. The file is the player's: it writes the next cover over
+         * the same name when the track changes (or a peer cuts it short on
+         * purpose), and a decoder reading a mapping whose file has just
+         * been truncated ends the whole daemon with SIGBUS. */
+        j->data = walpe_read_regular (j->path, 4 * ART_MAX_BYTES, &err);
     }
     if (j->data) {
         gsize dlen = 0;

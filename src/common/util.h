@@ -41,6 +41,14 @@ gboolean walpe_dir_is_private (const char *dir);
  * next to it, flushed to disk, renamed over path. A symbolic link at path
  * is replaced, not followed. len < 0: strlen. */
 gboolean walpe_write_private (const char *path, const char *data, gssize len, GError **err);
+/* The whole of a regular file of at most max bytes, read into memory.
+ * For files somebody else may change while they are used (a path a D-Bus
+ * peer names): a mapping of a file that is cut short ends the process with
+ * SIGBUS the moment the missing part is read; what was read stays what it
+ * was. NULL + err when path is no regular file (a FIFO is not waited for),
+ * is larger than max (also when it grows beyond it while it is read) or
+ * cannot be read. */
+GBytes *walpe_read_regular (const char *path, gsize max, GError **err);
 
 /* What libjpeg has to hold of the JPEG in d[0..len) before the first pixel
  * comes out, in bytes. A sequential file whose first scan carries every
