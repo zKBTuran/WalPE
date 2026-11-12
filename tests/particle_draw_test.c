@@ -600,6 +600,126 @@ static void lit_box (const guint8 *a, const guint8 *ground, int *bw, int *bh)
     *bh = y1 >= y0 ? y1 - y0 + 1 : 0;
 }
 
+
+/* The layer's buffers. The systems of a scene do not keep one factor: a
+ * frame in which nothing went into the layer forgets it, the fog then
+ * comes back at 1/4 and the sharper dots at 1/2 behind it (two objects, two
+ * layers in that frame). With one buffer for the layer each of these was a
+ * texture and a framebuffer deleted and made at the other size - in a real
+ * scene several times an hour for as long as it runs. A buffer per factor
+ * is made once and the pictures are the ones the fresh buffers gave. The
+ * 1/2 buffer goes when nothing was drawn into it for 600 frames, the 1/4
+ * buffer (a quarter of it) stays while the layer is in use, both go when
+ * it is not. */
+static void test_layer_buffers (void)
+{
+    static guint8 first[W * H * 4], last[W * H * 4];
+    seed_n = 4242;
+    WalpeWeParticles *dots = make_additive (SYS_MEDIUM);
+    WalpeWeParticles *ps[2] = { make_additive (SYS_FOG), dots };
+    if (!ps[0] || !ps[1]) {
+        fails++;
+        printf ("FAIL: layer buffers: systems not made\n");
+        return;
+    }
+    WalpePtStats st;
+    walpe_weparticles_set_lowres (WALPE_PT_LOWRES_OFF);
+    for (int k = 0; k < 30; k++)
+        frame (ps, 2, 1.0 / 30, 1, 1, 0, NULL);
+    /* whatever an earlier case left: gone after this many frames without the layer */
+    for (int k = 0; k < 602; k++) {
+        walpe_weparticles_begin_frame (fbo, W, H);
+        walpe_weparticles_end_frame ();
+    }
+    walpe_weparticles_stats (&st, TRUE);
+    enum { ROUNDS = 12, IDLE = 610 };
+    guint in_layer = 0, composites = 0;
+    for (int r = 0; r < ROUNDS; r++) {
+        walpe_weparticles_set_lowres (WALPE_PT_LOWRES_OFF);
+        frame (ps, 2, 0.0, 1, 1, 0, NULL);   /* nothing in the layer: no factor to keep */
+        walpe_weparticles_stats (&st, FALSE);
+        guint l0 = st.lowres_systems, c0 = st.composites;
+        walpe_weparticles_set_lowres (WALPE_PT_LOWRES_AUTO);
+        frame (ps, 2, 0.0, 1, 1, 0, r == 0 ? first : last);   /* the fog at 1/4, the dots at 1/2 */
+        walpe_weparticles_stats (&st, FALSE);
+        in_layer += st.lowres_systems - l0;
+        composites += st.composites - c0;
+    }
+    walpe_weparticles_stats (&st, TRUE);
+    Diff d = compare (first, last);
+    printf ("layer buffers: %d frames with the fog at 1/4 and the dots at 1/2, a frame without the "
+            "layer between them: %u systems in the layer, %u composites, %u buffers made; first "
+            "and last picture: %ld pixels differ, max %d\n", ROUNDS, in_layer, composites,
+            st.layer_buffers, d.differing, d.max);
+    CHECK (in_layer == 2 * ROUNDS && composites == 2 * ROUNDS,
+           "layer buffers: want both systems in the layer at their own factor in every such frame: "
+           "%u systems, %u composites in %d frames", in_layer, composites, ROUNDS);
+    CHECK (st.layer_buffers == 2,
+           "layer buffers: %u buffers made in %d frames that use both factors, want 2 (one for 1/2, "
+           "one for 1/4: a buffer was deleted and made again when the factor changed)",
+           st.layer_buffers, ROUNDS);
+    CHECK (d.max == 0, "layer buffers: a buffer that is used again gives another picture than a "
+           "new one: %ld pixels differ, max %d", d.differing, d.max);
+
+    /* the dots alone, at 1/2, for longer than a buffer may be idle: the
+     * small buffer stays with the layer */
+    for (int k = 0; k < IDLE; k++)
+        frame (ps + 1, 1, 0.0, 1, 1, 0, NULL);
+    walpe_weparticles_stats (&st, TRUE);
+    guint made = st.layer_buffers, dots_in = st.lowres_systems;
+    walpe_weparticles_set_lowres (WALPE_PT_LOWRES_OFF);
+    frame (ps, 2, 0.0, 1, 1, 0, NULL);
+    walpe_weparticles_set_lowres (WALPE_PT_LOWRES_AUTO);
+    frame (ps, 2, 0.0, 1, 1, 0, NULL);   /* both factors again */
+    walpe_weparticles_stats (&st, TRUE);
+    printf ("layer buffers: %d frames at 1/2 only (%u of them in the layer): %u buffers made; a frame "
+            "with both factors after them: %u made\n", IDLE, dots_in, made, st.layer_buffers);
+    CHECK (dots_in == IDLE && made == 0, "layer buffers: %u buffers made in %d frames that all used "
+           "the 1/2 buffer (%u did), want none", made, IDLE, dots_in);
+    CHECK (st.layer_buffers == 0,
+           "layer buffers: %u buffers made for a frame that needs 1/4 again after %d frames at 1/2, "
+           "want none (the small buffer stays while the layer is in use)", st.layer_buffers, IDLE);
+
+    /* the fog alone, at 1/4, for as long: the 1/2 buffer is given back */
+    walpe_weparticles_set_lowres (WALPE_PT_LOWRES_OFF);
+    frame (ps, 1, 0.0, 1, 1, 0, NULL);
+    walpe_weparticles_set_lowres (WALPE_PT_LOWRES_AUTO);
+    for (int k = 0; k < IDLE; k++)
+        frame (ps, 1, 0.0, 1, 1, 0, NULL);
+    walpe_weparticles_stats (&st, TRUE);
+    made = st.layer_buffers;
+    guint fog_in = st.lowres_systems;
+    walpe_weparticles_set_lowres (WALPE_PT_LOWRES_OFF);
+    frame (ps, 2, 0.0, 1, 1, 0, NULL);
+    walpe_weparticles_set_lowres (WALPE_PT_LOWRES_AUTO);
+    frame (ps, 2, 0.0, 1, 1, 0, NULL);
+    walpe_weparticles_stats (&st, TRUE);
+    printf ("layer buffers: %d frames at 1/4 only (%u of them in the layer): %u buffers made; a frame "
+            "with both factors after them: %u made\n", IDLE, fog_in, made, st.layer_buffers);
+    CHECK (fog_in == IDLE && made == 0, "layer buffers: %u buffers made in %d frames that all used "
+           "the 1/4 buffer (%u did), want none", made, IDLE, fog_in);
+    CHECK (st.layer_buffers == 1,
+           "layer buffers: %u buffers made for a frame that needs 1/2 again after %d frames without "
+           "it, want 1 (a 1/2 buffer nothing is drawn into is released after 600 frames)",
+           st.layer_buffers, IDLE);
+
+    /* nothing drawn into either for that long: both go */
+    for (int k = 0; k < 602; k++) {
+        walpe_weparticles_begin_frame (fbo, W, H);
+        walpe_weparticles_end_frame ();
+    }
+    walpe_weparticles_set_lowres (WALPE_PT_LOWRES_OFF);
+    frame (ps, 2, 0.0, 1, 1, 0, NULL);
+    walpe_weparticles_set_lowres (WALPE_PT_LOWRES_AUTO);
+    frame (ps, 2, 0.0, 1, 1, 0, NULL);
+    walpe_weparticles_stats (&st, TRUE);
+    CHECK (st.layer_buffers == 2,
+           "layer buffers: %u buffers made after 600 frames without the layer, want 2 (both were "
+           "released)", st.layer_buffers);
+    for (int i = 0; i < 2; i++)
+        walpe_weparticles_free (ps[i]);
+}
+
 /* One particle that stands at the object's origin with a glow that follows
  * it (WE's shooting star preset in small), the object scaled 4 x 4. The
  * glow's size is 80: a quad of 40 scene units. Under a "world space"
@@ -1230,6 +1350,7 @@ static void gl_run (EGLDisplay dpy)
         test_density ();
         test_instancing_keeps_layer ();
         test_layer_factor_change ();
+        test_layer_buffers ();
         test_world_children ();
         test_refract_copy ();
         test_refract_copy_freed ();

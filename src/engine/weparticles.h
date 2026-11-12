@@ -212,6 +212,7 @@ typedef struct {
     guint state_changes;   /* blend function / texture / program state set */
     guint lowres_systems;  /* systems drawn into the reduced-resolution layer */
     guint composites;      /* ... and how often the layer went onto the frame */
+    guint layer_buffers;   /* buffers (a texture and a framebuffer) made for the layer */
     guint copies;          /* copies of the frame for refracting systems */
     double copied;         /* ... their area, screen areas */
     guint64 verts;         /* vertices the GPU runs the vertex shader for */

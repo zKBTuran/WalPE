@@ -467,15 +467,37 @@ static __thread int pt_users;              /* particle objects with GL state on 
  * for when that is allowed) and the rounding of several blends into one.
  * Layer pixel (i, j) covers the F x F view pixels from ((i - 1) F,
  * (j - 1) F): one pixel of margin around the view, so the bilinear
- * composite never reads past the buffer's edge. */
+ * composite never reads past the buffer's edge.
+ * There is a buffer for each of the two factors, made when a frame first
+ * draws at that factor. The systems of a scene do not settle on one factor
+ * for good: after a frame in which nothing went into the layer each starts
+ * at its own again, and a frame later they meet at the smallest
+ * (lr_decide). With one buffer every such change was a texture and a
+ * framebuffer deleted and made at the other size: four times within a few
+ * seconds, several times an hour, in a scene with two light shaft systems
+ * and a few glows (2 MiB and 0.5 MiB in turns on a 1920x1080 monitor), for
+ * as long as the wallpaper ran.
+ * The 1/2 buffer is released when nothing was drawn into it for
+ * LR_IDLE_FRAMES frames. The 1/4 buffer, a quarter of its size, stays
+ * while the layer is in use at all: it is what the systems come back to
+ * every time, for a few frames. Both go when the layer is unused for that
+ * long, when the scene is paused and with the last particle object. */
 #define LR_TX 32                       /* tiles across / down: where the layer has */
 #define LR_TY 18                       /* content (only those are composited) */
+#define LR_IDLE_FRAMES 600             /* a buffer nothing drew into for this long goes */
+typedef struct {
+    GLuint fbo, tex;
+    int lw, lh;
+    gboolean drawn;                    /* a system was drawn into it in this frame */
+    int idle;                          /* frames since it was last in use */
+} PtLayerBuf;
 typedef struct {
     gboolean have_target;              /* begin_frame was called for this frame */
     GLuint target;                     /* the framebuffer the scene draws to */
     int tw, th;                        /* its size */
-    GLuint fbo, tex;
-    int f, lw, lh;                     /* the buffer's factor and size */
+    PtLayerBuf kept[2];                /* the buffers that exist: of 1/2, of 1/4 */
+    GLuint fbo, tex;                   /* the one in use (of kept[]) */
+    int f, lw, lh;                     /* its factor and size */
     gboolean broken;                   /* could not be made: everything is drawn directly */
     gboolean pending;                  /* holds particles that are not on the frame yet */
     gboolean unclipped;                /* ... some of them drawn while no clip applied
@@ -486,7 +508,6 @@ typedef struct {
                                         * commutes with additive draws on the frame */
     guint32 tiles[LR_TY];
     int hint_f, seen_f;                /* smallest factor of the last frame / this one */
-    int idle;                          /* frames since anything used it */
 } PtLayer;
 static __thread PtLayer lr;
 static __thread gboolean pt_in_render;   /* inside walpe_weparticles_render (its sample query runs) */
@@ -3071,12 +3092,24 @@ static void lr_flush (DrawCtx *d)
     }
 }
 
+/* one of the two buffers goes (not while it holds particles: lr.pending) */
+static void lr_buf_release (PtLayerBuf *b)
+{
+    if (lr.fbo && lr.fbo == b->fbo) {
+        lr.fbo = lr.tex = 0;
+        lr.f = lr.lw = lr.lh = 0;
+    }
+    if (b->fbo)
+        glDeleteFramebuffers (1, &b->fbo);
+    if (b->tex)
+        glDeleteTextures (1, &b->tex);
+    memset (b, 0, sizeof (*b));
+}
+
 static void lr_release (void)
 {
-    if (lr.fbo)
-        glDeleteFramebuffers (1, &lr.fbo);
-    if (lr.tex)
-        glDeleteTextures (1, &lr.tex);
+    for (guint k = 0; k < G_N_ELEMENTS (lr.kept); k++)
+        lr_buf_release (&lr.kept[k]);
     lr.fbo = lr.tex = 0;
     lr.f = lr.lw = lr.lh = 0;
     lr.pending = lr.bound = FALSE;
@@ -3090,12 +3123,15 @@ static gboolean lr_bind (DrawCtx *d, int f)
     if (lr.pending && lr.f != f)
         lr_flush (d);
     int lw = (lr.tw + f - 1) / f + 2, lh = (lr.th + f - 1) / f + 2;
-    if (!lr.fbo || lr.f != f || lr.lw != lw || lr.lh != lh) {
+    PtLayerBuf *b = &lr.kept[f > 2 ? 1 : 0];
+    /* the view has another size: no buffer fits any more */
+    if (b->fbo && (b->lw != lw || b->lh != lh))
         lr_release ();
-        glGenTextures (1, &lr.tex);
+    if (!b->fbo) {
+        glGenTextures (1, &b->tex);
         glActiveTexture (GL_TEXTURE0);
-        glBindTexture (GL_TEXTURE_2D, lr.tex);
-        d->tex0 = lr.tex;
+        glBindTexture (GL_TEXTURE_2D, b->tex);
+        d->tex0 = b->tex;
         glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -3105,9 +3141,9 @@ static gboolean lr_bind (DrawCtx *d, int f)
          * closer to the direct picture, whose own rounding of every blend
          * is what remains) */
         glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, lw, lh, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-        glGenFramebuffers (1, &lr.fbo);
-        glBindFramebuffer (GL_FRAMEBUFFER, lr.fbo);
-        glFramebufferTexture2D (GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, lr.tex, 0);
+        glGenFramebuffers (1, &b->fbo);
+        glBindFramebuffer (GL_FRAMEBUFFER, b->fbo);
+        glFramebufferTexture2D (GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, b->tex, 0);
         gboolean ok = glCheckFramebufferStatus (GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
         glBindFramebuffer (GL_FRAMEBUFFER, lr.target);
         if (!ok) {
@@ -3117,10 +3153,17 @@ static gboolean lr_bind (DrawCtx *d, int f)
             lr.broken = TRUE;
             return FALSE;
         }
-        lr.f = f;
-        lr.lw = lw;
-        lr.lh = lh;
+        b->lw = lw;
+        b->lh = lh;
+        if (stats_on ())
+            pt_stats.layer_buffers++;
     }
+    b->drawn = TRUE;
+    lr.fbo = b->fbo;
+    lr.tex = b->tex;
+    lr.f = f;
+    lr.lw = lw;
+    lr.lh = lh;
     if (!lr.bound) {
         glBindFramebuffer (GL_FRAMEBUFFER, lr.fbo);
         glViewport (0, 0, lr.lw, lr.lh);
@@ -4465,12 +4508,18 @@ void walpe_weparticles_begin_frame (guint target_fbo, int w, int h)
     lr.have_target = w >= 64 && h >= 64;
     lr.hint_f = lr.seen_f;
     lr.seen_f = 0;
-    /* a layer nothing used for a while (the setting went off, the fog's
-     * layer is hidden) gives its memory back */
-    if (lr.hint_f)
-        lr.idle = 0;
-    else if (lr.fbo && ++lr.idle > 600)
-        lr_release ();
+    /* a buffer nothing was drawn into for a while (the setting went off,
+     * the fog's layer is hidden, every system does with 1/4) gives its
+     * memory back; the small one only with the layer (PtLayer) */
+    const gboolean used = lr.kept[0].drawn || lr.kept[1].drawn;
+    for (guint k = 0; k < G_N_ELEMENTS (lr.kept); k++) {
+        PtLayerBuf *b = &lr.kept[k];
+        if (b->drawn || (k == 1 && used))
+            b->idle = 0;
+        else if (b->fbo && ++b->idle > LR_IDLE_FRAMES)
+            lr_buf_release (b);
+        b->drawn = FALSE;
+    }
 }
 
 void walpe_weparticles_flush (void)
