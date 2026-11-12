@@ -214,7 +214,9 @@ static void test_name (void)
     CHECK (id2 && strlen (id2) == 32);
     g_free (id2);
     /* what cannot be read: no name */
-    CHECK (!walpe_scene_video_id (P ("missing.tex"), 0, 10));
+    char *missing = P ("missing.tex");
+    CHECK (!walpe_scene_video_id (missing, 0, 10));
+    g_free (missing);
     CHECK (!walpe_scene_video_id ("relative.tex", 0, 10));
     CHECK (!walpe_scene_video_id (NULL, 0, 10));
     CHECK (!walpe_scene_video_id (tmp, 0, 10));             /* a folder */
