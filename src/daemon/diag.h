@@ -79,8 +79,8 @@ static const char *diag_sound_gate_text (int gate)
     static const char *const t[] = {
         "the settings let wallpapers be heard (scene_sound on, not muted)",
         "muted: every wallpaper is silent (walpe-ctl set mute=off)",
-        "scene_sound is off: scenes do not play their sound layers, but for one with its own "
-        "switch (walpe-ctl set scene_sound=on; one wallpaper: walpe-ctl setprop walpe_sound=on)",
+        "scene_sound is off: wallpapers are silent (scenes, videos, web pages), but for one with its "
+        "own switch (walpe-ctl set scene_sound=on; one wallpaper: walpe-ctl setprop walpe_sound=on)",
         "the volume setting is 0: every wallpaper is silent (walpe-ctl set volume=0.5)",
     };
     return t[CLAMP (gate, 0, 3)];

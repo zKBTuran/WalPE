@@ -16,7 +16,7 @@ makes.
 ## Hearing something
 
 ```sh
-walpe-ctl set scene_sound=on|off # wallpaper sound: scenes play their sound layers (default: on)
+walpe-ctl set scene_sound=on|off # wallpaper sound: scenes, videos and web pages (default: on)
 walpe-ctl set volume=0.5         # the volume of all wallpaper sound, 0..1 (default: 0.5)
 walpe-ctl set mute=on|off        # silence that keeps the volume value
 walpe-ctl setprop walpe_sound=on|off   # one wallpaper's own switch: wins over scene_sound

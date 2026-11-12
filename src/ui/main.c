@@ -2628,7 +2628,8 @@ static void settings_software_info (void)
  * was turned up here changed nothing that could be heard, and nothing here
  * said why. The row is named for what it is to the user, not for the kind
  * of wallpaper: whatever sound wallpapers make belongs under this one
- * switch (today: the sound layers of scenes). */
+ * switch (the sound layers of scenes, the sound track of a video, what a
+ * web page plays). */
 static void settings_sound_info (void)
 {
     if (!SW.sound_info)
@@ -2636,7 +2637,8 @@ static void settings_sound_info (void)
     JsonObject *st = U.last_state;
     const char *now = st ? wpj_str (st, "sound", "") : "";
     char *t = g_strdup_printf ("Wallpapers may make sound: scenes play their sound layers (music, rain, "
-                               "wind) at the volume below; one wallpaper's own switch and volume are in "
+                               "wind), videos their sound track and web pages their own sound, at the "
+                               "volume below; one wallpaper's own switch and volume are in "
                                "its options. Switching it on while the volume is 0 sets the volume to "
                                "50. A paused wallpaper is silent - also while windows cover its monitor "
                                "(\"Pause a monitor when windows cover it\", above).%s%s",
