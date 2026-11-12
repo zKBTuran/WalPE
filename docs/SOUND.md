@@ -1,27 +1,47 @@
 # Wallpaper sound
 
 Scene wallpapers can carry sound layers: rain, wind, a song, the tracks of a music player.
-WalPE plays them when you switch that on. It is **off by default**, and a wallpaper without
-sound layers behaves and renders exactly as before.
+WalPE plays them: wallpaper sound is **on by default**, at half volume (up to 0.14.0 it was
+off, at volume 0, and could be switched on from the command line only). A wallpaper without
+sound layers behaves and renders exactly as before and costs nothing for it: no player, no
+thread, no connection to the sound server.
 
-> **State of testing.** Measured against PulseAudio 16.1 with a null sink, by recording the
-> sink's monitor and analysing the recording. Nobody has heard it: no loudspeaker, no
-> sound card (so no drift against a device clock), and `pipewire-pulse` was not tried.
+> **State of testing.** Measured against PulseAudio 16.1 and against PipeWire 1.0.5
+> (`pipewire-pulse`) with a null sink, by recording the sink's monitor and analysing the
+> recording: no loudspeaker, no sound card (so no drift against a device clock). The
+> maintainer has heard scene sound on his own machine with 0.14.0.
 
 ## Hearing something
 
 ```sh
-walpe-ctl set scene_sound=on     # scenes play their sound layers (default: off)
-walpe-ctl set volume=0.5         # the volume of all wallpaper sound, 0..1 (default: 0)
+walpe-ctl set scene_sound=on|off # wallpaper sound: scenes play their sound layers (default: on)
+walpe-ctl set volume=0.5         # the volume of all wallpaper sound, 0..1 (default: 0.5)
 walpe-ctl set mute=on|off        # silence that keeps the volume value
 walpe-ctl setprop walpe_sound=on|off   # one wallpaper's own switch: wins over scene_sound
+walpe-ctl setprop walpe_volume=0.3     # one wallpaper's own volume, 0..1: times the volume above
 ```
 
-All three settings apply at once, without loading the wallpaper again, and are kept in
-`config.json` (`scene_sound`, `volume`, `mute`). The volume slider of the settings window
-and the tray's Mute / Unmute set the same values; there is no switch for `scene_sound` in
-the settings window yet. `walpe_sound` is set like every wallpaper option (`--monitor N` /
-`--path P`; the wallpaper is loaded again; `resetprops` drops it).
+The three settings apply at once, without loading the wallpaper again, and are kept in
+`config.json` (`scene_sound`, `volume`, `mute`). The settings window ("Engine settings")
+has them under "Audio": the switch "Wallpaper sound", the volume slider and the switch
+"Mute". Under the first is the line `sound` of the status below - what is heard now, or
+why nothing is - and switching it on while the volume is 0 also sets the volume to 0.5,
+so that one click is enough. The tray's entry reads "Switch wallpaper sound on" while it
+is off, else "Mute" (the volume to 0) or "Unmute" (the volume back, `mute` off).
+
+One wallpaper: `walpe_sound` and `walpe_volume` are options of the wallpaper, kept with its
+other options (`--monitor N` / `--path P`; `resetprops` drops them). In the library window
+a wallpaper that has sound layers shows them as the first two rows of its options, under
+"Sound of this wallpaper" - "Sound" (as in Engine settings / on / off) and "Volume" -
+whether or not its author gave it a music option of his own; a wallpaper without sound has
+no such rows. Both apply to the running wallpaper at once: it is not loaded again and its
+sound goes on where it is.
+
+A configuration from 0.14.0 or older: "off, volume 0" was the default there and was
+written into every `config.json`, so a file that still holds exactly that - volume 0 and
+sound not switched on - takes the new defaults at the first start (the log says so, once).
+Sound switched on with volume 0, or switched off with a volume above 0, was somebody's
+choice and stays as it is. What is set from now on is kept, "off" included.
 
 `walpe-ctl status` has `scene_sound`, `mute`, `volume` and one line `sound`, for example:
 
@@ -67,7 +87,12 @@ plays into nothing meanwhile and asks for its turn again a quarter of a second l
 
 - While the wallpaper is paused (a fullscreen window, a covered monitor, the focus,
   battery and display rules, `walpe-ctl pause`). It goes on where it stopped; stopping and
-  starting take about a fifth of a second (the sound is faded, not cut).
+  starting take about a fifth of a second (the sound is faded, not cut). A monitor counts
+  as covered when windows hide 85 % of it (`pause_covered`, on by default), and WalPE's own
+  window counts: under a tiling window manager one tiled window is enough, so there a
+  wallpaper is heard only on a monitor without windows. `walpe-ctl set covered=off` (the
+  settings window: "Pause a monitor when windows cover it") keeps it running, and heard,
+  behind windows. The status line `sound` says when this is why nothing is heard.
 - While the layer is invisible (a wallpaper option that hides it, a script).
 - While 16 other sound layers already sound, all wallpapers and monitors together: a
   further layer waits and starts when one of them has fallen silent. The log says so once,
@@ -102,7 +127,7 @@ Known behaviour worth knowing:
   volume setting is above 0.
 - Audio-reactive wallpapers listen to what the default output plays, so they react to
   wallpaper sound too (not when `WALPE_SOUND_SINK` names another sink).
-- With `scene_sound` off, a scene with sound layers still looks its sound files up when it
+- With sound off (the setting, or the wallpaper's own switch), a scene with sound layers still looks its sound files up when it
   loads (it opens none and starts no thread), so that switching sound on applies at once.
 - 16 sounding layers cost the daemon 36 threads and 80 file descriptors.
 - The status words "no sound server (...)" are also shown when the server runs and the

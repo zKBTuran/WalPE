@@ -110,9 +110,9 @@ software renderer only ([Known limitations](#known-limitations)).
   (65 of the 68 tests that need neither a display nor an OpenGL context pass there; no
   ARM GPU, no board):
   [64-bit ARM](BUILDING.md#64-bit-arm-aarch64).
-- **Sound is off by default and nobody has heard it.** Scene sound layers were measured
-  against a PulseAudio null sink by recording it; no loudspeaker, no sound card, no
-  `pipewire-pulse`. Quitting or restarting the daemon cuts a playing sound without a
+- **Sound was measured, not listened to.** Scene sound layers (on by default) were measured
+  against a PulseAudio null sink and against PipeWire's `pipewire-pulse` by recording the
+  sink; no loudspeaker, no sound card. Quitting or restarting the daemon cuts a playing sound without a
   fade. Video wallpapers are silent, and a web page's own sound is not affected by the
   volume setting. Audio-reactive wallpapers react to wallpaper sound too.
   [SOUND.md](SOUND.md).

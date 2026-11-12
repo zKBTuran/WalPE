@@ -45,9 +45,10 @@ quality knobs in `walpe-ctl quality`, the scene feature switches in
 | `monitor_current` | `{}` | (`walpe-ctl open --monitor N`) | output name -> wallpaper path |
 | `paused` | false | (`walpe-ctl pause` / `resume`) | |
 | `fps` | 60 | | frame rate limit of scenes and web pages, 5-200; a monitor never shows more than its refresh rate; a video or GIF keeps its own lower rate |
-| `volume` | 0 | | volume of wallpaper sound, 0-1 ([SOUND.md](SOUND.md)); nothing is heard at 0 |
-| `scene_sound` | false | | scenes play their sound layers; one wallpaper's own switch: `walpe-ctl setprop walpe_sound=on\|off` |
+| `volume` | 0.5 | | volume of wallpaper sound, 0-1 ([SOUND.md](SOUND.md)); nothing is heard at 0 |
+| `scene_sound` | true | | wallpaper sound ("Wallpaper sound" in the settings window): scenes play their sound layers; one wallpaper's own switch and volume: `walpe-ctl setprop walpe_sound=on\|off`, `walpe_volume=0..1` (rows of its options in the library window) |
 | `mute` | false | | wallpaper sound silent, the volume value stays |
+| `sound_defaults` | 2 | (file only) | written by WalPE: the file was saved by a version in which wallpaper sound is on by default. A file without it that holds volume 0 and no `scene_sound: true` (the defaults up to 0.14.0) takes the new defaults once |
 | `parallax` | true | | scenes follow the pointer where they are made to |
 | `video_backend` | `ffmpeg` | | stored only |
 | `vsync`, `audio` | true, false | (file only) | stored only (presentation is set in `gpu.conf`) |

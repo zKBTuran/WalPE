@@ -24,7 +24,7 @@ Workshop and the tray icon. Building and installing is in [BUILDING.md](BUILDING
 | Presets (`project.json` with `dependency` + `preset`) | yes | the base item is found next to the preset, in the Steam libraries or the WalPE library |
 | Steam Workshop | yes | browse, search and download through steamcmd; WalPE never handles a Steam password ([Steam Workshop](#steam-workshop)) |
 | Camera parallax, camera shake, bloom, sprite-sheet layers, script camera | yes | each with a switch; they change the picture of scenes that ask for them ([SCENE-FEATURES.md](SCENE-FEATURES.md)). HDR bloom is not implemented; the look of the camera shake is an estimate |
-| Sound | off by default | scene sound layers (WAV, MP3, FLAC, Ogg) through PulseAudio / PipeWire: `walpe-ctl set scene_sound=on volume=0.5` ([SOUND.md](SOUND.md)). Video wallpapers are silent; web pages play their own media |
+| Sound | yes, on by default | scene sound layers (WAV, MP3, FLAC, Ogg) through PulseAudio / PipeWire: switched in Engine settings ("Wallpaper sound") or with `walpe-ctl set scene_sound=on\|off volume=0.5`, per wallpaper in its options ([SOUND.md](SOUND.md)). Video wallpapers are silent; web pages play their own media |
 | 3D model scenes, `application` wallpapers | no | |
 
 ## Starting WalPE
@@ -129,7 +129,7 @@ is [docs/SETTINGS.md](SETTINGS.md); the most used:
 | `gpu=auto\|integrated\|discrete\|<device>` | auto | which GPU renders; `auto` sets nothing |
 | `gl_api=auto\|gl\|gles` | auto | desktop OpenGL 3.3 where the driver has it, else OpenGL ES 3.2 / 3.1 |
 | `resolution=native\|720p\|1080p\|1440p\|4k\|WxH` | native | render resolution, for every monitor or `NAME:value,...` |
-| `scene_sound=on\|off`, `volume=0..1`, `mute=on\|off` | off, 0, off | wallpaper sound |
+| `scene_sound=on\|off`, `volume=0..1`, `mute=on\|off` | on, 0.5, off | wallpaper sound: the rows "Wallpaper sound", "Wallpaper volume" and "Mute" of the settings window |
 | `bloom`, `camera_shake`, `camera_parallax`, `sprite_sheets`, `script_camera`, `script_texanim`, `fluid_sim` `=on\|off` | on | scene features; `parallax_offset` is off |
 | `hwdec=off\|auto\|<api>`, `video_zerocopy=on\|off` | off | decode videos with a hardware decoder; keep its pictures in GPU memory |
 | `video_scene_convert=on\|off` | on | a video inside a scene that is larger than it is shown is played from a converted copy of the size shown |
@@ -276,7 +276,7 @@ strangers: see [SECURITY.md](SECURITY.md).
 ## Tray icon (walpe-tray)
 
 Left click opens (or raises) the WalPE window, middle click pauses / resumes, right click
-opens the menu (open, pause / resume all, mute, next / random wallpaper, per-monitor
+opens the menu (open, pause / resume all, wallpaper sound on / mute / unmute, next / random wallpaper, per-monitor
 wallpaper and recent ones, pause switches, settings, restart engine, quit). The icon dims with a
 pause badge while paused and turns grey with a red badge when the engine is not running.
 
