@@ -16,7 +16,10 @@
  *    that a pause which begins or ends writes them again;
  *  - src/ui/wlappid.h: which windows are given the application's id on
  *    Wayland - the toplevels GTK would name after the program - and none
- *    on X11. */
+ *    on X11;
+ *  - src/ui/lastwords.h: the sentence of an engine that ended at once is
+ *    found in what it wrote - its last line that is no informational
+ *    one, without what GLib puts before it. */
 #include "ui/appearance.h"
 #include "ui/monlist.h"
 #include "ui/suppoll.h"
@@ -24,6 +27,7 @@
 #include "ui/monline.h"
 #include "ui/winstate.h"
 #include "ui/wlappid.h"
+#include "ui/lastwords.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -190,6 +194,47 @@ int main (void)
     CHECK (!walpe_wl_app_id_wanted (TRUE, TRUE), "Wayland, the application's own window: GTK did it");
     CHECK (!walpe_wl_app_id_wanted (FALSE, FALSE) && !walpe_wl_app_id_wanted (FALSE, TRUE),
            "X11 (no Wayland toplevel): never");
+
+    /* ---- what the engine said last */
+    {
+        char *w = walpe_last_words (
+            "** Message: 20:05:11.299: display backend: wayland (auto)\n"
+            "walpe-daemon: no display to draw on: the Wayland compositor has no layer shell\n");
+        CHECK (w && !strcmp (w, "no display to draw on: the Wayland compositor has no layer shell"),
+               "the engine's own sentence, without its name: %s", w ? w : "(null)");
+        g_free (w);
+        w = walpe_last_words ("** Message: 20:14:17.547: display backend: x11, asked for (--backend)\n"
+                              "cannot open X display\n");
+        CHECK (w && !strcmp (w, "cannot open X display"), "a plain line: %s", w ? w : "(null)");
+        g_free (w);
+        w = walpe_last_words ("\n** (process:18274): WARNING **: 20:10:41.844: wallpaper load failed: x\n"
+                              "** Message: 20:10:41.845: pause signals: logind is not available\n"
+                              "walpe-daemon-Message: 20:10:41.846: more of the same\n\n");
+        CHECK (w && !strcmp (w, "wallpaper load failed: x"),
+               "a warning before informational lines, without GLib's prefix: %s", w ? w : "(null)");
+        g_free (w);
+        w = walpe_last_words ("(walpe-daemon:77): Gtk-CRITICAL **: 12:00:00.000: gtk_x: assertion failed\n");
+        CHECK (w && !strcmp (w, "gtk_x: assertion failed"), "a critical with a domain: %s", w ? w : "(null)");
+        g_free (w);
+        w = walpe_last_words ("** Message: 20:05:11.299: up\n** INFO: 20:05:11.300: fine\n"
+                              "(walpe-daemon:1): walpe-DEBUG: 20:05:11.301: detail\n");
+        CHECK (!w, "only informational lines: nothing to quote");
+        g_free (w);
+        CHECK (!walpe_last_words ("") && !walpe_last_words (NULL) && !walpe_last_words ("\n \n"),
+               "nothing written: nothing to quote");
+        w = walpe_last_words ("the Message: of this line is no GLib message\n");
+        CHECK (w && g_str_has_prefix (w, "the Message: of"), "the word Message alone does not hide a line");
+        g_free (w);
+        char *lng = g_strnfill (1000, 'x');
+        w = walpe_last_words (lng);
+        CHECK (w && g_utf8_strlen (w, -1) == WALPE_LAST_WORDS_MAX + 1 && g_str_has_suffix (w, "…"),
+               "a long line is cut: %ld characters", w ? g_utf8_strlen (w, -1) : -1L);
+        g_free (w);
+        g_free (lng);
+        w = walpe_last_words ("bad bytes \xff\xfe here\n");
+        CHECK (w && g_utf8_validate (w, -1, NULL), "bytes that are no UTF-8 do not get through");
+        g_free (w);
+    }
 
     /* ---- monitor text */
     char *t = walpe_ui_monitor_text ("DP-1", 2560, 1440, 1.0);

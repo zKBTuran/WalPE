@@ -38,6 +38,7 @@
 #include "monline.h"     /* what each monitor shows, as text */
 #include "winstate.h"    /* is the window on screen at all */
 #include "wlappid.h"     /* Wayland: one application id for all windows */
+#include "lastwords.h"   /* what the engine said before it ended */
 #ifdef WALPE_HAVE_WORKSHOP_PAGE
 #include "workshop_page.h"   /* GtkWidget *walpe_workshop_page_new (void); */
 #endif
@@ -240,7 +241,9 @@ static struct {
     gboolean quit_told;         /* the engine said it leaves on request ({"event":"quit"}) */
     gboolean restart_asked;     /* ... and that request was this window's "Restart engine" */
     char *why;                  /* last failure reason */
-} Sup = { .auto_restart = TRUE };
+    char *words;                /* ... and what the engine itself said last, NULL = nothing */
+    gint64 log_off;             /* where our engine's output begins in its log, -1 = no log */
+} Sup = { .auto_restart = TRUE, .log_off = -1 };
 
 static void set_status (const char *msg, gboolean error);
 static gboolean parse_monitors (JsonObject *st);
@@ -463,15 +466,52 @@ static void sup_schedule_respawn (void)
     Sup.retry_id = g_timeout_add_seconds (d, sup_retry, NULL);
 }
 
+/* What our engine wrote last before it ended (g_free), NULL when that was
+ * nothing that says why (lastwords.h). Its output is the end of its log,
+ * from where the log stood when it was started; the last 4 KiB are read. */
+static char *daemon_last_words (void)
+{
+    if (Sup.log_off < 0)
+        return NULL;
+    char *log = daemon_log_path (), *words = NULL;
+    int fd = open (log, O_RDONLY | O_CLOEXEC);
+    struct stat st;
+    if (fd >= 0 && fstat (fd, &st) == 0 && st.st_size > Sup.log_off) {
+        char buf[4097];
+        gint64 from = MAX (Sup.log_off, (gint64) st.st_size - 4096);
+        ssize_t n = pread (fd, buf, sizeof buf - 1, (off_t) from);
+        if (n > 0) {
+            buf[n] = 0;
+            const char *t = buf;
+            if (from > Sup.log_off) {       /* not from the start of a line */
+                t = strchr (buf, '\n');
+                t = t ? t + 1 : buf + n;
+            }
+            words = walpe_last_words (t);
+        }
+    }
+    if (fd >= 0)
+        close (fd);
+    g_free (log);
+    return words;
+}
+
 static void sup_give_up (void)
 {
     Sup.auto_restart = FALSE;
     char *log = daemon_log_path ();
     char *base = U.current && *U.current ? g_path_get_basename (U.current) : g_strdup ("none");
-    char *m = g_strdup_printf ("The engine stopped %d times right after starting (%s; it was "
-                               "loading %s). Automatic restart is off: pick another wallpaper "
-                               "or press Start engine. Log: %s",
-                               Sup.quick_fails, Sup.why ? Sup.why : "no reason given", base, log);
+    /* (the engine's own sentence first: the status line is cut at its end) */
+    char *m = Sup.words
+        ? g_strdup_printf ("The engine does not start: %s (it stopped %d times right after "
+                           "starting, %s; it was loading %s). Automatic restart is off: pick "
+                           "another wallpaper or press Start engine. Log: %s",
+                           Sup.words, Sup.quick_fails, Sup.why ? Sup.why : "no reason given",
+                           base, log)
+        : g_strdup_printf ("The engine stopped %d times right after starting (%s; it was "
+                           "loading %s). Automatic restart is off: pick another wallpaper "
+                           "or press Start engine. Log: %s",
+                           Sup.quick_fails, Sup.why ? Sup.why : "no reason given", base, log);
     sup_set_state (D_GAVE_UP, m);
     g_free (m);
     g_free (base);
@@ -494,6 +534,13 @@ static void sup_child_exit (GPid pid, gint wstatus, gpointer u)
     else
         Sup.why = g_strdup_printf ("exit status %d", WIFEXITED (wstatus) ? WEXITSTATUS (wstatus) : -1);
     gboolean clean = WIFEXITED (wstatus) && WEXITSTATUS (wstatus) == 0;
+    /* An engine that ends by itself says why in its last line, and so does
+     * one that GLib aborts (an error, a failed assertion). One that was
+     * killed or crashed said nothing about it: its last line is from
+     * before, and is not quoted as the reason. */
+    g_free (Sup.words);
+    Sup.words = (WIFEXITED (wstatus) && !clean) || (WIFSIGNALED (wstatus) && WTERMSIG (wstatus) == SIGABRT)
+                    ? daemon_last_words () : NULL;
     if (clean && (lived > 3 * G_USEC_PER_SEC || Sup.quit_told)) {
         /* asked to quit (walpe-ctl quit): no automatic restart */
         Sup.auto_restart = FALSE;
@@ -511,7 +558,9 @@ static void sup_child_exit (GPid pid, gint wstatus, gpointer u)
         sup_give_up ();
         return;
     }
-    char *m = g_strdup_printf ("The engine stopped (%s). Restarting it…", Sup.why);
+    char *m = Sup.words ? g_strdup_printf ("The engine stopped: %s (%s). Restarting it…",
+                                           Sup.words, Sup.why)
+                        : g_strdup_printf ("The engine stopped (%s). Restarting it…", Sup.why);
     sup_set_state (D_DOWN, m);
     g_free (m);
     sup_schedule_respawn ();
@@ -553,6 +602,8 @@ static void sup_spawn (void)
     int fd = open (log, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
     if (fd >= 0)
         fchmod (fd, 0600);
+    /* what this engine writes begins here (daemon_last_words) */
+    Sup.log_off = fd >= 0 && fstat (fd, &st) == 0 ? (gint64) st.st_size : -1;
     char *argv[] = { path, NULL };
     /* the GUI's own renderer choice must not leak into the daemon (WebKit) */
     char **envp = g_get_environ ();
@@ -825,6 +876,7 @@ static void on_status_reply (JsonObject *reply, const char *err, gpointer u)
                 Sup.quick_fails++;
                 g_free (Sup.why);
                 Sup.why = g_strdup ("it never opened its control socket");
+                g_clear_pointer (&Sup.words, g_free);
             }
             if (U.dstate == D_UP || U.dstate == D_UNKNOWN || U.dstate == D_STARTING) {
                 if (Sup.quick_fails >= 3) {
