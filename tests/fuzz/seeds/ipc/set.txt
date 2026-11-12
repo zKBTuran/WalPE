@@ -1,0 +1,3 @@
+{"cmd":"set","fps":30,"mute":true,"gpu":"auto"}
+{"cmd":"set","fps":"x","nope":1}
+0

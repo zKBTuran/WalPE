@@ -56,6 +56,11 @@ done | xargs -0 -r -n 2 -P "$JOBS" sh -c 'echo "cc $1"; exec '"$CC $FUZZ_SAN $cf
 $CC $FUZZ_SAN -fno-sanitize=function $cflags -w -c "$here/fakegl.c" -o "$out/obj/fakegl.o"
 rm -f "$out/libwalpecore.a"
 ar rcs "$out/libwalpecore.a" "$out"/obj/src_*.o
+# an OpenGL entry the engine calls and fakegl.c does not define would go to
+# libepoxy and end the run ("no context"): say which
+missing=$(nm "$out/libwalpecore.a" 2>/dev/null | awk '$1 == "U" && $2 ~ /^epoxy_/ { print $2 }' | sort -u |
+          while read -r sym; do nm "$out/obj/fakegl.o" | grep -q " [DBTR] $sym\$" || printf '%s ' "$sym"; done)
+[ -z "$missing" ] || echo "WARNING: fakegl.c lacks: $missing"
 
 [ $# -gt 0 ] || set -- $(cd "$here" && ls fuzz_*.c | sed 's/^fuzz_//; s/\.c$//')
 # the sound target with FFmpeg's decoders where libavcodec is (else WAV only):
@@ -65,11 +70,21 @@ if [ -z "${FUZZ_FFMPEG_LIBS:-}" ] && pkg-config --exists libavcodec libavutil 2>
     FUZZ_FFMPEG_LIBS=$(pkg-config --libs libavcodec libavutil)
 fi
 for t in "$@"; do
-    echo "link fuzz-$t"
     more=""
+    if [ "$t" = thumbs ]; then      # includes a file of the GUI: only where GTK's headers are
+        pkg-config --exists gtk4 2>/dev/null || { echo "skip fuzz-thumbs (no gtk4 here)"; continue; }
+        more="$(pkg-config --cflags --libs gtk4) -Wno-unused-function"
+    fi
+    echo "link fuzz-$t"
     if [ "$t" = sound ] && [ -n "${FUZZ_FFMPEG_LIBS:-}" ]; then
         more="-DFUZZ_HAVE_FFMPEG ${FUZZ_FFMPEG_CFLAGS:-} $top/src/engine/sounddec.c $FUZZ_FFMPEG_LIBS"
     fi
-    [ "$t" = scenejson ] && more="-DFUZZ_ASSETS=\"$here/seeds/scene/everything.scene\""
-    $CC $FUZZ_SAN $FUZZ_LINK $cflags -w "$here/fuzz_$t.c" $more "$out/obj/fakegl.o" "$out/libwalpecore.a" $libs -o "$out/fuzz-$t"
+    case "$t" in
+    library) more="$top/src/ui/store.c";;
+    scenejson) more="-DFUZZ_ASSETS=\"$here/seeds/scene/everything.scene\"";;
+    scenefile) more="-DFUZZ_ASSETS=\"$here/seeds/scenefile.assets\"";;
+    esac
+    gl="$out/obj/fakegl.o"
+    [ "$t" != thumbs ] || gl=""     # (GTK brings the real libepoxy)
+    $CC $FUZZ_SAN $FUZZ_LINK $cflags -w "$here/fuzz_$t.c" $more $gl "$out/libwalpecore.a" $libs -o "$out/fuzz-$t"
 done

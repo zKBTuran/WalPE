@@ -1,0 +1,2 @@
+=== scene.json
+{"object": {"width": 64, "height": 64, "camera": {"zoom": 1, "shift": "0 0"}, "layers": [{"image": "materials/a.tex", "x": 0, "y": 0, "width": 32, "height": 32, "opacity": 0.5}, {"text": "hello", "font": "sans", "size": 12, "x": 4, "y": 4, "color": "1 1 1"}, {"particles": {"image": "materials/a.tex", "count": 8, "speed": 4}}]}, "general": {"properties": {}}}

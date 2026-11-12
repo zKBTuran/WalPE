@@ -1,0 +1,2 @@
+=== project.json
+{"file": "scene.json", "title": "seed", "type": "scene", "general": {"properties": {"speed": {"type": "slider", "value": 2, "min": 0, "max": 10}, "on": {"type": "bool", "value": true}, "tint": {"type": "color", "value": "1 0 0"}, "words": {"type": "textinput", "value": "hello"}}}}

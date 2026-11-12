@@ -73,7 +73,13 @@ static inline const char *fuzz_dir (const char *name)
                                (int) getpid ());
     if (g_mkdir_with_parents (d, 0700) != 0)
         abort ();
-    return d;   /* kept for the life of the process */
+    /* kept for the life of the process (and held here, so that a caller
+     * that only passes it on leaves nothing for the leak check) */
+    static char *kept[8] G_GNUC_UNUSED;
+    static int n_kept;
+    if (n_kept < 8)
+        kept[n_kept++] = d;
+    return d;
 }
 
 /* every byte of a result is read: a length that says more than was

@@ -1,0 +1,16 @@
+12 -1 Background
+40 0 Clock
+40 0 Clock
+-1 1 
+-1 1 
+77 2 hand
+
+12:Background	10 -20 1.5 1
+40~2:Clock	0 0 1 0
+40
+hand
+-:
+-~2:
+Clock
+99:hand
+-:hand

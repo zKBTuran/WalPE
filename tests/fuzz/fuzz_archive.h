@@ -1,13 +1,13 @@
 /* fuzz_archive.h - the file archive of the scene harnesses:
  *     === scene.json\n<bytes>\n=== materials/a.json\n<bytes> ...
- * A line "=== <relative name>" starts a file (at most 24 files; names of
+ * A line "=== <relative name>" starts a file (at most 48 files; names of
  * letters, digits and . _ - / only). fuzz_unpack () writes them below
  * fuzz_archive_dir, after removing the files of the call before. */
 #pragma once
 #include "fuzz_common.h"
 #include <glib/gstdio.h>
 
-#define MAX_FILES 24
+#define MAX_FILES 48
 static const char *fuzz_archive_dir;
 static char *written[MAX_FILES];
 static int n_written;

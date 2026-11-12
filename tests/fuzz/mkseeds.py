@@ -64,6 +64,75 @@ for name, data in (("one.gif", gif1), ("three-frames.gif", gif2), ("small.png", 
                    ("baseline.jpg", jpeg), ("progressive.jpg", jpeg_prog)):
     put("gif", name, data)
 
+# pictures through their decoders (fuzz_picture: the first byte is the caller)
+def bmp8(w, h, colours=4):
+    rowlen = (w + 3) & ~3
+    pal = b"".join(bytes((i * 60 & 255, i * 30 & 255, i * 90 & 255, 0)) for i in range(colours))
+    off = 54 + len(pal)
+    return (b"BM" + u32(off + rowlen * h, 0, off) + u32(40, w, h) + struct.pack("<HH", 1, 8) +
+            u32(0, rowlen * h, 2835, 2835, colours, 0) + pal + bytes(i % colours for i in range(rowlen * h)))
+
+
+pictures = [("one.gif", gif1), ("three-frames.gif", gif2), ("small.png", png(3, 2)), ("wide.png", png(700, 2)),
+            ("small.bmp", bmp), ("palette.bmp", bmp8(5, 3)), ("header-only.jpg", jpeg)]
+try:        # real JPEG / WebP / interlaced and paletted PNG data when Pillow is here
+    import io
+    from PIL import Image
+    im = Image.new("RGB", (24, 16))
+    im.putdata([((x * 11) & 255, (y * 17) & 255, (x * y) & 255) for y in range(16) for x in range(24)])
+
+    def saved(fmt, image=im, **kw):
+        b = io.BytesIO()
+        image.save(b, fmt, **kw)
+        return b.getvalue()
+    pictures += [("baseline.jpg", saved("JPEG", quality=60)), ("progressive.jpg", saved("JPEG", progressive=True)),
+                 ("grey.jpg", saved("JPEG", image=im.convert("L"))),
+                 ("large.jpg", saved("JPEG", image=im.resize((1500, 900)), quality=20)),
+                 ("interlaced.png", saved("PNG", image=im.resize((300, 200)), interlace=True)),
+                 ("palette.png", saved("PNG", image=im.convert("P"))),
+                 ("alpha.png", saved("PNG", image=im.convert("RGBA"))),
+                 ("anim.gif", saved("GIF", image=im.convert("P"), save_all=True,
+                                    append_images=[im.rotate(180).convert("P")], duration=40, loop=0)),
+                 ("rle.bmp", saved("BMP", image=im.convert("P")))]
+    try:
+        pictures += [("lossy.webp", saved("WEBP", quality=50)), ("lossless.webp", saved("WEBP", lossless=True))]
+    except Exception:
+        pass
+except ImportError:
+    pass
+# JPEGs for the check of walpe_jpeg_store_bytes against libjpeg (fuzz_jpegstore)
+def jpeg_head(sof, w, h, comps, scan):
+    """markers only: a frame of w x h with these (h, v) sampling factors and a first scan of `scan` components"""
+    frame = struct.pack(">BHHB", 8, h, w, len(comps)) + b"".join(bytes([i + 1, (hs << 4) | vs, 0])
+                                                                  for i, (hs, vs) in enumerate(comps))
+    sos = bytes([scan]) + b"".join(bytes([i + 1, 0]) for i in range(scan)) + b"\x00\x3f\x00"
+    return (b"\xff\xd8\xff\xdb\x00\x43\x00" + bytes([16] * 64) +
+            b"\xff" + bytes([sof]) + struct.pack(">H", 2 + len(frame)) + frame +
+            b"\xff\xc4\x00\x14\x00" + bytes([1] + [0] * 15) + b"\x00" +
+            b"\xff\xda" + struct.pack(">H", 2 + len(sos)) + sos + b"\x00" * 16 + b"\xff\xd9")
+
+
+put("jpegstore", "progressive-3000.jpg", jpeg_head(0xc2, 3000, 2000, [(2, 2), (1, 1), (1, 1)], 3))
+put("jpegstore", "progressive-444-4096.jpg", jpeg_head(0xc2, 4096, 4096, [(1, 1), (1, 1), (1, 1)], 1))
+put("jpegstore", "baseline-scan-per-component.jpg", jpeg_head(0xc0, 2048, 1024, [(2, 1), (1, 1), (1, 1)], 1))
+put("jpegstore", "baseline-one-scan.jpg", jpeg_head(0xc0, 4000, 3000, [(2, 2), (1, 1), (1, 1)], 3))
+put("jpegstore", "grey-progressive.jpg", jpeg_head(0xc2, 4096, 100, [(1, 1)], 1))
+put("jpegstore", "four-components.jpg", jpeg_head(0xc2, 1024, 1024, [(1, 1), (4, 4), (1, 2), (2, 1)], 1))
+put("jpegstore", "too-large.jpg", jpeg_head(0xc2, 20000, 16000, [(1, 1)], 1))
+for name, data in pictures:
+    if name.endswith(".jpg"):
+        put("jpegstore", name, data)
+
+# the library's previews as its workers decode them (fuzz_thumbs: the first byte is the tile)
+for name, data in pictures:
+    if name.endswith(".gif") or name in ("small.png", "wide.png", "baseline.jpg", "palette.bmp", "lossy.webp"):
+        for tile in (0, 1, 7, 10):
+            put("thumbs", "%d-%s" % (tile, name), bytes([tile]) + data)
+for name, data in pictures:
+    # callers: 0 the library's previews, 1 workshop previews, 2 cover art; +4 larger sizes, +8 not scaled
+    for who in (0, 1, 2, 12):
+        put("picture", "%d-%s" % (who, name), bytes([who]) + data)
+
 # ------------------------------------------------------------------- .tex
 
 def lz4_literals(d):
@@ -186,6 +255,8 @@ def pkg(files, version=b"PKGV0016"):
     table = b""
     blob = b""
     for name, data in files:
+        if isinstance(data, str):
+            data = data.encode()
         n = name.encode()
         table += u32(len(n)) + n + u32(len(blob), len(data))
         blob += data
@@ -494,4 +565,137 @@ if shutil.which("ffmpeg"):
                 if name == "tone.mp3":
                     put("sound", "tone-id3.mp3", b"ID3\x04\x00\x00\x00\x00\x00\x0a" + bytes(10) + d)
 
+
+# the set of fuzz_scenefile: everything.scene's files and, for the inputs that
+# bring no scene.json, small scenes that hold only what a file is about
+def only(*objs):
+    return json.dumps({"camera": camera, "general": dict(general, bloom=False, camerashake=False), "objects": list(objs)})
+
+
+plain2 = dict(layers[1])
+del plain2["effects"]
+plain9 = dict(layers[8])
+del plain9["effects"]
+variants = [
+    ("variants/solid.json", only(layers[0])),
+    ("variants/image.json", only(plain2)),
+    ("variants/options.json", only(layers[0], layers[1])),
+    ("variants/fx.json", only(obj(2, image="models/solid.json", color="1 0.5 0.25", alpha=0.5, effects=layers[1]["effects"]))),
+    ("variants/fx2.json", only(obj(3, image="models/solid.json", effects=[layers[2]["effects"][1]]))),
+    ("variants/particle.json", only(layers[3])),
+    ("variants/dxt.json", only(plain9)),
+    ("variants/mask.json", only(layers[8])),
+    ("variants/sound.json", only(layers[5])),
+    ("variants/pass.json", only(layers[0], layers[6])),
+]
+with open(os.path.join(out, "scenefile.assets"), "wb") as f:
+    f.write(archive(scene_files + variants))
+
+# ------------------------------------------- one file of the scene's set
+# (fuzz_scenefile: the input's files replace those of everything.scene)
+for name, data in scene_files:
+    put("scenefile", name.replace("/", "_") + ".one", archive([(name, data)]))
+put("scenefile", "scene-and-model.two", archive([scene_files[1], ("models/a.json", '{"material":"materials/a.json"}')]))
+put("scenefile", "sprite-texture.one", archive([("materials/a.tex", tex(0, 8, 4, [(8, 4, 0, rgba(8, 4))], flags=4, ver=3,
+                                                                    tail=frames(2, 4, 4)))]))
+put("scenefile", "video-texture.one", archive([("materials/a.tex", tex(0, 16, 16, [(16, 16, 0, mp4())], flags=0x20, ver=3))]))
+put("scenefile", "old-layout.one", archive([("scene.json", json.dumps({
+    "object": {"width": 64, "height": 64, "camera": {"zoom": 1, "shift": "0 0"},
+               "layers": [{"image": "materials/a.tex", "x": 0, "y": 0, "width": 32, "height": 32, "opacity": 0.5},
+                          {"text": "hello", "font": "sans", "size": 12, "x": 4, "y": 4, "color": "1 1 1"},
+                          {"particles": {"image": "materials/a.tex", "count": 8, "speed": 4}}]},
+    "general": {"properties": {}}}))]))
+
+# ------------------------------------------- the options window's package scan
+scan_scene = dict(scene, objects=[obj(1, image="models/a.json", alpha={"user": "speed", "value": 0.5},
+                                      visible={"user": "on", "value": True}),
+                                  obj(2, particle="particles/p.json",
+                                      instanceoverride={"count": {"user": "speed", "value": 2}})])
+scan_scene["general"]["bloom"] = {"user": "on", "value": True}
+put("notes", "bindings.pkg", pkg([("scene.json", json.dumps(scan_scene)), ("particles/p.json", json.dumps(particle)),
+                                  ("materials/a.json", '{"passes":[{"shader":"workshop/1/tint",'
+                                                       '"constantshadervalues":{"c":{"user":"tint","value":"1 1 1"}}}]}'),
+                                  ("scripts.json", '{"x":{"script":"export function update(v){return engine.userProperties.speed;}","value":1}}')]))
+put("notes", "empty.pkg", pkg([]))
+put("notes", "same-bytes.pkg", u32(8) + b"PKGV0016" + u32(3) + b"".join(
+    u32(6) + b"a.json" + u32(0, 9) for _ in range(3)) + b'{"a":[1]}')
+
+# ------------------------------------------------------------ Steam replies
+# (tests/fixtures/workshop holds saved pages: the regress test and a run
+# take them as further seeds)
+put("steam", "details.json", json.dumps({"response": {"result": 1, "resultcount": 1, "publishedfiledetails": [{
+    "publishedfileid": "123", "result": 1, "creator": "76561190000000000", "title": "t", "description": "[b]x[/b]",
+    "preview_url": "https://steamuserimages-a.akamaihd.net/ugc/1/2/", "file_size": 10, "time_created": 1,
+    "time_updated": 2, "subscriptions": 3, "favorited": 4, "views": 5, "banned": 0,
+    "tags": [{"tag": "Scene"}, {"tag": "Anime"}]}]}}))
+put("steam", "queryfiles.json", json.dumps({"response": {"total": 2, "publishedfiledetails": [
+    {"publishedfileid": "1", "result": 1, "title": "a", "vote_data": {"score": 0.5, "votes_up": 1, "votes_down": 1},
+     "tags": [{"tag": "Video", "display_name": "Video"}]}, {"publishedfileid": "2", "result": 9}]}}))
+put("steam", "bbcode.txt", "[h1]T[/h1][list][*]a[*]b[/list][url=https://x.example/a]l[/url] [img]u[/img] [b][i]x[/b]")
+put("steam", "links.html", '<div class="workshopItem"><a href="https://steamcommunity.com/sharedfiles/filedetails/?id=42" '
+    'data-publishedfileid="42"><img class="workshopItemPreviewImage" src="https://x/p.jpg"></a>'
+    '<div class="workshopItemTitle ellipsis">T &amp; t</div></div><div class="workshopBrowsePagingInfo">'
+    "Showing 1-30 of 1,234 entries</div>")
+put("steam", "redirect.txt", "https://steamcommunity.com/workshop/browse/?appid=431960")
+
+# ------------------------------------------------------------------ ffprobe
+put("import", "h264.json", json.dumps({"streams": [
+    {"codec_type": "audio", "codec_name": "aac"},
+    {"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p", "width": 1920, "height": 1080,
+     "sample_aspect_ratio": "1:1", "duration": "12.5", "tags": {"rotate": "90"},
+     "side_data_list": [{"side_data_type": "Display Matrix", "rotation": -90}]}],
+    "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "12.500000"}}))
+put("import", "hevc-10bit.json", json.dumps({"streams": [
+    {"codec_type": "video", "codec_name": "hevc", "pix_fmt": "yuv420p10le", "width": 3840, "height": 2160,
+     "sample_aspect_ratio": "4:3"}], "format": {"format_name": "matroska,webm", "duration": "N/A"}}))
+put("import", "no-video.json", '{"streams":[{"codec_type":"audio"}],"format":{}}')
+
+# -------------------------------------------------------------- config.json
+put("config", "empty.json", "{}")
+put("config", "settings.json", json.dumps({
+    "config_version": 3, "wallpapers_dir": "/w", "current": "/w/a", "video_backend": "ffmpeg", "fps": 30,
+    "volume": 0.5, "scene_sound": True, "mute": False, "paused": False, "pause_fullscreen": True,
+    "pause_fullscreen_all": False, "pause_dpms": True, "pause_covered": True, "transparent_windows": "st,kitty",
+    "focus_action": "pause", "focus_fps": 10, "pause_battery": False, "battery_fps": 15, "pause_idle": 300,
+    "scale_filter": "bilinear", "present": "auto", "gpu": "auto", "gl_api": "auto", "backend": "auto",
+    "video_hwdec": "auto", "particle_lowres": "half", "particle_density": 50, "fx_quality": "fast",
+    "features": {"parallax": True, "sprites": False},
+    "monitors": {"HDMI-0": {"path": "/w/a", "fit": "cover", "fps": 60}, "DP-2": {"path": "/w/b"}},
+    "props": {"/w/a": {"speed": "2", "on": "true"}},
+    "quality": {"/w/a": {"effects": "off", "render_scale": 0.5}},
+    "video_resolution": {"kind": "fixed", "width": 1280, "height": 720},
+    "layers": {"/w/a": {"3": {"visible": False, "alpha": 0.5}}}, "unknown_member": [1, 2, {"x": None}]}))
+
+# ---------------------------------------------------------- control socket
+# (the last byte says how the client behaves: fuzz_ipc.c)
+put("ipc", "status.txt", '{"cmd":"status"}\n0')
+put("ipc", "set.txt", '{"cmd":"set","fps":30,"mute":true,"gpu":"auto"}\n{"cmd":"set","fps":"x","nope":1}\n0')
+put("ipc", "subscribe-big.txt", '{"cmd":"subscribe"}\n{"cmd":"big"}\n{"cmd":"none"}\n2')
+put("ipc", "no-newline.txt", '{"cmd":"status"}')
+put("ipc", "bytes.txt", b'{"cmd":"a\x00b"}\n\xff\xfe{}\n[1]\n"x"\n\n{"cmd":"big"}\n4')
+
 print("seeds written to", out)
+
+
+# -------------------------------------------- layer keys (Adjust layers)
+put("layers", "scene.txt", "12 -1 Background\n40 0 Clock\n40 0 Clock\n-1 1 \n-1 1 \n77 2 hand\n\n"
+    "12:Background\t10 -20 1.5 1\n40~2:Clock\t0 0 1 0\n40\nhand\n-:\n-~2:\nClock\n99:hand\n-:hand\n")
+put("layers", "cycle.txt", "1 1 a\n2 0 b\n3 2 c\n4 9 d\n\n1:a\n3\nd\n")
+put("layers", "numbers.txt", "5 -1 x\n\n5:x\t100000 -100000 100 2\n5:x\t1e9 0 1 0\n5:x\tnan 0 0.001 3\nshown\nhide\n")
+
+# ------------------------------- project.json as the library window reads it
+put("library", "scene.json", json.dumps({"title": "A scene", "type": "scene", "file": "scene.json",
+    "description": "text", "preview": "preview.jpg", "workshopid": "42", "tags": ["Anime"],
+    "general": {"properties": {"speed": {"type": "slider", "text": "ui_speed", "value": 1, "min": 0, "max": 2},
+                               "on": {"type": "bool", "value": True, "order": 1},
+                               "tint": {"type": "color", "value": "1 0 0"},
+                               "mode": {"type": "combo", "value": "a", "options": [{"label": "A", "value": "a"}]},
+                               "words": {"type": "textinput", "value": "x", "condition": "on.value"},
+                               "schemecolor": {"type": "color", "value": "0 0 0"}},
+                "localization": {"en-us": {"ui_speed": "Speed"}}}}))
+put("library", "preset.json", json.dumps({"dependency": "7", "title": "A preset", "preset": {"speed": 2}}))
+put("library", "video.json", '{"file":"a.mp4","type":"video","title":"v","preview":"../7/index.html",}')
+put("library", "array.json", "[1,2]")
+put("library", "bom.json", "\ufeff{\"type\":\"Web\",\"file\":\"index.html\",\"title\":\"\\u0000\\u202e\"}")
+put("library", "vdf.json", '{"dependency":7,"title":"t",\n\t"path"\t\t"/tmp"\n\t"path"\t\t"C:\\\\Steam"\n}')
+put("library", "steamcmd-root.txt", "/tmp\n")

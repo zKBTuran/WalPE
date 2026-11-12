@@ -1,0 +1,2 @@
+=== effects/fx2/effect.json
+{"name": "fx2", "group": "t", "passes": [{"material": "materials/effects/fx2.json"}], "fbos": [{"name": "_rt_half", "scale": 2, "format": "rgba8888"}]}

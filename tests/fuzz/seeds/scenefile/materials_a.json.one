@@ -1,0 +1,2 @@
+=== materials/a.json
+{"passes":[{"shader":"genericimage2","textures":["a"],"blending":"translucent"}]}

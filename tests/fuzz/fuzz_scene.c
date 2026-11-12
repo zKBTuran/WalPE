@@ -8,7 +8,7 @@
  *
  * The input is a small archive of the wallpaper's files:
  *     === scene.json\n<bytes>\n=== materials/a.json\n<bytes> ...
- * (a line "=== <relative name>" starts a file; at most 24 files). They are
+ * (a line "=== <relative name>" starts a file; at most 48 files). They are
  * written to a directory of the harness - $WALPE_FUZZ_TMP, best a tmpfs -
  * which is emptied before every input.
  * Scripts need QuickJS, which is not what is tested here: build the fuzz

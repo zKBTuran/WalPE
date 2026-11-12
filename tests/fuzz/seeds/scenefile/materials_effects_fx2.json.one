@@ -1,0 +1,2 @@
+=== materials/effects/fx2.json
+{"passes": [{"shader": "effects/fx2", "blending": "normal", "depthtest": "disabled", "depthwrite": "disabled", "cullmode": "nocull", "constantshadervalues": {"speed": 3}, "combos": {"MODE": 1}}]}

@@ -1,0 +1,17 @@
+=== shaders/effects/fx2.frag
+// [COMBO] {"material":"mode","combo":"MODE","type":"options","default":1}
+varying vec4 v_TexCoord;
+uniform float g_Time;
+uniform sampler2D g_Texture0; // {"hidden":true}
+uniform sampler2D g_Texture1; // {"material":"mask","combo":"MASK","default":"util/white"}
+uniform float g_Speed; // {"material":"speed","default":2,"range":[0,10]}
+uniform vec3 g_Tint; // {"material":"tint","type":"color","default":"1 0.5 0"}
+void main() {
+	vec4 c = texSample2D(g_Texture0, v_TexCoord.xy + frac(g_Time * g_Speed) * 0.01);
+#if MASK
+	c.a *= texSample2D(g_Texture1, v_TexCoord.zw).r;
+#endif
+	c.a = min(1.0, c.a + 0.5 * sin(g_Time));
+	gl_FragColor = vec4(mix(c.rgb, g_Tint, 0.5), c.a);
+}
+

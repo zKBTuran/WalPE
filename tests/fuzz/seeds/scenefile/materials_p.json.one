@@ -1,0 +1,2 @@
+=== materials/p.json
+{"passes":[{"shader":"genericparticle","textures":["a"],"blending":"additive"}]}

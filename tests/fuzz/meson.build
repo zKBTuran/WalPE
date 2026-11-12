@@ -1,5 +1,7 @@
 # Fuzz harnesses: one LLVMFuzzerTestOneInput () per parser of bytes that a
-# wallpaper brings (fuzz_<target>.c; fuzz_common.h says how they are built).
+# wallpaper brings, and of those that come over the control socket, from
+# Steam's servers, from ffprobe and from config.json (fuzz_<target>.c;
+# fuzz_common.h says how they are built).
 #
 #   fuzz-regress-<target>   tests of the normal suite: the harness as a plain
 #       program (standalone.c) over tests/fuzz/seeds/<target> and
@@ -13,19 +15,28 @@
 #       ninja -C bf fuzz-tex && bf/tests/fuzz/fuzz-tex -dict=tests/fuzz/dict/tex.dict \
 #           corpus/ tests/fuzz/seeds/tex
 #   tests/fuzz/build.sh builds the same programs without meson (a machine
-#   without GTK); tests/fuzz/mkseeds.py writes the seeds.
+#   without GTK); tests/fuzz/mkseeds.py writes the seeds, tests/fuzz/mkdict.py
+#   the dictionaries of the JSON targets (from the loaders' string literals).
 #
 # OpenGL in the harnesses is tests/fuzz/fakegl.c.
 fuzz_targets = ['pkg', 'tex', 'mp4', 'gif', 'json', 'puppet', 'particle', 'shader', 'scene', 'scenejson',
-                'sound']
+                'scenefile', 'sound', 'notes', 'picture', 'steam', 'import', 'config', 'ipc', 'layers', 'thumbs', 'jpegstore', 'library']
+fuzz_assets = ['-DFUZZ_ASSETS="' + meson.current_source_dir() / 'seeds' / 'scene' / 'everything.scene' + '"']
 # the sound target reads MP3 / FLAC / Ogg only where FFmpeg is (else WAV alone)
 fuzz_extra = {'sound': {'src': have_ffmpeg ? files('../../src/engine/sounddec.c') : [],
                         'args': have_ffmpeg ? ['-DFUZZ_HAVE_FFMPEG'] : [],
                         'deps': deps_ffmpeg},
-              # the files around a fuzzed scene.json
-              'scenejson': {'src': [], 'deps': [],
-                            'args': ['-DFUZZ_ASSETS="' + meson.current_source_dir() /
-                                     'seeds' / 'scene' / 'everything.scene' + '"']}}
+              # the files around a fuzzed scene.json / the set a fuzzed file is one of
+              # (a file of the GUI, included by the harness: GTK's headers; GTK brings the
+              # real libepoxy, so this one target is linked without the stand-in)
+              'thumbs': {'src': [], 'deps': [gtk4],
+                         'args': cc.get_supported_arguments(['-Wno-unused-function', '-Wno-unused-variable'])},
+              # (the library scan of the GUI: no GTK in it)
+              'library': {'src': files('../../src/ui/store.c'), 'deps': [], 'args': []},
+              'scenejson': {'src': [], 'deps': [], 'args': fuzz_assets},
+              'scenefile': {'src': [], 'deps': [cc.find_library('dl', required: false)],
+                            'args': ['-DFUZZ_ASSETS="' + meson.current_source_dir() / 'seeds' /
+                                     'scenefile.assets' + '"']}}
 
 # (walpe-build-config.h lies in the build's root)
 fuzz_inc = [inc, include_directories('../..')]
@@ -41,18 +52,19 @@ foreach t : fuzz_targets
     replay = executable('fuzz-replay-' + t, 'fuzz_' + t + '.c', 'standalone.c', x['src'],
       include_directories: fuzz_inc,
       c_args: x['args'],
-      link_with: fakegl,
+      link_with: t == 'thumbs' ? [] : [fakegl],
       dependencies: [core_dep] + x['deps'],
       install: false, build_by_default: false)
     test('fuzz-regress-' + t, replay,
-      args: [meson.current_source_dir() / 'seeds' / t, meson.current_source_dir() / 'regress' / t],
+      args: [meson.current_source_dir() / 'seeds' / t, meson.current_source_dir() / 'regress' / t] +
+            (t == 'steam' ? [meson.current_source_dir() / '..' / 'fixtures' / 'workshop'] : []),
       env: ['WALPE_SOUND_NULL=1'], timeout: 300)
   endif
   if get_option('fuzz').enabled()
     executable('fuzz-' + t, 'fuzz_' + t + '.c', x['src'],
       include_directories: fuzz_inc,
       c_args: x['args'],
-      link_with: fakegl,
+      link_with: t == 'thumbs' ? [] : [fakegl],
       link_args: ['-fsanitize=fuzzer'],
       dependencies: [core_dep] + x['deps'],
       install: false, build_by_default: false)

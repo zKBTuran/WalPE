@@ -1,0 +1,2 @@
+=== materials/d.json
+{"passes":[{"shader":"genericimage2","textures":["d"]}]}

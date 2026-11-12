@@ -205,9 +205,8 @@ static void f_CompressedTexImage2D (GLenum target, GLint level, GLenum ifmt, GLs
     }
 }
 
-static void f_GetTexLevelParameteriv (GLenum target, GLint level, GLenum pname, GLint *out)
+static void tex_level_param (Tex *t, GLint level, GLenum pname, GLint *out)
 {
-    Tex *t = target == GL_TEXTURE_2D ? tex_slot (bound_tex, 0) : NULL;
     int w = t ? t->w >> level : 0, h = t ? t->h >> level : 0;
     if (t && t->w && level >= 0 && level < 31) {
         w = w ? w : 1;
@@ -223,6 +222,27 @@ static void f_GetTexLevelParameteriv (GLenum target, GLint level, GLenum pname, 
     }
 }
 
+/* (the same by the texture's name: OpenGL 4.5) */
+static void f_GetTextureLevelParameteriv (GLuint tex, GLint level, GLenum pname, GLint *out)
+{
+    tex_level_param (tex_slot (tex, 0), level < 0 || level > 30 ? 0 : level, pname, out);
+}
+
+static void f_TexStorage2D (GLenum target, GLsizei levels, GLenum ifmt, GLsizei w, GLsizei h)
+{
+    (void) levels;
+    Tex *t = target == GL_TEXTURE_2D ? tex_slot (bound_tex, 1) : NULL;
+    if (t) {
+        t->w = w; t->h = h; t->ifmt = (int) ifmt; t->csize = 0;
+    }
+}
+
+static void f_GetTexLevelParameteriv (GLenum target, GLint level, GLenum pname, GLint *out)
+{
+    tex_level_param (target == GL_TEXTURE_2D ? tex_slot (bound_tex, 0) : NULL,
+                     level < 0 || level > 30 ? 0 : level, pname, out);
+}
+
 static void f_GetTexParameteriv (GLenum target, GLenum pname, GLint *out)
 {
     (void) target;
@@ -235,6 +255,12 @@ static void f_GetTexParameteriv (GLenum target, GLenum pname, GLint *out)
     case GL_TEXTURE_SWIZZLE_A: *out = GL_ALPHA; break;
     default: *out = 0; break;
     }
+}
+
+static void f_GetTextureParameteriv (GLuint tex, GLenum pname, GLint *out)
+{
+    (void) tex;
+    f_GetTexParameteriv (GL_TEXTURE_2D, pname, out);
 }
 
 static void f_GetTexParameterfv (GLenum target, GLenum pname, GLfloat *out)
@@ -543,6 +569,7 @@ static void f_Get1ui (GLuint a, GLenum pname, GLuint *out) { (void) a; *out = pn
 static void f_Get1ui64 (GLuint a, GLenum b, GLuint64 *out) { (void) a; (void) b; *out = 0; }
 static void f_Get1e (GLenum a, GLenum b, GLint *out) { (void) a; (void) b; *out = 0; }
 static void f_GetFbAtt (GLenum a, GLenum b, GLenum c, GLint *out) { (void) a; (void) b; (void) c; *out = 0; }
+static void f_GetNamedFbAtt (GLuint a, GLenum b, GLenum c, GLint *out) { (void) a; (void) b; (void) c; *out = 0; }
 
 /* ------------------------------------------------------------ tables */
 
@@ -578,6 +605,10 @@ DEF (glGetQueryObjectuiv, f_Get1ui) DEF (glGetQueryObjectiv, f_Get1i)
 DEF (glGetQueryObjectui64v, f_Get1ui64) DEF (glGetQueryObjectui64vEXT, f_Get1ui64)
 DEF (glGetQueryiv, f_Get1e) DEF (glGetBufferParameteriv, f_Get1e)
 DEF (glGetFramebufferAttachmentParameteriv, f_GetFbAtt)
+DEF (glGetNamedFramebufferAttachmentParameteriv, f_GetNamedFbAtt)
+DEF (glGetNamedBufferParameteriv, f_Get1i) DEF (glGetNamedRenderbufferParameteriv, f_Get1i)
+DEF (glGetTextureLevelParameteriv, f_GetTextureLevelParameteriv)
+DEF (glGetTextureParameteriv, f_GetTextureParameteriv) DEF (glTexStorage2D, f_TexStorage2D)
 
 NOP (glTexParameteri) NOP (glTexParameterf) NOP (glBindVertexArray) NOP (glBindBuffer)
 NOP (glUniform1i) NOP (glUniform2i) NOP (glUniform1f) NOP (glUniform2f) NOP (glUniform3f)
@@ -594,6 +625,8 @@ NOP (glFenceSync) NOP (glClientWaitSync) NOP (glUnmapBuffer) NOP (glMapBufferRan
 NOP (glInvalidateFramebuffer) NOP (glColorMask) NOP (glReadBuffer) NOP (glCopyTexSubImage2D)
 NOP (glBufferStorage) NOP (glDebugMessageCallback) NOP (glDebugMessageCallbackKHR)
 NOP (glDebugMessageControl) NOP (glDebugMessageControlKHR)
+NOP (glDrawElementsInstanced) NOP (glIsProgram) NOP (glIsQuery)
+NOP (glIsRenderbuffer) NOP (glIsSampler) NOP (glIsShader) NOP (glIsVertexArray)
 NOP (glEGLImageTargetTexture2DOES) NOP (glEGLImageTargetTexStorageEXT)
 NOP (eglGetCurrentDisplay) NOP (eglGetError) NOP (eglQueryString) NOP (eglGetProcAddress)
 NOP (eglQueryDeviceStringEXT) NOP (eglQueryDisplayAttribEXT) NOP (eglQueryDeviceAttribEXT)

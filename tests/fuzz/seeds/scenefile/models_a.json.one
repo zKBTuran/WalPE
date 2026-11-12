@@ -1,0 +1,2 @@
+=== models/a.json
+{"material":"materials/a.json","puppet":"models/a_puppet.mdl","width":8,"height":8}
