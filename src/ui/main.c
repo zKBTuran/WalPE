@@ -3196,10 +3196,16 @@ static void split_on_position (GObject *o, GParamSpec *ps, gpointer u)
         Split.user = TRUE;
 }
 
+/* GtkPaned's key bindings emit "move-handle" for every arrow, Home, End or
+ * Page key that reaches the pane unhandled, wherever the focus is (the
+ * search field, a button of the details panel). GtkPaned moves the handle
+ * only while the pane itself has the focus (after F8), and only then is it
+ * the user's move. */
 static gboolean split_on_move_handle (GtkPaned *p, GtkScrollType t, gpointer u)
 {
-    (void) p; (void) t; (void) u;
-    Split.user = TRUE;
+    (void) t; (void) u;
+    if (gtk_widget_is_focus (GTK_WIDGET (p)))
+        Split.user = TRUE;
     return FALSE;   /* GtkPaned moves the handle */
 }
 
