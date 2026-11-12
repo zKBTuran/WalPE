@@ -40,7 +40,9 @@
  * 14. many scripts that each use up the time limit of their first entry,
  *     or stay just under it: the load has one budget for all of them;
  * 15. a timer callback that arms its successor and never returns is not
- *     paid for in every frame for good.
+ *     paid for in every frame for good;
+ * 16. the time limit striking while a call into the scene converts an
+ *     argument ends the script, not (later) all scripts.
  * `meson test -C build script-hostile` */
 #include "walpe-build-config.h"
 #include <glib.h>
@@ -1129,6 +1131,47 @@ static void timers_rearmed (void)
     walpe_ss_free (ss);
 }
 
+/* -------------------------- 16. the time limit inside a call to the scene */
+
+/* The time limit ends a script with an error no script can catch. Where it
+ * struck while a function of the scene converted an argument (an object's
+ * valueOf), the function answered "no such effect" and dropped the error:
+ * the script ran on, into the next such call, until the 1.5 s watchdog for
+ * built-ins took the thread out and every script of the wallpaper was lost. */
+static const char *const SWALLOW_JS[][2] = {
+    { "reading an effect's visibility",
+      "'use strict';\nconst e = thisScene.getLayer('fx').getEffect(0);\n"
+      "export function update(v) { e.__e = { valueOf() { for (;;) {} } }; for (;;) { e.visible; } }\n" },
+    { "setting an effect's visibility",
+      "'use strict';\nconst e = thisScene.getLayer('fx').getEffect(0);\n"
+      "export function update(v) { e.__i = { valueOf() { for (;;) {} } }; for (;;) { e.visible = true; } }\n" },
+    { "reading an effect's name",
+      "'use strict';\nconst e = thisScene.getLayer('fx').getEffect(1);\n"
+      "export function update(v) { e.__e = { valueOf() { for (;;) {} } }; for (;;) { try { e.name; } catch (x) {} } }\n" },
+};
+
+static void swallowed (void)
+{
+    for (guint k = 0; k < G_N_ELEMENTS (SWALLOW_JS); k++) {
+        WalpeSceneScript *ss = make ();
+        add (ss, 0, "text", "'use strict';\nlet n = 0;\nexport function update(v) { return 'n' + (++n); }\n");
+        add (ss, 1, "text", SWALLOW_JS[k][1]);
+        start (ss);
+        double t0 = thread_cpu ();
+        tick (ss, 1);
+        double first = thread_cpu () - t0;
+        for (int f = 2; f <= 6; f++)
+            tick (ss, f);
+        WalpeSsMem m;
+        walpe_ss_mem (ss, &m);
+        CHECK (first < 1.0 && !m.dead && !m.lost && text[0] && !strcmp (text[0], "n6"),
+               "time limit while %s: the script is stopped after %.2f s, the others run on (%s, %s)",
+               SWALLOW_JS[k][0], first, m.lost ? "all lost" : m.dead ? "all stopped" : "running",
+               text[0] ? text[0] : "-");
+        walpe_ss_free (ss);
+    }
+}
+
 int main (int argc, char **argv)
 {
     if (argc > 2 && !strcmp (argv[1], "memory-child"))
@@ -1168,6 +1211,8 @@ int main (int argc, char **argv)
         load_time (argc > 2 ? (guint) atoi (argv[2]) : 40);
     if (!only || !strcmp (only, "timers"))
         timers_rearmed ();
+    if (!only || !strcmp (only, "swallowed"))
+        swallowed ();
     if (!only || !strcmp (only, "driver")) {
         int before = contract_breaks;
         /* 6 seeds by default (each takes seconds: its scripts run into the

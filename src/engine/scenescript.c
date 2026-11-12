@@ -2138,7 +2138,28 @@ static JSValue ss_host_call (JSContext *ctx, JSValueConst t, int argc, JSValueCo
 {
     /* not marked as host code here: each function brackets the stretch
      * in which it really is (ss_host_enter) */
-    return ss_host_fns[magic].fn (ctx, t, argc, argv);
+    /* The time limit of the entry has struck (interrupt_cb). Its error is
+     * one no script can catch - but these functions convert arguments,
+     * which runs script code (an object's valueOf), and several of them
+     * answer a conversion that failed with "nothing there" instead of
+     * handing the error on: `for (;;) effect.visible`, with such an object
+     * as the effect's index, ran on from one dropped error to the next
+     * until the watchdog for built-ins ended it (SS_HARD_NS, and with it
+     * every script of the wallpaper). No function answers any more once
+     * the limit has struck: the one it struck in hands on the error it
+     * dropped, a later one is not called. */
+    if (ss_tls.interrupted)
+        return JS_ThrowInternalError (ctx, "interrupted");
+    JSValue r = ss_host_fns[magic].fn (ctx, t, argc, argv);
+    if (ss_tls.interrupted && !JS_IsException (r)) {
+        JS_FreeValue (ctx, r);
+        JSValue dropped = JS_GetException (ctx);
+        if (JS_IsObject (dropped))
+            return JS_Throw (ctx, dropped);
+        JS_FreeValue (ctx, dropped);
+        return JS_ThrowInternalError (ctx, "interrupted");
+    }
+    return r;
 }
 
 WalpeSceneScript *walpe_ss_new (const WalpeSsHost *host, float canvas_w, float canvas_h,
