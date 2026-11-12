@@ -25,5 +25,9 @@ gboolean walpe_ipc_sub_live (WalpeIpcSub *s);
 /* the daemon that answered does not know "subscribe" (an older build
  * still running): the caller polls as it used to */
 gboolean walpe_ipc_sub_unsupported (WalpeIpcSub *s);
+/* the socket's directory is watched: a daemon that is started later is
+ * found without the caller asking (FALSE: no watch could be set up, the
+ * caller has to look by itself) */
+gboolean walpe_ipc_sub_watching (WalpeIpcSub *s);
 /* try to connect now (the caller just started a daemon) */
 void walpe_ipc_sub_kick (WalpeIpcSub *s);

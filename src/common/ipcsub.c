@@ -238,6 +238,11 @@ gboolean walpe_ipc_sub_unsupported (WalpeIpcSub *s)
     return s && s->unsupported;
 }
 
+gboolean walpe_ipc_sub_watching (WalpeIpcSub *s)
+{
+    return s && !s->freed && s->mon != NULL;
+}
+
 void walpe_ipc_sub_kick (WalpeIpcSub *s)
 {
     if (!s || s->freed || s->live || s->connecting)

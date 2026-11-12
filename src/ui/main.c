@@ -31,6 +31,7 @@
 #include "uistats.h"
 #include "appearance.h"  /* dark / light from the desktop portal (Wayland sessions) */
 #include "monlist.h"     /* the outputs as GDK names them, while no engine runs */
+#include "suppoll.h"     /* how often the engine is asked for its status */
 #ifdef WALPE_HAVE_WORKSHOP_PAGE
 #include "workshop_page.h"   /* GtkWidget *walpe_workshop_page_new (void); */
 #endif
@@ -369,8 +370,10 @@ static void props_status (const char *msg, gboolean error) { set_status (msg, er
  * subscribed connection, common/ipcsub.h): while that is live the GUI
  * does not poll at all when its window is not the active one, and asks
  * once every 10 s when it is (a daemon that hangs is still noticed).
- * Without pushes (daemon down, starting, or an older build) it polls
- * every 2 s as before - an older daemon only while the window is active. A dead daemon is
+ * Without pushes (daemon starting, not answering, or an older build) it
+ * polls every 2 s as before - an older daemon only while the window is
+ * active; a daemon that is stopped and not about to be started here is
+ * not polled in the background at all (suppoll.h). A dead daemon is
  * respawned with backoff (1, 3, 8 s); three deaths within 30 s of a start
  * stop the automatic restarts and say why. A clean exit (walpe-ctl quit)
  * is respected. "Restart engine" always works. Nothing here blocks. */
@@ -931,15 +934,17 @@ static void sup_poll_update (void)
 {
     if (U.closing)
         return;
-    gboolean live = Sup.sub && walpe_ipc_sub_live (Sup.sub);
-    gboolean active = U.win && gtk_window_is_active (GTK_WINDOW (U.win));
-    guint secs;
-    if (live)
-        secs = active ? 10 : 0;
-    else if (Sup.sub && walpe_ipc_sub_unsupported (Sup.sub) && U.dstate == D_UP)
-        secs = active ? 2 : 0;
-    else
-        secs = 2;
+    WalpeSupPoll sp = {
+        .live = Sup.sub && walpe_ipc_sub_live (Sup.sub),
+        .unsupported = Sup.sub && walpe_ipc_sub_unsupported (Sup.sub),
+        .up = U.dstate == D_UP,
+        /* stopped for good as far as this window goes: no child of ours
+         * runs and no restart is scheduled */
+        .stopped = (U.dstate == D_DOWN || U.dstate == D_GAVE_UP) && !Sup.child && !Sup.retry_id,
+        .watching = Sup.sub && walpe_ipc_sub_watching (Sup.sub),
+        .active = U.win && gtk_window_is_active (GTK_WINDOW (U.win)),
+    };
+    guint secs = walpe_sup_poll_secs (&sp);
     if (secs == Sup.poll_secs)
         return;
     if (Sup.poll_id)

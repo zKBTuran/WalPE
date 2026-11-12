@@ -5,9 +5,14 @@
  *    X11, not with GTK_THEME set, not on GTK 4.20 and later - and what a
  *    color-scheme value turns into;
  *  - src/ui/monlist.h: the text for a monitor while no engine runs
- *    (connector name, device pixels). */
+ *    (connector name, device pixels);
+ *  - src/ui/suppoll.h: how often the window asks the engine for its
+ *    status - never in the background while the state is pushed, and
+ *    never in the background while the engine is stopped and its socket
+ *    is watched. */
 #include "ui/appearance.h"
 #include "ui/monlist.h"
+#include "ui/suppoll.h"
 #include "ui/winstate.h"
 #include <stdio.h>
 #include <string.h>
@@ -98,6 +103,34 @@ int main (void)
     CHECK (!walpe_wm_offscreen (-799, 0, 800, 600, 1920, 1080), "one column still on the screen");
     CHECK (!walpe_wm_offscreen (1919, 1079, 800, 600, 1920, 1080), "one pixel still on the screen");
     CHECK (!walpe_wm_offscreen (2, 20, 956, 1058, 1920, 1080), "a position inside a frame");
+
+    /* ---- the status poll */
+    {
+        WalpeSupPoll p = { .live = TRUE, .up = TRUE, .watching = TRUE };
+        CHECK (walpe_sup_poll_secs (&p) == 0, "pushed state, window in the background: no timer");
+        p.active = TRUE;
+        CHECK (walpe_sup_poll_secs (&p) == 10, "pushed state, active window: every 10 s");
+        p = (WalpeSupPoll) { .unsupported = TRUE, .up = TRUE, .watching = TRUE };
+        CHECK (walpe_sup_poll_secs (&p) == 0, "an engine that cannot push, background: no timer");
+        p.active = TRUE;
+        CHECK (walpe_sup_poll_secs (&p) == 2, "an engine that cannot push, active: every 2 s");
+        /* starting, not answering, not seen yet: asked until it is known */
+        p = (WalpeSupPoll) { .watching = TRUE };
+        CHECK (walpe_sup_poll_secs (&p) == 2, "starting or unknown, background: every 2 s");
+        p.active = TRUE;
+        CHECK (walpe_sup_poll_secs (&p) == 2, "starting or unknown, active: every 2 s");
+        p = (WalpeSupPoll) { .unsupported = TRUE, .watching = TRUE };
+        CHECK (walpe_sup_poll_secs (&p) == 2, "an older engine that went away and is being restarted");
+        /* stopped, nothing here starts it: the socket's watch reports a new one */
+        p = (WalpeSupPoll) { .stopped = TRUE, .watching = TRUE };
+        CHECK (walpe_sup_poll_secs (&p) == 0, "stopped, background: no timer");
+        p.active = TRUE;
+        CHECK (walpe_sup_poll_secs (&p) == 10, "stopped, active window: every 10 s");
+        p = (WalpeSupPoll) { .stopped = TRUE };
+        CHECK (walpe_sup_poll_secs (&p) == 2, "stopped but nothing watches for its socket: every 2 s");
+        p.active = TRUE;
+        CHECK (walpe_sup_poll_secs (&p) == 2, "the same, active");
+    }
 
     if (fails) {
         fprintf (stderr, "ui-session: %d check(s) failed\n", fails);

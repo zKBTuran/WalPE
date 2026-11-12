@@ -172,6 +172,7 @@ static void on_sub (const char *line, gpointer user)
     if (sub_lines == 1) {
         CHECK (strstr (line, "\"subscribed\":true") != NULL);
         CHECK (walpe_ipc_sub_live (sub));
+        CHECK (walpe_ipc_sub_watching (sub));   /* the socket's directory: a later start is seen */
         g_idle_add (do_broadcast, "{\"event\":\"state\",\"n\":7}");
     } else {
         CHECK (strstr (line, "\"n\":7") != NULL);
