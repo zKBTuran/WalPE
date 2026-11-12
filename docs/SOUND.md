@@ -189,6 +189,16 @@ the application name `WebKit` in the desktop's mixer. The same three settings de
 - Otherwise the volume setting scales what the page itself sets: the volume of every media
   element (the page reads back the value it wrote) and the output of every AudioContext.
   `walpe-ctl set volume=0.25` measured a quarter of the amplitude of `volume=1`.
+- **What is guaranteed.** Off, mute, volume 0, the wallpaper's own "off" and a paused
+  wallpaper are hard: the page is muted by WebKit itself, outside the page, and nothing a
+  page does gets round that (measured with a page that tries: every global it can find,
+  the accessors of another frame, media and Web Audio made in a frame, again every 0.4 s -
+  silence in all five cases, and its sound is back afterwards). The volume in between is
+  the work of a script that runs among the page's own - nothing else reaches an `Audio`
+  object or an AudioContext - and is an agreement, not a wall: a page that sets out to
+  defeat it can be louder than the volume says, never louder than off. (The same page
+  was at 0.252 of its amplitude with `volume=0.25`: it did not get round it either.) A
+  frame from another site keeps the level it had when it was made, and the mute.
 - A change applies at once, and a daemon that starts shows the page with the saved values.
 - Media start by themselves, without a click on the wallpaper. (Up to 0.14.0 they did
   not: WebKit let media with sound start only after a click on the page, as a browser

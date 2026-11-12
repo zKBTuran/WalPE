@@ -1641,6 +1641,7 @@ if (pr && pr.then) pr.then(function () { S.play = 'ok'; }, function (e) { S.play
 var AC = window.AudioContext || window.webkitAudioContext, ctx = null;
 try { ctx = new AC(); var o = ctx.createOscillator(); o.connect(ctx.destination); o.start(); } catch (e) {}
 function say() { S.v = el.volume; S.dp = det.paused; S.ctx = ctx ? ctx.state : null;
+  S.g = Object.getOwnPropertyNames(window).filter(function (n) { return /walpe.*(vol|snd|sound)/i.test(n); }).length;
   console.log('WCsound ' + JSON.stringify(S)); }
 window.wallpaperPropertyListener = {applyUserProperties: function () { S.user++; say(); }};
 setInterval(say, 300); window.addEventListener('load', say);
@@ -1681,6 +1682,7 @@ def case_sound(env, W):
     check(st.get("dp") is True and st.get("v") == 0.5,
           "sound: wallpaper sound is off: the Audio object is held, the element has the page's volume",
           (st.get("dp"), st.get("v")))
+    check(st.get("g") == 0, "sound: what sets the page's level is no global the page could call", st.get("g"))
     vc0 = st.get("vc", 0)
     env.ctl("set", "scene_sound=on", "volume=0.3")
     st = wait_state(env, "sound", lambda s: s.get("dp") is False and s.get("vc", 0) > vc0, 20, env.mark())

@@ -99,7 +99,9 @@ run.** One default changes: wallpaper sound is on, at half volume (under Sound).
   document and Web Audio are silent too (only elements in the document were paused).
   A web wallpaper has the two sound rows of a scene in its options - its own switch and
   its own volume (`walpe_sound`, `walpe_volume`) -, applied to the page that runs and
-  kept apart for every page. [SOUND.md](docs/SOUND.md#web-wallpapers).
+  kept apart for every page. Off and mute are enforced by WebKit's own mute of the page,
+  which no page script can undo; the volume in between is scaled by a script inside the
+  page, which a page that fights it could defeat. [SOUND.md](docs/SOUND.md#web-wallpapers).
 
 ### Tray
 
