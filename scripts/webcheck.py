@@ -1665,7 +1665,8 @@ def gen_sound(out):
 def case_sound(env, W):
     # (no sound server here: what is checked is what the page is told and allowed, which
     # needs none; what is heard was measured against a sound server, docs/SOUND.md)
-    if not start(env, [("A", 1280, 720, 0, 0)], "sound"):
+    # (wallpaper sound is on in a new configuration: this one starts with it off)
+    if not start(env, [("A", 1280, 720, 0, 0)], "sound", config={"scene_sound": False, "volume": 0.5, "mute": False}):
         return
     mark = env.mark()
     st = open_page(env, W["sound"], "sound", "sound")
