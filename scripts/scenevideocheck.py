@@ -27,6 +27,9 @@ monitor does not depend on the moment it is read.
            the original; saved in config.json.
   restart  a daemon that starts with the scene plays the copy from the first picture:
            the original's decoder is never opened.
+  damaged  the copy in the cache is cut short (the machine lost power before the file
+           had reached the disk): the daemon that starts with the scene removes it,
+           plays the clip as it is, makes the copy again - once - and plays that.
   cancel   another wallpaper while the copy of a long clip is being made: the ffmpeg
            child (which runs at nice 19) ends, its partial file goes, status forgets
            the video; the same when the daemon quits.
@@ -351,6 +354,49 @@ def case_restart(env, W):
     env.stop_daemon()
 
 
+# ------------------------------------------------------------------ damaged
+def case_damaged(env, W):
+    cs = copies(env)
+    if not cs:
+        print("skip  damaged: the copy of case `copy` is not there", flush=True)
+        return
+    whole = os.path.getsize(cs[0])
+    with open(cs[0], "r+b") as f:
+        f.truncate(whole // 2)
+    rc.jdump(env.config, {"config_version": 4, "fps": 30, "pause_covered": False, "pause_dpms": False,
+                          "video_resolution": "auto", "current": W["vid"]})
+    mark = env.mark()
+    if not check(start(env), "damaged: daemon started with the scene, its copy cut to half its length"):
+        return
+    lc.loaded(env, W["vid"])
+    lc.wait_for(lambda: "played 640x360 30.00 fps, copy: ready" in scene_videos(env) or
+                "failed" in scene_videos(env) or "not usable" in scene_videos(env), 300, 0.25)
+    sv = scene_videos(env)
+    log = env.since(mark)
+    check(sv == "v.tex: source 1280x720 30.00 fps, played 640x360 30.00 fps, copy: ready",
+          "damaged: the copy is made again and played (not \"not usable\" for ever)", sv)
+    check("cannot be read (cut short or damaged): removed" in log, "damaged: the log says that the file was removed",
+          [ln for ln in log.splitlines() if "scenenode:" in ln][:4])
+    check(log.count("making a 640x360 copy once") == 1 and log.count("for its scene made") == 1,
+          "damaged: one conversion", [ln for ln in log.splitlines() if "video:" in ln][-8:])
+    cs2 = copies(env)
+    check(cs2 == cs and probe(cs[0]) == "640,360,yuv420p,60" and not copies(env, ".part"),
+          "damaged: the copy in the cache is whole again: 640x360, every one of the clip's 60 pictures",
+          (cs2, probe(cs[0]) if cs2 else None))
+    check(bars_ok(picture(env)), "damaged: the monitor shows the clip's picture")
+    env.stop_daemon()
+    # the daemon that starts next plays the copy from the first picture, like any other
+    mark = env.mark()
+    if check(start(env), "damaged: daemon started again"):
+        lc.loaded(env, W["vid"])
+        lc.wait_for(lambda: "copy: ready" in scene_videos(env), 30, 0.2)
+        log = env.since(mark)
+        check("is played from its converted copy" in log and "making a" not in log and "removed" not in log,
+              "damaged: the next start plays the copy, nothing is removed or converted",
+              [ln for ln in log.splitlines() if "video:" in ln][:6])
+        env.stop_daemon()
+
+
 # ------------------------------------------------------------------- cancel
 def case_cancel(env, W):
     # at the lowest priority, as it runs for a user (nice 19 is checked here)
@@ -528,7 +574,8 @@ def case_webunload(env, W):
     env.stop_daemon()
 
 
-CASES = [("copy", case_copy), ("switch", case_switch), ("restart", case_restart), ("cancel", case_cancel),
+CASES = [("copy", case_copy), ("switch", case_switch), ("restart", case_restart), ("damaged", case_damaged),
+         ("cancel", case_cancel),
          ("small", case_small), ("monitors", case_monitors), ("webunload", case_webunload)]
 
 

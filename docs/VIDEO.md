@@ -73,7 +73,10 @@ background, into a copy of the size it is needed at, and the scene plays the cop
   `copy:` - `waiting`, `converting 42 %`, `ready (played from where the clip starts again)`,
   `ready`, `off`, `not needed`, `not made (why)`, `not usable (why)`, `failed (why)`.
   `video_decoder` is the decoder of what is played. The log says when a copy is started,
-  made and taken into use.
+  made and taken into use. A copy whose file cannot be read any more (cut short when the
+  machine lost power, damaged) is removed when its scene is loaded and made again; `not
+  usable` is what a copy gets that can be read but is not the clip (another number of
+  pictures, another rate): that one is kept, making it again would give the same file.
 * **The switch.** `walpe-ctl set video_scene_convert=off` (window: Engine settings, "Smaller
   copies of videos in scenes"; `WALPE_VIDEO_SCENE_CONVERT=0|1` in front of `walpe-daemon`
   overrides): the clip itself again, from where it starts next; nothing is converted. The

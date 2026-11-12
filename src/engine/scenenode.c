@@ -33,6 +33,8 @@
 #endif
 #include <json-glib/json-glib.h>
 #include <glib/gstdio.h>
+#include <errno.h>
+#include <unistd.h>
 #include <utime.h>
 #include <pango/pangocairo.h>
 #include "scenetext.h"
@@ -221,6 +223,7 @@ typedef struct {
     int plan_w, plan_h;      /* the copy's size (WAITING, READY) */
     char *plan_copy;         /* ... and its file */
     gboolean wanted;         /* the daemon was asked for plan_copy */
+    gboolean copy_removed;   /* a copy that could not be read was removed (once per load) */
     char *id;                /* walpe_scene_video_id, looked up when first needed */
 } SceneVideo;
 /* the frame skip asks this counter whether a video layer shows another
@@ -529,6 +532,36 @@ static void parse_vec (const char *s, float *v, int n, const float *dflt)
         v[i] = t[i];
 }
 
+/* Is the converted copy `copy` there to be played? A copy that is there but
+ * is no MP4 with H.264 pictures any more - cut short because the machine
+ * lost power before the file had reached the disk, or damaged since - was
+ * refused by the video module at every load ("not usable"), and nothing
+ * made it again, because its file existed: that clip was decoded at its
+ * full size for ever. Such a file is removed here, so that the copy is
+ * asked for like one that was never made; once per load of the scene
+ * (*removed), so that a copy that comes out unreadable again is left to
+ * the module's verdict and not made over and over. A copy that can be read
+ * but is not the clip (other pictures, another rate) is not touched: making
+ * it again would give the same file. */
+static gboolean scene_video_copy_there (const char *copy, gboolean *removed)
+{
+    if (!copy || !g_file_test (copy, G_FILE_TEST_IS_REGULAR))
+        return FALSE;
+    if (*removed || g_access (copy, R_OK) != 0)
+        return TRUE;        /* (the module says what is wrong with it) */
+    Mp4Demux *d = mp4_demux_open_range (copy, 0, 0, NULL);
+    if (d) {
+        mp4_demux_free (d);
+        return TRUE;
+    }
+    *removed = TRUE;
+    if (g_unlink (copy) != 0 && errno != ENOENT)    /* (gone: another monitor's scene removed it) */
+        return TRUE;
+    g_message ("scenenode: the converted copy %s cannot be read (cut short or damaged): removed, "
+               "it is made again", copy);
+    return FALSE;
+}
+
 /* video texture: attach the object to the scene's shared entry for this
  * file (one decoder per unique texture, shared across monitors too) */
 static gboolean attach_video (SceneNodeContent *s, NodeObj *nv, const char *path,
@@ -548,6 +581,7 @@ static gboolean attach_video (SceneNodeContent *s, NodeObj *nv, const char *path
      * looked at only when the .tex says it is larger than the box. */
     WalpeVideoTexCopy copy = { 0 };
     char *copy_path = NULL, *id = NULL;
+    gboolean copy_removed = FALSE;
     const WalpeVideoBox box = { s->vbox_w, s->vbox_h };
     if (walpe_scene_video_on () && s->downscale && box.w > 0 && box.h > 0 &&
         (w > box.w || h > box.h)) {
@@ -557,7 +591,7 @@ static gboolean attach_video (SceneNodeContent *s, NodeObj *nv, const char *path
                                             &tw, &th)) {
             id = walpe_scene_video_id (path, off, len);
             copy_path = walpe_scene_video_cache_file (id, tw, th);
-            if (copy_path && g_file_test (copy_path, G_FILE_TEST_IS_REGULAR)) {
+            if (scene_video_copy_there (copy_path, &copy_removed)) {
                 copy = (WalpeVideoTexCopy) { WALPE_VTEX_COPY_READY, copy_path, tw, th };
                 g_utime (copy_path, NULL);  /* in use: the daemon removes copies unused for months */
             }
@@ -574,7 +608,7 @@ static gboolean attach_video (SceneNodeContent *s, NodeObj *nv, const char *path
         return FALSE;
     }
     SceneVideo sv = { .path = g_strdup (path), .v = v, .w = w, .h = h, .full_w = w, .full_h = h,
-                      .off = off, .len = len, .id = id };
+                      .off = off, .len = len, .id = id, .copy_removed = copy_removed };
     g_array_append_val (s->videos, sv);
     nv->video = (int) s->videos->len - 1;
     g_message ("scenenode: video texture %s (%dx%d)", walpe_log_str (path), w, h);
@@ -623,7 +657,9 @@ static void scene_video_plan (SceneNodeContent *s, SceneVideo *sv, guint gen)
         copy = walpe_scene_video_cache_file (sv->id, tw, th);
         if (!copy)
             st = WALPE_VTEX_COPY_NOT_NEEDED;    /* (the file cannot be read any more) */
-        else if (g_file_test (copy, G_FILE_TEST_IS_REGULAR))
+        else if ((sv->plan_state == WALPE_VTEX_COPY_READY && !g_strcmp0 (copy, sv->plan_copy) &&
+                  g_file_test (copy, G_FILE_TEST_IS_REGULAR)) ||   /* (looked at before) */
+                 scene_video_copy_there (copy, &sv->copy_removed))
             st = WALPE_VTEX_COPY_READY;
         else
             st = in.format == 1 ? WALPE_VTEX_COPY_WAITING : WALPE_VTEX_COPY_UNSUITED;
