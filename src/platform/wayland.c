@@ -2789,9 +2789,10 @@ static void wl_pointer_foreign (const char *output, WalpeForeignPointer what, do
     W.motion_dirty = TRUE;
     guint32 now_ms = (guint32) (g_get_monotonic_time () / 1000);
     if (what == WALPE_FOREIGN_PRESS || what == WALPE_FOREIGN_RELEASE) {
-        int button = (int) a;
-        if (button >= 1 && button <= 3)
-            wl_ptr_queue_button (button, what == WALPE_FOREIGN_PRESS, now_ms);
+        /* (compared as the number it came as: a double outside int's range
+         * has no defined conversion) */
+        if (a >= 1 && a <= 3)
+            wl_ptr_queue_button ((int) a, what == WALPE_FOREIGN_PRESS, now_ms);
     } else if (what == WALPE_FOREIGN_WHEEL) {
         /* notches of 120, as wl_pointer's axis_value120: whole clicks, the rest kept */
         const double v[2] = { b, a };       /* axis 0 vertical, 1 horizontal, as wl_pointer has them */
