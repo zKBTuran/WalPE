@@ -33,6 +33,7 @@
 #include "appearance.h"  /* dark / light from the desktop portal (Wayland sessions) */
 #include "monlist.h"     /* the outputs as GDK names them, while no engine runs */
 #include "suppoll.h"     /* how often the engine is asked for its status */
+#include "winstate.h"    /* is the window on screen at all */
 #ifdef WALPE_HAVE_WORKSHOP_PAGE
 #include "workshop_page.h"   /* GtkWidget *walpe_workshop_page_new (void); */
 #endif
@@ -3231,9 +3232,21 @@ static void on_win_size (GObject *o, GParamSpec *ps, gpointer u)
     update_cap ();
 }
 
+/* the window went off the screen (another workspace, an icon) or came
+ * back: off it, the pictures kept in memory are given back (thumbs.h) */
+static void on_toplevel_state (GObject *sf, GParamSpec *ps, gpointer u)
+{
+    (void) ps; (void) u;
+    thumbs_window_hidden (walpe_surface_hidden (GDK_SURFACE (sf)));
+}
+
 static void on_realize (GtkWidget *w, gpointer u)
 {
     (void) u;
+    GdkSurface *sf = gtk_native_get_surface (GTK_NATIVE (w));
+    walpe_winstate_watch (gtk_widget_get_display (w));
+    if (sf && GDK_IS_TOPLEVEL (sf))
+        g_signal_connect (sf, "notify::state", G_CALLBACK (on_toplevel_state), NULL);
     GskRenderer *r = gtk_native_get_renderer (GTK_NATIVE (w));
     const char *env = g_getenv ("GSK_RENDERER");
     g_message ("GSK renderer: %s (GSK_RENDERER=%s%s)", r ? G_OBJECT_TYPE_NAME (r) : "none",

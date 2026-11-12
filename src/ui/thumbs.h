@@ -37,6 +37,16 @@ void thumbs_set (GtkPicture *pic, const char *src, int w, int h, ThumbMode mode)
 /* forget the pending target of pic (list item unbind) and clear it */
 void thumbs_clear (GtkPicture *pic);
 
+/* The window that shows the pictures went off the screen, or is back
+ * (winstate.h: another workspace, an icon, suspended - not: without the
+ * focus). Off the screen the pictures kept in memory for a quick return
+ * (the LRU above: every preview looked at, up to its budget) are given
+ * back; what a picture shows stays, and anything else is read again from
+ * the disk cache when it is asked for. */
+void thumbs_window_hidden (gboolean hidden);
+/* diagnostics: bytes of decoded stills the memory cache holds */
+gsize thumbs_cache_bytes (void);
+
 /* animated previews: WALPE_PREVIEW_ALWAYS / _HOVER / _OFF (common/config.h) */
 void thumbs_set_anim_mode (int mode);
 int  thumbs_get_anim_mode (void);

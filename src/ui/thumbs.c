@@ -566,6 +566,8 @@ static GHashTable *hooked;     /* windows / adjustments / pictures whose signals
 static GQueue anim_lru = G_QUEUE_INIT;
 static gsize anim_bytes;
 static guint anim_tick_id, anim_kick_id;
+static gboolean win_hidden;     /* the window is off the screen (thumbs_window_hidden) */
+static void stills_drop (void);
 
 static void init (void);
 static void request_still (GtkPicture *pic, const char *key, const char *src, int w, int h,
@@ -820,6 +822,8 @@ static gboolean anim_idle_drop (gpointer u)
         return G_SOURCE_REMOVE;     /* playing again */
     while (anim_lru.head)
         anim_drop (anim_lru.head->data);
+    if (win_hidden)
+        stills_drop ();     /* (after the pictures above took their stills from it) */
     malloc_trim (0);
     return G_SOURCE_REMOVE;
 }
@@ -1005,9 +1009,49 @@ static void mem_trim (void)
         g_queue_delete_link (&lru, lru.tail);
         if (e) {
             mem_bytes -= e->bytes;
-            g_hash_table_remove (mem, k);   /* frees k (the hash key) and e */
+            g_hash_table_remove (mem, k);   /* frees e */
         }
+        g_free (k);     /* (the table has no key destructor: it was never freed) */
     }
+}
+
+/* ------------------------------------------- the window off the screen
+ * The memory cache keeps every still that was decoded, least recently
+ * used out first, up to MEM_BUDGET: a quick return to tiles scrolled past
+ * and to previews looked at. Looking through a library once fills it (a
+ * detail preview is up to 720 x 405), and the window then held those
+ * megabytes for as long as it existed - also on another workspace or as an
+ * icon, where nobody scrolls back to anything. So the cache is emptied
+ * when the window goes off the screen (winstate.h; not when it merely
+ * loses the focus: in a tiled layout it is looked at without it). A
+ * texture some picture shows stays alive through that picture, so the
+ * window looks the same when it is back; only the cache's reference goes,
+ * and a picture nobody shows is read from the disk cache when it is asked
+ * for again. Where animations are loaded their frames go first
+ * (anim_idle_drop, 20 s later): the pictures that showed them take their
+ * stills from this cache at that moment. */
+static void stills_drop (void)
+{
+    if (!mem || !lru.head)
+        return;
+    gsize had = mem_bytes;
+    g_hash_table_remove_all (mem);
+    g_queue_clear_full (&lru, g_free);
+    mem_bytes = 0;
+    if (had > (4u << 20))
+        malloc_trim (0);
+}
+
+void thumbs_window_hidden (gboolean hidden)
+{
+    win_hidden = hidden;
+    if (hidden && !anim_lru.head)
+        stills_drop ();
+}
+
+gsize thumbs_cache_bytes (void)
+{
+    return mem_bytes;
 }
 
 static void apply_to (GtkPicture *pic, const char *key, GdkTexture *tex)

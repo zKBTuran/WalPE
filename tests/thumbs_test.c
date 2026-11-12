@@ -142,6 +142,59 @@ int main (void)
     CHECK (!thumbs_state_hidden (GDK_TOPLEVEL_STATE_FOCUSED | GDK_TOPLEVEL_STATE_MAXIMIZED |
                                  GDK_TOPLEVEL_STATE_FULLSCREEN | GDK_TOPLEVEL_STATE_TILED));
     CHECK (!thumbs_toplevel_hidden (NULL));
+    {
+        /* the picture cache of a window that goes off the screen: emptied
+         * (a texture a picture still shows lives on through that picture's
+         * reference - here: ours), left alone while the window is merely
+         * back or was never away */
+        mem = g_hash_table_new_full (g_str_hash, g_str_equal, NULL, mem_free);
+        GdkTexture *shown = NULL;
+        for (int i = 0; i < 3; i++) {
+            static const guint8 px[3] = { 1, 2, 3 };
+            GBytes *b = g_bytes_new_static (px, sizeof px);
+            MemEnt *e = g_new0 (MemEnt, 1);
+            e->tex = gdk_memory_texture_new (1, 1, GDK_MEMORY_R8G8B8, b, 3);
+            g_bytes_unref (b);
+            e->bytes = 6u << 20;        /* (as if they were pictures: 18 MB) */
+            char *k = g_strdup_printf ("key-%d", i);
+            g_queue_push_head (&lru, k);
+            e->link = lru.head;
+            g_hash_table_replace (mem, k, e);
+            mem_bytes += e->bytes;
+            if (i == 1)
+                shown = g_object_ref (e->tex);
+        }
+        thumbs_window_hidden (FALSE);
+        CHECK (thumbs_cache_bytes () == (18u << 20) && g_hash_table_size (mem) == 3);
+        thumbs_window_hidden (TRUE);
+        CHECK (thumbs_cache_bytes () == 0 && g_hash_table_size (mem) == 0 && lru.length == 0);
+        CHECK (GDK_IS_TEXTURE (shown) && G_OBJECT (shown)->ref_count == 1 &&
+               gdk_texture_get_width (shown) == 1);
+        thumbs_window_hidden (TRUE);    /* again, with nothing in it */
+        thumbs_window_hidden (FALSE);
+        CHECK (thumbs_cache_bytes () == 0);
+        /* over the budget the oldest goes, with its key (it was never freed) */
+        for (int i = 0; i < 3; i++) {
+            static const guint8 px[3] = { 4, 5, 6 };
+            GBytes *b = g_bytes_new_static (px, sizeof px);
+            MemEnt *e = g_new0 (MemEnt, 1);
+            e->tex = gdk_memory_texture_new (1, 1, GDK_MEMORY_R8G8B8, b, 3);
+            g_bytes_unref (b);
+            e->bytes = MEM_BUDGET / 2;
+            char *k = g_strdup_printf ("big-%d", i);
+            g_queue_push_head (&lru, k);
+            e->link = lru.head;
+            g_hash_table_replace (mem, k, e);
+            mem_bytes += e->bytes;
+        }
+        mem_trim ();
+        CHECK (g_hash_table_size (mem) == 2 && lru.length == 2 && mem_bytes == MEM_BUDGET);
+        CHECK (!g_hash_table_contains (mem, "big-0") && g_hash_table_contains (mem, "big-2"));
+        thumbs_window_hidden (TRUE);
+        thumbs_window_hidden (FALSE);
+        g_object_unref (shown);
+        g_clear_pointer (&mem, g_hash_table_unref);
+    }
     int *d = gif_frame_delays (test_gif, sizeof (test_gif), &n, &w, &h);
     CHECK (d && n == 5 && w == 8 && h == 6);
     /* gdk-pixbuf's rule for the third frame: under 20 ms plays as 20 */
