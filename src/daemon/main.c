@@ -8289,6 +8289,8 @@ static char *ipc_handler (const char *req, gpointer user)
      * their menus for it. */
     gboolean touch = !ipc_request_reads (cmd, o);
     json_node_unref (root);
+    if (touch)
+        diag_sound_line ();     /* the log: sound was switched off, muted, set to 0 - or back */
     if (quit)
         g_main_loop_quit (D.loop);
     else if (touch)

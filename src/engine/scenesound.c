@@ -620,6 +620,15 @@ static gboolean out_connect (Out *o, const char *name)
         if (o->said)
             g_message ("sound: %s: the sound server is there, heard from now on", walpe_log_str (name));
         o->said = FALSE;
+        /* the first stream this process got: the log of a report about
+         * silence shows that the output was opened, and on what (once; a
+         * server that refuses has had its lines below from the start) */
+        static gint opened_said;
+        if (g_atomic_int_compare_and_exchange (&opened_said, 0, 1))
+            g_message ("sound: output open: a stream on the sound server (libpulse: PulseAudio or "
+                       "PipeWire's pipewire-pulse), %s, %d Hz, %d channel(s); first layer: %s",
+                       env.sink ? "the sink of WALPE_SOUND_SINK" : "its default sink", o->rate, o->channels,
+                       walpe_log_str (name));
         return TRUE;
     }
     /* (the reason of a layer that only waits behind another one does not

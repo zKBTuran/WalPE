@@ -16,6 +16,9 @@
  *
  * diag_quit_ipc (), diag_quit_signal (): who asked the daemon to stop.
  *
+ * diag_sound_line (): one line when the sound settings begin or stop to
+ * keep every wallpaper silent.
+ *
  * Everything is read from what the daemon holds anyway, on the main
  * thread, when it is asked or when the thing happens: no timer, no
  * thread, nothing on a frame's path. A wallpaper is named by the last part
@@ -47,6 +50,43 @@ static void diag_no_home (GString *s)
         g_string_insert_c (s, at, '~');
         p = s->str + at;
     }
+}
+
+/* the sound settings as one fact: 0 = they let wallpapers be heard, else
+ * which of them keeps them silent (the switch, mute, the volume: the order
+ * of walpe_sound_status ()) */
+static int diag_sound_gate (void)
+{
+    return !D.cfg->scene_sound ? 2 : D.cfg->mute ? 1 : D.cfg->volume <= 0.0 ? 3 : 0;
+}
+
+static const char *diag_sound_gate_text (int gate)
+{
+    static const char *const t[] = {
+        "the settings let wallpapers be heard (scene_sound on, not muted)",
+        "muted: every wallpaper is silent (walpe-ctl set mute=off)",
+        "scene_sound is off: scenes do not play their sound layers, but for one with its own "
+        "switch (walpe-ctl set scene_sound=on; one wallpaper: walpe-ctl setprop walpe_sound=on)",
+        "the volume setting is 0: every wallpaper is silent (walpe-ctl set volume=0.5)",
+    };
+    return t[CLAMP (gate, 0, 3)];
+}
+
+/* after a request that changed something: one line when the sound settings
+ * went from "heard" to one of the silent states or back (three compares
+ * otherwise). The state at start is in the summary. */
+static int diag_sound_said = -1;
+
+static void diag_sound_line (void)
+{
+    int gate = diag_sound_gate ();
+    if (gate == diag_sound_said)
+        return;
+    if (diag_sound_said >= 0 && gate)
+        g_message ("sound: %s", diag_sound_gate_text (gate));
+    else if (diag_sound_said >= 0)
+        g_message ("sound: %s, volume %.2f", diag_sound_gate_text (gate), D.cfg->volume);
+    diag_sound_said = gate;
 }
 
 static char *diag_text (void)
@@ -159,6 +199,7 @@ static gboolean diag_say (gpointer first_gl)
     char *t = diag_text ();
     g_message ("summary (walpe-ctl diag prints it again):\n%s", t);
     g_free (t);
+    diag_sound_said = diag_sound_gate ();   /* (the summary has said it) */
     return G_SOURCE_REMOVE;
 }
 
