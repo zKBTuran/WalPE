@@ -2,8 +2,14 @@
  * without EGL / X11: see gpusel.h */
 #include "common/gpusel.h"
 #include "common/util.h"
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 /* ------------------------------------------------------------- helpers */
 
@@ -1071,6 +1077,111 @@ char *walpe_gpu_find_egl_vendor (const char *dirs, const char *word)
     }
     g_strfreev (dv);
     return found;
+}
+
+/* ------------------------------------------------- a program with a limit */
+
+/* When the kernel started process pid (/proc/<pid>/stat, field 22), which
+ * together with the number says which process it is: a number is given
+ * out again, a start time with it is not. FALSE: there is no such process
+ * any more, or only what is left of one that has ended (state Z). */
+static gboolean proc_started (pid_t pid, guint64 *start)
+{
+    char path[48], *txt = NULL;
+    g_snprintf (path, sizeof path, "/proc/%d/stat", (int) pid);
+    if (!g_file_get_contents (path, &txt, NULL, NULL))
+        return FALSE;
+    /* "pid (comm) state ppid ...": comm may hold spaces and ')' */
+    const char *rp = strrchr (txt, ')');
+    char state = 0;
+    unsigned long long st = 0;
+    gboolean ok = rp && sscanf (rp + 1, " %c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %*u %*u "
+                                        "%*d %*d %*d %*d %*d %*d %llu", &state, &st) == 2 &&
+                  state != 'Z' && state != 'X';
+    g_free (txt);
+    *start = st;
+    return ok;
+}
+
+/* takes what is in the pipes now; a pipe at its end is closed (-1).
+ * TRUE: one of them is still open */
+static gboolean run_drain (int fd[2], GString *got[2])
+{
+    gboolean open_any = FALSE;
+    for (int i = 0; i < 2; i++) {
+        char buf[4096];
+        while (fd[i] >= 0) {
+            ssize_t n = read (fd[i], buf, sizeof buf);
+            if (n > 0) {
+                if (got[i]->len < 64 * 1024)
+                    g_string_append_len (got[i], buf, MIN ((gsize) n, 64 * 1024 - got[i]->len));
+            } else if (n == 0) {
+                close (fd[i]);
+                fd[i] = -1;
+            } else if (errno != EINTR) {
+                break;      /* EAGAIN: nothing now */
+            }
+        }
+        open_any |= fd[i] >= 0;
+    }
+    return open_any;
+}
+
+gboolean walpe_gpu_run_limited (char **argv, char **envp, guint limit_ms, char **out,
+                                char **errout, gboolean *timed_out, GError **error)
+{
+    GPid pid = 0;
+    int fd[2] = { -1, -1 };
+    *out = *errout = NULL;
+    *timed_out = FALSE;
+    const gint64 until = g_get_monotonic_time () + (gint64) limit_ms * 1000;
+    /* (no G_SPAWN_DO_NOT_REAP_CHILD: GLib starts the program from a process
+     * that ends at once and reaps that one itself - the program is nobody's
+     * to wait for here) */
+    if (!g_spawn_async_with_pipes (NULL, argv, envp, G_SPAWN_DEFAULT, NULL, NULL, &pid, NULL,
+                                   &fd[0], &fd[1], error))
+        return FALSE;
+    /* which process that is, for as long as it lives: its number alone may
+     * be another process's by the time a signal is sent */
+    guint64 start = 0, now_start = 0;
+    /* (without /proc nothing tells: then only the end of the streams and
+     * the clock end the wait, and no signal is sent) */
+    const gboolean have_proc = proc_started (getpid (), &now_start);
+    const gboolean known = have_proc && proc_started (pid, &start);
+    gboolean gone = have_proc && !known;    /* ended already */
+    GString *got[2] = { g_string_new (NULL), g_string_new (NULL) };
+    for (int i = 0; i < 2; i++)
+        fcntl (fd[i], F_SETFL, fcntl (fd[i], F_GETFL) | O_NONBLOCK);
+    gint64 looked = g_get_monotonic_time ();
+    for (;;) {
+        /* both streams at their end: all there is. Or the program is gone
+         * and something else holds a stream: what the program wrote was in
+         * the pipes before it ended, and this pass came after that */
+        if (!run_drain (fd, got) || gone)
+            break;
+        gint64 now = g_get_monotonic_time ();
+        if (now >= until) {
+            *timed_out = TRUE;
+            if (known && proc_started (pid, &now_start) && now_start == start)
+                kill (pid, SIGKILL);
+            break;      /* not waited for: it may not end for that either */
+        }
+        struct pollfd pfd[2] = { { fd[0], POLLIN, 0 }, { fd[1], POLLIN, 0 } };
+        /* (a negative descriptor is skipped by poll) */
+        int r = poll (pfd, 2, (int) MIN ((until - now) / 1000 + 1, 50));
+        now = g_get_monotonic_time ();
+        if (have_proc && (r == 0 || now - looked >= 50 * 1000)) {
+            looked = now;
+            gone = !(proc_started (pid, &now_start) && now_start == start);
+        }
+    }
+    for (int i = 0; i < 2; i++)
+        if (fd[i] >= 0)
+            close (fd[i]);
+    g_spawn_close_pid (pid);
+    *out = g_string_free (got[0], FALSE);
+    *errout = g_string_free (got[1], FALSE);
+    return TRUE;
 }
 
 /* a GL_RENDERER of a CPU rasteriser (the words Mesa and others use) */

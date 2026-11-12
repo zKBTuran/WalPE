@@ -112,9 +112,11 @@ another device is wanted, a second child with the variables set that must open a
 surface and draw one frame on that device. Only if that worked does the daemon set the
 variables for itself (Mesa: `DRI_PRIME`; NVIDIA: `__NV_PRIME_RENDER_OFFLOAD`,
 `__GLX_VENDOR_LIBRARY_NAME`; `__EGL_VENDOR_LIBRARY_FILENAMES` where needed). The daemon's
-start waits for the two children: each is ended after 10 seconds, after 5 when `auto` made
-the choice (a GPU that was powered down has to wake within that), and the log line says how
-long the test took. A variable that is already set in the daemon's environment is not
+start waits for the two children, each for at most 10 seconds, 5 when `auto` made the
+choice (a GPU that was powered down has to wake within that), and the log line says how
+long the test took. The limit is the daemon's own clock: when it is up the test process is
+sent SIGKILL and not waited for, so a driver that does not let the process end, or a
+helper it started that lingers, cannot hold up the start. A variable that is already set in the daemon's environment is not
 touched: the setting is then not applied and `gpu_note` says which variable decides. A
 change restarts the daemon in place; a value that names no device of this machine is
 refused with the list of devices. "Render on CPU" wins over the `gpu` setting.

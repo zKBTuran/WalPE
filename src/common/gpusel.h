@@ -222,6 +222,28 @@ const char *const *walpe_gpu_offload_env_names (void);
  * g_free; NULL = none. */
 char *walpe_gpu_find_egl_vendor (const char *dirs, const char *word);
 
+/* Runs argv with envp (NULL = this process's environment) and collects
+ * what it writes to stdout and stderr - for at most limit_ms by this
+ * process's own clock, whatever the program does. For the test process of
+ * a GPU choice: it talks to a driver, and a start that waits for it must
+ * not depend on the driver letting it end.
+ *   The program ends, or closes both streams: back at once, as from
+ *   g_spawn_sync.
+ *   It has ended and something it started still holds a stream: back
+ *   within a few hundredths of a second, with what it wrote
+ *   (g_spawn_sync waits for that other process).
+ *   The time is up: *timed_out, the program is sent SIGKILL and not
+ *   waited for - also when the signal does not end it (a task that
+ *   sleeps in a driver and cannot be interrupted).
+ * The program is never a child of this process (it is started through a
+ * process that ends at once): nothing is left to be reaped, whenever and
+ * however it ends, and code that ends "all children" never waits for it.
+ * So there is no exit status; what it wrote is the result.
+ * FALSE + *error: it could not be started. *out / *errout: g_free; at
+ * most 64 KiB of each are kept (the rest is read and dropped). */
+gboolean walpe_gpu_run_limited (char **argv, char **envp, guint limit_ms, char **out,
+                                char **errout, gboolean *timed_out, GError **error);
+
 /* The report of `walpe-daemon --gpu-probe` (lines "key=value": device,
  * render_node, vendor, renderer, version, drew, fail). TRUE when a frame
  * was drawn by a hardware renderer. The strings are set when the report

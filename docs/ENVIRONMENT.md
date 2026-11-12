@@ -274,6 +274,7 @@ Not for daily use: test hooks, measuring aids and names the programs set for the
 | `WALPE_SIG_WAYLAND_DISPLAY=name` | daemon | the Wayland pause providers (idle, window list) connect to this compositor socket instead of the session's |
 | `WALPE_LOGIND_BUS=session` | daemon | the login manager is looked for on the session bus, where a program of the user can stand in for it |
 | `WALPE_GPU_SYSFS_ROOT=dir` | daemon, `walpe-ctl` | another directory in place of `/sys` for the list of graphics devices: made-up machines |
+| `WALPE_GPU_PROBE_TEST=hang\|linger` | daemon | the test process of a GPU choice never ends and ignores its alarm / ends and leaves a process behind that holds its output: the daemon's start must wait no longer than its limit for either |
 | `WALPE_DISPLAY_LOST` | daemon | set by the daemon for its restart in place after the display went away |
 | `WALPE_CHECK_DISPLAY=xvfb\|sway` | the end-to-end checks | the display of a check started by hand without `--display` (the registered tests name theirs) |
 | `WALPE_CHECK_STRICT=1` | the end-to-end checks | a check that cannot run for a missing program, or whose display does not start, fails instead of being skipped; a build without the backend still skips |

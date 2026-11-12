@@ -1530,8 +1530,10 @@ test('gpusel', gpusel_test)
 # variable where one GPU or a card drives the displays, or with gpu =
 # display; on a laptop with two GPUs the discrete one is tested, and when
 # the test fails - here it always does: a software renderer draws - the
-# window system's GPU renders and log and status say why. Its own Xvfb
-# (exit 77 = skipped without it), private directories.
+# window system's GPU renders and log and status say why; test processes
+# that never end, or leave a process holding their output, do not hold up
+# the start beyond its limit. Its own Xvfb (exit 77 = skipped without it),
+# private directories.
 if have_x11
   test('gpu-auto', find_program('sh'),
     args: [meson.current_source_dir() / 'tests/gpu_auto_test.sh', daemon, ctl, gpusel_test],

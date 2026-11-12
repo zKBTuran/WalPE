@@ -21,7 +21,12 @@
 #  4. the discrete GPU has no driver: no test, and the note says so;
 #  5. `walpe-ctl set gpu=display` on the laptop of 2: taken without a
 #     restart, and the next start tests nothing; `set gpu=auto`: the daemon
-#     restarts in place and tests again.
+#     restarts in place and tests again;
+#  6. test processes that never end and ignore their alarm
+#     (WALPE_GPU_PROBE_TEST=hang): the daemon is up after its own limit
+#     (2 x 5 s), says so, has ended them and has no child left; test
+#     processes that leave a process behind holding their output (linger):
+#     the start does not wait for that one.
 # exit 77: skipped (the display's programs are not installed, or the build has
 # no backend for it); WALPE_CHECK_STRICT=1 makes that a failure.
 daemon=$1
@@ -58,6 +63,7 @@ stop_daemon () {
 }
 cleanup () {
     stop_daemon
+    pkill -9 -f "^$daemon --gpu-probe" 2>/dev/null   # (what case 6 may have left for some seconds)
     [ -n "$xpid" ] && kill "$xpid" 2>/dev/null
     wait 2>/dev/null
     rm -rf "$tmp"
@@ -81,7 +87,9 @@ for m in desktop-nvidia desktop-igpu-arc laptop-intel-nvidia laptop-nvidia-undri
 done
 
 if [ "$kind" = xvfb ]; then
-    Xvfb -displayfd 3 -screen 0 640x480x24 -nolisten tcp 3>"$tmp/disp" >"$tmp/log/xvfb" 2>&1 &
+    # -noreset: the test processes are this server's only clients besides the daemon; a
+    # server that starts over when the last one leaves refuses the next for a moment
+    Xvfb -displayfd 3 -screen 0 640x480x24 -nolisten tcp -noreset 3>"$tmp/disp" >"$tmp/log/xvfb" 2>&1 &
     xpid=$!
     i=0
     while [ ! -s "$tmp/disp" ] && [ $i -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
@@ -205,6 +213,38 @@ if start laptop-nvidia-undriven; then
         fail "no driver: the log does not say why auto stays"
     status | grep -q '"gpu_note":"[^"]*no kernel driver loaded' || fail "no driver: no gpu_note"
     clean_env "no driver"
+fi
+
+# 6. test processes that do not end, and ones that leave something behind
+# processes that are (or were) children of the daemon, as "pid state" lines
+children () {
+    for f in /proc/[0-9]*/stat; do
+        sed -n "s/^\([0-9]*\) (.*) \([A-Za-z]\) $dpid .*/\1 \2/p" "$f" 2>/dev/null
+    done
+}
+t0=$(date +%s)
+if start laptop-intel-nvidia WALPE_GPU_PROBE_TEST=hang; then
+    took=$(($(date +%s) - t0))
+    grep -q "gpu = auto: .*could not be made the renderer (the test did not finish within 5 s" "$log" ||
+        fail "hanging test: the log does not say that the test did not finish: $(grep 'gpu = ' "$log" | head -3)"
+    grep -E -q "\(tested in 1[0-4][0-9]{3} ms\)" "$log" ||
+        fail "hanging test: two tests of 5 s did not take 10 to 15 s: $(grep -o 'tested in [0-9]* ms' "$log")"
+    [ "$took" -le 40 ] || fail "hanging test: the daemon took $took s to come up"
+    status | grep -q '"gpu_note":"[^"]*the test did not finish within 5 s' || fail "hanging test: no gpu_note"
+    clean_env "hanging test"
+    n=0     # (they were sent SIGKILL and not waited for)
+    while [ $n -lt 40 ] && pgrep -f "^$daemon --gpu-probe" >/dev/null 2>&1; do sleep 0.25; n=$((n + 1)); done
+    pgrep -f "^$daemon --gpu-probe" >/dev/null 2>&1 && fail "hanging test: a test process is still there"
+    c=$(children)
+    [ -z "$c" ] || fail "hanging test: the daemon has children (pid state): $c"
+fi
+if start laptop-intel-nvidia WALPE_GPU_PROBE_TEST=linger; then
+    grep -q "gpu = auto: .*could not be made the renderer (the driver fell back to a software renderer" "$log" ||
+        fail "lingering process: the test's answer was not read: $(grep 'gpu = ' "$log" | head -3)"
+    grep -E -q "\(tested in [0-9]{1,4} ms\)" "$log" ||
+        fail "lingering process: the start waited for it: $(grep -o 'tested in [0-9]* ms' "$log")"
+    c=$(children)
+    [ -z "$c" ] || fail "lingering process: the daemon has children (pid state): $c"
 fi
 
 stop_daemon

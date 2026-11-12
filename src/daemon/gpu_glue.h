@@ -29,7 +29,9 @@
  * WALPE_GPU_QUERY=0       do not ask EGL for its device (EGL_EXT_device_
  *                         query); the device is then taken from the EGL
  *                         vendor and the device list
- * WALPE_GPU_SYSFS_ROOT    another sysfs (tests) */
+ * WALPE_GPU_SYSFS_ROOT    another sysfs (tests)
+ * WALPE_GPU_PROBE_TEST     hang | linger: a test process that does not end
+ *                         / leaves a process holding its streams (tests) */
 
 #ifndef EGL_DRM_RENDER_NODE_FILE_EXT
 #define EGL_DRM_RENDER_NODE_FILE_EXT 0x3377
@@ -136,10 +138,13 @@ static gboolean gpu_gl_driver_is_software (const char *gl_driver)
 
 /* -------------------------------------------------------------- probe */
 
-/* How long one test process may take before it is ended (SIGALRM), in
- * seconds: for a GPU the user named, and for the discrete GPU gpu = auto
+/* How long the daemon waits for one test process, in seconds by its own
+ * clock: for a GPU the user named, and for the discrete GPU gpu = auto
  * found. A GPU that was powered down has to wake within this; when it
- * does not, the window system's GPU renders for this run. */
+ * does not, the window system's GPU renders for this run. The wait ends
+ * then whatever the test process does (walpe_gpu_run_limited: it is sent
+ * SIGKILL and not waited for; it is no child of this process). The test
+ * process's own alarm, a second later, is for a parent that is gone. */
 #define GPU_PROBE_LIMIT_S      10
 #define GPU_PROBE_LIMIT_AUTO_S 5
 
@@ -154,14 +159,36 @@ static gboolean gpu_gl_driver_is_software (const char *gl_driver)
  * (The steps are sw_probe_run ()'s, plus the device lines.) */
 static int gpu_probe_run (int argc, char **argv)
 {
-    /* never hold up the daemon's start: 10 s, or what the parent allows
-     * (--gpu-probe-limit S: a choice nobody asked for by name gets less) */
-    guint limit = GPU_PROBE_LIMIT_S;
+    /* The parent stops waiting by its own clock (gpu_probe); this alarm,
+     * a second after that, ends a test whose parent is not there any more:
+     * --gpu-probe-limit S, else 10 s + 1. */
+    guint limit = GPU_PROBE_LIMIT_S + 1;
     for (int i = 1; i + 1 < argc; i++)
         if (!g_strcmp0 (argv[i], "--gpu-probe-limit"))
-            limit = (guint) CLAMP (atoi (argv[i + 1]), 1, GPU_PROBE_LIMIT_S);
+            limit = (guint) CLAMP (atoi (argv[i + 1]), 1, GPU_PROBE_LIMIT_S + 1);
     alarm (limit);
     Gpu.probing = TRUE;
+    {
+        /* WALPE_GPU_PROBE_TEST (tests): a test process as a driver could
+         * make it. "hang": it ignores its alarm and SIGTERM and never
+         * ends. "linger": it does its work, and a process it started keeps
+         * its streams open for a while after it. */
+        const char *pt = g_getenv ("WALPE_GPU_PROBE_TEST");
+        if (!g_strcmp0 (pt, "hang")) {
+            signal (SIGALRM, SIG_IGN);
+            signal (SIGTERM, SIG_IGN);
+            g_print ("egl=never\n");
+            fflush (NULL);
+            for (;;)
+                pause ();
+        } else if (!g_strcmp0 (pt, "linger")) {
+            fflush (NULL);
+            if (fork () == 0) {
+                sleep (8);
+                _exit (0);
+            }
+        }
+    }
     char *perr = NULL;
     if (!probe_open (argc, argv, &perr)) {
         g_print ("fail=%s\n", perr ? perr : "cannot open the display");
@@ -219,7 +246,7 @@ static gboolean gpu_probe (char **pairs, guint limit_s, int *idx, char **rendere
     *renderer = *why = NULL;
     char **envp = walpe_sw_environ (g_get_environ (), pairs);
     char lim[16];
-    g_snprintf (lim, sizeof lim, "%u", limit_s);
+    g_snprintf (lim, sizeof lim, "%u", limit_s + 1);    /* (its own alarm: after this wait) */
     /* the child draws on the window system this process chose */
     char *pargv[] = { Sw.exe, (char *) "--gpu-probe", (char *) "--backend",
                       (char *) walpe_backend_name (D.backend), (char *) "--gpu-probe-limit", lim,
@@ -227,13 +254,14 @@ static gboolean gpu_probe (char **pairs, guint limit_s, int *idx, char **rendere
     char *out = NULL, *errout = NULL;
     GError *e = NULL;
     gboolean ok = FALSE;
-    int wstatus = 0;
-    if (!g_spawn_sync (NULL, pargv, envp, G_SPAWN_DEFAULT, NULL, NULL, &out, &errout, &wstatus,
-                       &e)) {
+    gboolean late = FALSE;
+    /* (not g_spawn_sync: that waits for as long as the test process, or
+     * anything it started, keeps a pipe open - with a driver that does not
+     * let the process end, for good) */
+    if (!walpe_gpu_run_limited (pargv, envp, limit_s * 1000, &out, &errout, &late, &e)) {
         *why = g_strdup_printf ("the test could not be run (%s)", e ? e->message : "?");
         g_clear_error (&e);
-    } else if (WIFSIGNALED (wstatus) && WTERMSIG (wstatus) == SIGALRM) {
-        /* (its own alarm: gpu_probe_run) */
+    } else if (late) {
         *why = g_strdup_printf ("the test did not finish within %u s", limit_s);
     } else {
         char *dev = NULL, *rn = NULL;

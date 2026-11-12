@@ -5,7 +5,10 @@
  * the `gpu` setting matched against the lists, what `auto` chooses on each
  * of the machines, the display device, the environment for rendering on
  * another GPU, the probe's report, the record of the GPU in use, the
- * config keys and the Mesa equivalents of gpu.conf's driver hints.
+ * config keys and the Mesa equivalents of gpu.conf's driver hints; and
+ * that the wait for a test process ends when its time is up (stand-ins:
+ * one that ignores signals and never ends, one that leaves a process
+ * behind holding its pipes).
  * `gpusel-test --tree <machine> <dir>` writes one of the trees and nothing
  * else (tests/gpu_auto_test.sh starts a daemon on it).
  *
@@ -20,9 +23,11 @@
 #include "common/present.h"
 #include "fakegpu.h"
 #include <glib/gstdio.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static int fails;
@@ -624,6 +629,110 @@ static void test_auto (void)
     }
 }
 
+/* is that process still there (and not only what is left of one that ended)? */
+static gboolean pid_runs (int pid)
+{
+    char *p = g_strdup_printf ("/proc/%d/stat", pid), *txt = NULL;
+    gboolean runs = FALSE;
+    if (g_file_get_contents (p, &txt, NULL, NULL)) {
+        const char *rp = strrchr (txt, ')');
+        runs = rp && rp[1] == ' ' && rp[2] != 'Z' && rp[2] != 'X';
+    }
+    g_free (txt);
+    g_free (p);
+    return runs;
+}
+
+/* walpe_gpu_run_limited: the wait for a test process ends by this
+ * process's clock, whatever the program does. Stand-ins written in sh. */
+static void test_run_limited (void)
+{
+    char *out = NULL, *err = NULL;
+    gboolean late = TRUE;
+    GError *e = NULL;
+#define SH(script) (char *[]) { (char *) "/bin/sh", (char *) "-c", (char *) (script), NULL }
+#define MS_SINCE(t0) ((int) ((g_get_monotonic_time () - (t0)) / 1000))
+    /* a program that answers and ends: both streams, at once */
+    gint64 t0 = g_get_monotonic_time ();
+    CHECK (walpe_gpu_run_limited (SH ("echo renderer=x; echo oops >&2; exit 3"), NULL, 5000, &out,
+                                  &err, &late, &e));
+    CHECK (!late && !e && !g_strcmp0 (out, "renderer=x\n") && !g_strcmp0 (err, "oops\n"));
+    CHECK (MS_SINCE (t0) < 4000);
+    g_free (out);
+    g_free (err);
+    /* its environment is the one given */
+    {
+        char **env = g_environ_setenv (g_get_environ (), "WALPE_T_RUN", "given", TRUE);
+        CHECK (walpe_gpu_run_limited (SH ("echo $WALPE_T_RUN"), env, 5000, &out, &err, &late, &e));
+        CHECK (!late && !g_strcmp0 (out, "given\n"));
+        g_strfreev (env);
+        g_free (out);
+        g_free (err);
+    }
+    /* more than a pipe holds: read to the end (the program is not left
+     * waiting for a reader), 64 KiB kept */
+    t0 = g_get_monotonic_time ();
+    CHECK (walpe_gpu_run_limited (SH ("head -c 300000 /dev/zero | tr '\\0' x; echo done >&2"), NULL,
+                                  10000, &out, &err, &late, &e));
+    CHECK (!late && out && strlen (out) == 64 * 1024 && !g_strcmp0 (err, "done\n"));
+    CHECK (MS_SINCE (t0) < 8000);
+    g_free (out);
+    g_free (err);
+    /* a program that cannot be started */
+    CHECK (!walpe_gpu_run_limited ((char *[]) { (char *) "/nonexistent/walpe-no-such-program", NULL },
+                                   NULL, 1000, &out, &err, &late, &e));
+    CHECK (e != NULL && out == NULL && err == NULL);
+    g_clear_error (&e);
+
+    /* a program that never ends and ignores SIGTERM and its own alarm: the
+     * wait ends when the time is up, what it wrote so far is there, and it
+     * is ended from outside */
+    t0 = g_get_monotonic_time ();
+    CHECK (walpe_gpu_run_limited (SH ("trap '' TERM ALRM INT HUP; echo $$; "
+                                      "while :; do sleep 0.05; done"),
+                                  NULL, 700, &out, &err, &late, &e));
+    int ms = MS_SINCE (t0);
+    CHECK (late && ms >= 700 && ms < 700 + 3000);     /* (generous: a busy machine) */
+    int pid = out ? atoi (out) : 0;
+    CHECK (pid > 1);
+    {
+        /* (it was sent SIGKILL and not waited for: gone within moments) */
+        int n = 0;
+        while (pid > 1 && pid_runs (pid) && n++ < 100)
+            g_usleep (20 * 1000);
+        CHECK (pid > 1 && !pid_runs (pid));
+    }
+    g_free (out);
+    g_free (err);
+
+    /* a program that answers, ends and leaves a process behind that holds
+     * both streams for 4 s (g_spawn_sync waits for that one): back with
+     * the answer long before */
+    t0 = g_get_monotonic_time ();
+    CHECK (walpe_gpu_run_limited (SH ("sleep 4 & echo drew=1"), NULL, 10000, &out, &err, &late, &e));
+    ms = MS_SINCE (t0);
+    CHECK (!late && !g_strcmp0 (out, "drew=1\n") && ms < 3000);
+    g_free (out);
+    g_free (err);
+    /* ... and one that holds them and goes on writing for 4 s and more */
+    t0 = g_get_monotonic_time ();
+    CHECK (walpe_gpu_run_limited (SH ("(trap '' TERM; n=0; while [ $n -lt 200 ]; do echo x; "
+                                      "sleep 0.02; n=$((n + 1)); done) & echo drew=1"),
+                                  NULL, 10000, &out, &err, &late, &e));
+    ms = MS_SINCE (t0);
+    /* (the other process may get its first line in before the answer) */
+    CHECK (!late && out && strstr (out, "drew=1\n") && ms < 3000);
+    g_free (out);
+    g_free (err);
+
+    /* none of them was this process's child: nothing is left to be reaped,
+     * now or when the ones still running end */
+    errno = 0;
+    CHECK (waitpid (-1, NULL, WNOHANG) == -1 && errno == ECHILD);
+#undef SH
+#undef MS_SINCE
+}
+
 #define ICD(lib) "{ \"file_format_version\" : \"1.0.0\", \"ICD\" : { \"library_path\" : \"" lib "\" } }"
 
 static void test_vendor_files_and_probe (void)
@@ -1196,6 +1305,7 @@ int main (int argc, char **argv)
     test_other_machines ();
     test_outputs_and_values ();
     test_auto ();
+    test_run_limited ();
     test_vendor_files_and_probe ();
     test_in_use ();
     test_config ();
