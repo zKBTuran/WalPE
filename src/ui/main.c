@@ -4127,6 +4127,14 @@ int main (int argc, char **argv)
     /* unique: a second "walpe" (or walpe-tray's left click, D-Bus
      * org.freedesktop.Application.Activate) raises the open window */
     U.app = gtk_application_new (WALPE_UI_APP_ID, G_APPLICATION_DEFAULT_FLAGS);
+    /* The windows' icon by name ("walpe", data/icons: the one the desktop
+     * entry names). On X11 GTK puts its pixels on every window
+     * (_NET_WM_ICON), which is all a task bar that does not look for the
+     * window's desktop entry has: mate-panel, lxpanel, icewm, tint2 showed
+     * their placeholder. Where the icon is not installed nothing is set, as
+     * before; on Wayland the compositor takes the icon from the desktop
+     * entry and this does nothing. */
+    gtk_window_set_default_icon_name ("walpe");
     g_signal_connect (U.app, "activate", G_CALLBACK (activate), NULL);
     /* app actions exist before the first activate: walpe-tray's
      * ActivateAction("settings") can arrive as soon as the name is owned */

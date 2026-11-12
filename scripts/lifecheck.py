@@ -1457,6 +1457,39 @@ def case_window(env, W):
         env.ipc({"cmd": "resume"})
     finally:
         stop(win)
+
+    # The window's icon on X11. With the icon installed where the icon theme
+    # is looked for (here: a copy of data/icons/walpe.svg in a directory named
+    # in XDG_DATA_DIRS) the window carries its pixels (_NET_WM_ICON), which is
+    # what a task bar shows that does not look for the window's desktop entry
+    # (mate-panel, lxpanel, icewm, tint2 showed their placeholder).
+    icon = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "icons", "walpe.svg")
+    share = os.path.join(env.tmp, "icons-share")
+    apps = os.path.join(share, "icons", "hicolor", "scalable", "apps")
+    if not os.path.exists(icon):
+        print("skip window icon (no data/icons/walpe.svg next to the scripts)")
+    else:
+        os.makedirs(apps, exist_ok=True)
+        shutil.copy(icon, apps)
+        put(os.path.join(share, "icons", "hicolor", "index.theme"),
+            "[Icon Theme]\nName=Hicolor\nComment=check\nDirectories=scalable/apps\n\n"
+            "[scalable/apps]\nSize=48\nMinSize=8\nMaxSize=512\nType=Scalable\nContext=Applications\n")
+        dirs = share + ":" + (env.run_env.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share")
+        win, ok = start({"XDG_DATA_DIRS": dirs})
+        try:
+            if check(ok, "window: it runs with the icon installed", f"exit status {win.poll()}"):
+                xc = XClient(env.env["DISPLAY"])
+                try:
+                    def with_icon():
+                        return [w for w in xc.tree(xc.root, 3)
+                                if xc.has_prop(w, "_GTK_APPLICATION_ID") and xc.has_prop(w, "_NET_WM_ICON")]
+                    got = wait_for(with_icon, 20, 0.5)
+                    check(bool(got), "window: its X window carries the icon (_NET_WM_ICON)",
+                          [w for w in xc.tree(xc.root, 3) if xc.has_prop(w, "_GTK_APPLICATION_ID")])
+                finally:
+                    xc.close()
+        finally:
+            stop(win)
     env.stop_daemon()
 
 
@@ -2213,6 +2246,31 @@ class XClient:
                                            self.c.c_int]
         self.prop(self.wmwin, "_NET_SUPPORTING_WM_CHECK", self.XA_WINDOW, [self.wmwin])
         self.prop(self.root, "_NET_SUPPORTING_WM_CHECK", self.XA_WINDOW, [self.wmwin])
+
+    def has_prop(self, win, name):
+        """does the window have this property?"""
+        c = self.c
+        kind, fmt, n, left = c.c_ulong(), c.c_int(), c.c_ulong(), c.c_ulong()
+        data = c.c_void_p()
+        self.x.XGetWindowProperty.argtypes = [c.c_void_p, c.c_ulong, c.c_ulong, c.c_long, c.c_long, c.c_int,
+                                              c.c_ulong, c.POINTER(c.c_ulong), c.POINTER(c.c_int),
+                                              c.POINTER(c.c_ulong), c.POINTER(c.c_ulong),
+                                              c.POINTER(c.c_void_p)]
+        if self.x.XGetWindowProperty(self.d, win, self.atom(name), 0, 0, 0, 0, c.byref(kind), c.byref(fmt),
+                                     c.byref(n), c.byref(left), c.byref(data)) != 0:
+            return False
+        if data:
+            self.x.XFree(data)
+        return kind.value != 0
+
+    def tree(self, win, depth):
+        """the windows below win, depth levels down"""
+        out = []
+        for k in self.children(win):
+            out.append(k)
+            if depth > 1:
+                out += self.tree(k, depth - 1)
+        return out
 
     def wtype(self, win, name):
         """the window's type, as its toolkit sets it (_NET_WM_WINDOW_TYPE_DESKTOP: a file manager's desktop)"""
