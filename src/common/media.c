@@ -35,6 +35,7 @@
 
 static GMutex lock;
 static int refs;
+static int resting;                /* holders of a reference that draw nothing now (walpe_media_rest) */
 static GThread *thread;
 static GMainContext *mctx;
 static gint serial;                /* atomic */
@@ -1325,13 +1326,26 @@ static GMainContext *media_ctx (void)
     return g_main_context_get_thread_default ();
 }
 
+/* somebody who holds a reference is being drawn (not every holder rests) */
+static gboolean watched (void)
+{
+    g_mutex_lock (&lock);
+    gboolean w = refs > resting;
+    g_mutex_unlock (&lock);
+    return w;
+}
+
 /* while something plays: timeline event once a second (WE: "sent
- * frequently while media is playing"), Position resync every 5 s */
+ * frequently while media is playing"), Position resync every 5 s. Not
+ * while every holder rests (a paused scene): nobody is shown the time,
+ * and the request every 5 s woke the player's process as well. What the
+ * player says by itself - another track, paused, a cover - is still
+ * taken in, and the position is carried on from the last one known */
 static gboolean tick_cb (gpointer u)
 {
     (void) u;
     Player *p = active ? active_player () : NULL;
-    if (!p || p->state != WALPE_MEDIA_PLAYING) {
+    if (!p || p->state != WALPE_MEDIA_PLAYING || !watched ()) {
         tick_id = 0;
         return G_SOURCE_REMOVE;
     }
@@ -1346,7 +1360,7 @@ static gboolean tick_cb (gpointer u)
 static void tick_update (void)
 {
     Player *p = active ? active_player () : NULL;
-    gboolean want = p && p->state == WALPE_MEDIA_PLAYING;
+    gboolean want = p && p->state == WALPE_MEDIA_PLAYING && watched ();
     if (want && !tick_id) {
         GSource *s = g_timeout_source_new_seconds (1);
         g_source_set_callback (s, tick_cb, NULL, NULL);
@@ -1536,6 +1550,35 @@ void walpe_media_ref (void)
     if (old)
         g_thread_join (old);
     post (activate_cb);
+}
+
+/* media thread: a holder rests or is drawn again */
+static gboolean rest_cb (gpointer u)
+{
+    (void) u;
+    gboolean had = tick_id != 0;
+    tick_update ();
+    if (!had && tick_id) {
+        /* drawn again while something plays: where the player is now,
+         * and a timeline event for the first frame */
+        Player *p = active ? active_player () : NULL;
+        if (p)
+            position_query (p);
+        g_mutex_lock (&lock);
+        bump (&pub.timeline_serial);
+        g_mutex_unlock (&lock);
+    }
+    return G_SOURCE_REMOVE;
+}
+
+void walpe_media_rest (gboolean rest)
+{
+    g_mutex_lock (&lock);
+    resting += rest ? 1 : -1;
+    if (resting < 0)
+        resting = 0;
+    g_mutex_unlock (&lock);
+    post (rest_cb);
 }
 
 void walpe_media_unref (void)

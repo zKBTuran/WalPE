@@ -12,9 +12,11 @@
  *     does not grow with the number of such messages - every repeated
  *     value used to stay allocated;
  *  3. a title of a megabyte is published as a title of at most 4096 bytes,
- *     cut between two characters; an ordinary one as it is.
+ *     cut between two characters; an ordinary one as it is;
+ *  4. while every holder rests (walpe_media_rest: a paused scene) the
+ *     player is not asked for its position and no timeline event is made.
  *
- * No display. Takes a few seconds. */
+ * No display. Takes a quarter of a minute. */
 #include <gio/gio.h>
 #include <stdio.h>
 #include <string.h>
@@ -51,14 +53,18 @@ static const char xml[] =
     " <property name='Rate' type='d' access='read'/>"
     "</interface></node>";
 
+static int positions;       /* how often the player was asked where it is */
+
 static GVariant *get_prop (GDBusConnection *c, const char *sender, const char *path, const char *iface,
                            const char *prop, GError **err, gpointer user)
 {
     (void) c; (void) sender; (void) path; (void) iface; (void) err; (void) user;
     if (!strcmp (prop, "PlaybackStatus"))
         return g_variant_new_string ("Playing");
-    if (!strcmp (prop, "Position"))
+    if (!strcmp (prop, "Position")) {
+        positions++;
         return g_variant_new_int64 (0);
+    }
     if (!strcmp (prop, "Rate"))
         return g_variant_new_double (1.0);
     GVariantBuilder b;
@@ -112,6 +118,25 @@ static long wait_title (const char *prefix, int seconds)
             g_usleep (2000);
     }
     return len;
+}
+
+/* be the player for so many milliseconds */
+static void spin (int ms)
+{
+    gint64 end = g_get_monotonic_time () + (gint64) ms * 1000;
+    while (g_get_monotonic_time () < end) {
+        g_main_context_iteration (NULL, FALSE);
+        g_usleep (2000);
+    }
+}
+
+static guint timeline_events (void)
+{
+    WalpeNowPlaying np;
+    walpe_media_get (&np);
+    guint n = np.timeline_serial;
+    walpe_media_now_clear (&np);
+    return n;
 }
 
 static long rss_kb (void)
@@ -205,6 +230,31 @@ int main (void)
         walpe_media_now_clear (&np);
         send_metadata (c, 0, 0, "A title, as they are");
         CHECK (wait_title ("A title", 20) == (long) strlen ("A title, as they are"));
+    }
+
+    /* 4. a holder that rests (a paused scene). While the player plays, a
+     * timeline event is made every second and the player is asked for its
+     * position every 5 s; while every holder rests neither happens (the
+     * request woke the player's process too), and both are back at once
+     * when the holder is drawn again. */
+    {
+        guint t0 = timeline_events ();
+        spin (2500);
+        CHECK (timeline_events () != t0);            /* the tick runs */
+        walpe_media_rest (TRUE);
+        spin (1200);                                 /* (a tick that was due) */
+        int asked = positions;
+        guint t1 = timeline_events ();
+        spin (6500);
+        if (positions != asked || timeline_events () != t1)
+            fprintf (stderr, "media-player: at rest for 6.5 s: asked for the position %d time(s), %u timeline event(s)\n",
+                     positions - asked, timeline_events () - t1);
+        CHECK (positions == asked);
+        CHECK (timeline_events () == t1);
+        walpe_media_rest (FALSE);
+        spin (800);
+        CHECK (positions > asked);
+        CHECK (timeline_events () != t1);
     }
 
     walpe_media_unref ();

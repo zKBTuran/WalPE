@@ -304,6 +304,7 @@ typedef struct {
     /* media integration (media.h): scripts with media* events and/or
      * $mediaThumbnail system textures */
     gboolean needs_media, media_ref;
+    gboolean media_rest;        /* paused: told the media integration so (walpe_media_rest) */
     guint64 media_serial;
     guint media_seen[5];        /* status/props/thumb/playback/timeline serials */
     gboolean media_first;       /* next dispatch is the initial one */
@@ -3496,7 +3497,15 @@ static void scene_media_hold (SceneNodeContent *s, gboolean on)
     if (on) {
         s->media_first = TRUE;
         walpe_media_ref ();
+        if (s->paused) {    /* loaded while its monitor is paused */
+            s->media_rest = TRUE;
+            walpe_media_rest (TRUE);
+        }
     } else {
+        if (s->media_rest) {
+            s->media_rest = FALSE;
+            walpe_media_rest (FALSE);
+        }
         walpe_media_unref ();
     }
 }
@@ -7054,7 +7063,13 @@ static void scenenode_set_paused (WalpeContent *c, gboolean p)
     }
     /* media integration stays subscribed while paused (gl_init .. gl_free):
      * the MPRIS state keeps updating, and the first frame after a resume
-     * dispatches what changed, so a media widget is right when uncovered */
+     * dispatches what changed, so a media widget is right when uncovered.
+     * What only a scene that is drawn needs - the timeline tick, the
+     * player asked for its position every 5 s - stops meanwhile */
+    if (s->media_ref && p != s->media_rest) {
+        s->media_rest = p;
+        walpe_media_rest (p);
+    }
     /* the shared decoder sleeps once every user (monitor) is paused - when
      * it has a picture: a paused decoder that has none decodes its first
      * one (video_custom.c). The frame a paused monitor rests on is to have

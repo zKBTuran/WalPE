@@ -11,7 +11,9 @@
  * /org/mpris/MediaPlayer2.
  *
  * Like audio.h, this runs ONLY while a consumer holds a reference (a
- * visible, unpaused scene or page that uses media integration). The first
+ * scene that uses media integration, from its load to its end; a web page
+ * with a media listener while it is visible and not paused). A paused
+ * scene keeps its reference and rests (walpe_media_rest). The first
  * reference starts a "walpe-media" thread with its own main context, which
  * subscribes to NameOwnerChanged / PropertiesChanged / Seeked (no polling
  * except a 1 s timeline tick and a 5 s Position resync while something is
@@ -56,6 +58,13 @@ typedef struct {
 
 WALPE_API void walpe_media_ref (void);
 WALPE_API void walpe_media_unref (void);
+/* A holder of a reference draws nothing for now (TRUE: a paused scene) or
+ * is drawn again (FALSE); calls pair up, and a holder that rests ends its
+ * rest before it gives its reference back. While every holder rests the
+ * once-a-second timeline tick and the Position request every 5 s stop -
+ * the media thread then wakes only when a player says something, which is
+ * still taken in, so that the first frame afterwards is right. */
+void walpe_media_rest (gboolean rest);
 /* any thread; 0 until the first snapshot */
 WALPE_API guint64 walpe_media_serial (void);
 /* copy the current snapshot (always fills strings); clear with walpe_media_now_clear */
