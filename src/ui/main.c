@@ -21,6 +21,7 @@
 
 #include "store.h"
 #include "numfield.h"
+#include "a11yname.h"
 #include "delete.h"
 #include "props.h"
 #include "layers.h"   /* "Adjust layers" section under the options */
@@ -2225,7 +2226,7 @@ static GtkWidget *settings_row (GtkWidget *grid, int row, const char *title, con
     gtk_grid_attach (GTK_GRID (grid), v, 0, row, 1, 1);
     gtk_widget_set_valign (ctl, GTK_ALIGN_CENTER);
     gtk_widget_set_halign (ctl, GTK_ALIGN_END);
-    gtk_accessible_update_property (GTK_ACCESSIBLE (ctl), GTK_ACCESSIBLE_PROPERTY_LABEL, title, -1);
+    walpe_a11y_name (ctl, title, t);
     gtk_grid_attach (GTK_GRID (grid), ctl, 1, row, 1, 1);
     return s;
 }
@@ -3310,6 +3311,9 @@ static GtkWidget *build_library (void)
     U.search = gtk_search_entry_new ();
     gtk_search_entry_set_placeholder_text (GTK_SEARCH_ENTRY (U.search), "Search wallpapers (Ctrl+F)");
     gtk_widget_set_hexpand (U.search, TRUE);
+    /* (the placeholder is not a name: a screen reader said "search box") */
+    gtk_accessible_update_property (GTK_ACCESSIBLE (U.search), GTK_ACCESSIBLE_PROPERTY_LABEL,
+                                    "Search wallpapers", -1);
     g_signal_connect (U.search, "search-changed", G_CALLBACK (on_search_changed), NULL);
     gtk_box_append (GTK_BOX (bar), U.search);
     const char *types[] = { "All types", "Scenes", "Videos", "Web", "Images / GIF",

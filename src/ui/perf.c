@@ -6,6 +6,7 @@
 #include "common/util.h"
 #include "uiipc.h"
 #include "numfield.h"
+#include "a11yname.h"
 #include "winstate.h"
 
 typedef struct {
@@ -222,7 +223,7 @@ static void perf_row (GtkWidget *grid, int row, const char *title, const char *s
     gtk_grid_attach (GTK_GRID (grid), v, 0, row, 1, 1);
     gtk_widget_set_valign (ctl, GTK_ALIGN_CENTER);
     gtk_widget_set_halign (ctl, GTK_ALIGN_END);
-    gtk_accessible_update_property (GTK_ACCESSIBLE (ctl), GTK_ACCESSIBLE_PROPERTY_LABEL, title, -1);
+    walpe_a11y_name (ctl, title, t);
     if (sub)
         gtk_widget_set_tooltip_text (ctl, sub);
     gtk_grid_attach (GTK_GRID (grid), ctl, 1, row, 1, 1);

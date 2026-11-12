@@ -2,6 +2,7 @@
 #include "resdialog.h"
 #include <string.h>
 #include "resmodel.h"
+#include "a11yname.h"
 #include "uiipc.h"
 #include "common/uitext.h"
 #include "common/util.h"
@@ -575,7 +576,7 @@ static void row_fill (Row *r, const WalpeMonresMon *m)
      * in another column */
     char *plain = walpe_monres_mon_title (m);
     char *a = g_strdup_printf ("Render resolution of monitor %s", plain);
-    gtk_accessible_update_property (GTK_ACCESSIBLE (r->dd), GTK_ACCESSIBLE_PROPERTY_LABEL, a, -1);
+    walpe_a11y_name (r->dd, a, r->title);   /* a choice: named by the row's title label */
     g_free (a);
     a = g_strdup_printf ("Width in pixels, monitor %s", plain);
     gtk_accessible_update_property (GTK_ACCESSIBLE (r->w_entry), GTK_ACCESSIBLE_PROPERTY_LABEL, a, -1);
@@ -1041,7 +1042,7 @@ static GtkWidget *set_row (const char *title, const char *sub, GtkWidget *ctl, G
     gtk_box_append (GTK_BOX (h), v);
     gtk_widget_set_valign (ctl, GTK_ALIGN_CENTER);
     gtk_widget_set_halign (ctl, GTK_ALIGN_END);
-    gtk_accessible_update_property (GTK_ACCESSIBLE (ctl), GTK_ACCESSIBLE_PROPERTY_LABEL, title, -1);
+    walpe_a11y_name (ctl, title, t);
     gtk_box_append (GTK_BOX (h), ctl);
     if (sub_out)
         *sub_out = s;

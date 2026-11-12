@@ -2,6 +2,7 @@
 #include "props.h"
 #include "uiipc.h"
 #include "numfield.h"
+#include "a11yname.h"
 #include "common/util.h"
 #include "engine/content.h"   /* walpe_content_property_defs */
 #include "engine/propnotes.h" /* walpe_prop_notes */
@@ -2053,8 +2054,7 @@ static PRow *build_row (Panel *P, const char *key, JsonObject *def, JsonNode *cu
     }
     gtk_widget_set_valign (ctl, GTK_ALIGN_CENTER);
     if (r->kind != K_SLIDER && r->kind != K_READONLY)
-        gtk_accessible_update_property (GTK_ACCESSIBLE (ctl), GTK_ACCESSIBLE_PROPERTY_LABEL,
-                                        lab.title, -1);
+        walpe_a11y_name (ctl, lab.title, r->title_lbl);
     g_object_set_data (G_OBJECT (ctl), "walpe-prow", r);
     r->ctl = ctl;
     gtk_box_append (GTK_BOX (h), ctl);
