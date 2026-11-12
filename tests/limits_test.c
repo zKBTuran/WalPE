@@ -670,8 +670,8 @@ static void test_art (void)
      * decoded: SVG, XPM, PNM */
     {
         static const char *const other[] = {
-            "<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" "
-            "height=\"36\"><rect width=\"64\" height=\"36\" fill=\"red\"/></svg>\n",
+            ("<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" "
+             "height=\"36\"><rect width=\"64\" height=\"36\" fill=\"red\"/></svg>\n"),
             "/* XPM */\nstatic char *x[] = {\n\"2 2 1 1\",\n\". c #FF0000\",\n\"..\",\n\"..\"\n};\n",
             "P3\n2 2\n255\n255 0 0 255 0 0 255 0 0 255 0 0\n",
         };
