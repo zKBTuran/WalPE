@@ -1,5 +1,5 @@
 project('walpe', 'c',
-  version: '0.13.0',
+  version: '0.14.0',
   meson_version: '>= 0.60.0',
   default_options: [
     'c_std=c11',
@@ -15,7 +15,7 @@ project('walpe', 'c',
 # names come from).
 # Every release has a name of its own. This is the one place that
 # says it: the sources get it as WALPE_CODENAME, like WALPE_VERSION.
-walpe_codename = 'PINK'
+walpe_codename = 'Flood'
 
 cc = meson.get_compiler('c')
 

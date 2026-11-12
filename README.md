@@ -4,7 +4,7 @@ Animated desktop wallpapers for Linux, on X11 and on Wayland compositors with th
 shell: **Wallpaper Engine scene, video and web projects, GIFs and still images**, rendered
 by a small GTK-free daemon (one EGL render thread per monitor), with a GTK4 library window,
 a tray icon and a command line client. Written in C. This is the development tree of
-version 0.13.0, which is not released; the last release is 0.12.2.
+version 0.14.0, which is not released; the last release is 0.12.2.
 
 > **What is new since 0.12.2, and how far it was tested.** A Wayland backend next to the
 > X11 one; choice of the GPU on machines with two, and support written for AMD and Intel
@@ -351,7 +351,7 @@ the one before it on screen; `walpe-ctl status` says why (`load_error`, `load_re
 | `backend [auto\|x11\|wayland]` | show the window system the daemon draws on, how it was chosen, what the build holds and who reports each pause condition; or save the setting for its next start ([WAYLAND.md](docs/WAYLAND.md)) |
 | `gpu [--json]` | the graphics devices of this machine, the one that renders, and what `set gpu=auto\|integrated\|discrete\|<device>` would pick ([GPU.md](docs/GPU.md)) |
 | `gpu-stats [--sample SECONDS] [--json] ...` | GPU busy, memory, power and temperature as the kernel and the driver account them, for the whole GPU and for walpe-daemon; works without a running daemon ([GPU-PROFILING.md](docs/GPU-PROFILING.md)) |
-| `mem [--json] [--deep] [--wait S] [--events on\|off]`, `mem --diff A B` | where the daemon's memory is, computed when asked and at no other time: resident memory by kind of mapping and by name, the allocator, descriptors, threads by name, counters since the start, and per monitor the GL objects of its context (textures by size, buffers, programs) and what its wallpaper holds. Save two reports with `--json` and `--diff` shows what grew `--events on` starts counting how often textures, framebuffers, buffers and programs are made and deleted and pixels are read back (nothing counts them before; `off` stops it) |
+| `mem [--json] [--deep] [--wait S] [--events on\|off]`, `mem --diff A B` | where the daemon's memory is, computed when asked and at no other time: resident memory by kind of mapping and by name, the allocator, descriptors, threads by name, counters since the start, and per monitor the GL objects of its context (textures by size, buffers, programs) and what its wallpaper holds. Save two reports with `--json` and `--diff` shows what grew. `--events on` starts counting how often textures, framebuffers, buffers and programs are made and deleted and pixels are read back (nothing counts them before; `off` stops it) |
 | `resolution [<monitor> <value>] ...` | the render resolution of every monitor, or set one: `native`, `720p` ... `4k`, `WxH` ([RESOLUTION.md](docs/RESOLUTION.md)) |
 | `quality [--json] [--effects]` | the quality knobs, what the wallpapers on screen cost and what each preset would save |
 | `quality --monitor N \| --path P key=value ... \| reset` | quality knobs for one wallpaper only |

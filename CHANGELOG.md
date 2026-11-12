@@ -4,6 +4,143 @@ What changed in each released version of WalPE, newest first, written for people
 it. Version numbers are `0.<minor>.<patch>`; every release is tagged `v<version>` in git.
 Release names are album titles by the band Boris, one per release.
 
+## 0.14.0 "Flood" (not released)
+
+The development version. It contains everything of 0.13.0 "PINK" below, which was not
+released on its own. On top of it: memory and CPU that the daemon kept or spent for
+things that were not in use, corrections to the fullscreen pause per monitor, a fix for
+scene sound, and a report of where the daemon's memory is. **The state of testing is that
+of 0.13.0: Mesa's software renderer (llvmpipe), Xvfb, a headless Wayland compositor (sway
+1.9) and a PulseAudio null sink. Nothing of it has been run on real graphics hardware.**
+Two settings are new and on by default: `video_scene_convert` (under Video) and
+`web_unload` (under Other). The fixes are meant to change no picture; the one place where
+the picture is not the same pixel for pixel is a scene's video played from its converted
+copy.
+
+### Scenes
+
+- A layer with effects that changes its size from frame to frame - one that crosses a
+  screen edge while the camera parallax follows the pointer, a camera shake sways the view
+  or a script moves it - no longer fills the pool of effect targets. The pool kept one set
+  of targets for every size of the last five seconds: on a 640x360 output with two such
+  layers 137 to 262 targets (31 to 60 MiB) against 28 (2.8 MiB) with the pointer at rest;
+  now 37 to 43 (5 to 9 MiB). A scene whose layers keep their sizes allocates as before.
+- Particles: the reduced-resolution layer for large soft sprites keeps one buffer for
+  each of its two sizes (1/2 and 1/4 of the view) instead of one buffer that was deleted
+  and made again whenever the systems of a scene changed between the two. One test scene
+  did that four times within a few seconds, several times an hour, for as long as it ran:
+  23 buffers made in an hour on a 1920x1080 monitor, 3 now. The smaller buffer (0.5 MiB at
+  1920x1080) now stays while the layer is in use.
+- Text layers: the glyphs of a wallpaper's fonts leave the daemon with the wallpaper.
+  They stayed until the daemon was stopped: 0.3 to 0.7 MB for every wallpaper with a clock
+  and a date that had been shown, more with large text.
+- A program keeps no shader object alive after it was linked. Each program held its two
+  shader objects with their source text for as long as it lived: 170 shader objects and
+  743 kB of source for the 85 programs of one test scene, and whatever the driver keeps
+  for a shader on top of that.
+- The table that remembers which effect pass last used a program forgets a program when
+  it is deleted. On a driver that gives every new program a new name it grew by a few
+  dozen bytes per program with every change of wallpaper.
+- Scene sound (`scene_sound`, off by default): a scene with many sound layers lost some
+  of them for five seconds after a start or a resume on a busy machine, although the
+  sound server had answered every stream. The layers open their streams one at a time,
+  and a layer gave up a quarter of a second after it began to wait, whoever was being
+  served. The quarter second now belongs to the layer whose turn it is: the others wait
+  as long as the turns go round. Only behind a stream the server has not answered in that
+  time do they play into nothing, and they ask again a quarter of a second later instead
+  of five seconds later. With 16 layers against PulseAudio 16.1 on a loaded machine 3 of
+  30 starts lost 2 to 15 layers before, none of 30 now. Measured against a null sink;
+  nobody has heard it.
+- OpenGL ES: with `fx_specialize` on or `fx_quality=fast`, an effect shader above the
+  256 KiB limit was named in two warnings instead of one.
+
+### Video
+
+- A video inside a scene that is larger than the scene shows it (a 4K clip on a 1080p
+  monitor) used to be decoded at its own size for as long as the scene ran: four times the
+  decoding of what is seen. It is now converted once, in the background and at the lowest
+  priority, into a copy of the size shown (`video_resolution`) in `~/.cache/walpe/video`,
+  and the scene plays the copy from where the clip next starts again; the original plays
+  until then. `walpe-ctl set video_scene_convert=on|off` (on by default; Engine settings,
+  "Smaller copies of videos in scenes"), `walpe-ctl status`: `scene_videos`. Only 8-bit
+  4:2:0 clips are converted, the frame rate is kept, the picture differs from the original
+  by the scaling and one more encoding. Measured with a 3840x2160 60 fps clip on a
+  1920x1080 monitor, software decoding: 16.1 - 16.8 ms of CPU per picture before, 4.9 ms
+  from the copy (3.3 to 3.5 times less), about 110 MB less memory; the conversion took 64
+  CPU seconds once (docs/VIDEO.md).
+
+### Pausing
+
+Corrections to "Pause for fullscreen apps" per monitor, which is new in 0.13.0:
+
+- X11: a window that turns fullscreen within a moment of getting the focus - a game or a
+  player that asks for fullscreen as soon as its window is there - pauses its monitor.
+  The daemon could miss that change (35 of 300 such starts on a busy machine) and left
+  the monitor running until the focus moved again.
+- X11: the root window and the daemon's own wallpaper windows never count as the focused
+  application. When another program named one of them as the active window, the daemon
+  stopped hearing that a part of that wallpaper had to be drawn again: without a
+  compositor, what a window had covered on a paused or still wallpaper stayed black until
+  the daemon was restarted. **You can see this change with `walpe-daemon --windowed`:**
+  the preview window no longer pauses itself when it is made fullscreen and has the
+  focus.
+- X11, `walpe-daemon --monitor N`: a fullscreen window on another monitor that reaches a
+  few pixels into the daemon's monitor no longer pauses it. The monitor holding most of
+  the window is looked for among all monitors of the screen.
+- Wayland: with two connectors whose names differ in one letter only (`DVI-D-1` and
+  `DVI-I-1`, `HDMI-A-1` and `HDMI-B-1`) a window on the second monitor paused the first
+  one. This also concerned "pause when covered" and the pause for a focused application.
+- Wayland: a window that starts in fullscreen pauses its own monitor only. For the moment
+  between its appearing and the compositor naming its output (18 to 122 ms on sway 1.9)
+  it paused every monitor. The first window a session ever shows still does.
+- Shared rendering (two monitors of one size showing the same scene are rendered once):
+  a paused monitor that follows the other one sleeps. It was woken for every frame of the
+  monitor that draws, 52 times a second in the test, to find that it had nothing to show.
+
+### Other
+
+- `walpe-ctl mem` says where the daemon's memory is: resident memory by kind of mapping
+  and by name, the allocator's numbers, descriptors, threads, per monitor the OpenGL
+  objects of its context (textures by size, buffers, programs) and what its wallpaper
+  holds, and counters since the start. `mem --json` saves a report and `mem --diff A B`
+  shows what differs between two. `mem --events on` starts counting how often textures,
+  framebuffers, buffers and programs are made and deleted and pixels are read back;
+  `--events off` stops it. The report is computed when it is asked for and at no other
+  time: no timer, no thread, nothing per frame; nothing counts the OpenGL events before
+  they are switched on.
+- A daemon that has shown a web wallpaper gives WebKit back. The web module (WebKitGTK,
+  JavaScriptCore, GTK) cannot be unloaded, so after the last web wallpaper had been
+  replaced it stayed in the daemon until the daemon was stopped: about 50 MB of its
+  resident memory on the machine this was measured on, three threads (one of them wakes
+  every five seconds) and GTK's connection to the display. Now the daemon restarts
+  itself in place at the wallpaper change that leaves no monitor with a web wallpaper,
+  the way it does when the monitor layout changes: same process, the control socket
+  stays open, wallpapers and settings come back from the configuration. Every monitor
+  loads its wallpaper again and shows nothing until it has, as at a start (one second
+  without a picture on both monitors where it was measured); a wallpaper that then fails
+  to load does not bring the web wallpaper back. At most once a minute, never on a
+  timer, not while an import or a Workshop download runs or the copy of a scene's video
+  is being made. `walpe-ctl set web_unload=off` keeps the module loaded as before;
+  `walpe-ctl status` shows `modules`. The video module (FFmpeg) is small and stays
+  loaded.
+- The daemon, `walpe-video.so` and `walpe-web.so` have to come from the same build, as
+  before: the number of the module interface changed, and a module of 0.13.0 next to a
+  daemon of 0.14.0 is refused.
+- README: "One scene's picture depends on reused effect targets" is no known limitation
+  any more; 0.13.0 fixed it (a layer with a tint and effects keeps its effects).
+- Tests: scene sound against a slow and a refusing sound server; files of another kind
+  under a picture's name; an effect with 1 to 33 passes; rope trails at 10 to 1000 frames
+  a second; the working size of effects on a colour-only layer; scene switches that
+  reload once; more of the fullscreen rule on X11, and its case no longer ends in a crash
+  of the test script when the X server refuses a connection for a moment; the converted
+  copies of scene videos (`scenevideo`, `daemon-scene-video`); the memory report
+  (`memreport`).
+
+### Known limitations
+
+- See the state of testing at the top of this section. The full list is in
+  [README.md](README.md#known-limitations).
+
 ## 0.13.0 "PINK" (not released)
 
 The development version. It contains every fix of 0.12.2. **Everything listed here was
@@ -113,10 +250,9 @@ the final tree with those of that earlier tree.
   `walpe-ctl setprop walpe_sound=on|off`. The `volume` setting now has an effect.
   The sound layers of a scene open their streams one at a time, a few milliseconds
   apart: asked for in the same instant, some were refused by the sound server. A
-  connection it still refuses is asked for again at once. A layer waits while the others
-  get their streams; only behind a stream the server has not answered for a quarter of a
-  second it plays into nothing meanwhile, and asks for its turn again a quarter of a
-  second later. Measured against a null sink by recording it; nobody has heard it.
+  connection it still refuses is asked for again at once. A layer waits for its turn for
+  a quarter of a second at most; after that it plays into nothing and asks again 5
+  seconds later. Measured against a null sink by recording it; nobody has heard it.
 
 ### Video
 
@@ -124,18 +260,6 @@ the final tree with those of that earlier tree.
   the GPU that renders (`walpe-ctl set hwdec=off|auto|<api>`: VA-API, NVDEC, VDPAU, Vulkan
   Video, V4L2); on NVIDIA's driver NVDEC stays first. Optional zero-copy
   (`video_zerocopy`). Both off by default.
-- A video inside a scene that is larger than the scene shows it (a 4K clip on a 1080p
-  monitor) used to be decoded at its own size for as long as the scene ran: four times the
-  decoding of what is seen. It is now converted once, in the background and at the lowest
-  priority, into a copy of the size shown (`video_resolution`) in `~/.cache/walpe/video`,
-  and the scene plays the copy from where the clip next starts again; the original plays
-  until then. `walpe-ctl set video_scene_convert=on|off` (on by default; Engine settings,
-  "Smaller copies of videos in scenes"), `walpe-ctl status`: `scene_videos`. Only 8-bit
-  4:2:0 clips are converted, the frame rate is kept, the picture differs from the original
-  by the scaling and one more encoding. Measured with a 3840x2160 60 fps clip on a
-  1920x1080 monitor, software decoding: 16.1 - 16.8 ms of CPU per picture before, 4.9 ms
-  from the copy (3.3 to 3.5 times less), about 110 MB less memory; the conversion took 64
-  CPU seconds once (docs/VIDEO.md).
 
 ### Pausing
 
@@ -154,19 +278,6 @@ the final tree with those of that earlier tree.
 
 ### Other
 
-- A daemon that has shown a web wallpaper gives WebKit back. The web module (WebKitGTK,
-  JavaScriptCore, GTK) cannot be unloaded, so after the last web wallpaper had been
-  replaced it stayed in the daemon until the daemon was stopped: about 50 MB of its
-  resident memory on the machine this was measured on, three threads (one of them wakes
-  every five seconds) and GTK's connection to the display. Now the daemon restarts
-  itself in place at the wallpaper change that leaves no monitor with a web wallpaper,
-  the way it does when the monitor layout changes: same process, the control socket
-  stays open, wallpapers and settings come back from the configuration. Every monitor
-  loads its wallpaper again and shows nothing until it has, as at a start; a wallpaper
-  that then fails to load does not bring the web wallpaper back. At most once a minute,
-  never on a timer, not while an import or a Workshop download runs. `walpe-ctl set
-  web_unload=off` keeps the module loaded as before; `walpe-ctl status` shows `modules`.
-  The video module (FFmpeg) is small and stays loaded.
 - Pictures from outside go to fewer decoders. A picture or GIF file chosen as the
   wallpaper is shown only as PNG, JPEG, GIF, BMP, TIFF, WebP, TGA, AVIF or JPEG XL: a
   file of another kind (an SVG document, a Windows icon ...), which earlier versions
