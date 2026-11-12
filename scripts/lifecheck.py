@@ -117,6 +117,14 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             on screen, requests answered -, says so once and in status
             ("restart_failed"), and still quits when told to. X11 only (the
             layout is changed as in `restart`).
+  quitload  the daemon is told to end (SIGTERM, `quit`) while a scene of many
+            layers, each with a texture file of its own, is being loaded: it
+            is gone long before the load would have finished (the load gives
+            up at its next layer or texture), with status 0, and leaves no
+            unfinished file in the cache. The load is timed first; the exits
+            are measured against it (a machine on which the scene loads in
+            under a second cannot tell: the case says so and checks the
+            rest).
   video     a video's load ends with its first picture: a clip the decoder
             cannot do anything with (its container reads well) is a failed
             load with a reason in status, and the wallpaper from before
@@ -239,6 +247,41 @@ def gen_big_scene(out, w=1280, h=720):
                      "size": f"{w} {h}", "scale": "1 1 1", "angles": "0 0 0", "color": "1 1 1",
                      "alpha": 1.0, "visible": True}]})
     rc.jdump(f"{out}/project.json", {"file": "scene.json", "title": "big", "type": "scene"})
+
+
+def gen_heavy_scene(out, n=160, size=1024):
+    """n small picture layers, each with a texture file of its own name (size x
+    size, raw RGBA; one file on disk and n - 1 hard links to it, copies where a
+    link cannot be made): a scene whose load takes a while on any machine"""
+    px = bytes((40, 160, 60, 255)) * (size * size)
+    tex = (b"TEXV0005\0" + b"TEXI0001\0" + struct.pack("<IIIIIII", 0, 0, size, size, size, size, 0) +
+           b"TEXB0003\0" + struct.pack("<II", 1, 0xFFFFFFFF) + struct.pack("<I", 1) +
+           struct.pack("<IIIII", size, size, 0, len(px), len(px)) + px)
+    os.makedirs(f"{out}/materials", exist_ok=True)
+    first = f"{out}/materials/h0.tex"
+    with open(first, "wb") as f:
+        f.write(tex)
+    objs = []
+    for i in range(n):
+        if i:
+            try:
+                os.link(first, f"{out}/materials/h{i}.tex")
+            except OSError:
+                shutil.copyfile(first, f"{out}/materials/h{i}.tex")
+        rc.jdump(f"{out}/materials/h{i}.json",
+                 {"passes": [{"blending": "translucent", "cullmode": "nocull", "depthtest": "disabled",
+                              "depthwrite": "disabled", "shader": "genericimage2", "textures": [f"h{i}"]}]})
+        rc.jdump(f"{out}/models/h{i}.json", {"autosize": True, "material": f"materials/h{i}.json"})
+        objs.append({"id": 100 + i, "name": f"h{i}", "image": f"models/h{i}.json",
+                     "origin": f"{60 + 11 * i} {60 + 6 * i} 0", "size": f"{size} {size}", "scale": "0.05 0.05 1",
+                     "angles": "0 0 0", "color": "1 1 1", "alpha": 1.0, "visible": True})
+    rc.jdump(f"{out}/scene.json", {
+        "camera": {"center": "0 0 -1", "eye": "0 0 0", "up": "0 1 0"},
+        "general": {"ambientcolor": "0.3 0.3 0.3", "bloom": False, "cameraparallax": False,
+                    "clearcolor": "0 0 0", "orthogonalprojection": {"height": 1080, "width": 1920},
+                    "skylightcolor": "0.3 0.3 0.3"},
+        "objects": objs})
+    rc.jdump(f"{out}/project.json", {"file": "scene.json", "title": "heavy", "type": "scene"})
 
 
 class Env(rc.Env):
@@ -2306,6 +2349,83 @@ def case_norestart(env, W):
     env.stop_daemon()
 
 
+# ----------------------------------------------------------------- quitload
+def case_quitload(env, W):
+    """The daemon is told to end while a scene loads. The render thread was
+    in the middle of the load and nobody could stop it: the exit (and a
+    restart in place) waited until the whole scene was there - seconds for a
+    large one, with the socket already closed."""
+    A, B = ("A", 640, 360, 0, 0), ("B", 640, 360, 640, 0)
+    heavy = os.path.join(env.tmp, "wallpapers", "heavy")
+    if not os.path.isdir(heavy):
+        gen_heavy_scene(heavy)
+
+    def begin(what):
+        rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False,
+                              "render_shared": False, "current": W["red"]})
+        return check(env.start_daemon([A, B]) and loaded(env, W["red"]), f"quitload: {what}: daemon started")
+
+    def end(how):
+        """-> (seconds until the process is gone, its status)"""
+        p, t0 = env.daemon, time.time()
+        if how == "quit":
+            env.ipc({"cmd": "quit"})
+        else:
+            os.kill(p.pid, how)
+        try:
+            code = p.wait(timeout=120 * PATIENCE)
+        except subprocess.TimeoutExpired:
+            code = None
+        dt = time.time() - t0
+        if code is not None:
+            env.daemon = None
+        env.stop_daemon()
+        return dt, code
+
+    def litter():
+        out = []
+        for d, _, fs in os.walk(env.env["XDG_CACHE_HOME"]):
+            out += [os.path.join(d, f) for f in fs if f.endswith((".part", ".tmp"))]
+        return out
+
+    # how long the load takes here: from the request to the scene's first frames on both monitors
+    if not begin("the load, timed"):
+        return
+    f0 = [m.get("frames") or 0 for m in env.monitors()]
+    t0 = time.time()
+    env.ipc({"cmd": "open", "path": heavy})
+    ok = wait_for(lambda: loaded(env, heavy, None, 1) and
+                  all((m.get("frames") or 0) > f for m, f in zip(env.monitors(), f0 + [0, 0])), 240 * PATIENCE, 0.05)
+    load_s = time.time() - t0
+    check(bool(ok), "quitload: the scene of many layers loads", rc.brief(env.monitors()))
+    dt, code = end(signal.SIGTERM)
+    check(code == 0, "quitload: an exit with it loaded: status 0", (round(dt, 2), code))
+    if not ok:
+        return
+    # ... and exits at three moments of that load
+    took = []
+    for frac, how in ((0.15, signal.SIGTERM), (0.4, "quit"), (0.65, signal.SIGTERM)):
+        if not begin(f"an exit after {int(frac * 100)} % of the load"):
+            return
+        env.ipc({"cmd": "open", "path": heavy})
+        time.sleep(load_s * frac)
+        still = any(m.get("loading") for m in env.monitors())
+        dt, code = end(how)
+        took.append((frac, round(dt, 2), code, still))
+    print(f"      quitload: the load takes {load_s:.2f} s here; exits (after this share of it, seconds, status, "
+          f"still loading): {took}", flush=True)
+    check(all(t[2] == 0 for t in took), "quitload: every exit during the load ends with status 0", took)
+    check(not litter(), "quitload: no unfinished file is left in the cache", litter())
+    if load_s < 1.0:
+        print("skip  quitload: the scene loads in under a second here: the exits cannot be told from a load "
+              "that was waited for", flush=True)
+        return
+    # without giving up, the first exit waits for about 85 % of the load, the second for 60 %
+    limit = max(0.3 * load_s, 0.5)
+    check(took[0][1] < limit and took[1][1] < limit,
+          f"quitload: the daemon is gone long before the load would have ended (limit {limit:.2f} s)", took)
+
+
 # ------------------------------------------------------------------ winlost
 def case_winlost(env, W):
     """Another X client destroys a wallpaper window. The daemon drew into a
@@ -2544,7 +2664,8 @@ CASES = [("logcap", case_logcap), ("pointer", case_pointer), ("reload", case_rel
          ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("scan", case_scan), ("tray", case_tray), ("window", case_window), ("panel", case_panel), ("busy", case_busy), ("probe", case_probe),
          ("fullscreen", case_fullscreen), ("video", case_video), ("webunload", case_webunload),
          ("winlost", case_winlost), ("convert", case_convert),
-         ("swaplost", case_swaplost), ("norestart", case_norestart)]
+         ("swaplost", case_swaplost), ("norestart", case_norestart),
+         ("quitload", case_quitload)]
 
 
 

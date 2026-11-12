@@ -2614,6 +2614,13 @@ static void parse_nodes_at (JsonArray *arr, GArray *out, const char *dir, SceneN
         JsonObject *o = wpj_arr_obj (arr, i);
         if (!o)
             continue;
+        /* the daemon is ending: the layers so far are a whole (shorter)
+         * scene, which its owner frees without showing it. A layer builds
+         * its effects and reads its first textures in here: the 73 layers
+         * of a large scene take seconds, and the exit waited for all of
+         * them. */
+        if (walpe_load_stopping ())
+            return;
         NodeObj nv;
         parse_node (&nv, o, dir, s, out, depth);
         g_array_append_val (out, nv);
@@ -3471,8 +3478,16 @@ static gboolean scenenode_gl_init (WalpeContent *c, GError **err)
     /* particle sprites: counted against the texture budget like the rest */
     walpe_gl_tex_scope_begin (s->tex_budget > 0 ? MAX ((gint64) 1, s->tex_budget - s->tex_eager_bytes)
                                                 : 0);
+    gboolean gave_up = FALSE;
     for (guint i = 0; i < s->nodes->len; i++) {
         NodeObj *nv = &g_array_index (s->nodes, NodeObj, i);
+        /* the daemon is ending: the particle systems not set up yet (their
+         * sprites, their shaders: most of this function's time in a scene
+         * with many of them) are not set up any more */
+        if (walpe_load_stopping ()) {
+            gave_up = TRUE;
+            break;
+        }
         if (nv->tex_ready && nv->tex_src)
             s->tex_deferred = TRUE;   /* file textures: the first frame loads the
                                        * deferred ones and drops the hidden layers' */
@@ -3495,6 +3510,10 @@ static gboolean scenenode_gl_init (WalpeContent *c, GError **err)
         }
     }
     s->tex_eager_bytes += walpe_gl_tex_scope_end ();
+    if (gave_up) {
+        g_set_error_literal (err, G_IO_ERROR, G_IO_ERROR_CANCELLED, "the load was given up: the daemon is ending");
+        return FALSE;   /* (the caller frees it: gl_free, free) */
+    }
     if (s->fx_count > 0) {
         int fok = 0, ffail = 0, nfx = 0, nstatic = 0;
         for (guint i = 0; i < s->nodes->len; i++) {
@@ -4728,6 +4747,10 @@ static void scene_load_deferred_textures (SceneNodeContent *s, const WalpeMat3 *
     int waiting = 0, fitted = 0;
     for (guint i = 0; i < s->nodes->len; i++) {
         NodeObj *nv = &g_array_index (s->nodes, NodeObj, i);
+        /* the daemon is ending: the textures not read yet stay unread
+         * (tex_deferred stays set; the caller draws nothing) */
+        if (walpe_load_stopping ())
+            return;
         gboolean hidden = !nv->world_visible && !tex_load_hidden ();
         if (!nv->tex_lazy) {
             if (hidden && nv->tex && nv->tex_src && nv->video < 0 && !nv->systex &&
@@ -5740,8 +5763,11 @@ static gboolean scenenode_gl_render (WalpeContent *c, int w, int h, float px, fl
             refresh_text (s, nv);
     }
     walpe_cph_to (WALPE_CPH_OTHER);
-    if (s->tex_deferred)
+    if (s->tex_deferred) {
         scene_load_deferred_textures (s, &tail, w, h, win_w, win_h);
+        if (s->tex_deferred)
+            return FALSE;   /* it gave up (the daemon is ending): nothing is drawn */
+    }
     /* Sprite sheets: every animated layer's clock (the scripts of this
      * frame have run). A layer whose frame changed shows it through its
      * signature (sp_frame); its effects, which cache their result over an

@@ -15,6 +15,7 @@
 
 /* frame_align: see content.h */
 gint walpe_frame_align_ = 0;
+gint walpe_load_stop_ = 0;       /* content.h walpe_load_stopping */
 
 void walpe_frame_align_set (gboolean on)
 {

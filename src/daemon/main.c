@@ -1510,6 +1510,21 @@ static void mon_do_load_ex (Mon *m, const char *path, gboolean paused, int fps,
         malloc_trim (0);
     }
     WalpeContent *c = walpe_content_new (path, &opts, &err);
+    if (walpe_load_stopping ()) {
+        /* the daemon is ending (main () said so when it left its loop) and
+         * the load gave up where it was: what there is of the wallpaper is
+         * freed here, with this thread's context current, like one whose
+         * GL init failed. Nothing is drawn and nobody is told: the main
+         * thread is past its loop and waits for this thread to end. */
+        g_clear_error (&err);
+        g_free (restore);
+        if (c) {
+            if (c->gl_free)
+                c->gl_free (c);
+            c->free (c);
+        }
+        return;
+    }
     if (!c) {
         g_warning ("wallpaper load failed: %s", err ? err->message : "?");
         char *why = g_strdup_printf ("%s: %s", path, err ? err->message : "load failed");
@@ -1547,7 +1562,17 @@ static void mon_do_load_ex (Mon *m, const char *path, gboolean paused, int fps,
 
     /* free the old wallpaper with our context current */
     mon_free_content (m);
-    if (!c->gl_init (c, &err)) {
+    const gboolean gl_ok = c->gl_init (c, &err);
+    if (walpe_load_stopping ()) {
+        /* (as above: it gave up in there, or the daemon began to end while
+         * it finished; either way nobody will see this wallpaper) */
+        g_clear_error (&err);
+        if (c->gl_free)
+            c->gl_free (c);
+        c->free (c);
+        return;
+    }
+    if (!gl_ok) {
         g_warning ("wallpaper GL init failed: %s", err ? err->message : "?");
         char *why = g_strdup_printf ("%s: %s", path, err ? err->message : "GL init failed");
         g_clear_error (&err);
@@ -1612,6 +1637,11 @@ static void mon_do_render_frame (Mon *m, gboolean paused, gboolean force, gboole
      * freshly loaded wallpaper is actually ON the window before the
      * covered-pause kicks in (otherwise it stays black until exposed) */
     if (!m->content || (paused && !force))
+        return;
+    /* a forced frame is a wallpaper's first one, the most expensive it
+     * ever draws (textures read, shaders used for the first time): not
+     * begun when the daemon is ending */
+    if (G_UNLIKELY (force) && walpe_load_stopping ())
         return;
     int w = m->geom.width;
     int h = m->geom.height;
@@ -1689,8 +1719,12 @@ static void mon_do_render_frame (Mon *m, gboolean paused, gboolean force, gboole
      * or a stale picture. (A scene that found its picture unchanged says so
      * in frame_unchanged and returns FALSE: window and followers keep
      * their frame. A forced frame is always drawn: surface_lost.) */
-    if ((!drew || m->content->frame_unchanged) && !force)
-        return;
+    if (!drew || m->content->frame_unchanged) {
+        /* (a first frame that gave up because the daemon is ending drew
+         * nothing either, and is forced: not presented) */
+        if (!force || walpe_load_stopping ())
+            return;
+    }
     static WalpeLazy gpumem_cell = WALPE_LAZY_UNSET;   /* every monitor's thread: common/lazy.h */
     int gpumem = walpe_lazy_get (&gpumem_cell);
     if (gpumem < 0)
@@ -10147,6 +10181,12 @@ int main (int argc, char **argv)
 
     if (!D.display_lost)    /* (it can go while the daemon is still starting) */
         g_main_loop_run (D.loop);
+    /* The daemon ends, or starts itself again. A render thread that is in
+     * the middle of loading a scene is not waited for until the scene is
+     * complete: the load gives up at its next layer or texture (content.h)
+     * and the thread frees what it has. (The exit waited for the whole
+     * load: seconds for a large scene, with the socket already closed.) */
+    walpe_load_stop ();
 
     /* release the socket BEFORE the (slow) EGL/X teardown: if a new daemon
      * starts during shutdown, our late unlink would otherwise delete its

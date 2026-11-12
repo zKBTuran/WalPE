@@ -190,6 +190,21 @@ typedef struct {
     int video_box_w, video_box_h;
 } WalpeLoadOpts;
 
+/* The process is ending (or starting itself again): a load that is under
+ * way gives up at its next step instead of finishing a wallpaper nobody
+ * will see. Set once by the daemon when it leaves its main loop, never
+ * cleared; read by the loaders between two layers and between two textures
+ * (never per frame). What gives up is freed the way a failed load is. */
+extern gint walpe_load_stop_;     /* atomic; content.c */
+static inline gboolean walpe_load_stopping (void)
+{
+    return g_atomic_int_get (&walpe_load_stop_) != 0;
+}
+static inline void walpe_load_stop (void)
+{
+    g_atomic_int_set (&walpe_load_stop_, 1);
+}
+
 /* phase-locked frame clock for gl_render: returns the next deadline one
  * interval after the previous one (so render time does not stretch the
  * period: a 60 fps cap really presents ~60 fps), never in the past */

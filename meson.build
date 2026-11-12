@@ -1654,6 +1654,7 @@ test('restore', executable('restore-test', 'tests/restore_test.c',
 # that cannot start or is cancelled,
 # buffer swaps that fail (a lost GL context: one restart in place, no more),
 # a restart in place that cannot be begun (the daemon runs on),
+# an exit asked for while a large scene loads (the load gives up),
 # a video the decoder refuses (the clip is made with the ffmpeg program:
 # that case is skipped where there is none).
 # Skipped (77) without Xvfb. `meson test -C build daemon-life`
