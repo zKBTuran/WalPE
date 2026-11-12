@@ -466,7 +466,8 @@ def played_from(env):
                 if r is not None:
                     return r
         return None
-    return find(env.ipc({"cmd": "mem"}) or {})
+    # (`mem` waits for the render threads and reads the process's mappings: seconds in a sanitizer build)
+    return find(env.ipc({"cmd": "mem"}, timeout=30) or {})
 
 
 def made_with(path, *texts):
