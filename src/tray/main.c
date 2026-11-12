@@ -244,6 +244,10 @@ static void recent_load (void)
     g_free (p);
 }
 
+/* the last write of the list failed (a full disk, the folder in the way):
+ * it is tried again with the next status line, as every line used to */
+static gboolean recent_unsaved;
+
 static void recent_save (void)
 {
     GString *s = g_string_new (NULL);
@@ -258,7 +262,7 @@ static void recent_save (void)
     /* the paths of the wallpapers last shown: for the owner alone, like
      * config.json (an existing directory keeps its mode, and the file was
      * written with whatever the umask left: 0644) */
-    walpe_write_private (p, s->str, -1, NULL);
+    recent_unsaved = !walpe_write_private (p, s->str, -1, NULL);
     g_free (dir);
     g_free (p);
     g_string_free (s, TRUE);
@@ -459,7 +463,7 @@ static void on_status (const char *reply, gpointer user)
         recent_push (T.path);
         recent_drop_deleted ();
         char *after = recent_sig ();
-        if (strcmp (before, after))
+        if (strcmp (before, after) || recent_unsaved)
             recent_save ();
         g_free (before);
         g_free (after);

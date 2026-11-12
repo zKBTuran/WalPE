@@ -863,6 +863,26 @@ def case_tray(env, W):
             with open(recent) as f:
                 return W["anim"] in f.read()
         check(bool(wait_for(has_anim, 10, 0.3)), "tray: a new wallpaper is added to the list file")
+        # A write that fails is not the end of it: with the list written only when it
+        # changed, a failed write (a full disk; here a folder in the file's place) left the
+        # file behind until the next change of wallpaper. The next status line tries again.
+        os.unlink(recent)
+        os.makedirs(os.path.join(recent, "in-the-way"))
+        env.open(W["ptr"], 1)
+        loaded(env, W["ptr"], 1)
+        time.sleep(1.0 * PATIENCE)
+        shutil.rmtree(recent)
+        env.ipc({"cmd": "pause"})
+        env.ipc({"cmd": "resume"})
+
+        def has_ptr():
+            try:
+                with open(recent) as f:
+                    return W["ptr"] in f.read()
+            except OSError:
+                return False
+        check(bool(wait_for(has_ptr, 10, 0.3)),
+              "tray: a list that could not be written is written with the next status line")
     finally:
         tray.terminate()
         try:
