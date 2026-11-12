@@ -8,12 +8,25 @@ Release names are album titles by the band Boris, one per release.
 
 What has changed since 0.14.0 "Flood" and is not in a release yet: answers to the first
 reports from other machines. On KDE Plasma (Wayland) the wallpaper was gone after a click
-on the desktop and the tray's menu had no working "Quit WalPE"; wallpaper sound could only
-be switched on with a command; and a log sent with a report said too little. **State of
-testing: that of 0.14.0, with one addition: the changes for KDE Plasma were run on a
-headless Plasma 6.8.2 and a headless Plasma 5.27 (KWin on a virtual output, software
-renderer). A real Plasma session, a graphics card there and several monitors have not been
-run.** One default changes: wallpaper sound is on, at half volume (under Sound).
+on the desktop, Plasma's desktop icons could not be had together with it, nothing paused
+it behind a fullscreen window, and the tray's menu had no working "Quit WalPE"; wallpaper
+sound could only be switched on with a command, and video and web wallpapers had none; on
+a laptop with two graphics cards the discrete one sat idle; a log sent with a report
+said too little; and, found on the way, the sound server could move the capture of a
+wallpaper that reacts to sound onto a microphone (PulseAudio; under Audio-reactive
+wallpapers). **State of testing: that of 0.14.0 - Mesa's software renderer, Xvfb, a
+headless sway, a PulseAudio null sink - with these additions. The changes for KDE Plasma
+were run on a headless Plasma 6.8.2 (the layer also on a headless Plasma 5.27): KWin on
+one and two virtual outputs, software renderer, a virtual pointer; a real Plasma session,
+a graphics card there and a restart of KWin have not been run. The sound of video and web
+wallpapers and the audio capture were measured against private sound servers with null
+sinks (PulseAudio 16.1; PipeWire 1.0.5 with WirePlumber 0.4.17): nobody has heard it,
+no sound card and no microphone was there, and WirePlumber 0.5 was not run. The new
+choice of a laptop's discrete GPU has never run on a machine with two GPUs: what was run
+is the decision, on made-up machines, and the way back when the GPU's test fails.** Two
+defaults change: wallpaper sound is on, at half volume (under Sound), and `gpu=auto`
+renders on a laptop's discrete GPU where there is one (under Graphics cards;
+`walpe-ctl set gpu=display` is what `auto` was).
 
 ### Wayland
 
@@ -26,7 +39,47 @@ run.** One default changes: wallpaper sound is on, at half volume (under Sound).
   layer as before. `WALPE_WL_LAYER=background|bottom|auto` in the daemon's environment
   overrides the choice, the log says at start which layer is used on KWin, and
   `walpe-ctl status` has `wl_layer` and `wl_layer_why`
-  ([WAYLAND.md](docs/WAYLAND.md#kde-plasma)).
+  ([WAYLAND.md](docs/WAYLAND.md#kde-plasma)). Plasma's desktop icons and widgets are then
+  behind the wallpaper; the add-on of the next entry shows them.
+- KDE Plasma 6: an optional add-on shows Plasma's desktop icons and widgets over the
+  wallpaper. Plasma's wallpaper, its icons and its widgets are one window, so a wallpaper
+  program of its own can only be in front of all of it or behind all of it.
+  `contrib/plasma` holds a wallpaper type "WalPE" for Plasma's "Desktop and Wallpaper"
+  dialog that draws no wallpaper itself: it makes Plasma's desktop window see-through and
+  has KWin keep that window right above WalPE's wallpaper. It is not part of the build
+  and nothing installs it by itself; a Plasma user installs it for himself, without root:
+  `contrib/plasma/install.sh install`, then `contrib/plasma/install.sh select` (or the
+  type "WalPE" in the dialog); `unselect`, `uninstall` and `status` are the other words.
+  The wallpaper is still chosen in WalPE. While the daemon is not running - not started
+  yet, quit, crashed - such a desktop shows a colour or a picture of its own with the
+  icons over it, not a black screen. Needs Plasma 6.5 or newer, on Wayland; the script
+  says what is missing and changes nothing elsewhere. The daemon's log at start and
+  `walpe-ctl status` (`wl_plasma_addon`, `wl_plasma_icons`, `wl_plasma_hint`) say whether
+  the icons are hidden and which command brings them back
+  ([WAYLAND.md](docs/WAYLAND.md#kde-plasma),
+  [contrib/plasma/README.md](contrib/plasma/README.md)).
+- KDE Plasma with the add-on: the wallpaper gets the pointer from the add-on. Plasma's
+  desktop window is then above the wallpaper and KWin gives it every pointer event. The
+  wallpaper type hands on the position, everywhere on the desktop, and the left button
+  and the wheel over the bare desktop; over an icon or a widget they stay Plasma's alone,
+  and the right and the middle button are never handed on (Plasma's menu, paste). Only
+  while a wallpaper uses the pointer (a web wallpaper, a scene that follows it); Plasma
+  goes on getting every event as before. `walpe-ctl status`: `wl_plasma_pointer`.
+- KDE Plasma 6: "Pause for fullscreen apps", "Pause when covered" and the focus rule
+  work. KWin offers other programs no window list and goes on asking a wallpaper that
+  windows hide for frames: with 0.14.0 a wallpaper behind a fullscreen or maximized
+  window, a game included, kept being drawn there. While one of the three rules is on
+  ("Pause when covered" is, by default) the daemon now loads a small script into KWin
+  over the session bus - nothing is installed, no permission is asked for - and the
+  script reports, per output, whether application windows hide at least 85 % of it,
+  whether the active window is on it and whether that window is fullscreen, and only
+  when one of the answers changes. With the three rules off there is no script and no
+  connection to the bus; the script is taken out of KWin when the daemon ends.
+  `walpe-ctl status` names `kwin` among the sources of the three rules, and
+  `pause_kwin_script` says what the script is doing or why it cannot report (no session
+  bus, KWin not on it, a KWin older than Plasma 6). `WALPE_KWIN_SCRIPT=0` in the daemon's
+  environment keeps the daemon from using it
+  ([WAYLAND.md](docs/WAYLAND.md#pause-rules)).
 - A Wayland compositor without the layer shell (GNOME): with `backend=auto` the daemon no
   longer goes on to X11 by itself when `DISPLAY` is set. That X11 is Xwayland, where the
   wallpaper window lies above every other window, the library window included, and clicks
@@ -35,11 +88,12 @@ run.** One default changes: wallpaper sound is on, at half volume (under Sound).
   (`--backend x11`, `WALPE_BACKEND`, `walpe-ctl backend x11`) is still taken, and the log
   says what that means there. Unchanged: an X11 session, a compositor that has the layer
   shell, `--windowed`.
-- "Pause when covered" where the compositor offers no window list (KDE Plasma):
+- "Pause when covered" where nothing reports the windows (a compositor without a window
+  list; KDE Plasma while the script above cannot report, Plasma 5.27 for one):
   `pause_rules` said that the rule works, and it pauses there only for a locked screen
   and a display that is off. `pause_rules.pause_covered` now has a `note` that says what
   it pauses for and that a window covering the wallpaper is not known in this session;
-  the settings window prints it under the switch. What pauses is unchanged.
+  the settings window prints it under the switch.
 
 ### Sound
 
@@ -62,7 +116,9 @@ run.** One default changes: wallpaper sound is on, at half volume (under Sound).
   volume of Engine settings). They act on the running wallpaper at once, without loading
   it again, and are saved per wallpaper. From the command line:
   `walpe-ctl setprop walpe_sound=on|off` and `walpe-ctl setprop walpe_volume=X`. A
-  wallpaper without sound layers has no such rows.
+  scene without sound layers has no such rows. A video wallpaper has the same two rows
+  unless its file is known to have no sound track, and so has every web wallpaper (the
+  entries on video and web wallpapers below).
 - Tray: the sound entry reads "Switch wallpaper sound on" while sound is switched off and
   does that; "Unmute" while `mute` or a volume of 0 silences it, and brings the sound
   back in both cases; "Mute" otherwise. With 0.14.0 it read "Unmute", set the volume to
@@ -168,6 +224,39 @@ comes from and what it costs).
   both spellings, and a page written with the first one threw an error in its playback
   listener.
 
+### Graphics cards
+
+- `gpu=auto`, the default, renders on a laptop's discrete GPU. Until now it set nothing
+  on any machine: on a laptop whose integrated GPU drives the panel, the integrated GPU
+  rendered and the discrete one sat idle beside it - what the first report from such a
+  machine showed (Intel and NVIDIA). Where an integrated GPU drives the displays and a
+  discrete GPU with a kernel driver sits beside it, the daemon now tests that GPU when
+  it starts, the way `gpu=discrete` always has - a short process of its own that has to
+  draw one frame on it - and renders on it only when the test passes, within 5 seconds.
+  When it does not, the display's GPU renders as before, and the log (a line starting
+  with `gpu = auto:`) and `gpu_note` in `walpe-ctl gpu --json` say why. **On every other
+  machine nothing changes**: with one GPU, with a card that drives the displays, where it
+  is not known which device drives them, with "Render on CPU", or with one of the
+  drivers' own variables (`DRI_PRIME`, `__NV_PRIME_RENDER_OFFLOAD`, ...) in the daemon's
+  environment, nothing is set and no test process is started. This has not run on a
+  machine with two GPUs ([GPU.md](docs/GPU.md)).
+- `gpu=display` is new and is what `auto` was: nothing is set, and the GPU of the X
+  server or the compositor renders, whatever the machine. It is the value for a laptop
+  on which the second GPU should stay asleep: rendering on the discrete GPU copies every
+  finished frame to the other one and keeps both awake while a wallpaper is animated.
+  `walpe-ctl set gpu=display`; `integrated` and `discrete` mean what they did.
+  `walpe-ctl gpu` lists `display` and says what `auto` picks on this machine, and a
+  change between `auto`, `display` and `discrete` restarts the daemon only when another
+  device would render.
+- The test of a GPU cannot hold up the daemon's start for good. Its only limit was an
+  alarm the test process set for itself: a process stuck in a driver while a powered-down
+  GPU does not wake, or one that left something behind holding its output, kept the
+  daemon waiting without a wallpaper and without an answer to `walpe-ctl` - until now
+  only for somebody who had named a GPU (`gpu=discrete`, `gpu=<device>`). The wait now
+  ends by the daemon's own clock - 10 seconds for a GPU that was named, 5 for the one
+  `auto` found, per test process - whatever the process does; it is then ended, and the
+  log and `gpu_note` say "the test did not finish within 5 s".
+
 ### Tray
 
 - The menu on KDE Plasma, and on any panel that keeps the entries it has read: when the
@@ -199,6 +288,46 @@ comes from and what it costs).
   to draw on, a compositor without the layer shell - was in its log and nowhere in the
   window.
 
+### Security
+
+What another program of the session or a wallpaper's files could do, found by a review of
+the changes above and of what they touch. None of these was seen being used. One more
+is under "Audio-reactive wallpapers" above: the capture that could end up on a
+microphone.
+
+- Configuration: one request on the control socket with half of a surrogate pair in a
+  string (`"a\ud800b"`, which is valid JSON) put bytes that are no UTF-8 into
+  `config.json`. The next start refused the file, set it aside as
+  `config.json.broken-<time>` and began with the defaults: the wallpaper gone, mute off,
+  the volume back at one half. The daemon now refuses a request whose strings are not
+  UTF-8 and changes nothing, and a save replaces such bytes and says so, whoever put
+  them there.
+- Configuration: a number too large to be one (`1e999`) in a member this version does
+  not read - one of another version - was carried along and written back as `inf.0`,
+  which is no JSON: the same loss of every setting, one start later. A save now writes
+  finite numbers only, reads its own text back before it replaces the file, and leaves
+  the file as it is when that text would not load; `walpe-ctl set` and the settings
+  window show the reason.
+- Tray: the tooltip of the tray icon begins with the wallpaper's title - somebody else's
+  words - and a panel may show it as rich text; KDE Plasma's system tray does. A
+  wallpaper called `<img src="http://host/x.png">` made Plasma's shell ask that server
+  for the picture when the pointer rested on the icon. `<` and `>` now reach a panel as
+  the single angle quotation marks. Read in Plasma's and Qt's sources, not run against
+  a Plasma session.
+- A wallpaper's `project.json` or `scene.json` whose string ends in half of a surrogate
+  pair followed by another `\u` escape was refused, as it should be, and cost memory
+  that was never given back: json-glib (1.8.0) keeps the string's buffer, up to 64 MiB
+  for a file of 32 MiB, each time the file is read - by the window whenever it lists the
+  library, by the engine at every load of the wallpaper, by the tray for the title. Such
+  a text is now refused before json-glib sees it. 0.14.0 has this too.
+- New with the changes above, and closed before anybody had them: a web page could undo
+  mute and "off" for its own sound (now WebKit's own mute, under Sound), and with the
+  Plasma add-on another program of the session could take the pointer's bus name and be
+  sent the pointer's position (the add-on now sends only to the process whose wallpaper
+  KWin sees under the desktop). What a name on the session bus is worth in the other
+  direction is written down in
+  [contrib/plasma/README.md](contrib/plasma/README.md#the-pointer).
+
 ### Log and bug reports
 
 - `walpe-ctl diag` prints the daemon's state in a dozen lines, made to be posted with a
@@ -225,17 +354,39 @@ comes from and what it costs).
   name and the host name; nothing is uploaded. What the files hold and what to look at
   before sending: [BUG-REPORTS.md](docs/BUG-REPORTS.md). The issue forms ask for
   `walpe-ctl diag` and for that archive.
+- Wayland: every entry of `wl_surfaces` in `walpe-ctl status` has `presented_flags`, the
+  flags the compositor gave with the last frame it showed (-1 before the first). In a
+  report from a real Plasma session they were the only thing that changed when Plasma's
+  desktop came to lie over the wallpaper. A hint for a report; the daemon does not act
+  on it.
 
 ### Known limitations
 
-- KDE Plasma: the desktop icons and widgets cannot be seen while WalPE shows a wallpaper.
-  They are part of the window of Plasma's shell that the wallpaper lies on. An optional
-  add-on that shows them is in preparation.
-- KDE Plasma: nothing pauses the wallpaper behind a fullscreen or maximized window yet, a
-  game included. KWin offers other programs no window list; the wallpaper pauses there
-  for a locked screen and a display that is off.
-- Video wallpapers are still silent: their sound track is not played. The switches above
-  act on the sound layers of scenes.
+- KDE Plasma: without the add-on (`contrib/plasma`, under Wayland above) the desktop
+  icons and widgets cannot be seen while WalPE shows a wallpaper; they are part of the
+  window of Plasma's shell that the wallpaper lies on. With the add-on they are shown
+  over the wallpaper, and the wallpaper then gets the left button and the wheel over the
+  bare desktop only, never the right or the middle button; the Overview shows the icons
+  without the wallpaper. The add-on needs Plasma 6.5 or newer.
+- KDE Plasma: the pause behind a fullscreen or maximized window needs Plasma 6 and the
+  session bus. On Plasma 5.27 nothing pauses the wallpaper behind a window, a game
+  included; it pauses there for a locked screen and a display that is off.
+- Video sound: videos imported with 0.14.0 or earlier have no sound track - the import
+  dropped it - and have to be imported again from the original file. A video layer
+  inside a scene is silent. A video's track is kept as a FLAC file in
+  `~/.cache/walpe/video`, a few MB per minute, removed after 90 days without use; it
+  needs `ffmpeg` in `PATH`.
+- Web wallpapers: a looping Ogg Vorbis sound has a break of 0.6 to 1 s at its first
+  repeat and of about 0.1 s at each later one (the way round WebKit's fault, under
+  Sound). The sound of a `<video>` element in a page ends about 0.1 s after a mute, not
+  at once.
+- Web wallpapers in a build without GStreamer's core headers (`gstreamer-1.0`; the
+  configure step warns): the plugin that keeps a page's level and mute out of the sound
+  server is not built. Web wallpapers play, but muting WalPE or a volume of 0 can then
+  silence other programs' music as well, also after WalPE has quit, and on PipeWire an
+  unmute may not bring a page's sound back.
+- `gpu=auto` on a laptop with two GPUs has not run on one. If the wallpaper is slower,
+  stutters or drains the battery there: `walpe-ctl set gpu=display`.
 - The full list is in [LIMITATIONS.md](docs/LIMITATIONS.md#known-limitations).
 
 ## 0.14.0 "Flood"
