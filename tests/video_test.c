@@ -567,6 +567,20 @@ static void run_case (const char *clip, const Case *cs)
     guint skipped = src->lim_skipped, unshown = src->lim_unshown, reused = src->dl_reused, fresh = src->dl_fresh;
     double iv = src->clip_iv;
     g_mutex_unlock (&src->lock);
+    /* `walpe-ctl mem`: the queue of a clip shown at half size holds reduced
+     * pictures in its own buffers, not the decoder's full ones */
+    WalpeVideoMemStats ms;
+    cv_mem_stats (&ms);
+    const gint64 full_pic = (gint64) ref_w * ref_h * 3 / 2;
+    if (cs->half)
+        CHECK (ms.frame_bytes > 0 && ms.frame_bytes < 2 * full_pic,
+               "%s: the report counts %" G_GINT64_FORMAT " bytes of queued frames (%d slots of quarter-size "
+               "pictures; one full picture is %" G_GINT64_FORMAT ")", cs->name, ms.frame_bytes, CV_AHEAD + 1,
+               full_pic);
+    else
+        CHECK (ms.frame_bytes > 0 && ms.frame_bytes <= (CV_AHEAD + 1) * full_pic,
+               "%s: the report counts %" G_GINT64_FORMAT " bytes of queued frames (%d slots, a full picture "
+               "is %" G_GINT64_FORMAT ")", cs->name, ms.frame_bytes, CV_AHEAD + 1, full_pic);
     cvv_free (&vw->base);
 
     g_mutex_lock (&rec_lock);

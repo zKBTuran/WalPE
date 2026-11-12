@@ -5608,8 +5608,13 @@ static void cv_mem_stats (WalpeVideoMemStats *o)
         }
         o->queued += src->nq;
         o->queue_slots += CV_AHEAD;
+        /* (a slot counts the decoder's picture only while it holds one: a
+         * frame reduced or copied into the slot's own buffer has pl[0] too,
+         * and three such slots of a 4K clip read as 37 MB more than they
+         * hold) */
         for (int i = 0; i <= CV_AHEAD; i++)
-            o->frame_bytes += (gint64) src->buf[i].cap + (src->buf[i].av && src->buf[i].pl[0] ? pic : 0);
+            o->frame_bytes += (gint64) src->buf[i].cap +
+                              (src->buf[i].av && src->buf[i].av->buf[0] ? pic : 0);
         o->scratch_bytes += (gint64) src->half_cap + (gint64) src->norm_cap +
                             (src->annexb ? (gint64) src->annexb->allocated_len : 0);
         o->stage_buffers += src->stage_n;
