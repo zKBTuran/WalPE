@@ -90,7 +90,7 @@ Plasma's desktop window is above the wallpaper, and KWin gives it every pointer 
 `Pointer.qml` sits on top of everything in that window and only looks (Qt's pointer
 handlers with passive grabs): the icons, the widgets and the desktop's menu get every
 event as before. What it sees it sends to the daemon (`io.github.walpe.Pointer.Event` on
-the session bus):
+the daemon's connection to the session bus):
 
 - the position, wherever the pointer is on the desktop, at most once per frame of the
   screen, in the screen's logical pixels;
@@ -106,9 +106,25 @@ It costs nothing while no wallpaper wants the pointer. The daemon takes the name
 `io.github.walpe.Pointer` only on KWin, with the add-on installed, while a wallpaper it
 shows uses the pointer (a web wallpaper, a scene that follows the pointer); the type
 watches for the name and loads `Pointer.qml` only while somebody has it and the daemon's
-surface is under the desktop. The daemon believes only the connection that has the name
-`org.kde.plasmashell`, and treats what comes like a pointer of its own: the same
-coordinates per output, the same button and wheel events.
+surface is under the desktop. The daemon treats what comes like a pointer of its own: the
+same coordinates per output, the same button and wheel events.
+
+Who is believed. Any program of the session can take a name on the session bus, so:
+
+- The type does not send to the name. It asks the bus which connection has it and which
+  process that is, and sends to that connection only if it is the process whose surface
+  KWin sees under the desktop (the KWin script writes that process id next to `Under`).
+  A program that takes the name before the daemon gets nothing; the daemon then cannot
+  have the name, the wallpaper gets no pointer, and `walpe-ctl status` says in
+  `wl_plasma_pointer` that the name is not the daemon's.
+- The daemon takes events from the connection that has the name `org.kde.plasmashell`
+  at the time, as it takes the pause script's reports from the one that has
+  `org.kde.KWin`. While Plasma's shell is not on the bus (it crashed, it is being
+  replaced), the first program to take its name is believed in its place: it can move
+  the wallpaper's pointer and click in a wallpaper that uses the pointer, with the left,
+  middle or right button, and nowhere else. The session bus has no means to tell such a
+  program from the shell, and a program that can do this can already do more to a Plasma
+  session (load a script into KWin, for one).
 
 ## What it cannot do
 

@@ -18,6 +18,8 @@ Kirigami.FormLayout {
     property alias cfg_Image: picture.text
     property bool cfg_Under
     property bool cfg_UnderDefault
+    property int cfg_Daemon
+    property int cfg_DaemonDefault
     property color cfg_ColorDefault
     property string cfg_ImageDefault
 

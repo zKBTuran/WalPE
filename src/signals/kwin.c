@@ -451,8 +451,20 @@ static char *kwin_bus_address (void)
  * io.github.walpe.Pointer, which the daemon owns only while the platform
  * says a helper can exist and a wallpaper uses the pointer
  * (walpe_platform_pointer_helper) - the type watches for the name and
- * hands nothing on while nobody has it. Only the connection of Plasma's
- * shell is believed. */
+ * hands nothing on while nobody has it. Any process of the session can
+ * take a name, so neither side takes one for more than it is:
+ *   - the type sends to the connection that has the name, by that
+ *     connection's own name, and only if the bus says it is the process
+ *     whose surface KWin sees under the desktop (Script.qml): somebody
+ *     else with the name gets nothing, and the daemon, not getting the
+ *     name, says so in status;
+ *   - the daemon believes the connection that owns org.kde.plasmashell
+ *     at the time (as Report believes the one that owns org.kde.KWin).
+ *     While Plasma's shell is not on the bus, the first process to take
+ *     its name is believed in its place: it can move this pointer and
+ *     press buttons 1 to 3 in a wallpaper that uses the pointer. The
+ *     session bus has nothing to tell the two apart by; such a process
+ *     can do more than that to the session in other ways. */
 #define PTR_NAME "io.github.walpe.Pointer"
 #define PTR_PATH "/io/github/walpe/Pointer"
 

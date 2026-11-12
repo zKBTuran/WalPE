@@ -18,5 +18,10 @@
       surface of walpe-daemon lies under this desktop</label>
       <default>false</default>
     </entry>
+    <entry name="Daemon" type="Int">
+      <label>Not a setting: written with Under, the process id KWin has for that surface's
+      owner (0: none)</label>
+      <default>0</default>
+    </entry>
   </group>
 </kcfg>

@@ -41,15 +41,17 @@ function screenKey(g) {
 }
 
 // what Plasma's shell runs: one line "walpe X,Y,W,H" per desktop of the type, after telling
-// each whether the daemon has a surface on its screen
+// each whether the daemon has a surface on its screen, and which process that is (covered:
+// screen -> process id; the type hands the pointer to that process only)
 function question(covered) {
     return "const covered = " + JSON.stringify(covered) + ";" +
         "for (const d of desktops()) {" +
         "  if (d.screen < 0 || d.wallpaperPlugin !== '" + TYPE + "') continue;" +
         "  const g = screenGeometry(d.screen);" +
         "  const key = [g.x, g.y, g.width, g.height].map(Math.round).join(',');" +
-        "  const under = covered.indexOf(key) >= 0;" +
+        "  const under = key in covered;" +
         "  d.currentConfigGroup = ['Wallpaper', '" + TYPE + "', 'General'];" +
+        "  d.writeConfig('Daemon', under ? covered[key] : 0);" +
         "  d.writeConfig('Under', under);" +
         "  print('walpe ' + key + '\\n');" +
         "}";
@@ -69,9 +71,11 @@ function ask(gone) {
         shell = desktop.pid;
     if (shell !== desktop.pid)
         return;
-    const covered = all.filter(isWalpe).map(w => screenKey(w.output.geometry));
+    const covered = {};
+    for (const w of all.filter(isWalpe))
+        covered[screenKey(w.output.geometry)] = Number(w.pid) || 0;
     const mine = ++serial;
-    print("walpe: question " + mine + ", surfaces of the daemon on [" + covered.join(" ") + "]");
+    print("walpe: question " + mine + ", surfaces of the daemon on [" + Object.keys(covered).join(" ") + "]");
     again.interval = 3000;            // Plasma's shell may still be starting: ask again, a few times
     if (unanswered++ < 5)
         again.start();

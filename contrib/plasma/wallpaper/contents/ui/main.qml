@@ -93,10 +93,19 @@ WallpaperItem {
     }
 
     // the pointer for the daemon's wallpaper, only while that is under this desktop and wants it
+    Binding {
+        target: script.item
+        property: "daemon"
+        value: root.under ? root.configuration.Daemon : 0
+        when: script.item !== null
+    }
     Loader {
-        active: root.under && script.item.pointerWanted
+        active: root.under && script.item.pointerTo !== ""
         source: "Pointer.qml"
-        onLoaded: item.view = root.view
+        onLoaded: {
+            item.to = script.item.pointerTo;
+            item.view = root.view;
+        }
     }
 
     Rectangle {

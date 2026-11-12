@@ -409,7 +409,10 @@ the wallpaper. A web wallpaper that needs the right button, or a drag without th
 frame, wants a desktop with another wallpaper type (it is then in front and has the
 pointer to itself). `wayland_pointer` = off switches this off with the rest of the
 pointer. If the add-on is installed while a wallpaper that uses the pointer is shown,
-the pointer arrives once that wallpaper is opened again.
+the pointer arrives once that wallpaper is opened again. The type sends the pointer only
+to the process whose surface KWin sees under the desktop, and the daemon takes it only
+from the connection that has the name of Plasma's shell; what a name on the session bus
+is and is not worth is in [contrib/plasma/README.md](../contrib/plasma/README.md#the-pointer).
 
 ### What the daemon says
 

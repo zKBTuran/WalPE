@@ -4,8 +4,9 @@
  * put on top of everything in that window and only looks: its handlers take passive grabs
  * (PointHandler, HoverHandler) or do not block (WheelHandler), so the icons, the widgets and
  * the desktop's own menu get every event as before. What it sees goes to the daemon over
- * D-Bus (io.github.walpe.Pointer; the daemon has that name only while a wallpaper wants the
- * pointer, and main.qml loads this file only then):
+ * D-Bus (io.github.walpe.Pointer.Event on the daemon's connection; the daemon has the name
+ * io.github.walpe.Pointer only while a wallpaper wants the pointer, and main.qml loads this
+ * file only then, after Script.qml has made sure whose connection that is):
  *   the position, at most once per frame of the screen;
  *   the left button and the wheel, where the pointer is over the bare desktop: over an
  *   icon or a widget they are Plasma's alone (found() below says what counts as one);
@@ -18,6 +19,7 @@ import org.kde.plasma.workspace.dbus as DBus
 Item {
     id: tap
     property var view: null              // the desktop window
+    property string to                   // the daemon's connection on the bus (Script.qml has checked whose it is)
     parent: view ? view.contentItem : null
     anchors.fill: parent
     z: 1000000
@@ -28,7 +30,7 @@ Item {
 
     function send(what, x, y, a, b) {
         DBus.SessionBus.asyncCall({
-            "service": "io.github.walpe.Pointer", "path": "/io/github/walpe/Pointer",
+            "service": to, "path": "/io/github/walpe/Pointer",
             "iface": "io.github.walpe.Pointer", "member": "Event",
             "arguments": [new DBus.string(Screen.name), new DBus.uint32(what), new DBus.double(x),
                           new DBus.double(y), new DBus.double(a), new DBus.double(b)],
