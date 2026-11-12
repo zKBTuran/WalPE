@@ -452,7 +452,64 @@ if get_option('scenescript') != 'disabled'
   if get_option('quickjs_libdir') != ''
     qjs_dirs = [get_option('quickjs_libdir')] + qjs_dirs
   endif
-  qjs = cc.find_library('quickjs', required: false, dirs: qjs_dirs)
+  if meson.is_cross_build()
+    # A cross build must not take the build machine's library: the list
+    # above starts with /usr/lib/quickjs, which on an x86-64 machine holds
+    # the x86-64 libquickjs.a, and find_library() answers with the first
+    # file of that name whatever it was built for - the configure step
+    # passed and the link of walpe-daemon failed ("Relocations in generic
+    # ELF"). Here every directory is tried by itself, the sysroot's and the
+    # target's multiarch directory before the plain ones, and a library is
+    # taken only when a program for the target links with it.
+    qjs_cross_dirs = []
+    if get_option('quickjs_libdir') != ''
+      qjs_cross_dirs += [get_option('quickjs_libdir')]
+    endif
+    if qjs_sysroot != ''
+      foreach qjs_d : ['usr/lib/quickjs', 'usr/lib64/quickjs', 'usr/local/lib/quickjs']
+        qjs_cross_dirs += [qjs_sysroot / qjs_d]
+      endforeach
+    endif
+    if qjs_ma.returncode() == 0 and qjs_ma.stdout().strip() != ''
+      qjs_cross_dirs += [qjs_ma_dir]
+    endif
+    foreach qjs_d : qjs_dirs
+      if not qjs_cross_dirs.contains(qjs_d)
+        qjs_cross_dirs += [qjs_d]
+      endif
+    endforeach
+    qjs = dependency('', required: false)
+    qjs_wrong = []
+    foreach qjs_d : qjs_cross_dirs
+      if not qjs.found()
+        qjs_try = cc.find_library('quickjs', required: false, dirs: [qjs_d])
+        if qjs_try.found()
+          if cc.links('''
+              #include <quickjs/quickjs.h>
+              int main (void) { return JS_NewRuntime () != 0; }''',
+              dependencies: [qjs_try, cc.find_library('m', required: false),
+                             cc.find_library('dl', required: false), dependency('threads')],
+              name: 'libquickjs of ' + qjs_d + ' links for ' + host_cpu)
+            qjs = qjs_try
+          else
+            qjs_wrong += [qjs_d]
+          endif
+        endif
+      endif
+    endforeach
+    if not qjs.found() and qjs_wrong.length() > 0
+      qjs_wrong_msg = ('QuickJS: the libquickjs of ' + ', '.join(qjs_wrong) + ' does not link for ' +
+                       host_cpu + ' (the build machine\'s library?). Give the target\'s with ' +
+                       '-Dquickjs_libdir=<dir>, name the sysroot in the cross file ([properties] ' +
+                       'sys_root), or build with -Dscenescript=disabled.')
+      if get_option('scenescript') == 'enabled'
+        error(qjs_wrong_msg)
+      endif
+      warning(qjs_wrong_msg + ' SceneScript is left out of this build.')
+    endif
+  else
+    qjs = cc.find_library('quickjs', required: false, dirs: qjs_dirs)
+  endif
   if qjs.found() and cc.has_header('quickjs/quickjs.h')
     have_quickjs = true
     deps_js = [qjs, cc.find_library('dl', required: false), dependency('threads')]
