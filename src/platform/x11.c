@@ -59,7 +59,9 @@ typedef struct {
                               * (x11desk.h: Mutter and its forks); else override-redirect */
     Window host;             /* the desktop window this window is a child of (x11desk.h);
                               * None: it is a child of the root */
+    Window host_want;        /* ... the one it is to be a child of (not host: on its way) */
     int host_x, host_y;      /* where in it */
+    guint adopt_id;          /* the timer of that way (desk_adopt_cb) */
 } X11Surface;
 
 static struct {
@@ -658,10 +660,44 @@ static char *window_class_name (Window w)
     return name ? name : g_strdup ("?");
 }
 
+/* second half of a wallpaper window's way into a desktop window
+ * (desk_apply unmapped it a moment ago) */
+static gboolean desk_adopt_cb (gpointer user)
+{
+    X11Surface *s = user;
+    s->adopt_id = 0;
+    if (s->destroyed || s->xid == None || s->host_want == None)
+        return G_SOURCE_REMOVE;
+    const Window host = s->host_want;
+    /* its own DestroyNotify: it dies with the window it is a child of */
+    XSelectInput (X.xd, s->xid, ExposureMask | StructureNotifyMask);
+    XReparentWindow (X.xd, s->xid, host, s->host_x, s->host_y);
+    XMapWindow (X.xd, s->xid);
+    XRaiseWindow (X.xd, s->xid);    /* above what the file manager has in it */
+    XFlush (X.xd);
+    s->host = host;
+    char *cls = window_class_name (host);
+    g_message ("mon%d: the desktop's own desktop window 0x%lx (%s) lies over this monitor and "
+               "nothing is seen through it: the wallpaper window is a child of it now - above "
+               "the desktop's picture and icons, below every other window; clicks go through to "
+               "the desktop. WALPE_X11_DESKTOP=root keeps it the lowest window of the root, behind "
+               "that window", s->index, (unsigned long) host, cls);
+    g_free (cls);
+    return G_SOURCE_REMOVE;
+}
+
 /* Every wallpaper window is put where x11desk.h says: into the desktop
  * window that lies over its monitor, or back at the bottom of the root.
  * Called after a scan found the desktop windows; changes something only
  * when one appeared, went or moved.
+ * The way into a desktop window has two steps, a fifth of a second
+ * apart: the window is unmapped, then made a child of the desktop window
+ * and mapped. A window manager that has taken note of the window as a
+ * child of the root is told by the unmapping and has let go of it by the
+ * second step. KWin does not hear of a mapped window that is reparented
+ * in one step: it goes on painting it, above everything, as the window it
+ * knew (seen with KWin 5.27); and one that manages the window puts it
+ * back on the root when it is withdrawn, which must be over first.
  * As a child of another client's window the wallpaper window dies with
  * it (the file manager is closed, or restarted): its own DestroyNotify
  * is asked for while it is one, and the daemon makes its windows anew
@@ -672,10 +708,10 @@ static void desk_apply (void)
         return;
     gboolean any = X.n_desks > 0;
     for (guint i = 0; i < X.surfs->len && !any; i++)
-        any = SURF (i)->host != None;
+        any = SURF (i)->host != None || SURF (i)->host_want != None;
     if (!any)
         return;         /* no desktop window, none left behind: a bare window manager */
-    const gboolean cm = X.n_desks > 0 && compositor_running ();
+    const gboolean cm = walpe_x11_desk_see_through (X.wm_name, X.n_desks > 0 && compositor_running ());
     for (guint i = 0; i < X.surfs->len; i++) {
         X11Surface *s = SURF (i);
         if (s->kind != WALPE_SURFACE_WALLPAPER || s->xid == None || s->destroyed)
@@ -685,36 +721,35 @@ static void desk_apply (void)
         const Window host = k >= 0 ? (Window) X.desks[k].client : None;
         const int hx = s->geom.x - (k >= 0 ? X.desks[k].r.x : 0);
         const int hy = s->geom.y - (k >= 0 ? X.desks[k].r.y : 0);
-        if (host == s->host) {
+        if (host == s->host_want) {
             if (host != None && (hx != s->host_x || hy != s->host_y)) {
-                XMoveWindow (X.xd, s->xid, hx, hy);     /* the desktop window was moved */
                 s->host_x = hx;
                 s->host_y = hy;
+                if (!s->adopt_id)
+                    XMoveWindow (X.xd, s->xid, hx, hy);     /* the desktop window was moved */
             }
         } else {
-            XSelectInput (X.xd, s->xid, ExposureMask | (host != None ? StructureNotifyMask : 0));
-            XReparentWindow (X.xd, s->xid, host != None ? host : X.root, hx, hy);
-            if (host != None) {
-                XRaiseWindow (X.xd, s->xid);    /* above what the file manager has in it */
-                char *cls = window_class_name (host);
-                g_message ("mon%d: the desktop's own desktop window 0x%lx (%s, %dx%d+%d+%d, %d-bit) "
-                           "lies over this monitor and nothing is seen through it: the wallpaper "
-                           "window is a child of it now - above the desktop's picture and icons, "
-                           "below every other window; clicks go through to the desktop. "
-                           "WALPE_X11_DESKTOP=root keeps it the lowest window of the root, behind "
-                           "that window", s->index, (unsigned long) host, cls, X.desks[k].r.width,
-                           X.desks[k].r.height, X.desks[k].r.x, X.desks[k].r.y, X.desks[k].depth);
-                g_free (cls);
-            } else {
-                XLowerWindow (X.xd, s->xid);
-                X.stack_dirty = TRUE;
-                g_message ("mon%d: the desktop window 0x%lx the wallpaper window was a child of is "
-                           "not over this monitor any more: the wallpaper window is the lowest "
-                           "window of the root again", s->index, (unsigned long) s->host);
-            }
-            s->host = host;
+            if (s->adopt_id)
+                g_source_remove (s->adopt_id);
+            s->adopt_id = 0;
+            s->host_want = host;
             s->host_x = hx;
             s->host_y = hy;
+            if (host != None) {
+                XUnmapWindow (X.xd, s->xid);
+                s->adopt_id = g_timeout_add (200, desk_adopt_cb, s);
+            } else {
+                XSelectInput (X.xd, s->xid, ExposureMask);
+                XReparentWindow (X.xd, s->xid, X.root, s->geom.x, s->geom.y);
+                XMapWindow (X.xd, s->xid);
+                XLowerWindow (X.xd, s->xid);
+                X.stack_dirty = TRUE;
+                if (s->host != None)
+                    g_message ("mon%d: the desktop window 0x%lx the wallpaper window was a child of "
+                               "is not over this monitor any more: the wallpaper window is the "
+                               "lowest window of the root again", s->index, (unsigned long) s->host);
+                s->host = None;
+            }
         }
         /* asked to stay on the root, behind a window nothing is seen
          * through: said once (the wallpaper is drawn and not seen) */
@@ -1101,6 +1136,8 @@ static void wallpaper_window_set_kind (X11Surface *s, gboolean managed)
         XDeleteProperty (X.xd, s->xid, XInternAtom (X.xd, "_NET_WM_STATE", False));
     }
     shape_away_input (s->xid);
+    if (s->adopt_id)
+        return;     /* on its way into a desktop window: mapped there (desk_adopt_cb) */
     XMapWindow (X.xd, s->xid);
     if (s->host == None) {
         /* (a window manager may have moved a window it managed) */
@@ -1169,6 +1206,7 @@ static void wm_look (void)
     if (X.surfs && X.surfs->len) {
         X.stack_dirty = TRUE;
         XFlush (X.xd);
+        cover_schedule ();  /* (what a desktop window counts as goes by the name too) */
     }
 }
 
@@ -2066,6 +2104,8 @@ static WalpeSurface *x11_surface_new (const WalpeSurfaceSpec *spec, EGLDisplay d
 static void x11_surface_free (WalpeSurface *ws)
 {
     X11Surface *s = (X11Surface *) ws;
+    if (s->adopt_id)
+        g_source_remove (s->adopt_id);
     eglDestroySurface (s->egl_dpy, s->egl);
     XDestroyWindow (X.xd, s->xid);
     g_ptr_array_remove (X.surfs, s);

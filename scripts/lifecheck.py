@@ -3258,6 +3258,10 @@ def case_desktop(env, W):
         check(bool(ok), "desktop: a window manager named GNOME Shell: managed windows", (kind(), flags()))
         check(is_red(colour_is(env, A, is_red)) and is_red(colour_is(env, B, is_red)),
               "desktop: ... that show the scene", (rc.name_of(env.colour(A)), rc.name_of(env.colour(B))))
+        # KDE's (it paints the windows it does not manage above everything as well)
+        xc.window_manager("KWin")
+        ok = wait_for(lambda: kind() == ("managed", "KWin") and flags() == [False, False], 10, 0.1)
+        check(bool(ok), "desktop: a window manager named KWin: managed windows", (kind(), flags()))
         check(env.daemon.poll() is None and env.daemon.pid == pid and "restarts in place" not in env.since(mark),
               "desktop: all of that in the same process, without a restart")
         env.stop_daemon()

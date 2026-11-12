@@ -154,15 +154,31 @@ static void test_window_kind (void)
     static const char *const mutter[] = { "Mutter (Muffin)", "GNOME Shell", "Mutter", "Mutter(Budgie)",
                                           "Mutter(Gala)", "mutter" };
     static const char *const others[] = { "dwm", "Xfwm4", "Openbox", "Metacity (Marco)", "i3", "IceWM 3.4.5 (Linux/x86_64)",
-                                          "Fluxbox", "bspwm", "awesome", "KWin", "LG3D", "", NULL };
+                                          "Fluxbox", "bspwm", "awesome", "LG3D", "", NULL };
+    /* KWin: on top as well, and Plasma's 32-bit desktop window is opaque */
+    CHECK (walpe_x11_wm_is_kwin ("KWin") && walpe_x11_wm_is_kwin ("kwin_x11") && !walpe_x11_wm_is_kwin ("Xfwm4") &&
+           !walpe_x11_wm_is_kwin (NULL));
+    CHECK (walpe_x11_wm_override_on_top ("KWin"));
+    CHECK (walpe_x11_win_managed (WALPE_X11_WIN_AUTO, "KWin") && !walpe_x11_win_managed (WALPE_X11_WIN_OVERRIDE, "KWin"));
+    CHECK (!walpe_x11_desk_see_through ("KWin", TRUE) && !walpe_x11_desk_see_through ("KWin", FALSE));
+    CHECK (walpe_x11_desk_see_through ("Mutter (Muffin)", TRUE) && !walpe_x11_desk_see_through ("Mutter (Muffin)", FALSE));
+    CHECK (walpe_x11_desk_see_through (NULL, TRUE) && walpe_x11_desk_see_through ("Xfwm4", TRUE));
+    {
+        /* plasmashell's desktop window: the host under KWin, left alone under any other name */
+        const WalpeDeskWin plasma[] = { { 0xa00015, 0x200027, { 0, 0, 1920, 1080 }, 32 } };
+        const WalpeDeskRect mon = { 0, 0, 1920, 1080 };
+        CHECK (walpe_x11_desk_host (WALPE_X11_DESK_AUTO, &mon, plasma, 1, walpe_x11_desk_see_through ("KWin", TRUE)) == 0);
+        CHECK (walpe_x11_desk_host (WALPE_X11_DESK_AUTO, &mon, plasma, 1,
+                                    walpe_x11_desk_see_through ("Mutter (Muffin)", TRUE)) == -1);
+    }
     for (guint i = 0; i < G_N_ELEMENTS (mutter); i++) {
-        CHECK (walpe_x11_wm_is_mutter (mutter[i]));
+        CHECK (walpe_x11_wm_override_on_top (mutter[i]) && !walpe_x11_wm_is_kwin (mutter[i]));
         CHECK (walpe_x11_win_managed (WALPE_X11_WIN_AUTO, mutter[i]));
         CHECK (!walpe_x11_win_managed (WALPE_X11_WIN_OVERRIDE, mutter[i]));
         CHECK (walpe_x11_win_managed (WALPE_X11_WIN_MANAGED, mutter[i]));
     }
     for (guint i = 0; i < G_N_ELEMENTS (others); i++) {
-        CHECK (!walpe_x11_wm_is_mutter (others[i]));
+        CHECK (!walpe_x11_wm_override_on_top (others[i]));
         CHECK (!walpe_x11_win_managed (WALPE_X11_WIN_AUTO, others[i]));
         CHECK (!walpe_x11_win_managed (WALPE_X11_WIN_OVERRIDE, others[i]));
         CHECK (walpe_x11_win_managed (WALPE_X11_WIN_MANAGED, others[i]));

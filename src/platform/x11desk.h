@@ -51,15 +51,24 @@ typedef struct { int x, y, width, height; } WalpeDeskRect;
  * Mutter and its forks (Muffin = Cinnamon, GNOME Shell on X11, Budgie,
  * Gala) do not: an override-redirect window that is no menu, tooltip or
  * the like goes into their group of windows that are painted above
- * everything else - every window and the panel. Lowest in the X server's
- * order, topmost on screen: the wallpaper covers the whole desktop. There
- * the wallpaper window is one the window manager manages, of the type
- * _NET_WM_WINDOW_TYPE_DESKTOP: Mutter keeps that type in its lowest
+ * everything else - every window and the panel. KWin does the same with
+ * every window it does not manage. Lowest in the X server's order,
+ * topmost on screen: the wallpaper covers the whole desktop. There the
+ * wallpaper window is one the window manager manages, of the type
+ * _NET_WM_WINDOW_TYPE_DESKTOP: both keep that type in their lowest
  * layer, below every window and - lowered - below the file manager's
  * translucent icons window. It takes no focus and no input, and is on
- * every workspace. */
+ * every workspace.
+ *
+ * KWin with Plasma's desktop is one case more. plasmashell's desktop
+ * window has a 32-bit visual and paints every pixel of it (Plasma's
+ * wallpaper, icons and widgets are that window): a wallpaper window below
+ * it is not seen, and one beside it in KWin's desktop layer is put behind
+ * it at the first click on the desktop. Under KWin a desktop window is
+ * taken for opaque whatever its visual, and the wallpaper window goes into
+ * it as into xfdesktop's. */
 typedef enum {
-    WALPE_X11_WIN_AUTO,     /* managed under Mutter and its forks, else override-redirect */
+    WALPE_X11_WIN_AUTO,     /* managed under Mutter, its forks and KWin, else override-redirect */
     WALPE_X11_WIN_OVERRIDE, /* always override-redirect (as up to 0.14.0) */
     WALPE_X11_WIN_MANAGED,  /* always a managed window of the desktop type */
 } WalpeX11WinMode;
@@ -89,11 +98,17 @@ static inline int walpe_x11_win_parse (const char *s, WalpeX11WinMode *out)
     return -1;
 }
 
-/* Does the window manager of this name (_NET_WM_NAME of its
- * _NET_SUPPORTING_WM_CHECK window; NULL = none runs or it says none)
- * paint override-redirect windows above everything? "Mutter (Muffin)",
- * "GNOME Shell", "Mutter", "Mutter(Budgie)", "Mutter(Gala)". */
-static inline gboolean walpe_x11_wm_is_mutter (const char *wm_name)
+/* is this window manager (_NET_WM_NAME of its _NET_SUPPORTING_WM_CHECK
+ * window; NULL = none runs or it says none) KWin? */
+static inline gboolean walpe_x11_wm_is_kwin (const char *wm_name)
+{
+    return wm_name && !g_ascii_strncasecmp (wm_name, "kwin", 4);
+}
+
+/* Does the window manager of this name paint override-redirect windows
+ * above everything? "Mutter (Muffin)", "GNOME Shell", "Mutter",
+ * "Mutter(Budgie)", "Mutter(Gala)"; "KWin". */
+static inline gboolean walpe_x11_wm_override_on_top (const char *wm_name)
 {
     if (!wm_name || !*wm_name)
         return FALSE;
@@ -101,14 +116,23 @@ static inline gboolean walpe_x11_wm_is_mutter (const char *wm_name)
     gboolean hit = strstr (low, "mutter") != NULL || strstr (low, "gnome shell") != NULL ||
                    strstr (low, "muffin") != NULL;
     g_free (low);
-    return hit;
+    return hit || walpe_x11_wm_is_kwin (wm_name);
 }
 
 /* is the wallpaper window a managed one under this window manager? */
 static inline gboolean walpe_x11_win_managed (WalpeX11WinMode mode, const char *wm_name)
 {
     return mode == WALPE_X11_WIN_MANAGED ||
-           (mode == WALPE_X11_WIN_AUTO && walpe_x11_wm_is_mutter (wm_name));
+           (mode == WALPE_X11_WIN_AUTO && walpe_x11_wm_override_on_top (wm_name));
+}
+
+/* Is what lies below a desktop window with a 32-bit visual seen through
+ * it under this window manager and a compositing manager? Not under KWin
+ * (Plasma's desktop window, above); elsewhere it is (nemo-desktop). The
+ * `compositor` the rules below are given is this answer. */
+static inline gboolean walpe_x11_desk_see_through (const char *wm_name, gboolean compositor)
+{
+    return compositor && !walpe_x11_wm_is_kwin (wm_name);
 }
 
 /* a mapped client window of type _NET_WM_WINDOW_TYPE_DESKTOP */
