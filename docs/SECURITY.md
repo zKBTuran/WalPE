@@ -72,6 +72,64 @@ A header is included once per file, whatever the `#include` line calls it (`"x.h
 Tests: `meson test -C build script-hostile fx-hostile scene-hostile` (the last two need EGL
 surfaceless; `fx-hostile-test gl 1500` and `fx-hostile-test text 6000` run more seeds).
 
+## Web wallpapers
+
+A web wallpaper is a page somebody else wrote, shown by WebKitGTK in a window nobody sees.
+What it gets and what it does not, as the code is today:
+
+- **Its files** come from a file server inside the daemon: a TCP port on 127.0.0.1 that the
+  system picks when the first page is opened. Every program on the machine can connect to
+  that port, also one of another account or one in a sandbox with network access; a file is
+  handed out only under the page's token (128 random bits, the first part of the address,
+  new for every page; the log shows it as stars). The server answers GET and HEAD and only
+  requests that name it as their host; the body of a request is read and dropped; one part
+  of a file (`Range`) is answered straight from the file; at most 128 connections are open,
+  and for one more the one that has waited longest for a request is closed. What it hands
+  out: regular files inside the wallpaper's folder (and the folder of a preset of it; a
+  link that leads out is not followed), the file chosen for a file option, and for a folder
+  chosen for a directory option its pictures and videos down to one sub-folder, nothing
+  hidden.
+  `WALPE_WEB_SCHEME=1` serves the page through a scheme of the module's own instead (no
+  port; media in pages does not play then). `WALPE_WEB_FILE_URLS=1` (diagnosis only) loads
+  the page from `file://`, where WebKit lets it read every file you can read: its network
+  access is switched off for that reason.
+- **Network access is on** unless you switch it off: a page reaches the internet, your
+  local network and services on this machine, as it does under Wallpaper Engine. Off for
+  one wallpaper with its option "Allow network access" (`walpe-ctl setprop
+  walpe_network=false`), off for all with `WALPE_WEB_OFFLINE=1`: every request of the page
+  then goes to the file server above, which answers for the page's own files and refuses
+  everything else, other ports of this machine included (WebRTC is switched off, so nothing
+  goes around it). Certificate errors fail the request (WebKit's default).
+- **Where it may go**: the page itself stays inside the wallpaper's folder (a navigation
+  elsewhere is refused and the wallpaper stays); frames inside it may load other addresses;
+  new windows are never opened; a download is cancelled as it starts. With
+  `WALPE_WEB_OPEN_LINKS=1` an http(s) link you clicked that was refused is handed to
+  `xdg-open`.
+- **Nothing is kept**: every page has a session of its own that lives in memory (cookies,
+  local storage, databases, cache) and ends with the page.
+- **No permission is granted**: location, camera and microphone, notifications, clipboard
+  reading, pointer lock and the rest are refused without a question. Script dialogs are
+  answered at once, a file or colour chooser is cancelled, there is no context menu, no
+  popup of a selection list, no print dialog, the hidden window does not go fullscreen,
+  and a server that asks for a name and a password (401, a proxy's 407) is not asked about
+  either: the request goes on without. The page gets pointer input that happens on the
+  empty desktop; it never gets the keyboard, and what it selects or copies does not reach
+  the selections of your session (X11: the daemon owns none unless `WALPE_WEB_SELECTIONS=1`
+  is set; the private page host has no clipboard at all).
+- **What it can ask of the daemon**: three things, by a message of at most 64 KiB - the
+  audio spectrum, the "now playing" state, and that a pointer event arrived. A page that
+  sends megabytes, or more than 20000 messages in ten seconds, is stopped (status:
+  `web_error`). A page whose process dies is loaded again, three times within a minute at
+  most.
+- **WebKit's sandbox stays on** for the processes that run pages; WalPE adds no folder to
+  it and does not switch it off. It keeps a page process that was taken over away from
+  your files and from the control socket. It is WebKit's sandbox with WebKit's rules: with
+  the X11 page host that process has the X server's socket (and so what any X client has),
+  and the sound server's.
+- Sound in a page plays, as under Wallpaper Engine.
+
+Tests: `meson test -C build websec websec-private`.
+
 ## What is trusted on the local machine
 
 - The control socket is for your own programs: mode 0600, a connection
@@ -95,7 +153,11 @@ surfaceless; `fx-hostile-test gl 1500` and `fx-hostile-test text 6000` run more 
   directory of your own with mode 0700.
 - `config.json` is written 0600 (it names your Steam account, every
   wallpaper path and what you typed into wallpaper options); a file from an
-  older version is narrowed when the daemon reads it. `workshop.json` (the
+  older version is narrowed when the daemon reads it. Two more files name
+  wallpaper paths and are written 0600 as well: the crash-loop marker next
+  to the socket and the tray's list of the wallpapers last shown
+  (`~/.local/state/walpe/tray-recent`; one from an older version is
+  narrowed when it is next written). `workshop.json` (the
   Steam Web API key) and `daemon.log` were 0600 already. `~/.cache/walpe`
   (unpacked wallpapers, converted videos, reports) is made 0700 by the
   daemon at every start.
@@ -103,6 +165,18 @@ surfaceless; `fx-hostile-test gl 1500` and `fx-hostile-test text 6000` run more 
   a file that belongs to another account, that everybody can write to, or
   that sits in such a directory is not loaded (log: "module: ... not
   loaded"), and `WALPE_MODULE_DIR` has to be an absolute path.
+- A video the player cannot read is converted once by `ffmpeg` (found in
+  `PATH`, like `ffprobe`). The file is a wallpaper's: both are given it as
+  a local file and nothing else (`-protocol_whitelist file`, for a clip
+  inside a scene's file a part of that file: no playlist, no script of
+  file names, no address), may open container and video stream formats
+  only, and no picture of more than 40 megapixels. A
+  conversion nobody asked for in person (a wallpaper is opened, a scene
+  has a video) is stopped after 60 minutes, at 8192 MB of output or when
+  less than 256 MB are left on the disk (`WALPE_CONVERT_MAX_MIN`,
+  `WALPE_CONVERT_MAX_MB`, 0 = no limit; `walpe-ctl add` has none), and ffmpeg
+  ends with the daemon, however the daemon ends; what it had written so
+  far is removed at the next start.
 - The environment the daemon is started with is trusted like the daemon
   itself (`LD_*`, `GST_*`, `WEBKIT_*`, `LIBGL_*`, `__EGL_VENDOR_LIBRARY_*`,
   every `WALPE_*` switch): the restarts in place hand the start
@@ -114,15 +188,21 @@ surfaceless; `fx-hostile-test gl 1500` and `fx-hostile-test text 6000` run more 
 
 A wallpaper with media integration is shown the cover picture the music player on the
 session bus names (a file, a `data:` URL or an http(s) address; any address a player names
-is fetched, also a local one). At most 16 MiB are read, counted after unpacking for a
-compressed http body; a picture of more than 8192 pixels per side is refused before any
+is fetched, also a local one, and an http redirect is followed wherever it leads). A local
+file is read whole before it is decoded (a regular file of at most 64 MiB; not mapped, so a
+player that writes its next cover over the same name cannot end the daemon), of an http
+body at most 16 MiB are read, counted after unpacking for a compressed one, within 10
+seconds; a picture of more than 8192 pixels per side is refused before any
 pixel exists, a JPEG that its decoder has to hold whole is not decoded beyond 256 MiB of
 that store, and a GIF is checked as in the table above. The cover goes to a decoder only
 when its first bytes are those of a JPEG, PNG, GIF, WebP or BMP file, and then to the
 decoder of that one format: gdk-pixbuf is not left to pick one of its other loaders (SVG,
 XPM, PNM, TGA, ICO, TIFF ...) for bytes a music player or a server chose. A cover in any
 other format is not decoded, and the wallpaper is shown none (the log says "album art not
-decodable"). Test: `meson test -C build limits`.
+decodable"). Nothing of a cover is written to disk: two reduced copies (640 pixels at most)
+are kept in memory. The texts a player sends (title, artist, album, genres) are kept up to
+4096 bytes each, and a key it repeats counts once. Tests: `meson test -C build limits
+media-player`.
 
 ## Parts added in 0.13
 
@@ -186,9 +266,9 @@ SVG, XPM, PNM, TGA, ICO ... - for them), a JPEG that its decoder has to hold who
 or a scan per component) is not decoded beyond 256 MiB of that store, and titles, tags, names
 and descriptions are cut to sane lengths and cleaned of control and text-direction characters
 before they are shown. `walpe-ctl` writes the texts it takes from a reply (a Workshop title, the
-layer and effect names of a scene, a text layer's text) with their control characters made
-visible (`\x1b`), so an escape sequence in them never reaches the terminal; a reply printed as
-JSON has them as `\u001b`. The optional Steam Web API key lives in `~/.config/walpe/workshop.json`
+layer and effect names of a scene, a text layer's text, the file names in a memory report) with
+their control characters made visible (`\x1b`), so an escape sequence in them never reaches the
+terminal; a reply printed as JSON has them as `\u001b`. The optional Steam Web API key lives in `~/.config/walpe/workshop.json`
 (mode 0600), is sent to api.steampowered.com only and is never logged; WalPE never handles a
 Steam password. Tests: `meson test -C build wsnet uitext thumbs steamsub workshop`.
 
