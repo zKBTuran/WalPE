@@ -34,7 +34,8 @@ background, into a copy of the size it is needed at, and the scene plays the cop
   enlarged by more than the texture slack (2 %). A scene whose textures stay at file size
   (`tex_downscale` off, `texture_limit` none) keeps its videos as they are too.
 * **What the copy is.** The import's format: H.264 High, yuv420p, `libx264 -preset medium
-  -crf 19`, bicubic scaling, MP4 with `+faststart`, no audio (video layers are silent). Every
+  -crf 19`, bicubic scaling, MP4 with `+faststart`, no audio (video layers are silent, and a
+  video wallpaper's sound comes from its own file: [SOUND.md](SOUND.md#video-wallpapers)). Every
   picture of the clip at the clip's own frame rate: the rate is never reduced, because what a
   monitor shows depends on settings that change while the copy stays (`fps`, the battery
   and focus limits), and `video_limit` already leaves out the pictures nobody sees. Only a
@@ -142,7 +143,11 @@ depends on its CPU: compare the daemon's CPU in a process monitor with the switc
   an older version), aspect preserved (sample aspect ratio and rotation metadata applied),
   **never upscaled**, even dimensions
 * **source frame rate** kept
-* **audio dropped** (`-an`): video wallpapers are silent
+* the **first sound track is kept** as AAC (192 kbit/s, stereo): the player takes a video
+  wallpaper's sound from the wallpaper's file ([SOUND.md](SOUND.md#video-wallpapers)). Videos
+  imported with 0.14.0 or earlier lost theirs (`-an`): import the original again. A copy the
+  daemon converts into its cache for a Workshop video it cannot read has no sound track; the
+  sound is taken from the Workshop file
 * already-conforming H.264 files are **remuxed** (stream copy, instant)
 
 Encoder: `libx264 -preset medium -crf 19` by default. To use the NVIDIA

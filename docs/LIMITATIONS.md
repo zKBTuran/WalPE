@@ -118,8 +118,11 @@ software renderer only ([Known limitations](#known-limitations)).
 - **Sound was measured, not listened to.** Scene sound layers (on by default) were measured
   against a PulseAudio null sink and against PipeWire's `pipewire-pulse` by recording the
   sink; no loudspeaker, no sound card. Quitting or restarting the daemon cuts a playing sound without a
-  fade. Video wallpapers are silent, and a web page's own sound is not affected by the
-  volume setting. Audio-reactive wallpapers react to wallpaper sound too.
+  fade. A video wallpaper's sound track and a web page's own sound follow the same
+  settings (measured against the PulseAudio null sink; web pages with WebKitGTK 2.52);
+  videos imported with 0.14.0 or earlier have no sound track and must be imported again,
+  and a video layer inside a scene is silent. Audio-reactive wallpapers react to wallpaper
+  sound too.
   [SOUND.md](SOUND.md).
 - **Builtin effects need a Wallpaper Engine install**
   ([USAGE.md](USAGE.md#wallpaper-engine-assets)); WalPE has no shaders of its own to

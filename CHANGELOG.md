@@ -76,6 +76,27 @@ run.** One default changes: wallpaper sound is on, at half volume (under Sound).
 - A packaged scene (`scene.pkg`) whose package changed after its copy was made without
   the sound files stayed silent with "cannot be opened" in the log; the log now says
   that the package has changed and that loading the wallpaper again makes a new copy.
+- **Video wallpapers play their sound track.** They were silent by design (the player
+  decodes pictures only), which nobody expects of a video with music. The first sound
+  track of the wallpaper's file is taken out once with ffmpeg into the cache (FLAC), in
+  the background and only when it is about to be heard, and played by what plays scene
+  sound, under the same settings: `scene_sound` (or the wallpaper's `walpe_sound`),
+  `volume`, `mute`; silent while paused; the same video on two monitors sounds once. The
+  sound follows the picture: it starts again where the clip starts again. With sound off
+  nothing is started, opened or decoded. [SOUND.md](docs/SOUND.md#video-wallpapers).
+- **An imported video keeps its sound track** (AAC in the MP4 the import writes). Up to
+  0.14.0 the import dropped it: videos imported before have no sound and must be imported
+  again from the original file. Workshop videos need nothing.
+- **Web wallpapers: sound starts, and follows the settings.** A page's media with sound
+  never started by themselves - WebKit waited for a click on the page, as a browser does:
+  no background music, `new Audio().play()` refused, Web Audio stuck, and a `<video
+  autoplay>` with a sound track that was not muted showed its first picture and stood
+  still. Pages may now start their media. Their sound follows `scene_sound`, `volume`
+  and `mute` (it followed none of them: a page that had been clicked played at full
+  volume with `mute=on`): silent while sound is off, scaled by the volume setting
+  otherwise. While a wallpaper is paused, `Audio` objects outside the
+  document and Web Audio are silent too (only elements in the document were paused).
+  [SOUND.md](docs/SOUND.md#web-wallpapers).
 
 ### Tray
 

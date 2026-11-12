@@ -4,7 +4,9 @@ Scene wallpapers can carry sound layers: rain, wind, a song, the tracks of a mus
 WalPE plays them: wallpaper sound is **on by default**, at half volume (up to 0.14.0 it was
 off, at volume 0, and could be switched on from the command line only). A wallpaper without
 sound layers behaves and renders exactly as before and costs nothing for it: no player, no
-thread, no connection to the sound server.
+thread, no connection to the sound server. The same switch, volume and mute are for the sound track of a
+[video wallpaper](#video-wallpapers) and for the sound a [web wallpaper](#web-wallpapers)
+makes.
 
 > **State of testing.** Measured against PulseAudio 16.1 and against PipeWire 1.0.5
 > (`pipewire-pulse`) with a null sink, by recording the sink's monitor and analysing the
@@ -132,5 +134,63 @@ Known behaviour worth knowing:
 - 16 sounding layers cost the daemon 36 threads and 80 file descriptors.
 - The status words "no sound server (...)" are also shown when the server runs and the
   sink named by `WALPE_SOUND_SINK` does not exist; the reason in the brackets is right.
-- Video wallpapers stay silent (their sound track is not decoded), and web wallpapers are
-  not touched by any of this.
+- A video inside a scene (a video layer) is silent.
+
+## Video wallpapers
+
+A video wallpaper whose file has a sound track plays it, under the same settings as a
+scene: `scene_sound` (or the wallpaper's own `walpe_sound`), `volume`, `mute`. One stream,
+named after the wallpaper.
+
+- The player decodes pictures only. The first sound track of the file is taken out once
+  with `ffmpeg` (the program imports already need) into
+  `~/.cache/walpe/video/<hash>-sound.flac` - lossless, 16 bit, two channels - and that file
+  is played by what plays scene sound. It is made when the track is about to be heard for
+  the first time, in the background: the picture never waits, the sound follows when the
+  file is there (0.4 s for a clip of four seconds here; a few seconds for a song). A video
+  without a sound track gets an empty file of that name, so nobody asks again. A changed
+  video gets a new file; files nothing played for 90 days are removed.
+- **With sound off nothing of this happens**: no ffmpeg, no file, no thread, no stream.
+- The picture leads. The track is started again where the clip starts again, and told the
+  picture's place when it begins to be heard or when the two are more than 0.3 s apart
+  (a resume after the other monitor played on). So nothing adds up over the passes of a
+  loop; where the clip starts again there is a break of some hundredths of a second in
+  the sound. A track shorter than the clip is silent until the clip starts again, a longer
+  one is cut there.
+- Paused wallpaper: silent, and it goes on where the picture goes on. The same video on
+  two monitors sounds once.
+- **Videos imported before this version have no sound track** - the import dropped it.
+  Import the original file again (`walpe-ctl add <file>`, or Import in the window): an
+  import now keeps the first sound track in the MP4 it writes (AAC, 192 kbit/s, stereo).
+  Workshop videos are played from their own file and need nothing.
+- Needs `ffmpeg` in `PATH` with its `flac` encoder (part of every build of FFmpeg), and
+  `walpe-video.so`'s FLAC decoder, as scene sound does. Without ffmpeg the log says so
+  and the video stays silent.
+- Not measured: how far the sound is behind the picture (the stream's buffer, about a
+  fifth of a second at most, and the moment the first frame of a pass is drawn).
+
+## Web wallpapers
+
+A web wallpaper plays its own sound: `<audio>` and `<video>` elements, `Audio` objects
+its script makes, Web Audio. WebKit plays it (GStreamer, in the page's process), under
+the application name `WebKit` in the desktop's mixer. The same three settings decide:
+
+- Sound off (`scene_sound=off`), `volume=0` or `mute=on`: the page is silent. A video in it goes on playing its pictures; an element that is sound alone is
+  held - paused, a `play()` of the page is taken and kept - and starts when sound is
+  switched on, so nothing is decoded into nothing.
+- Otherwise the volume setting scales what the page itself sets: the volume of every media
+  element (the page reads back the value it wrote) and the output of every AudioContext.
+  `walpe-ctl set volume=0.25` measured a quarter of the amplitude of `volume=1`.
+- A change applies at once, and a daemon that starts shows the page with the saved values.
+- Media start by themselves, without a click on the wallpaper. (Up to 0.14.0 they did
+  not: WebKit let media with sound start only after a click on the page, as a browser
+  does, so background music never began, and a `<video autoplay>` with a sound track that
+  the page had not muted showed its first picture and stood still.)
+- While the wallpaper is paused its media are paused, its AudioContexts suspended and the
+  page muted; they go on where they stopped.
+- There is no switch and no volume for one web wallpaper yet (`walpe_sound` and
+  `walpe_volume` are for scenes and videos).
+
+State of testing: WebKitGTK 2.52 with GStreamer 1.24 against a PulseAudio null sink (WAV,
+Ogg Vorbis, WebM with VP8 and Vorbis, an oscillator), by recording the sink's monitor.
+Nobody has heard it.

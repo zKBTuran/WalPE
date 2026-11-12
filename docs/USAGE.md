@@ -24,7 +24,7 @@ Workshop and the tray icon. Building and installing is in [BUILDING.md](BUILDING
 | Presets (`project.json` with `dependency` + `preset`) | yes | the base item is found next to the preset, in the Steam libraries or the WalPE library |
 | Steam Workshop | yes | browse, search and download through steamcmd; WalPE never handles a Steam password ([Steam Workshop](#steam-workshop)) |
 | Camera parallax, camera shake, bloom, sprite-sheet layers, script camera | yes | each with a switch; they change the picture of scenes that ask for them ([SCENE-FEATURES.md](SCENE-FEATURES.md)). HDR bloom is not implemented; the look of the camera shake is an estimate |
-| Sound | yes, on by default | scene sound layers (WAV, MP3, FLAC, Ogg) through PulseAudio / PipeWire: switched in Engine settings ("Wallpaper sound") or with `walpe-ctl set scene_sound=on\|off volume=0.5`, per wallpaper in its options ([SOUND.md](SOUND.md)). Video wallpapers are silent; web pages play their own media |
+| Sound | yes, on by default | scene sound layers (WAV, MP3, FLAC, Ogg) through PulseAudio / PipeWire: switched in Engine settings ("Wallpaper sound") or with `walpe-ctl set scene_sound=on\|off volume=0.5`, per wallpaper in its options ([SOUND.md](SOUND.md)). Video wallpapers play their sound track and web pages their own media under the same settings |
 | 3D model scenes, `application` wallpapers | no | |
 
 ## Starting WalPE
@@ -130,7 +130,7 @@ is [docs/SETTINGS.md](SETTINGS.md); the most used:
 | `gpu=auto\|integrated\|discrete\|<device>` | auto | which GPU renders; `auto` sets nothing |
 | `gl_api=auto\|gl\|gles` | auto | desktop OpenGL 3.3 where the driver has it, else OpenGL ES 3.2 / 3.1 |
 | `resolution=native\|720p\|1080p\|1440p\|4k\|WxH` | native | render resolution, for every monitor or `NAME:value,...` |
-| `scene_sound=on\|off`, `volume=0..1`, `mute=on\|off` | on, 0.5, off | wallpaper sound: the rows "Wallpaper sound", "Wallpaper volume" and "Mute" of the settings window |
+| `scene_sound=on\|off`, `volume=0..1`, `mute=on\|off` | on, 0.5, off | wallpaper sound, for scenes, video wallpapers and web pages alike: the rows "Wallpaper sound", "Wallpaper volume" and "Mute" of the settings window |
 | `bloom`, `camera_shake`, `camera_parallax`, `sprite_sheets`, `script_camera`, `script_texanim`, `fluid_sim` `=on\|off` | on | scene features; `parallax_offset` is off |
 | `hwdec=off\|auto\|<api>`, `video_zerocopy=on\|off` | off | decode videos with a hardware decoder; keep its pictures in GPU memory |
 | `video_scene_convert=on\|off` | on | a video inside a scene that is larger than it is shown is played from a converted copy of the size shown |
@@ -237,8 +237,8 @@ root with such an `assets/`). `walpe-ctl status` shows the result as `we_assets`
 The player reads H.264 in MP4. `walpe-ctl add <file>` (or **Import** in the GUI) turns
 anything ffmpeg can read into that: H.264 High, yuv420p, scaled to fit within
 `video_resolution` (by default the largest render resolution among your monitors; 1080p
-for a configuration from an older version; never upscaled), source frame rate kept, audio
-dropped; a file that already conforms is
+for a configuration from an older version; never upscaled), source frame rate kept, the
+first sound track kept as AAC; a file that already conforms is
 remuxed. `walpe-ctl open` on another format converts it once into `~/.cache/walpe/video`.
 ffmpeg runs as a child process with an argument vector (no shell).
 
