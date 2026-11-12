@@ -164,7 +164,10 @@ could do to the daemon. None of these was seen being used.
     passes. Found by fuzzing;
   - layer pictures of the old scene format are read by the decoder of their own format
     only: a file of another kind under a picture's name (SVG, XPM, PNM, a Windows icon
-    ...) no longer reaches that kind's loader;
+    ...) no longer reaches that kind's loader. Damaged files are taken as before, with
+    one exception: a progressive JPEG that ends early is refused there now, as scenes
+    of the current format always did; the part that had been decoded used to be shown
+    when the cut lay in the picture's data;
   - a JPEG layer picture of the old scene format that is larger than a texture and has
     to be held whole by its decoder (progressive) is refused beyond 256 MiB of that store:
     136 bytes of file could take gigabytes.
@@ -184,6 +187,14 @@ could do to the daemon. None of these was seen being used.
 - Two files that name wallpaper paths are written for your account alone (mode 0600),
   like `config.json`: the marker of wallpapers being loaded next to the control socket,
   and the tray's list of recent wallpapers.
+- Log lines: control characters in names and texts of a wallpaper, and in what a scene
+  script logs or throws, are shown as `\xNN`. A name with a line break in it could
+  start a log line of the wallpaper's own wording, and an escape sequence in it reached
+  the terminal the log was read in. Not covered: shader compile logs, the error texts
+  of libraries, the daemon's own lines and the video and web modules.
+- "Adjust layers": a layer's name is shown as one line of at most 200 characters,
+  without control or direction characters; a name of any length with line breaks went
+  into the list as it was.
 - A layer key with ten digits (`walpe-ctl layer`, `config.json`) overflowed a number
   before it was refused; nothing came of it with the compilers in use.
 - [SECURITY.md](docs/SECURITY.md) has a new section on web wallpapers: what a page gets
@@ -236,7 +247,14 @@ could do to the daemon. None of these was seen being used.
     panel that is closed;
   - the animated previews of a library window that is not on screen - on another
     workspace or tag, minimised - stop playing and give their frames back (up to 48 MiB,
-    and a timer 20 times a second).
+    and a timer 20 times a second);
+  - an open performance panel no longer builds its line anew for every answer of the
+    daemon that says what the last one said;
+  - X11: the look at the windows behind "covered" and the focus rule asks each window
+    for its attributes only: 22 requests to the X server per focus change with eight
+    windows where it was 53. What it finds is the same;
+  - Wayland: a window's new title no longer makes the daemon go through the window
+    list (a player or a browser changes its title all the time).
 - X11: a wallpaper window that another program destroys (a script that tidies up
   windows, `xdotool windowclose` on the wrong id) is made again. The daemon did not
   notice: that monitor showed the root window for as long as the daemon ran. It now

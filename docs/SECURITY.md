@@ -40,6 +40,13 @@ What to include:
 
 A file beyond a limit is not loaded (the log says which); the rest of the wallpaper is.
 
+Names and texts of a wallpaper that the engine prints in its log lines, and what a scene
+script logs or throws, are printed with their control characters and bytes that are not
+UTF-8 made visible (`\x0a`), at most 2048 bytes of a string: a name cannot start a log
+line or send an escape sequence to the terminal the log is read in. This does not cover
+shader compile logs, the error texts of libraries (a path in one can carry a control
+character of a folder's name), the daemon's own lines and the video and web modules.
+
 ## Scripts and shaders
 
 QuickJS version: wallpaper scripts are untrusted and run inside QuickJS, so its age matters.
