@@ -15,7 +15,15 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <math.h>
+#include <sched.h>
+#include <signal.h>
+#include <unistd.h>
 #include <sys/statvfs.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 
 #define CRF "19"   /* visually lossless-ish for wallpapers, ~1/3 of crf 15 size */
 /* the box of the converted copies written before the box was a setting
@@ -39,14 +47,40 @@
  * limit is the same (engine/video_custom.c). */
 #define IN_MAX_PIXELS "40000000"
 
-static void push_input_limits (GPtrArray *a)
+/* A clip inside another file (a scene's video texture: an MP4 somewhere in
+ * a .tex) is read through FFmpeg's "subfile" protocol, which is the byte
+ * range of a file and nothing else; the only container such a clip can be
+ * is the one the player reads. */
+#define IN_PROTOCOLS_RANGE "file,subfile"
+#define IN_FORMATS_RANGE "mov"
+
+static void push_input_limits (GPtrArray *a, gboolean range)
 {
     g_ptr_array_add (a, g_strdup ("-max_pixels"));
     g_ptr_array_add (a, g_strdup (IN_MAX_PIXELS));
     g_ptr_array_add (a, g_strdup ("-protocol_whitelist"));
-    g_ptr_array_add (a, g_strdup (IN_PROTOCOLS));
+    g_ptr_array_add (a, g_strdup (range ? IN_PROTOCOLS_RANGE : IN_PROTOCOLS));
     g_ptr_array_add (a, g_strdup ("-format_whitelist"));
-    g_ptr_array_add (a, g_strdup (IN_FORMATS));
+    g_ptr_array_add (a, g_strdup (range ? IN_FORMATS_RANGE : IN_FORMATS));
+}
+
+/* The input as ffmpeg and ffprobe are given it: "file:<src>", or for a
+ * clip that is a byte range of src "subfile,,start,<n>,end,<m>,,:file:<src>".
+ * The name comes after the last option of the protocol and behind "file:",
+ * so nothing in it is read as an option or as another protocol. */
+static char *input_url (const char *src, const WalpeImportScene *sc)
+{
+    if (!sc)
+        return g_strconcat ("file:", src, NULL);
+    return g_strdup_printf ("subfile,,start,%" G_GUINT64_FORMAT ",end,%" G_GUINT64_FORMAT
+                            ",,:file:%s", sc->off, sc->off + sc->len, src);
+}
+
+/* FFmpeg's name of a colour matrix (H.264 matrix_coefficients), NULL =
+ * not one a copy is tagged with */
+static const char *matrix_name (int m)
+{
+    return m == 1 ? "bt709" : m == 5 ? "bt470bg" : m == 6 ? "smpte170m" : m == 9 ? "bt2020nc" : NULL;
 }
 
 /* ------------------------------------------------------------ probe info */
@@ -179,9 +213,10 @@ static void push (GPtrArray *a, const char *s)
     g_ptr_array_add (a, g_strdup (s));
 }
 
-char **walpe_import_build_argv (const char *src, const char *dst_part,
-                                const WalpeMediaInfo *mi, const char *encoder,
-                                gboolean remux, const WalpeVideoBox *box)
+/* sc: the clip is a scene's (walpe_import_start_scene), else NULL */
+static char **build_argv (const char *src, const char *dst_part, const WalpeMediaInfo *mi,
+                          const char *encoder, gboolean remux, const WalpeVideoBox *box,
+                          const WalpeImportScene *sc)
 {
     GPtrArray *a = g_ptr_array_new ();
     push (a, "ffmpeg");
@@ -190,9 +225,19 @@ char **walpe_import_build_argv (const char *src, const char *dst_part,
     push (a, "-y");
     push (a, "-v");
     push (a, "error");
-    push_input_limits (a);
+    push_input_limits (a, sc != NULL);
+    if (sc) {
+        /* read the way the player reads it: an MP4 with H.264 in it, and
+         * the pictures as they are stored (a scene stretches them over its
+         * layer; the player applies no display matrix) */
+        push (a, "-f");
+        push (a, "mov");
+        push (a, "-c:v");
+        push (a, "h264");
+        push (a, "-noautorotate");
+    }
     push (a, "-i");
-    g_ptr_array_add (a, g_strconcat ("file:", src, NULL));
+    g_ptr_array_add (a, input_url (src, sc));
     push (a, "-map");
     push (a, "0:v:0");
     if (remux) {
@@ -200,9 +245,29 @@ char **walpe_import_build_argv (const char *src, const char *dst_part,
         push (a, "copy");
     } else {
         int w = 0, h = 0;
-        walpe_import_target_size (mi, box, &w, &h);
+        const char *mx = sc ? matrix_name (sc->matrix) : NULL;
+        if (sc) {
+            w = sc->w;
+            h = sc->h;
+        } else {
+            walpe_import_target_size (mi, box, &w, &h);
+        }
         push (a, "-vf");
-        g_ptr_array_add (a, g_strdup_printf ("scale=%d:%d:flags=bicubic,setsar=1,format=yuv420p", w, h));
+        /* (a scene's copy says which matrix its samples are in - the one
+         * the player took for the clip - since the player decides that of
+         * an untagged stream by its size, and the copy is smaller; the
+         * samples themselves are only scaled) */
+        if (mx)
+            g_ptr_array_add (a, g_strdup_printf ("scale=%d:%d:flags=bicubic,setsar=1,format=yuv420p,"
+                                                 "setparams=colorspace=%s:range=tv", w, h, mx));
+        else
+            g_ptr_array_add (a, g_strdup_printf ("scale=%d:%d:flags=bicubic,setsar=1,format=yuv420p", w, h));
+        if (mx) {
+            push (a, "-colorspace");
+            push (a, mx);
+            push (a, "-color_range");
+            push (a, "tv");
+        }
         push (a, "-c:v");
         push (a, encoder);
         if (!g_strcmp0 (encoder, "h264_nvenc")) {
@@ -239,6 +304,19 @@ char **walpe_import_build_argv (const char *src, const char *dst_part,
     return (char **) g_ptr_array_free (a, FALSE);
 }
 
+char **walpe_import_build_argv (const char *src, const char *dst_part,
+                                const WalpeMediaInfo *mi, const char *encoder,
+                                gboolean remux, const WalpeVideoBox *box)
+{
+    return build_argv (src, dst_part, mi, encoder, remux, box, NULL);
+}
+
+char **walpe_import_scene_argv (const char *src, const WalpeImportScene *sc, const char *dst_part,
+                                const char *encoder)
+{
+    return build_argv (src, dst_part, NULL, encoder, FALSE, NULL, sc);
+}
+
 /* ------------------------------------------------------------ the job */
 
 typedef enum { ST_ENCODERS, ST_PROBE, ST_ENCODE, ST_THUMB, ST_DONE } Stage;
@@ -268,6 +346,11 @@ struct _WalpeImport {
     gint64 max_us, max_bytes;        /* 0 = no limit */
     guint watch_id;
     char *limit_msg;                 /* a limit was hit: why the child was stopped */
+    /* the copy of a scene's video (walpe_import_start_scene): the clip is
+     * a byte range of src, the output has exactly the size asked for, and
+     * ffmpeg runs at the lowest priority */
+    gboolean is_scene;
+    WalpeImportScene scene;
 };
 
 static char *encoder_list;           /* cached `ffmpeg -encoders` output */
@@ -459,6 +542,38 @@ static void encode_wait_cb (GObject *o, GAsyncResult *res, gpointer user)
     imp_unref (imp);
 }
 
+/* Between fork and exec of a conversion nobody asked for in person (only
+ * calls that may be made there): the lowest CPU and disk priority - it gets
+ * the time nothing else wants - and it does not outlive the daemon. What
+ * the system refuses stays as it was. user: 0 = the daemon's priority
+ * (WALPE_CONVERT_BACKGROUND=0: for tests on a machine that is never idle,
+ * where such a child would not get to run). */
+static void background_child_setup (gpointer user)
+{
+    if (GPOINTER_TO_INT (user)) {
+        if (setpriority (PRIO_PROCESS, 0, 19) != 0) {
+            /* stays at the daemon's */
+        }
+#ifdef SCHED_IDLE
+        {
+            struct sched_param sp = { 0 };
+            if (sched_setscheduler (0, SCHED_IDLE, &sp) != 0) {
+                /* nice 19 it is */
+            }
+        }
+#endif
+#if defined(__linux__) && defined(SYS_ioprio_set)
+        /* IOPRIO_WHO_PROCESS, this process, IOPRIO_CLASS_IDLE << IOPRIO_CLASS_SHIFT */
+        if (syscall (SYS_ioprio_set, 1, 0, 3 << 13) != 0) {
+            /* the disk scheduler's default */
+        }
+#endif
+    }
+#if defined(__linux__) && defined(PR_SET_PDEATHSIG)
+    prctl (PR_SET_PDEATHSIG, SIGKILL);
+#endif
+}
+
 static void start_encode (WalpeImport *imp)
 {
     imp->stage = ST_ENCODE;
@@ -467,12 +582,22 @@ static void start_encode (WalpeImport *imp)
         g_snprintf (imp->mode, sizeof (imp->mode), "remux");
     else
         g_snprintf (imp->mode, sizeof (imp->mode), "transcode:%s", imp->used_encoder);
-    char **argv = walpe_import_build_argv (imp->src, imp->dst_part, &imp->mi,
-                                           imp->used_encoder, imp->remux, &imp->box);
+    char **argv = build_argv (imp->src, imp->dst_part, &imp->mi, imp->used_encoder, imp->remux,
+                              &imp->box, imp->is_scene ? &imp->scene : NULL);
     GError *err = NULL;
-    imp->proc = g_subprocess_newv ((const char *const *) argv,
-                                   G_SUBPROCESS_FLAGS_STDOUT_PIPE |
-                                   G_SUBPROCESS_FLAGS_STDERR_MERGE, &err);
+    if (imp->is_scene) {
+        GSubprocessLauncher *l = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+                                                            G_SUBPROCESS_FLAGS_STDERR_MERGE);
+        const char *bg = g_getenv ("WALPE_CONVERT_BACKGROUND");
+        g_subprocess_launcher_set_child_setup (l, background_child_setup,
+                                               GINT_TO_POINTER (!(bg && *bg == '0')), NULL);
+        imp->proc = g_subprocess_launcher_spawnv (l, (const char *const *) argv, &err);
+        g_object_unref (l);
+    } else {
+        imp->proc = g_subprocess_newv ((const char *const *) argv,
+                                       G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+                                       G_SUBPROCESS_FLAGS_STDERR_MERGE, &err);
+    }
     g_strfreev (argv);
     if (!imp->proc) {
         finish (imp, FALSE, err->message);
@@ -545,6 +670,34 @@ static void probe_cb (GObject *o, GAsyncResult *res, gpointer user)
                                          : (errs && *errs) ? g_strstrip (errs) : "no video stream");
         finish (imp, FALSE, msg);
         g_free (msg);
+    } else if (imp->is_scene && (g_strcmp0 (imp->mi.codec, "h264") ||
+                                 g_strcmp0 (imp->mi.pix_fmt, "yuv420p"))) {
+        /* a copy is 8-bit 4:2:0 in limited range: only a clip that is the
+         * same gets one, so that nothing but its size changes */
+        char *msg = g_strdup_printf ("left as it is: %s %s is not 8-bit 4:2:0 H.264 in limited range",
+                                     imp->mi.codec ? imp->mi.codec : "?",
+                                     imp->mi.pix_fmt ? imp->mi.pix_fmt : "?");
+        finish (imp, FALSE, msg);
+        g_free (msg);
+    } else if (imp->is_scene && (imp->scene.w > imp->mi.width || imp->scene.h > imp->mi.height)) {
+        char *msg = g_strdup_printf ("left as it is: the clip is %dx%d, not larger than the "
+                                     "%dx%d asked for", imp->mi.width, imp->mi.height,
+                                     imp->scene.w, imp->scene.h);
+        finish (imp, FALSE, msg);
+        g_free (msg);
+    } else if (imp->is_scene) {
+        const char *enc = pick_encoder (imp->encoder);
+        if (!enc) {
+            finish (imp, FALSE, "this ffmpeg build has no H.264 encoder (libx264, h264_nvenc "
+                                "or libopenh264)");
+        } else {
+            imp->remux = FALSE;     /* never: the point is another size */
+            imp->used_encoder = g_strdup (enc);
+            g_message ("import: %s (%" G_GUINT64_FORMAT " bytes at %" G_GUINT64_FORMAT "): h264 "
+                       "%dx%d -> %s %dx%d", imp->src, imp->scene.len, imp->scene.off,
+                       imp->mi.width, imp->mi.height, enc, imp->scene.w, imp->scene.h);
+            start_encode (imp);
+        }
     } else {
         imp->remux = walpe_import_can_remux (&imp->mi, &imp->box);
         const char *enc = imp->remux ? "copy" : pick_encoder (imp->encoder);
@@ -574,15 +727,23 @@ static void start_probe (WalpeImport *imp)
 {
     imp->stage = ST_PROBE;
     g_snprintf (imp->mode, sizeof (imp->mode), "probe");
-    char *in = g_strconcat ("file:", imp->src, NULL);
+    char *in = input_url (imp->src, imp->is_scene ? &imp->scene : NULL);
     const char *argv[] = { "ffprobe", "-v", "error", "-max_pixels", IN_MAX_PIXELS,
                            "-protocol_whitelist", IN_PROTOCOLS, "-format_whitelist", IN_FORMATS,
                            "-print_format", "json",
                            "-show_format", "-show_streams", "-select_streams", "v:0",
                            in, NULL };
+    /* (a scene's clip: the byte range, as an MP4 and nothing else) */
+    const char *argv_scene[] = { "ffprobe", "-v", "error", "-max_pixels", IN_MAX_PIXELS,
+                                 "-protocol_whitelist", IN_PROTOCOLS_RANGE,
+                                 "-format_whitelist", IN_FORMATS_RANGE, "-f", "mov",
+                                 "-print_format", "json",
+                                 "-show_format", "-show_streams", "-select_streams", "v:0",
+                                 in, NULL };
     GError *err = NULL;
-    imp->proc = g_subprocess_newv (argv, G_SUBPROCESS_FLAGS_STDOUT_PIPE |
-                                         G_SUBPROCESS_FLAGS_STDERR_PIPE, &err);
+    imp->proc = g_subprocess_newv (imp->is_scene ? argv_scene : argv,
+                                   G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+                                   G_SUBPROCESS_FLAGS_STDERR_PIPE, &err);
     g_free (in);
     if (!imp->proc) {
         finish (imp, FALSE, err->message);
@@ -712,22 +873,24 @@ char *walpe_video_cache_file (const char *src, const WalpeVideoBox *box)
 
 static WalpeImport *import_start (const char *src, const char *dest_dir, const char *dst_file,
                                   const char *encoder, const WalpeVideoBox *box,
+                                  const WalpeImportScene *sc,
                                   WalpeImportDone done, gpointer user, GError **err);
 
 WalpeImport *walpe_import_start (const char *src, const char *dest_dir,
                                  const char *encoder, const WalpeVideoBox *box,
                                  WalpeImportDone done, gpointer user, GError **err)
 {
-    return import_start (src, dest_dir, NULL, encoder, box, done, user, err);
+    return import_start (src, dest_dir, NULL, encoder, box, NULL, done, user, err);
 }
 
-WalpeImport *walpe_import_start_to (const char *src, const char *dst_file,
-                                    const char *encoder, const WalpeVideoBox *box,
-                                    WalpeImportDone done, gpointer user, GError **err)
+/* a conversion into the cache: its folder, and the limits it runs under */
+static WalpeImport *start_bounded (const char *src, const char *dst_file, const char *encoder,
+                                   const WalpeVideoBox *box, const WalpeImportScene *sc,
+                                   WalpeImportDone done, gpointer user, GError **err)
 {
     char *dir = g_path_get_dirname (dst_file);
     g_mkdir_with_parents (dir, 0700);   /* created private; an existing dir keeps its mode */
-    WalpeImport *imp = import_start (src, dir, dst_file, encoder, box, done, user, err);
+    WalpeImport *imp = import_start (src, dir, dst_file, encoder, box, sc, done, user, err);
     g_free (dir);
     if (imp) {
         imp->max_us = limit_env ("WALPE_CONVERT_MAX_MIN", 60) * 60 * G_USEC_PER_SEC;
@@ -737,10 +900,35 @@ WalpeImport *walpe_import_start_to (const char *src, const char *dst_file,
     return imp;
 }
 
+WalpeImport *walpe_import_start_to (const char *src, const char *dst_file,
+                                    const char *encoder, const WalpeVideoBox *box,
+                                    WalpeImportDone done, gpointer user, GError **err)
+{
+    return start_bounded (src, dst_file, encoder, box, NULL, done, user, err);
+}
+
+WalpeImport *walpe_import_start_scene (const char *src, const WalpeImportScene *sc,
+                                       const char *dst_file, WalpeImportDone done, gpointer user,
+                                       GError **err)
+{
+    /* sizes an encoder takes, a range that is one, and an output in a
+     * place of ours (the caller's cache name) */
+    if (!sc || sc->len < 64 || sc->off > G_MAXINT64 - sc->len || sc->w < 2 || sc->h < 2 ||
+        (sc->w & 1) || (sc->h & 1) || sc->w > WALPE_RES_MAX_SIDE || sc->h > WALPE_RES_MAX_SIDE ||
+        !dst_file || !g_path_is_absolute (dst_file)) {
+        g_set_error (err, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "not a clip inside a file, or "
+                     "not a size a copy can have");
+        return NULL;
+    }
+    return start_bounded (src, dst_file, NULL, NULL, sc, done, user, err);
+}
+
 /* dst_file NULL: <dest_dir>/<stem>.mp4 + <stem>.jpg thumbnail (library
- * import); else exactly dst_file, no thumbnail */
+ * import); else exactly dst_file, no thumbnail. sc: the clip is a byte
+ * range of src and the output has the size it names. */
 static WalpeImport *import_start (const char *src, const char *dest_dir, const char *dst_file,
                                   const char *encoder, const WalpeVideoBox *box,
+                                  const WalpeImportScene *sc,
                                   WalpeImportDone done, gpointer user, GError **err)
 {
     if (!src || !g_path_is_absolute (src) || !g_file_test (src, G_FILE_TEST_IS_REGULAR)) {
@@ -776,6 +964,10 @@ static WalpeImport *import_start (const char *src, const char *dest_dir, const c
     imp->user = user;
     if (box && box->w > 0 && box->h > 0)
         imp->box = *box;
+    if (sc) {
+        imp->is_scene = TRUE;
+        imp->scene = *sc;
+    }
     if (!encoder || !*encoder)
         encoder = g_getenv ("WALPE_IMPORT_ENCODER");
     imp->encoder = g_strdup (encoder && *encoder ? encoder : "libx264");

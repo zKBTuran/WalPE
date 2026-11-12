@@ -86,6 +86,7 @@ static const WalpeSetKey walpe_set_keys[] = {
     { "skip_hidden_margin", WALPE_SET_NUM },
     { "skip_hidden_inset", WALPE_SET_NUM },
     { "video_limit", WALPE_SET_BOOL },
+    { "video_scene_convert", WALPE_SET_BOOL },  /* videos inside scenes: played from a copy of the size needed */
     { "video_upload", WALPE_SET_STR },
     /* the window system the daemon draws on (auto / x11 / wayland; read
      * at its next start) and, on Wayland, whether the wallpaper surface

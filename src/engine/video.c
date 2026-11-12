@@ -9,6 +9,7 @@
 #include "common/config.h" /* IWYU pragma: keep */
 #include "common/import.h" /* walpe_video_cache_file */
 #include <glib/gstdio.h>
+#include <string.h>
 #include <utime.h>
 
 static gint video_hwdec;   /* atomic: config "video_hwdec", 0 = off */
@@ -366,4 +367,17 @@ gint64 walpe_video_tex_interval_us (WalpeVideoTex *v) { (void) v; return 0; }
 void walpe_video_tex_set_view (WalpeVideoTex *v, int w, int h) { (void) v; (void) w; (void) h; }
 void walpe_video_tex_set_paused (WalpeVideoTex *v, gboolean p) { (void) v; (void) p; }
 void walpe_video_tex_free (WalpeVideoTex *v) { (void) v; }
+WalpeVideoTex *walpe_video_tex_new_copy (const char *path, guint64 off, guint64 len,
+                                         const WalpeVideoTexCopy *copy, GError **err)
+{
+    (void) copy;
+    return walpe_video_tex_new (path, off, len, err);
+}
+void walpe_video_tex_set_copy (WalpeVideoTex *v, const WalpeVideoTexCopy *copy) { (void) v; (void) copy; }
+void walpe_video_tex_info (WalpeVideoTex *v, WalpeVideoTexInfo *info)
+{
+    (void) v;
+    memset (info, 0, sizeof *info);
+}
+char *walpe_video_scene_note (WalpeVideoJobText job, gpointer user) { (void) job; (void) user; return NULL; }
 #endif

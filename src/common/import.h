@@ -72,6 +72,35 @@ WalpeImport *walpe_import_start (const char *src, const char *dest_dir,
 WalpeImport *walpe_import_start_to (const char *src, const char *dst_file,
                                     const char *encoder, const WalpeVideoBox *box,
                                     WalpeImportDone done, gpointer user, GError **err);
+/* The copy of a scene's video (common/scenevideo.h): the clip is the MP4 at
+ * [off, off + len) of src - a WE .tex with a video in it - and the copy is
+ * exactly w x h. Otherwise the pipeline and the format of
+ * walpe_import_start_to, with its limits (WALPE_CONVERT_MAX_MIN, ..._MB,
+ * the disk), and with these differences:
+ *   - the clip is read through FFmpeg's "subfile" protocol (the byte range
+ *     of a file; no temporary copy), as an MP4 with H.264 in it and as
+ *     nothing else, its pictures as they are stored (no rotation, no pixel
+ *     aspect ratio: a scene stretches them over its layer);
+ *   - only 8-bit 4:2:0 H.264 in limited range is converted (what the copy
+ *     is): anything else ends with an error that says so and no output;
+ *   - it is never a stream copy;
+ *   - the copy is tagged with the colour matrix `matrix` (1 BT.709, 5 / 6
+ *     BT.601, 9 BT.2020; anything else: no tag) and limited range; its
+ *     samples are scaled, not converted;
+ *   - ffmpeg runs at the lowest CPU and disk priority (nice 19, SCHED_IDLE,
+ *     idle I/O class) and ends with the daemon.
+ * Source frame rate, no audio, as every import. */
+typedef struct {
+    guint64 off, len;
+    int w, h;
+    int matrix;
+} WalpeImportScene;
+WalpeImport *walpe_import_start_scene (const char *src, const WalpeImportScene *sc,
+                                       const char *dst_file, WalpeImportDone done, gpointer user,
+                                       GError **err);
+/* argv of that run (tests; NULL-terminated, g_strfreev) */
+char   **walpe_import_scene_argv (const char *src, const WalpeImportScene *sc, const char *dst_part,
+                                  const char *encoder);
 /* where the converted copy of video src is cached:
  * <user cache dir>/walpe/video/<hash of path, size, mtime>[-<W>x<H> |
  * -full].mp4 - a changed or replaced source gets a new name, and a copy

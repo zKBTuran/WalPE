@@ -276,6 +276,11 @@ typedef struct {
         double copied;
         int real, mode;
     } up_log;
+    /* src->lock: what this user wants the clip played from (videotex.h,
+     * WalpeVideoTexCopy; a video wallpaper says nothing: the clip) */
+    int copy_state;
+    char *copy_path;
+    int copy_w, copy_h;
 } CvViewer;
 
 /* shared decode pipeline (path-keyed, refcounted) */
@@ -423,6 +428,27 @@ struct _CvSource {
     guint lim_skipped, lim_unshown; /* decode thread, fps log: not decoded / decoded and not queued */
     /* decode thread, WALPE_FPS_LOG: CPU seconds per stage since the last line */
     double st_demux, st_decode, st_prep, st_copied, st_workers;
+    /* A scene's clip may be played from a converted copy of itself
+     * (videotex.h). `demux` is then the copy's; the clip is found again
+     * through the registry key and its byte range. */
+    gboolean scene;             /* src->lock: a scene's video texture */
+    guint64 range_off, range_len;   /* the clip in its file (0, 0 = the whole file) */
+    int orig_w, orig_h;         /* the clip's own size, pictures and frame rate (set */
+    guint orig_n;               /*  when the source is made, then only read) */
+    double orig_fps;
+    int play_w, play_h;         /* src->lock: what `demux` is, for the readers that */
+    double play_fps;            /*  are not the decode thread */
+    char *alt_path;             /* src->lock (written by the decode thread): the copy
+                                 * that is played, NULL = the clip itself */
+    char *alt_bad;              /* src->lock: why the copy that is asked for is not used */
+    /* another file from where the clip starts again (cv_alt_update asks,
+     * cv_swap_now does it) */
+    gint alt_pending;           /* atomic */
+    Mp4Demux *alt_demux;        /* src->lock: opened by who asked */
+    char *alt_next;             /* src->lock: its file, NULL = the clip itself */
+    /* atomic: what the decoder's pictures are (WalpeVideoTexInfo.format,
+     * .matrix): 0 until the first one */
+    gint pic_format, pic_matrix;
 };
 
 static const char *cv_up_name (int base);
@@ -1499,6 +1525,12 @@ static void cv_threads_learn (const char *key, int n)
  * frame. The decoder gets more threads when it does fall behind
  * (cv_threads_raise). WALPE_VIDEO_THREADS=n fixes the count;
  * WALPE_VIDEO_THREADS_START=n (testing) sets only what it starts with. */
+/* (a copy of the clip is another, smaller clip: it learns for itself) */
+static const char *cv_learn_key (const CvSource *src)
+{
+    return src->alt_path ? src->alt_path : src->path;
+}
+
 static int cv_threads_for (const CvSource *src, int *max)
 {
     const Mp4Demux *d = src->demux;
@@ -1516,7 +1548,7 @@ static int cv_threads_for (const CvSource *src, int *max)
     const char *ts = g_getenv ("WALPE_VIDEO_THREADS_START");
     if (ts && atoi (ts) > 0)
         n = atoi (ts);
-    n = MAX (n, cv_threads_learned (src->path));
+    n = MAX (n, cv_threads_learned (cv_learn_key (src)));
     return CLAMP (n, 1, *max);
 }
 
@@ -3031,7 +3063,7 @@ static gboolean cv_raise_now (CvSource *src)
 {
     int to = src->raise_to;
     src->raise_to = 0;
-    cv_threads_learn (src->path, to);
+    cv_threads_learn (cv_learn_key (src), to);
     src->threads = to;
     if (!src->dec)
         return TRUE;        /* parked meanwhile: cv_unpark opens it with the new count */
@@ -3046,6 +3078,221 @@ static gboolean cv_raise_now (CvSource *src)
     src->sent_sps = FALSE;  /* the new decoder's first packet carries SPS / PPS */
     g_debug ("video: %d decode threads from sample %u on (%s)", to, src->demux->cursor, src->path);
     return TRUE;
+}
+
+/* ----------------------------------- played from a converted copy
+ * (videotex.h, common/scenevideo.h) */
+
+/* frame limit: the frame interval of the file that is played and its
+ * first time stamp (source creation, and again when the file changes) */
+static void cv_clip_times (CvSource *src)
+{
+    double fps = cv_clip_fps (src->demux);
+    src->clip_iv = fps > 0 ? 1.0 / fps : 0;
+    gint64 t0 = G_MAXINT64;
+    for (guint i = 0; i < src->demux->nsamples; i++)
+        t0 = MIN (t0, cv_sample_ticks (src->demux, i));
+    src->clip_t0 = src->demux->nsamples && src->demux->timescale
+        ? (double) t0 / (double) src->demux->timescale : 0;
+}
+
+/* src->lock held (or nobody else knows the source yet) */
+static void cv_play_note (CvSource *src)
+{
+    src->play_w = src->demux->width;
+    src->play_h = src->demux->height;
+    src->play_fps = cv_clip_fps (src->demux);
+}
+
+/* the file the clip itself is in: the registry key without "@off+len" */
+static char *cv_clip_file (const CvSource *src)
+{
+    const char *at = src->range_off || src->range_len ? strrchr (src->path, '@') : NULL;
+    return at ? g_strndup (src->path, (gsize) (at - src->path)) : g_strdup (src->path);
+}
+
+/* Is the file behind `a` the clip of src again, only smaller: as many
+ * pictures at the same rate, shown as stored, not larger? A copy made by
+ * the daemon is; a file that is something else (cut short, of another
+ * clip) would break the loop or the picture. *why (g_free) says what is
+ * wrong. */
+static gboolean cv_alt_fits (const CvSource *src, const Mp4Demux *a, char **why)
+{
+    const double fps = cv_clip_fps (a);
+    *why = NULL;
+    if (a->rotation != 0 || a->sar_num != a->sar_den)
+        *why = g_strdup ("it is stored rotated or with pixels that are not square");
+    else if (a->nsamples != src->orig_n)
+        *why = g_strdup_printf ("it has %u pictures, the clip %u", a->nsamples, src->orig_n);
+    else if (src->orig_fps > 0 && fabs (fps - src->orig_fps) > 0.005 * src->orig_fps)
+        *why = g_strdup_printf ("it has %.3f pictures a second, the clip %.3f", fps, src->orig_fps);
+    else if (a->width > src->orig_w || a->height > src->orig_h || a->width < 2 || a->height < 2)
+        *why = g_strdup_printf ("it is %d x %d, the clip %d x %d", a->width, a->height,
+                                src->orig_w, src->orig_h);
+    return *why == NULL;
+}
+
+/* what the users of src ask for (src->lock held): the clip itself as soon
+ * as one of them does, else the largest copy they name (NULL = the clip) */
+static const char *cv_alt_wanted (const CvSource *src)
+{
+    const CvViewer *best = NULL;
+    for (guint i = 0; i < src->viewers->len; i++) {
+        const CvViewer *vw = g_ptr_array_index (src->viewers, i);
+        if (vw->copy_state != WALPE_VTEX_COPY_READY || !vw->copy_path)
+            return NULL;
+        if (!best || (gint64) vw->copy_w * vw->copy_h > (gint64) best->copy_w * best->copy_h)
+            best = vw;
+    }
+    return best ? best->copy_path : NULL;
+}
+
+/* one change of a played file is prepared at a time (its file is opened
+ * under this lock; taken before a source's own) */
+static GMutex cv_alt_lock;
+
+/* A user of src said what it wants, or left: when the file that is played
+ * (or is about to be) is not the one they ask for now, the other one is
+ * opened here and handed to the decode thread, which changes over where
+ * the clip starts again (cv_swap_now). Any thread that keeps src alive. */
+static void cv_alt_update (CvSource *src)
+{
+    g_mutex_lock (&cv_alt_lock);
+    g_mutex_lock (&src->lock);
+    char *want = g_strdup (cv_alt_wanted (src));
+    const gboolean pending = g_atomic_int_get (&src->alt_pending) != 0;
+    gboolean same = !g_strcmp0 (want, pending ? src->alt_next : src->alt_path);
+    if (!same && !g_strcmp0 (want, src->alt_path)) {
+        /* a change that is not wanted any more */
+        g_atomic_int_set (&src->alt_pending, 0);
+        g_clear_pointer (&src->alt_demux, mp4_demux_free);
+        g_clear_pointer (&src->alt_next, g_free);
+        same = TRUE;
+    }
+    if (same && want && !g_strcmp0 (want, src->alt_path))
+        g_clear_pointer (&src->alt_bad, g_free);
+    g_mutex_unlock (&src->lock);
+    if (!same) {
+        GError *e = NULL;
+        char *why = NULL, *file = want ? g_strdup (want) : cv_clip_file (src);
+        Mp4Demux *d = want ? mp4_demux_open_range (want, 0, 0, &e)
+                           : mp4_demux_open_range (file, src->range_off, src->range_len, &e);
+        if (d && want && !cv_alt_fits (src, d, &why))
+            g_clear_pointer (&d, mp4_demux_free);
+        if (!d && !why)
+            why = g_strdup (e ? e->message : "it cannot be read");
+        g_clear_error (&e);
+        const gboolean want_copy = want != NULL;
+        char *bad = d ? NULL : g_strdup (why);
+        g_mutex_lock (&src->lock);
+        g_free (src->alt_bad);
+        src->alt_bad = d ? NULL : g_steal_pointer (&why);
+        if (d) {
+            g_clear_pointer (&src->alt_demux, mp4_demux_free);
+            g_free (src->alt_next);
+            src->alt_demux = d;
+            src->alt_next = g_steal_pointer (&want);
+            g_atomic_int_set (&src->alt_pending, 1);
+        }
+        g_mutex_unlock (&src->lock);
+        /* (src->alt_next and alt_bad are this thread's to read: they change
+         * under cv_alt_lock, or go with the swap, which only frees them) */
+        if (d && want_copy)
+            g_message ("video: %s will be played from its converted copy %s where it starts again",
+                       src->path, file);
+        else if (d)
+            g_message ("video: %s will be played as it is again where it starts again", src->path);
+        else
+            g_message ("video: %s is not played from %s: %s", src->path, file, bad ? bad : "?");
+        g_free (file);
+        g_free (why);
+        g_free (bad);
+    }
+    g_free (want);
+    g_mutex_unlock (&cv_alt_lock);
+}
+
+/* decode thread: is this the place to change files - the clip is at its
+ * end (the next read would start it again), or has not begun */
+static gboolean cv_swap_here (const CvSource *src)
+{
+    const Mp4Demux *d = src->demux;
+    return src->skip_until < 0 && !src->rebase && (d->cursor >= d->nsamples || d->cursor == 0);
+}
+
+/* decode thread: the old decoder has given up its last picture; play the
+ * file cv_alt_update prepared from its first picture on. That picture
+ * follows the last one of the old file after one frame interval on the
+ * same presentation clock, like the first picture of every other pass.
+ * FALSE = no decoder any more. */
+static gboolean cv_swap_now (CvSource *src)
+{
+    if (!src->dec)
+        return TRUE;        /* parked meanwhile: after the resume, at the clip's end */
+    g_mutex_lock (&src->lock);
+    Mp4Demux *nd = g_steal_pointer (&src->alt_demux);
+    char *np = g_steal_pointer (&src->alt_next);
+    g_atomic_int_set (&src->alt_pending, 0);
+    g_mutex_unlock (&src->lock);
+    if (!nd) {
+        /* the change was taken back meanwhile: the decoder, which was told
+         * that its input had ended, takes the clip's next pass */
+        g_free (np);
+        avcodec_flush_buffers (src->dec);
+        return TRUE;
+    }
+    const double iv = src->frame_interval > 0.001 ? src->frame_interval
+                    : src->clip_iv > 0 ? src->clip_iv : 1.0 / 30.0;
+    /* (frame limit: the pass ended with its last picture, also when that
+     * one was left out) */
+    const double play = src->last_play < 0 ? 0
+        : src->last_play + iv + (src->last_raw >= 0 && src->drop_raw_max > src->last_raw
+                                     ? src->drop_raw_max - src->last_raw : 0);
+    const gboolean ended = src->demux->cursor >= src->demux->nsamples;
+    av_frame_unref (src->frame);
+    av_frame_unref (src->swframe);
+    avcodec_free_context (&src->dec);
+    cv_hw_close (src);
+    Mp4Demux *old = src->demux;
+    g_mutex_lock (&src->lock);
+    src->demux = nd;
+    g_free (src->alt_path);
+    src->alt_path = np;
+    cv_play_note (src);
+    g_mutex_unlock (&src->lock);
+    mp4_demux_free (old);
+    cv_clip_times (src);
+    g_free (src->hw_profile);
+    src->hw_profile = walpe_h264_profile_text (src->demux->sps, src->demux->sps_len);
+    src->threads = 0;       /* what this file needs (cv_decoder_open asks) */
+    src->raise_to = 0;
+    if (ended)
+        g_atomic_int_inc (&src->passes);
+    GError *err = NULL;
+    if (!cv_decoder_open (src, FALSE, &err)) {
+        g_warning ("video: %s: %s", src->path, err ? err->message : "decoder");
+        g_clear_error (&err);
+        return FALSE;
+    }
+    cv_restart_at (src, -1, play, 0);
+    src->drop_raw_max = -1;
+    g_message ("video: %s is played from %s now: %dx%d %.2f fps, %d decode thread(s)", src->path,
+               src->alt_path ? src->alt_path : "the clip itself", src->demux->width,
+               src->demux->height, cv_clip_fps (src->demux), src->dec->thread_count);
+    return TRUE;
+}
+
+/* decode thread: what the decoder's pictures are, once (videotex.h
+ * WalpeVideoTexInfo): a copy is made only of 8-bit 4:2:0 in limited range,
+ * and is tagged with the matrix the pictures are converted with here */
+static void cv_note_format (CvSource *src)
+{
+    const AVFrame *fr = src->frame;
+    const guint mode = cv_frame_mode (fr);
+    const gboolean plain = (fr->format == AV_PIX_FMT_YUV420P || fr->format == AV_PIX_FMT_NV12) &&
+                           !(mode & WALPE_YUV_FULL);
+    g_atomic_int_set (&src->pic_matrix, (mode & WALPE_YUV_BT2020) ? 9 : (mode & WALPE_YUV_BT709) ? 1 : 6);
+    g_atomic_int_set (&src->pic_format, plain ? 1 : 2);
 }
 
 /* decode thread: demux sample -> libavcodec -> frame queue
@@ -3140,6 +3387,10 @@ static gpointer cv_decode_thread (gpointer data)
          * the new decoder takes the next sample */
         gboolean drain = src->raise_to > 0 && !src->hw_on && src->skip_until < 0 &&
                          cv_raise_here (src);
+        /* another file from here on (a converted copy of the clip, or the
+         * clip again): the decoder is drained the same way, then replaced
+         * together with the demuxer (cv_swap_now) */
+        const gboolean swap = !drain && g_atomic_int_get (&src->alt_pending) && cv_swap_here (src);
         /* (declared in front of the drain pass's jump: both ways into the
          * receive loop start without a picture) */
         gboolean got_frame = FALSE;
@@ -3147,9 +3398,9 @@ static gpointer cv_decode_thread (gpointer data)
             src->raise_to = 0;      /* a hardware decoder decodes now */
 
         double c0 = cv_cpu ();
-        const Mp4Sample *smp = drain ? NULL : mp4_demux_next (src->demux);
+        const Mp4Sample *smp = drain || swap ? NULL : mp4_demux_next (src->demux);
         gboolean at_start = !src->sent_sps;
-        if (drain) {
+        if (drain || swap) {
             avcodec_send_packet (src->dec, NULL);
             goto receive;
         }
@@ -3339,6 +3590,8 @@ receive:
                     }
                 }
             }
+            if (!g_atomic_int_get (&src->pic_format))
+                cv_note_format (src);
             /* our packet pts are in 1/timescale units and the decoder
              * may override avctx->time_base from SPS timing info —
              * always scale by OUR demuxer's timescale */
@@ -3591,6 +3844,10 @@ receive:
         }
         if (drain && !g_atomic_int_get (&src->quit) && !cv_raise_now (src))
             break;
+        if (swap && !g_atomic_int_get (&src->quit) && !cv_swap_now (src))
+            break;
+        if (swap)
+            continue;       /* (a decoder without a picture yet is not a barren stream) */
         /* a stream the decoder takes without ever giving a picture (e.g.
          * predicted frames only, no keyframe: nothing is output and nothing
          * fails): the frame queue is this loop's only pacing, so it read
@@ -4869,7 +5126,12 @@ static void cvv_free (WalpeVideo *v)
     } else {
         cv_recompute_paused (src);
     }
+    const gboolean replan = !last && src->scene;
     g_mutex_unlock (&src->lock);
+    /* (what the users that stay ask for; under the registry's lock the
+     * source cannot go meanwhile) */
+    if (replan)
+        cv_alt_update (src);
     g_mutex_unlock (&registry_lock);
 
     if (last) {
@@ -4899,6 +5161,10 @@ static void cvv_free (WalpeVideo *v)
         g_free (src->norm_buf);
         if (src->annexb)
             g_string_free (src->annexb, TRUE);
+        g_clear_pointer (&src->alt_demux, mp4_demux_free);
+        g_free (src->alt_next);
+        g_free (src->alt_path);
+        g_free (src->alt_bad);
         g_free (src->path);
         g_mutex_clear (&src->lock);
         g_cond_clear (&src->cond);
@@ -4908,6 +5174,7 @@ static void cvv_free (WalpeVideo *v)
     /* (zero-copy: a picture this viewer still held goes back to its
      * decoder's pool, or is freed with it when the decoder is gone) */
     av_frame_free (&vw->zhold);
+    g_free (vw->copy_path);
     /* no main-loop source references the viewer: free synchronously */
     g_free (vw);
 }
@@ -4935,8 +5202,10 @@ static CvViewer *cv_viewer_new (CvSource *src)
 
 /* ------------------------------------------------------- source setup */
 
+/* alt: a converted copy of the clip to play instead of it (videotex.h),
+ * when it is one; NULL = the clip */
 static CvSource *cv_source_create (const char *key, const char *path, guint64 off,
-                                   guint64 len, GError **err)
+                                   guint64 len, const char *alt, GError **err)
 {
     CvSource *src = g_new0 (CvSource, 1);
     src->path = g_strdup (key);
@@ -4953,6 +5222,8 @@ static CvSource *cv_source_create (const char *key, const char *path, guint64 of
     src->drop_raw_max = -1;
     src->rebase_raw = -1;
 
+    src->range_off = off;
+    src->range_len = len;
     src->demux = mp4_demux_open_range (path, off, len, err);
     if (!src->demux)
         goto fail;
@@ -4963,16 +5234,32 @@ static CvSource *cv_source_create (const char *key, const char *path, guint64 of
                      path, src->demux->width, src->demux->height, CV_MAX_PIXELS / 1000000);
         goto fail;
     }
-    {
-        /* frame limit: the clip's frame interval and its first time stamp */
-        double fps = cv_clip_fps (src->demux);
-        src->clip_iv = fps > 0 ? 1.0 / fps : 0;
-        gint64 t0 = G_MAXINT64;
-        for (guint i = 0; i < src->demux->nsamples; i++)
-            t0 = MIN (t0, cv_sample_ticks (src->demux, i));
-        src->clip_t0 = src->demux->nsamples && src->demux->timescale
-            ? (double) t0 / (double) src->demux->timescale : 0;
+    src->orig_w = src->demux->width;
+    src->orig_h = src->demux->height;
+    src->orig_n = src->demux->nsamples;
+    src->orig_fps = cv_clip_fps (src->demux);
+    if (alt) {
+        /* a converted copy of the clip: played from the start when it is
+         * the clip again (the clip's own table of pictures was read above
+         * to tell; its decoder is never opened) */
+        char *why = NULL;
+        Mp4Demux *ad = mp4_demux_open_range (alt, 0, 0, NULL);
+        if (ad && cv_alt_fits (src, ad, &why)) {
+            g_message ("video: %s is played from its converted copy %s (%dx%d instead of %dx%d)",
+                       path, alt, ad->width, ad->height, src->orig_w, src->orig_h);
+            mp4_demux_free (src->demux);
+            src->demux = ad;
+            src->alt_path = g_strdup (alt);
+        } else {
+            g_message ("video: the converted copy %s of %s is not used: %s", alt, path,
+                       why ? why : "it cannot be read");
+            src->alt_bad = why ? g_steal_pointer (&why) : g_strdup ("it cannot be read");
+            g_clear_pointer (&ad, mp4_demux_free);
+        }
+        g_free (why);
     }
+    cv_play_note (src);
+    cv_clip_times (src);    /* frame limit: the frame interval and the first time stamp */
     src->dl_keep = av_frame_alloc ();
     src->zc_hw = av_frame_alloc ();
     /* (status line: the profile the file declares) */
@@ -5026,6 +5313,8 @@ fail:
         g_string_free (src->hw_log, TRUE);
     g_free (src->hw_profile);
     g_free (src->zc_why);
+    g_free (src->alt_path);
+    g_free (src->alt_bad);
     g_free (src->path);
     g_ptr_array_free (src->viewers, TRUE);
     g_cond_clear (&src->cond);
@@ -5034,7 +5323,8 @@ fail:
     return NULL;
 }
 
-static CvViewer *cv_attach (const char *path, guint64 off, guint64 len, GError **err)
+static CvViewer *cv_attach (const char *path, guint64 off, guint64 len, const char *alt,
+                            GError **err)
 {
     char *key = off || len ? g_strdup_printf ("%s@%" G_GUINT64_FORMAT "+%" G_GUINT64_FORMAT,
                                               path, off, len)
@@ -5044,7 +5334,7 @@ static CvViewer *cv_attach (const char *path, guint64 off, guint64 len, GError *
         registry = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
     CvSource *src = g_hash_table_lookup (registry, key);
     if (!src) {
-        src = cv_source_create (key, path, off, len, err);
+        src = cv_source_create (key, path, off, len, alt, err);
         if (!src) {
             g_mutex_unlock (&registry_lock);
             g_free (key);
@@ -5063,7 +5353,7 @@ WalpeVideo *walpe_video_custom_new (const char *path, GError **err)
     /* serialize lookup+create so two monitors starting up on the same
      * file share one source instead of racing into two; the viewer is
      * attached (refs++) before the lock drops so the source cannot die */
-    CvViewer *vw = cv_attach (path, 0, 0, err);
+    CvViewer *vw = cv_attach (path, 0, 0, NULL, err);
     if (!vw)
         return NULL;
     CvSource *src = vw->src;
@@ -5082,17 +5372,130 @@ struct WalpeVideoTex {
     CvViewer *vw;
 };
 
-WalpeVideoTex *walpe_video_tex_new (const char *path, guint64 off, guint64 len, GError **err)
+/* src->lock held */
+static void cv_viewer_copy (CvViewer *vw, const WalpeVideoTexCopy *copy)
 {
-    CvViewer *vw = cv_attach (path, off, len, err);
+    g_free (vw->copy_path);
+    vw->copy_state = copy ? copy->state : WALPE_VTEX_COPY_UNDECIDED;
+    vw->copy_path = copy && copy->path ? g_strdup (copy->path) : NULL;
+    vw->copy_w = copy ? copy->w : 0;
+    vw->copy_h = copy ? copy->h : 0;
+}
+
+/* (static: the names of videotex.h are the core's, modload.c forwards them
+ * through the module's table) */
+static WalpeVideoTex *cv_tex_new_copy (const char *path, guint64 off, guint64 len,
+                                       const WalpeVideoTexCopy *copy, GError **err)
+{
+    const char *alt = copy && copy->state == WALPE_VTEX_COPY_READY ? copy->path : NULL;
+    CvViewer *vw = cv_attach (path, off, len, alt, err);
     if (!vw)
         return NULL;
     WalpeVideoTex *v = g_new0 (WalpeVideoTex, 1);
     v->vw = vw;
     g_mutex_lock (&vw->src->lock);
     vw->measured = TRUE;        /* frame limit: its rate is the scene's frame rate */
+    vw->src->scene = TRUE;
+    cv_viewer_copy (vw, copy);
     g_mutex_unlock (&vw->src->lock);
+    /* a clip that is playing already (another monitor's scene has it):
+     * what its users ask for together */
+    cv_alt_update (vw->src);
     return v;
+}
+
+WalpeVideoTex *walpe_video_tex_new (const char *path, guint64 off, guint64 len, GError **err)
+{
+    return cv_tex_new_copy (path, off, len, NULL, err);
+}
+
+static void cv_tex_set_copy (WalpeVideoTex *v, const WalpeVideoTexCopy *copy)
+{
+    CvSource *src = v->vw->src;
+    g_mutex_lock (&src->lock);
+    cv_viewer_copy (v->vw, copy);
+    g_mutex_unlock (&src->lock);
+    cv_alt_update (src);
+}
+
+static void cv_tex_info (WalpeVideoTex *v, WalpeVideoTexInfo *info)
+{
+    CvSource *src = v->vw->src;
+    memset (info, 0, sizeof *info);
+    g_mutex_lock (&src->lock);
+    info->clip_w = src->orig_w;
+    info->clip_h = src->orig_h;
+    info->clip_fps = src->orig_fps;
+    info->clip_frames = src->orig_n;
+    info->play_w = src->play_w;
+    info->play_h = src->play_h;
+    info->play_fps = src->play_fps;
+    info->from_copy = src->alt_path != NULL;
+    g_mutex_unlock (&src->lock);
+    info->format = g_atomic_int_get (&src->pic_format);
+    info->matrix = g_atomic_int_get (&src->pic_matrix);
+}
+
+/* videotex.h walpe_video_scene_note */
+static char *cv_scene_note (WalpeVideoJobText job, gpointer user)
+{
+    GString *all = NULL;
+    GHashTableIter it;
+    gpointer val;
+    g_mutex_lock (&registry_lock);
+    if (registry)
+        g_hash_table_iter_init (&it, registry);
+    while (registry && g_hash_table_iter_next (&it, NULL, &val)) {
+        CvSource *src = val;
+        g_mutex_lock (&src->lock);
+        if (src->scene) {
+            /* the file's name without its folder and without "@off+len" */
+            const char *at = src->range_off || src->range_len ? strrchr (src->path, '@') : NULL;
+            const char *end = at ? at : src->path + strlen (src->path), *name = end;
+            while (name > src->path && name[-1] != '/')
+                name--;
+            if (!all)
+                all = g_string_new (NULL);
+            g_string_append_printf (all, "%s%.*s: source %dx%d %.2f fps, played %dx%d %.2f fps, copy: ",
+                                    all->len ? "; " : "", (int) (end - name), name, src->orig_w,
+                                    src->orig_h, src->orig_fps, src->play_w, src->play_h,
+                                    src->play_fps);
+            /* what the users say: one that waits for a copy first, else
+             * the first one's answer */
+            const CvViewer *say = NULL;
+            for (guint i = 0; i < src->viewers->len; i++) {
+                const CvViewer *vw = g_ptr_array_index (src->viewers, i);
+                if (!say || (vw->copy_state == WALPE_VTEX_COPY_WAITING &&
+                             say->copy_state != WALPE_VTEX_COPY_WAITING))
+                    say = vw;
+            }
+            const gboolean pending = g_atomic_int_get (&src->alt_pending) != 0;
+            const int st = say ? say->copy_state : WALPE_VTEX_COPY_UNDECIDED;
+            if (src->alt_path && !pending) {
+                g_string_append (all, "ready");
+            } else if (pending && src->alt_next) {
+                g_string_append (all, "ready (played from where the clip starts again)");
+            } else if (st == WALPE_VTEX_COPY_WAITING) {
+                char *t = job && say->copy_path ? job (say->copy_path, user) : NULL;
+                g_string_append (all, t ? t : "wanted");
+                g_free (t);
+            } else if (st == WALPE_VTEX_COPY_READY) {
+                g_string_append_printf (all, "not usable (%s)", src->alt_bad ? src->alt_bad : "?");
+            } else {
+                g_string_append (all, st == WALPE_VTEX_COPY_OFF ? "off"
+                                 : st == WALPE_VTEX_COPY_NOT_NEEDED ? "not needed"
+                                 : st == WALPE_VTEX_COPY_NO_LIMIT ? "not needed (video_resolution is none)"
+                                 : st == WALPE_VTEX_COPY_FULL_TEX
+                                   ? "not made (the scene keeps its textures at file size)"
+                                 : st == WALPE_VTEX_COPY_UNSUITED
+                                   ? "not made (the clip is not 8-bit 4:2:0 in limited range)"
+                                 : "not decided yet");
+            }
+        }
+        g_mutex_unlock (&src->lock);
+    }
+    g_mutex_unlock (&registry_lock);
+    return all ? g_string_free (all, FALSE) : NULL;
 }
 
 GLuint walpe_video_tex_update (WalpeVideoTex *v, int *w, int *h)
@@ -5177,6 +5580,7 @@ WALPE_API const WalpeVideoModule *walpe_video_module_entry (void)
         walpe_video_tex_interval_us, walpe_video_tex_set_view, walpe_video_tex_set_paused,
         walpe_video_tex_free,
         { walpe_sounddec_open, walpe_sounddec_read, walpe_sounddec_close },   /* sounddec.c */
+        cv_tex_new_copy, cv_tex_set_copy, cv_tex_info, cv_scene_note,
     };
     return &m;
 }

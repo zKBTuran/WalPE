@@ -124,6 +124,7 @@ All of these are written to the file only while they are not at their default.
 | `video_hwdec_api` | unset | (`hwdec=<api>`) | the one API to use (`vaapi`, `cuda`, `vdpau`, `vulkan`, `drm`, `v4l2m2m`); written while one is chosen |
 | `video_zerocopy` | false | | hardware-decoded pictures stay in GPU memory where the driver can do it and the samples are exactly the decoder's |
 | `video_limit` | false | | videos follow the frame rate limit and decode only the pictures that are shown |
+| `video_scene_convert` | true | | a video inside a scene that is larger than the scene shows it (a 4K clip on a 1080p monitor) is converted once, in the background, into a copy of the size shown (`video_resolution`) and played from it; the original plays until the copy is ready. `walpe-ctl status`: `scene_videos` ([VIDEO.md](VIDEO.md)) |
 | `video_upload` | `legacy` | | how video frames reach their textures: `legacy`, `pbo`, `pbodata`, `persist`, `direct`, each also `+pingpong` (same picture) |
 
 | `features` | `{}` | (`walpe-ctl set <switch>=off`, `=on`) | the scene feature switches that were ever set (`camera_parallax`, `parallax_offset`, `script_camera`, `sprite_sheets`, `script_texanim`, `bloom`, `camera_shake`), `{ "<name>": true\|false }`. All on by default except `parallax_offset` ([SCENE-FEATURES.md](SCENE-FEATURES.md)) |

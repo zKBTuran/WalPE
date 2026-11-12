@@ -50,6 +50,8 @@
  * take walpe_gl_tex_image_bgra and walpe_gl_tex_sub_image_bgra from the
  * daemon. (Comments elsewhere that say "module ABI 11" name one of these
  * changes.)
+ * 13: WalpeVideoModule ends with tex_new_copy, tex_set_copy, tex_info and
+ * scene_note (videotex.h: a scene's video played from a converted copy).
  *
  * NEVER UNLOADED. A module that was loaded stays loaded until the process
  * ends (modload.c closes a library only when it has no entry symbol). The
@@ -61,7 +63,7 @@
  * (scenesound.c). Whoever adds a dlclose of walpe-video.so has to wait for
  * walpe_sound_threads () == 0 first - and those threads may be blocked in
  * the sound server without a time limit. */
-#define WALPE_MODULE_ABI 12
+#define WALPE_MODULE_ABI 13
 
 typedef struct {
     int abi;
@@ -86,6 +88,12 @@ typedef struct {
     void (*tex_set_paused) (WalpeVideoTex *v, gboolean paused);
     void (*tex_free) (WalpeVideoTex *v);
     WalpeSoundDecoder sound;        /* ABI 11: MP3 / FLAC / Ogg for scene sound */
+    /* ABI 13: a scene's video played from a converted copy (videotex.h) */
+    WalpeVideoTex *(*tex_new_copy) (const char *path, guint64 off, guint64 len,
+                                    const WalpeVideoTexCopy *copy, GError **err);
+    void (*tex_set_copy) (WalpeVideoTex *v, const WalpeVideoTexCopy *copy);
+    void (*tex_info) (WalpeVideoTex *v, WalpeVideoTexInfo *info);
+    char *(*scene_note) (WalpeVideoJobText job, gpointer user);
 } WalpeVideoModule;
 
 /* module entry points (defined in web.c / video_custom.c) */

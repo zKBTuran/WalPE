@@ -214,6 +214,8 @@ static JsonNode *config_to_json (WalpeConfig *c)
     json_builder_add_boolean_value (b, c->video_zerocopy);
     json_builder_set_member_name (b, "video_limit");
     json_builder_add_boolean_value (b, c->video_limit);
+    json_builder_set_member_name (b, "video_scene_convert");
+    json_builder_add_boolean_value (b, c->video_scene_convert);
     json_builder_set_member_name (b, "video_upload");
     json_builder_add_string_value (b, c->video_upload ? c->video_upload : "legacy");
     json_builder_set_member_name (b, "particle_lowres");
@@ -576,6 +578,7 @@ WalpeConfig *walpe_config_load (void)
     c->particle_lowres   = 1;      /* automatic */
     c->particle_density  = 100;
     c->particle_instancing = TRUE;
+    c->video_scene_convert = TRUE;
     c->parallax          = TRUE;
     c->software_render   = FALSE;
     c->software_threads  = 0;
@@ -728,6 +731,7 @@ WalpeConfig *walpe_config_load (void)
         }
         c->video_zerocopy = wpj_bool (o, "video_zerocopy", c->video_zerocopy);
         c->video_limit = wpj_bool (o, "video_limit", c->video_limit);
+        c->video_scene_convert = wpj_bool (o, "video_scene_convert", c->video_scene_convert);
         { const char *u = wpj_str (o, "video_upload", NULL);
           if (u && *u && strlen (u) < 40) {
               g_free (c->video_upload); c->video_upload = g_strdup (u); } }

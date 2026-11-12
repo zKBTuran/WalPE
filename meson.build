@@ -462,6 +462,7 @@ core_srcs = files(
   'src/common/region.c',
   'src/common/premult.c',
   'src/common/import.c',
+  'src/common/scenevideo.c',
   'src/common/library.c',
   'src/common/steamsub.c',
   'src/common/audio.c',

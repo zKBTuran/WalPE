@@ -101,6 +101,9 @@ typedef struct WalpeConfig_ {
     gboolean video_limit;     /* videos follow the frame rate limit and decode only
                                * the pictures that are shown (engine/video.h); off =
                                * videos keep their own frame rate (the default) */
+    gboolean video_scene_convert; /* a video inside a scene that is larger than the
+                               * scene shows it is played from a converted copy of
+                               * the size needed (common/scenevideo.h); on by default */
     int     particle_lowres;  /* large soft particles (fog, glows) at reduced
                                * resolution: 0 off, 1 automatic (only where the
                                * picture stays the same; default), 2 everything

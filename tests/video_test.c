@@ -530,7 +530,7 @@ static void run_case (const char *clip, const Case *cs)
     GError *err = NULL;
     recs_clear ();
     walpe_video_set_limit (cs->limit_on);
-    CvViewer *vw = cv_attach (clip, 0, 0, &err);
+    CvViewer *vw = cv_attach (clip, 0, 0, NULL, &err);
     if (!vw) {
         CHECK (FALSE, "%s: %s", cs->name, err ? err->message : "no viewer");
         g_clear_error (&err);
@@ -636,7 +636,7 @@ static void test_hw (const char *clip)
     GError *err = NULL;
     recs_clear ();
     walpe_video_set_hwdec (1);
-    CvViewer *vw = cv_attach (clip, 0, 0, &err);
+    CvViewer *vw = cv_attach (clip, 0, 0, NULL, &err);
     if (!vw) {
         CHECK (FALSE, "hardware asked: %s", err ? err->message : "no viewer");
         g_clear_error (&err);
@@ -723,7 +723,7 @@ static void test_hw_fake (const char *clip)
     g_atomic_int_set (&fake_fail_after, hw_pictures);
     g_atomic_int_set (&fake_on, 1);
     CHECK (walpe_video_set_hwdec_name ("fake"), "the stand-in decoder is asked for by name");
-    CvViewer *vw = cv_attach (clip, 0, 0, &err);
+    CvViewer *vw = cv_attach (clip, 0, 0, NULL, &err);
     if (!vw) {
         CHECK (FALSE, "stand-in hardware: %s", err ? err->message : "no viewer");
         g_clear_error (&err);

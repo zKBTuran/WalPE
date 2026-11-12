@@ -138,6 +138,15 @@ struct WalpeContent {
     int render_w, render_h;
     int scale_filter;
     int tex_limit;
+    /* Videos inside the wallpaper (common/scenevideo.h; module ABI 13),
+     * set by the owner like the fields above: the box of "video_resolution"
+     * for the monitors that show this wallpaper now (0 x 0 = no limit).
+     * Only read while video_box_live is TRUE; an owner that leaves it
+     * FALSE has given the box once, with the load (WalpeLoadOpts
+     * video_box_w / video_box_h). A scene decides by it whether a video
+     * layer is played from a smaller converted copy. */
+    int video_box_w, video_box_h;
+    gboolean video_box_live;
 };
 
 typedef struct {
@@ -170,7 +179,8 @@ typedef struct {
      * this wallpaper is made for - config video_resolution and the render
      * sizes of the monitors that show it (common/resolution.h
      * walpe_video_box; 0 = no limit). The copy's cache name carries it
-     * (common/import.h walpe_video_cache_file). */
+     * (common/import.h walpe_video_cache_file). A scene takes it as the
+     * box of its video layers (common/scenevideo.h). */
     int video_box_w, video_box_h;
 } WalpeLoadOpts;
 

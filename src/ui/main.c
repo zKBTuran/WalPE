@@ -1898,7 +1898,7 @@ typedef struct {
     GtkWidget *tray, *tray_info;
     GtkWidget *fps, *volume, *fs, *fs_all, *covered, *dpms, *transparent, *parallax, *assets, *steam;
     GtkWidget *shared, *fxcache, *texdown, *covtrans, *webaccel, *webaccel_info, *hwdec;
-    GtkWidget *vlimit;
+    GtkWidget *vlimit, *vscene;
     GtkWidget *software, *software_info;   /* "Render on CPU" + what renders now */
     GtkWidget *focus, *focus_fps, *battery, *battery_fps, *previews;   /* opt-in rules */
     GtkWidget *idle;                 /* pause_idle: seconds without input, 0 = off */
@@ -2338,6 +2338,8 @@ static void settings_fill (gboolean follow)
     }
     gtk_switch_set_active (GTK_SWITCH (SW.hwdec), st ? wpj_bool (st, "video_hwdec", c->video_hwdec) : c->video_hwdec);
     gtk_switch_set_active (GTK_SWITCH (SW.vlimit), st ? wpj_bool (st, "video_limit", c->video_limit) : c->video_limit);
+    gtk_switch_set_active (GTK_SWITCH (SW.vscene), st ? wpj_bool (st, "video_scene_convert", c->video_scene_convert)
+                                                      : c->video_scene_convert);
     gtk_drop_down_set_selected (GTK_DROP_DOWN (SW.plowres), (guint) CLAMP (
         walpe_particle_lowres_from_name (st ? wpj_str (st, "particle_lowres", NULL) : NULL,
                                          c->particle_lowres), 0, 2));
@@ -2475,6 +2477,13 @@ static GtkWidget *settings_window (void)
                   "A video wallpaper is shown at most as often as the frame rate cap (and the "
                   "battery / focus limits) allows, and pictures of a video that no monitor shows "
                   "are not decoded. Off: videos keep their own frame rate.", SW.vlimit);
+    SW.vscene = mk_switch ("video_scene_convert", "Smaller copies of videos in scenes");
+    settings_row (g, r++, "Smaller copies of videos in scenes",
+                  "A video inside a scene that is larger than the scene shows it (a 4K clip on a "
+                  "1080p monitor) is converted once, in the background, into a copy of the size "
+                  "that is shown, and played from that copy: decoding it costs a fraction. The "
+                  "original plays until the copy is ready. Off: such videos are decoded at their "
+                  "own size.", SW.vscene);
     /* quality presets and the knobs behind them (perf.c) */
     gtk_grid_attach (GTK_GRID (g), walpe_perf_panel_new (FALSE, set_status), 0, r++, 2, 1);
 

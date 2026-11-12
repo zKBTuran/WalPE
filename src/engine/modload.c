@@ -268,7 +268,36 @@ WalpeVideoTex *walpe_video_tex_new (const char *path, guint64 off, guint64 len, 
     return m->tex_new (path, off, len, err);
 }
 
+WalpeVideoTex *walpe_video_tex_new_copy (const char *path, guint64 off, guint64 len,
+                                         const WalpeVideoTexCopy *copy, GError **err)
+{
+    const WalpeVideoModule *m = walpe_video_module (TRUE);
+    if (!m) {
+        g_set_error (err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, "video backend: %s",
+                     video_err ? video_err : "not loaded");
+        return NULL;
+    }
+    return m->tex_new_copy (path, off, len, copy, err);
+}
+
+/* (status asks; a daemon that never showed a video has no module) */
+char *walpe_video_scene_note (WalpeVideoJobText job, gpointer user)
+{
+    const WalpeVideoModule *m = walpe_video_module (FALSE);
+    return m ? m->scene_note (job, user) : NULL;
+}
+
 /* a WalpeVideoTex only exists once the module is loaded */
+void walpe_video_tex_set_copy (WalpeVideoTex *v, const WalpeVideoTexCopy *copy)
+{
+    video_mod->tex_set_copy (v, copy);
+}
+
+void walpe_video_tex_info (WalpeVideoTex *v, WalpeVideoTexInfo *info)
+{
+    video_mod->tex_info (v, info);
+}
+
 GLuint walpe_video_tex_update (WalpeVideoTex *v, int *w, int *h)
 {
     return video_mod->tex_update (v, w, h);

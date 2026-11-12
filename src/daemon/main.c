@@ -55,6 +55,7 @@
 #include "signals/providers.h"        /* the idle rule: walpe_signal_get, its timeout */
 #include "common/util.h"
 #include "common/import.h"
+#include "common/scenevideo.h" /* converted copies of videos inside scenes */
 #include "common/library.h"   /* walpe_config_forget_path */
 #include "common/audio.h"
 #include "common/media.h"
@@ -291,9 +292,13 @@ typedef struct Mon {
     gboolean res_changed;    /* main -> thread (lock): one of them changed for the
                               * running wallpaper: a frame now */
     WalpeVideoBox load_box;  /* main -> thread (lock), with load_path */
+    WalpeVideoBox vbox;      /* main -> thread (lock): the same box as it is now, for
+                              * the videos inside a wallpaper that is running
+                              * (video_boxes_update; WalpeContent.video_box_w / _h) */
     int rt_res_w, rt_res_h;  /* render thread: as last taken */
     int rt_tex_limit;
     WalpeVideoBox rt_box;
+    WalpeVideoBox rt_vbox;
     char *res_note;          /* main: why the chosen size is not used (NULL = it is) */
 } Mon;
 
@@ -1509,6 +1514,11 @@ static void mon_do_render_frame (Mon *m, gboolean paused, gboolean force, gboole
         m->content->render_h = own_size ? m->rt_res_h : 0;
         m->content->scale_filter = g_atomic_int_get (&D.cfg->scale_filter);
         m->content->tex_limit = cap;
+        /* the box of "video_resolution" for this wallpaper as it is now (a
+         * scene's video layers: common/scenevideo.h) */
+        m->content->video_box_w = m->rt_vbox.w;
+        m->content->video_box_h = m->rt_vbox.h;
+        m->content->video_box_live = TRUE;
     }
     /* the frame must be drawn whatever the content thinks of it when the
      * window that is to show it, or the followers' slot, lacks its last one */
@@ -1913,6 +1923,7 @@ static gpointer mon_thread (gpointer data)
         m->rt_tex_limit = m->tex_limit;
         if (load)
             m->rt_box = m->load_box;
+        m->rt_vbox = m->vbox;
         gboolean res_changed = m->res_changed;
         m->res_changed = FALSE;
         gboolean stats_wanted = m->stats_until_us > g_get_monotonic_time ();
@@ -2493,6 +2504,32 @@ static void video_box_for (const char *path, Mon *also, gboolean everyone, Walpe
     walpe_video_box (&D.cfg->video_res, sizes, n, box);
 }
 
+/* main: the box of every monitor's wallpaper as it is now, handed to its
+ * render thread when it changed (Mon.vbox). The box depends on which
+ * monitors show the wallpaper and on their render sizes, so it changes for
+ * a wallpaper that stays where it is when another monitor gets it too, or
+ * loses it, or is given another render size, and with "video_resolution".
+ * A scene with a video layer looks at it with its next frame
+ * (common/scenevideo.h); nothing else reads it. */
+static void video_boxes_update (void)
+{
+    for (GList *l = D.mons; l; l = l->next) {
+        Mon *m = l->data;
+        WalpeVideoBox box;
+        video_box_for (m->want_path, NULL, FALSE, &box);
+        if (box.w == m->vbox.w && box.h == m->vbox.h)
+            continue;
+        g_mutex_lock (&m->lock);
+        m->vbox = box;
+        /* (a frame only where a scene runs: nothing else has such videos) */
+        if (g_atomic_int_get (&m->content_type) == WALPE_TYPE_SCENE) {
+            m->render_req = TRUE;
+            g_cond_signal (&m->cond);
+        }
+        g_mutex_unlock (&m->lock);
+    }
+}
+
 /* main thread: give a monitor thread its next wallpaper (path, or NULL =
  * keep the content) and role: sf + idx -1 = lead sf, idx >= 0 = follow
  * sf, sf NULL = render on its own. keep: should that load fail, a monitor
@@ -2516,6 +2553,7 @@ static void mon_assign (Mon *m, const char *path, SharedFrame *sf, int idx, gboo
          * and, a video, the box of its converted copy */
         m->tex_limit = res_texlimit_for (m, path);
         video_box_for (path, NULL, FALSE, &m->load_box);
+        m->vbox = m->load_box;
     } else if (sf && idx >= 0) {
         /* it follows another monitor from now on: a load queued by an
          * earlier apply_wallpapers that its thread has not taken yet (it
@@ -3106,6 +3144,7 @@ static void apply_wallpapers (const char *force_path, Mon *force_mon, gboolean f
     g_free (lead);
     g_free (load);
     g_free (force_own);
+    video_boxes_update ();   /* who shows what changed: so may the box of a video in a scene */
     follow_pace_update ();   /* the roles changed */
     vis_push ();    /* "Skip hidden areas": a leader draws what its followers show */
     apply_pause_state ();
@@ -4312,6 +4351,11 @@ static struct {
     const char *purpose;     /* "add" (library import) | "convert" (see Conv) */
 } Imp;
 
+/* copies of videos inside scenes (below): they give way to an import or a
+ * conversion somebody asked for, and go on when it has ended */
+static void sv_yield (void);
+static void sv_start_next (void);
+
 static void import_done (WalpeImport *job, gboolean ok, const char *dst,
                          const char *error, gpointer user)
 {
@@ -4329,6 +4373,7 @@ static void import_done (WalpeImport *job, gboolean ok, const char *dst,
     else
         g_warning ("import failed: %s", Imp.error);
     state_touch ();
+    sv_start_next ();
 }
 
 static GError *start_import (const char *abs)
@@ -4356,6 +4401,7 @@ static GError *start_import (const char *abs)
     g_clear_pointer (&Imp.error, g_free);
     g_clear_pointer (&Imp.mode, g_free);
     g_message ("import started: %s", abs);
+    sv_yield ();
     return NULL;
 }
 
@@ -4495,6 +4541,7 @@ static GError *convert_start (const char *src, const char *wp, const char *mon, 
     Conv.wallpaper = g_strdup (wp);
     Conv.mon = g_strdup (mon);
     Conv.commit = commit;
+    sv_yield ();
     if (conv_failed)
         g_hash_table_remove (conv_failed, src);
     {
@@ -4600,7 +4647,251 @@ static void video_boxes_refresh (void)
     }
     if (reload)
         apply_wallpapers (NULL, NULL, FALSE, FALSE);
+    video_boxes_update ();  /* videos inside scenes: their scenes look again */
     convert_scan ();    /* copies that do not exist for their box yet */
+}
+
+/* ---------------------------------------- copies of videos inside scenes
+ * A scene's video layer that is larger than the scene shows it (a 4K clip
+ * on a 1080p monitor) is decoded at its own size, four times the work of
+ * what is seen. With "video_scene_convert" (on by default) the scene asks
+ * for a copy of the size it needs (common/scenevideo.h: the decision and
+ * the copy's name; engine/scenenode.c scene_video_plan asks) and plays the
+ * clip itself until the copy exists; the video module then changes over
+ * where the clip starts again (engine/videotex.h).
+ *
+ * Here: what the scenes on screen wait for, and the one ffmpeg that makes
+ * it (common/import.h walpe_import_start_scene: the import pipeline at the
+ * lowest priority, with the limits of a conversion on open). One clip at a
+ * time, never beside an import or a conversion somebody asked for (those
+ * come first: a copy that is being made is started again afterwards). A
+ * copy no scene waits for any more - its wallpaper was replaced - is not
+ * made: the ffmpeg that runs for it is stopped and its partial file
+ * removed. Nothing here exists while no scene waits for a copy: no table,
+ * no timer, no child. The copies share the folder and the rules of the
+ * converted video wallpapers (conv_cache_tidy: unfinished files go at
+ * start-up, copies nothing played for 90 days too). */
+typedef struct {
+    char *dst;          /* the copy (what it is known by) */
+    char *src;          /* the file with the clip, and the clip in it */
+    guint64 off, len;
+    int w, h, matrix;
+    int refs;           /* scenes that wait for it */
+    char *error;        /* its conversion failed in this run: not tried again */
+} SvWant;
+
+static struct {
+    GPtrArray *wants;       /* SvWant *; NULL while nothing is waited for */
+    WalpeImport *job;       /* the conversion that runs, or has just ended */
+    SvWant *running;        /* what it makes */
+    gboolean ended;         /* job has reported: sv_after_cb takes it away */
+    GHashTable *failed;     /* dst -> why, for copies no scene waits for any more */
+} Sv;
+
+static void sv_want_free (gpointer p)
+{
+    SvWant *w = p;
+    g_free (w->dst);
+    g_free (w->src);
+    g_free (w->error);
+    g_free (w);
+}
+
+static SvWant *sv_find (const char *dst)
+{
+    for (guint i = 0; Sv.wants && dst && i < Sv.wants->len; i++) {
+        SvWant *w = g_ptr_array_index (Sv.wants, i);
+        if (!strcmp (w->dst, dst))
+            return w;
+    }
+    return NULL;
+}
+
+/* main: a copy is being made right now (work that a restart of the daemon
+ * would throw away) */
+static gboolean sv_converting (void)
+{
+    return Sv.job && !Sv.ended;
+}
+
+/* the job is not needed any more (done, failed, stopped) */
+static void sv_job_clear (void)
+{
+    if (Sv.job)
+        walpe_import_free (Sv.job);     /* a running ffmpeg is killed, its partial file removed */
+    Sv.job = NULL;
+    Sv.running = NULL;
+    Sv.ended = FALSE;
+}
+
+static gboolean sv_after_cb (gpointer user)
+{
+    (void) user;
+    if (Sv.job && Sv.ended)
+        sv_job_clear ();
+    sv_start_next ();
+    return G_SOURCE_REMOVE;
+}
+
+static void sv_done (WalpeImport *job, gboolean ok, const char *dst, const char *error,
+                     gpointer user)
+{
+    (void) job;
+    (void) user;
+    /* (called from inside the job, also before walpe_import_start_scene has
+     * returned: the result is noted here, the job goes from the main loop.
+     * A job that was stopped does not report.) */
+    SvWant *w = Sv.running;
+    if (w && !ok) {
+        g_free (w->error);
+        w->error = g_strdup (error && *error ? error : "the conversion failed");
+        g_warning ("video: no copy of %s for its scene (%s): the clip is played as it is",
+                   w->src, w->error);
+    } else if (w) {
+        g_message ("video: copy of %s for its scene made: %s (%dx%d)", w->src, dst, w->w, w->h);
+    }
+    Sv.ended = TRUE;
+    walpe_scene_video_touch ();     /* the scenes look again: they play it, or say why not */
+    for (GList *l = D.mons; l; l = l->next)
+        if (g_atomic_int_get (&((Mon *) l->data)->content_type) == WALPE_TYPE_SCENE)
+            request_redraw (l->data);
+    g_idle_add (sv_after_cb, NULL);
+}
+
+/* main: make the next copy that is waited for, unless something runs */
+static void sv_start_next (void)
+{
+    if (Sv.job && Sv.ended)
+        sv_job_clear ();
+    if (Sv.job || Imp.active || !Sv.wants)
+        return;
+    for (guint i = 0; i < Sv.wants->len; i++) {
+        SvWant *w = g_ptr_array_index (Sv.wants, i);
+        if (w->refs <= 0 || w->error)
+            continue;
+        if (g_file_test (w->dst, G_FILE_TEST_IS_REGULAR)) {
+            walpe_scene_video_touch ();     /* it is there already: the scene finds it */
+            continue;
+        }
+        const WalpeImportScene sc = { w->off, w->len, w->w, w->h, w->matrix };
+        GError *err = NULL;
+        Sv.ended = FALSE;
+        Sv.running = w;
+        Sv.job = walpe_import_start_scene (w->src, &sc, w->dst, sv_done, NULL, &err);
+        if (Sv.job) {
+            g_message ("video: %s is larger than its scene shows it: making a %dx%d copy once, "
+                       "in the background (%s); the clip plays as it is until then", w->src,
+                       w->w, w->h, w->dst);
+            return;
+        }
+        Sv.running = NULL;
+        w->error = g_strdup (err ? err->message : "the conversion could not be started");
+        g_warning ("video: no copy of %s for its scene: %s", w->src, w->error);
+        g_clear_error (&err);
+        walpe_scene_video_touch ();
+    }
+}
+
+/* main: an import or a conversion somebody asked for starts: the copy that
+ * is being made waits (it is started again when that has ended) */
+static void sv_yield (void)
+{
+    if (sv_converting ()) {
+        g_message ("video: the copy of %s for its scene waits for the %s", Sv.running->src,
+                   !g_strcmp0 (Imp.purpose, "convert") ? "conversion" : "import");
+        sv_job_clear ();
+    }
+}
+
+typedef struct {
+    WalpeSceneVideoWant w;
+    gboolean wanted;
+} SvMsg;
+
+/* main (idle, queued by sv_hook): a scene waits for a copy, or no longer */
+static gboolean sv_want_cb (gpointer user)
+{
+    SvMsg *msg = user;
+    SvWant *w = sv_find (msg->w.dst);
+    if (msg->wanted) {
+        if (!w) {
+            w = g_new0 (SvWant, 1);
+            w->dst = g_strdup (msg->w.dst);
+            w->src = g_strdup (msg->w.src);
+            w->off = msg->w.off;
+            w->len = msg->w.len;
+            w->w = msg->w.w;
+            w->h = msg->w.h;
+            w->matrix = msg->w.matrix;
+            const char *why = Sv.failed ? g_hash_table_lookup (Sv.failed, w->dst) : NULL;
+            w->error = g_strdup (why);
+            if (!Sv.wants)
+                Sv.wants = g_ptr_array_new_with_free_func (sv_want_free);
+            g_ptr_array_add (Sv.wants, w);
+        }
+        w->refs++;
+        sv_start_next ();
+    } else if (w && --w->refs <= 0) {
+        if (Sv.running == w) {
+            if (!Sv.ended)
+                g_message ("video: no scene waits for the copy of %s any more: its conversion "
+                           "is stopped", w->src);
+            sv_job_clear ();
+        }
+        if (w->error) {     /* (not tried again when its scene is loaded again) */
+            if (!Sv.failed)
+                Sv.failed = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
+            g_hash_table_replace (Sv.failed, g_strdup (w->dst), g_strdup (w->error));
+        }
+        g_ptr_array_remove_fast (Sv.wants, w);
+        if (!Sv.wants->len)
+            g_clear_pointer (&Sv.wants, g_ptr_array_unref);
+        sv_start_next ();
+    }
+    g_free ((char *) msg->w.src);
+    g_free ((char *) msg->w.dst);
+    g_free (msg);
+    return G_SOURCE_REMOVE;
+}
+
+/* a render thread (common/scenevideo.h walpe_scene_video_want) */
+static void sv_hook (const WalpeSceneVideoWant *want, gboolean wanted)
+{
+    SvMsg *msg = g_new0 (SvMsg, 1);
+    msg->w = *want;
+    msg->w.src = g_strdup (want->src);
+    msg->w.dst = g_strdup (want->dst);
+    msg->wanted = wanted;
+    g_idle_add (sv_want_cb, msg);
+}
+
+/* status "scene_videos": what the daemon does about the copy a scene waits
+ * for (videotex.h WalpeVideoJobText; called with the video module's locks
+ * held, so nothing here calls into the module) */
+static char *sv_job_text (const char *copy, gpointer user)
+{
+    (void) user;
+    const SvWant *w = sv_find (copy);
+    const char *why = w && w->error ? w->error
+                    : Sv.failed ? g_hash_table_lookup (Sv.failed, copy) : NULL;
+    if (why)
+        return g_strdup_printf ("failed (%s)", why);
+    if (w && Sv.running == w && sv_converting ()) {
+        int pc = walpe_import_percent (Sv.job);
+        return pc >= 0 ? g_strdup_printf ("converting %d %%", pc) : g_strdup ("converting");
+    }
+    return g_strdup (Imp.active ? "waiting for the running import" : "waiting");
+}
+
+/* main: the setting changed. Scenes look at their videos with their next
+ * frame (the copy is played from where the clip starts again, or the clip
+ * itself is); off: nothing more is converted. */
+static void sv_setting (gboolean on)
+{
+    walpe_scene_video_set_on (on);
+    for (GList *l = D.mons; l; l = l->next)
+        if (g_atomic_int_get (&((Mon *) l->data)->content_type) == WALPE_TYPE_SCENE)
+            request_redraw (l->data);
 }
 
 /* --------------------------------------------- workshop install (steamcmd) */
@@ -5068,6 +5359,16 @@ static void ipc_status (JsonBuilder *b)
         jb_bool (b, "fluid_sim", D.cfg->fluid_sim);
         jb_str (b, "fluid_quality", walpe_fluid_quality_name ((WalpeFluidQuality) D.cfg->fluid_quality));
         jb_bool (b, "video_limit", D.cfg->video_limit);
+        jb_bool (b, "video_scene_convert", D.cfg->video_scene_convert);
+        {
+            /* the videos inside the scenes on screen: the clip's size and
+             * frame rate, what is decoded, and the state of its converted
+             * copy (ready, converting NN %, off, not needed, ...) */
+            char *sn = walpe_video_scene_note (sv_job_text, NULL);
+            if (sn)
+                jb_str (b, "scene_videos", sn);
+            g_free (sn);
+        }
         jb_str (b, "video_upload", D.cfg->video_upload ? D.cfg->video_upload : "legacy");
         {
             /* the path the video module really took (a path the GL context
@@ -6636,6 +6937,12 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
             request_redraw (l->data);
         changed = TRUE;
     }
+    if (json_object_has_member (o, "video_scene_convert")) {
+        /* scenes that are running follow it where their clip starts again */
+        D.cfg->video_scene_convert = wpj_bool (o, "video_scene_convert", D.cfg->video_scene_convert);
+        sv_setting (D.cfg->video_scene_convert);
+        changed = TRUE;
+    }
     if (json_object_has_member (o, "video_limit")) {
         /* videos that are playing follow it with their next picture */
         D.cfg->video_limit = wpj_bool (o, "video_limit", D.cfg->video_limit);
@@ -7253,6 +7560,7 @@ static char *ipc_handler (const char *req, gpointer user)
             Imp.error = g_strdup ("cancelled");
             g_clear_pointer (&Conv.wallpaper, g_free);
             g_clear_pointer (&Conv.mon, g_free);
+            sv_start_next ();   /* (a copy for a scene that gave way to it) */
         }
         jb_bool (b, "ok", TRUE);
     } else if (!g_strcmp0 (cmd, "forget")) {
@@ -8864,6 +9172,8 @@ int main (int argc, char **argv)
     walpe_video_set_hwdec_name (walpe_config_hwdec_word (D.cfg));
     walpe_video_set_zerocopy (D.cfg->video_zerocopy);
     walpe_video_set_limit (D.cfg->video_limit);
+    walpe_scene_video_set_on (D.cfg->video_scene_convert);
+    walpe_scene_video_set_hook (sv_hook);   /* before any render thread loads a scene */
     if (D.cfg->video_upload && !walpe_video_set_upload (D.cfg->video_upload))
         g_warning ("config: video_upload \"%s\" is not a known upload path: legacy is used",
                    D.cfg->video_upload);
@@ -9238,6 +9548,7 @@ int main (int argc, char **argv)
     }
     if (Imp.job) /* kills a running ffmpeg + removes its partial output */
         walpe_import_free (Imp.job);
+    sv_job_clear ();    /* the same for the copy of a scene's video that is being made */
     if (Ws.job)  /* kills steamcmd + removes a partial copy */
         walpe_workshop_free (Ws.job);
     /* two phases: every render thread is stopped and joined before any

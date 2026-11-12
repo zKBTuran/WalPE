@@ -26,10 +26,14 @@
 #include "common/config.h"
 #include "common/premult.h"
 #include "common/media.h"
+#include "common/scenevideo.h"   /* a video layer played from a converted copy */
+#include "mp4demux.h"
 #ifdef __GLIBC__
 #include <malloc.h>
 #endif
 #include <json-glib/json-glib.h>
+#include <glib/gstdio.h>
+#include <utime.h>
 #include <pango/pangocairo.h>
 #include "scenetext.h"
 #include "puppet.h"
@@ -204,6 +208,19 @@ typedef struct {
                               * change?" is to be asked of a video layer */
     int view_w, view_h;      /* this frame: largest on-screen size of a user */
     gboolean view_seen, view_full;
+    /* Played from a converted copy (common/scenevideo.h, scene_video_plan):
+     * the clip's bytes in `path`, the largest size it has been drawn at,
+     * and what was decided last - for which setting, box and size. */
+    guint64 off, len;
+    int need_w, need_h;
+    gboolean plan_made;
+    guint plan_gen;
+    int plan_box_w, plan_box_h;
+    int plan_state;          /* WALPE_VTEX_COPY_* */
+    int plan_w, plan_h;      /* the copy's size (WAITING, READY) */
+    char *plan_copy;         /* ... and its file */
+    gboolean wanted;         /* the daemon was asked for plan_copy */
+    char *id;                /* walpe_scene_video_id, looked up when first needed */
 } SceneVideo;
 /* the frame skip asks this counter whether a video layer shows another
  * picture */
@@ -248,6 +265,7 @@ typedef struct {
     char *origin;        /* wallpaper path as opened (override key) */
     char *preset_dir;    /* WE preset item dir ("files/..." values), or NULL */
     GArray *videos;      /* SceneVideo: shared video textures */
+    int vbox_w, vbox_h;  /* the box of "video_resolution" for this wallpaper (0 = none) */
     gint64 last_frame_us; /* particle simulation clock */
     double frame_time;   /* this frame's scene time (s): where a puppet's
                           * attachment points are (node_world) */
@@ -523,13 +541,39 @@ static gboolean attach_video (SceneNodeContent *s, NodeObj *nv, const char *path
         }
     }
     GError *err = NULL;
-    WalpeVideoTex *v = walpe_video_tex_new (path, off, len, &err);
+    /* a converted copy of the size this monitor needs, made by an earlier
+     * run: the clip starts from it (its own decoder is never opened). By
+     * the clip's real size, as every later decision (scene_video_plan);
+     * looked at only when the .tex says it is larger than the box. */
+    WalpeVideoTexCopy copy = { 0 };
+    char *copy_path = NULL, *id = NULL;
+    const WalpeVideoBox box = { s->vbox_w, s->vbox_h };
+    if (walpe_scene_video_on () && s->downscale && box.w > 0 && box.h > 0 &&
+        (w > box.w || h > box.h)) {
+        Mp4Demux *dm = mp4_demux_open_range (path, off, len, NULL);
+        int tw = 0, th = 0;
+        if (dm && walpe_scene_video_target (dm->width, dm->height, &box, 0, 0, s->slack_pct,
+                                            &tw, &th)) {
+            id = walpe_scene_video_id (path, off, len);
+            copy_path = walpe_scene_video_cache_file (id, tw, th);
+            if (copy_path && g_file_test (copy_path, G_FILE_TEST_IS_REGULAR)) {
+                copy = (WalpeVideoTexCopy) { WALPE_VTEX_COPY_READY, copy_path, tw, th };
+                g_utime (copy_path, NULL);  /* in use: the daemon removes copies unused for months */
+            }
+        }
+        if (dm)
+            mp4_demux_free (dm);
+    }
+    WalpeVideoTex *v = walpe_video_tex_new_copy (path, off, len, copy.state ? &copy : NULL, &err);
+    g_free (copy_path);
     if (!v) {
         g_warning ("scenenode: video texture %s: %s", path, err ? err->message : "?");
         g_clear_error (&err);
+        g_free (id);
         return FALSE;
     }
-    SceneVideo sv = { .path = g_strdup (path), .v = v, .w = w, .h = h, .full_w = w, .full_h = h };
+    SceneVideo sv = { .path = g_strdup (path), .v = v, .w = w, .h = h, .full_w = w, .full_h = h,
+                      .off = off, .len = len, .id = id };
     g_array_append_val (s->videos, sv);
     nv->video = (int) s->videos->len - 1;
     g_message ("scenenode: video texture %s (%dx%d)", path, w, h);
@@ -539,6 +583,82 @@ ok:
     nv->premult = TRUE;      /* decoded frames are opaque */
     nv->tex_ready = FALSE;   /* until the first decoded frame */
     return TRUE;
+}
+
+/* the daemon is not to make plan_copy for this scene any more */
+static void scene_video_unwant (SceneVideo *sv)
+{
+    if (sv->wanted && sv->plan_copy) {
+        const WalpeSceneVideoWant w = { .dst = sv->plan_copy };
+        walpe_scene_video_want (&w, FALSE);
+    }
+    sv->wanted = FALSE;
+}
+
+/* Render thread: what this video layer is to be played from - the clip, or
+ * a smaller converted copy of it (common/scenevideo.h) - by what holds
+ * now: the setting, the box of "video_resolution", the size the layer has
+ * been drawn at. A copy that exists is played (the module changes over
+ * where the clip starts again); one that does not is asked of the daemon
+ * and the clip plays meanwhile. Called when one of those changed, not per
+ * frame. */
+static void scene_video_plan (SceneNodeContent *s, SceneVideo *sv, guint gen)
+{
+    WalpeVideoTexInfo in;
+    walpe_video_tex_info (sv->v, &in);
+    const WalpeVideoBox box = { s->vbox_w, s->vbox_h };
+    int st = WALPE_VTEX_COPY_NOT_NEEDED, tw = 0, th = 0;
+    char *copy = NULL;
+    if (!walpe_scene_video_on ()) {
+        st = WALPE_VTEX_COPY_OFF;
+    } else if (!s->downscale) {
+        st = WALPE_VTEX_COPY_FULL_TEX;      /* textures at file size: the video too */
+    } else if (box.w <= 0 || box.h <= 0) {
+        st = WALPE_VTEX_COPY_NO_LIMIT;
+    } else if (walpe_scene_video_target (in.clip_w, in.clip_h, &box, sv->need_w, sv->need_h,
+                                         s->slack_pct, &tw, &th)) {
+        if (!sv->id)
+            sv->id = walpe_scene_video_id (sv->path, sv->off, sv->len);
+        copy = walpe_scene_video_cache_file (sv->id, tw, th);
+        if (!copy)
+            st = WALPE_VTEX_COPY_NOT_NEEDED;    /* (the file cannot be read any more) */
+        else if (g_file_test (copy, G_FILE_TEST_IS_REGULAR))
+            st = WALPE_VTEX_COPY_READY;
+        else
+            st = in.format == 1 ? WALPE_VTEX_COPY_WAITING : WALPE_VTEX_COPY_UNSUITED;
+    }
+    if (st != WALPE_VTEX_COPY_WAITING && st != WALPE_VTEX_COPY_READY) {
+        g_clear_pointer (&copy, g_free);
+        tw = th = 0;
+    }
+    /* the daemon: one "wanted" per copy this scene waits for */
+    if (sv->wanted && (st != WALPE_VTEX_COPY_WAITING || g_strcmp0 (copy, sv->plan_copy)))
+        scene_video_unwant (sv);
+    if (st == WALPE_VTEX_COPY_WAITING && !sv->wanted) {
+        const WalpeSceneVideoWant w = { .src = sv->path, .off = sv->off, .len = sv->len,
+                                        .dst = copy, .w = tw, .h = th, .matrix = in.matrix };
+        walpe_scene_video_want (&w, TRUE);
+        sv->wanted = TRUE;
+    }
+    if (st == WALPE_VTEX_COPY_READY)
+        g_utime (copy, NULL);       /* in use */
+    if (!sv->plan_made || st != sv->plan_state || g_strcmp0 (copy, sv->plan_copy)) {
+        const WalpeVideoTexCopy c = { st, copy, tw, th };
+        walpe_video_tex_set_copy (sv->v, &c);
+        g_debug ("scenenode: video texture %s (%dx%d, drawn at up to %dx%d, box %dx%d): %s%s",
+                 sv->path, in.clip_w, in.clip_h, sv->need_w, sv->need_h, box.w, box.h,
+                 st == WALPE_VTEX_COPY_READY ? "played from " : st == WALPE_VTEX_COPY_WAITING
+                 ? "a copy is asked for: " : "played as it is", copy ? copy : "");
+    }
+    g_free (sv->plan_copy);
+    sv->plan_copy = copy;
+    sv->plan_state = st;
+    sv->plan_w = tw;
+    sv->plan_h = th;
+    sv->plan_gen = gen;
+    sv->plan_box_w = box.w;
+    sv->plan_box_h = box.h;
+    sv->plan_made = TRUE;
 }
 
 /* "usertextures" entry -> system texture kind (0 = none / user property) */
@@ -5451,9 +5571,25 @@ static gboolean scenenode_gl_render (WalpeContent *c, int w, int h, float px, fl
     /* video textures: upload each unique decoder's newest frame once */
     walpe_cph_to (WALPE_CPH_VIDEO);
     gint64 video_iv = 0;
+    /* (asked only by a scene that has a video: what its copies depend on) */
+    const guint video_gen = s->videos->len ? walpe_scene_video_gen () : 0;
+    if (s->videos->len && c->video_box_live) {
+        s->vbox_w = c->video_box_w;
+        s->vbox_h = c->video_box_h;
+    }
     for (guint i = 0; i < s->videos->len; i++) {
         SceneVideo *sv = &g_array_index (s->videos, SceneVideo, i);
         int vw = 0, vh = 0;
+        /* played from a converted copy or not: decided once the layer has
+         * been drawn (its size is known then), and again when the setting,
+         * the box or a copy's state changed, or the layer is drawn larger
+         * than the copy was made for */
+        if (sv->tex && sv->need_w > 0 &&
+            (!sv->plan_made || sv->plan_gen != video_gen || sv->plan_box_w != s->vbox_w ||
+             sv->plan_box_h != s->vbox_h ||
+             (sv->plan_w > 0 && (sv->need_w > sv->plan_w * (1.0f + s->slack_pct / 100.0f) ||
+                                 sv->need_h > sv->plan_h * (1.0f + s->slack_pct / 100.0f)))))
+            scene_video_plan (s, sv, video_gen);
         guint noted = walpe_video_frames_noted ();
         GLuint t = walpe_video_tex_update (sv->v, &vw, &vh);
         if (walpe_video_frames_noted () != noted)
@@ -6339,9 +6475,12 @@ frame_done:
     walpe_cph_to (WALPE_CPH_POST);
     for (guint i = 0; i < s->videos->len; i++) {
         SceneVideo *sv = &g_array_index (s->videos, SceneVideo, i);
-        if (sv->view_seen)
+        if (sv->view_seen) {
             walpe_video_tex_set_view (sv->v, sv->view_full ? 0 : sv->view_w,
                                       sv->view_full ? 0 : sv->view_h);
+            sv->need_w = MAX (sv->need_w, sv->view_w);
+            sv->need_h = MAX (sv->need_h, sv->view_h);
+        }
         sv->view_w = sv->view_h = 0;
         sv->view_seen = sv->view_full = FALSE;
     }
@@ -6483,6 +6622,7 @@ static void scenenode_gl_free (WalpeContent *c)
     /* GL texture + decoder detach on the render thread that owns it */
     for (guint i = 0; i < s->videos->len; i++) {
         SceneVideo *sv = &g_array_index (s->videos, SceneVideo, i);
+        scene_video_unwant (sv);    /* a conversion only this scene waited for stops */
         g_clear_pointer (&sv->v, walpe_video_tex_free);
         sv->tex = 0;
     }
@@ -6593,9 +6733,12 @@ static void scenenode_free (WalpeContent *c)
             SceneVideo *sv = &g_array_index (s->videos, SceneVideo, i);
             /* normally gone in gl_free; a content freed without gl_free
              * (failed gl_init) still detaches its decoders */
+            scene_video_unwant (sv);
             if (sv->v)
                 walpe_video_tex_free (sv->v);
             g_free (sv->path);
+            g_free (sv->plan_copy);
+            g_free (sv->id);
         }
         g_array_free (s->videos, TRUE);
     }
@@ -6687,6 +6830,8 @@ WalpeContent *walpe_scenenode_new_from_root (JsonNode *root, const char *project
     s->cam_id = s->cam_node = -1;
     s->cam_zoom = 1.0f;
     s->videos = g_array_new (FALSE, TRUE, sizeof (SceneVideo));
+    s->vbox_w = opts ? opts->video_box_w : 0;
+    s->vbox_h = opts ? opts->video_box_h : 0;
     s->preset_dir = g_strdup (opts ? opts->preset_dir : NULL);
     s->user_props = collect_user_props (s->dir, s->origin, ro, opts ? opts->preset : NULL,
                                         &s->user_types);
