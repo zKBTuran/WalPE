@@ -18,7 +18,9 @@ gboolean walpe_path_is_inside (const char *path, const char *root);
 /* a file that a wallpaper's own json / shader names: root/name when that is
  * a regular file below root, else NULL. The name is always relative to root
  * (a leading '/' does not make it absolute) and cannot leave it with "..".
- * g_free() */
+ * A name that finds no file as it is written is looked up as Windows would
+ * (nocase.h: letter case ignored, '\' between folders), under the same
+ * two conditions. g_free() */
 char  *walpe_asset_path  (const char *root, const char *name);
 char  *walpe_dir_of      (const char *path);            /* g_free() */
 /* A number of a wallpaper file as an int. The C cast is undefined when the

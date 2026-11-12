@@ -1,6 +1,7 @@
 #include "util.h"
 #include "gifcheck.h"
 #include "pichead.h"
+#include "nocase.h"
 #include <glib/gstdio.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <errno.h>
@@ -154,6 +155,18 @@ char *walpe_asset_path (const char *root, const char *name)
     if (walpe_path_is_inside (p, root) && g_file_test (p, G_FILE_TEST_IS_REGULAR))
         return p;
     g_free (p);
+    /* No file of that name: the wallpaper was made on Windows, which finds
+     * "Materials/Sky.TEX" as materials/sky.tex and takes '\' between
+     * folders (nocase.h). The file found that way passes the same two
+     * tests as a name that matched. Only a name that found nothing gets
+     * here; '\' separates only when '/' alone found nothing either (it is
+     * a letter of a file name here). */
+    for (int bs = 0; bs <= (strchr (name, '\\') ? 1 : 0); bs++) {
+        p = walpe_path_nocase (root, name, bs);
+        if (p && walpe_path_is_inside (p, root) && g_file_test (p, G_FILE_TEST_IS_REGULAR))
+            return p;
+        g_free (p);
+    }
     return NULL;
 }
 

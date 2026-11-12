@@ -36,7 +36,7 @@ What to include:
 | font of a text layer | a TrueType / OpenType font file or a collection of them, at most 256 faces and named instances in all and 512 tables per face; anything else is not handed to fontconfig, and the layer is drawn with a system font |
 | text layer | 16 KiB of text, 8192 px, a font size of at most 15000 points; the text layers of a scene together 1024 MiB of texture (the same `WALPE_TEX_BUDGET_MB`, counted apart from the pictures), a layer beyond that is not drawn |
 | particles | 20000 per system, 128 systems per particle object, 4096 systems in all particle objects together - of every wallpaper the daemon has loaded at that moment, on all monitors (an object beyond that gets no further system, the log says so once in the daemon's life), 400000 alive in all systems together; a system at a limit emits no more until particles end. How large a particle is drawn and how much of the screen all of them fill is not limited: a thousand particles the size of the screen are a thousand screens to fill per frame |
-| names of files a wallpaper refers to | below the wallpaper's own folder (or the Wallpaper Engine `assets/`): no absolute path, no `..`, no symbolic link that leads out, regular files only; the preview picture the library window shows for a wallpaper is one of these |
+| names of files a wallpaper refers to | below the wallpaper's own folder (or the Wallpaper Engine `assets/`): no absolute path, no `..`, no symbolic link that leads out, regular files only; the preview picture the library window shows for a wallpaper is one of these. A name that matches no file as written is looked up the way Windows would (letter case ignored, `\` between folders: wallpapers are made there) - under the same conditions |
 
 A file beyond a limit is not loaded (the log says which); the rest of the wallpaper is.
 
@@ -210,7 +210,8 @@ What it gets and what it does not, as the code is today:
   of a file (`Range`) is answered straight from the file; at most 128 connections are open,
   and for one more the one that has waited longest for a request is closed. What it hands
   out: regular files inside the wallpaper's folder (and the folder of a preset of it; a
-  link that leads out is not followed), the file chosen for a file option, and for a folder
+  link that leads out is not followed; a name that matches no file as written also in
+  another letter case, as on Windows), the file chosen for a file option, and for a folder
   chosen for a directory option its pictures and videos down to one sub-folder, nothing
   hidden.
   `WALPE_WEB_SCHEME=1` serves the page through a scheme of the module's own instead (no

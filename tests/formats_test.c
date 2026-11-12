@@ -11,11 +11,13 @@
  *     a JPEG are still pixels; a normal PNG and an embedded PNG still load
  *   - asset names: "..", absolute paths, directories, FIFOs and device files
  *     are not resolved; /dev/zero is not read
+ *   - names in another letter case or with '\' (a wallpaper made on Windows)
+ *     find their file, and nothing outside the wallpaper
  *
  * Everything happens in a private temp dir that is also HOME and the XDG
  * dirs (set before GLib caches them).
  *
- * Run: meson test -C build formats -v   (formats-test preset|particles|pkg|tex|assets = one group) */
+ * Run: meson test -C build formats -v   (formats-test preset|particles|pkg|tex|assets|case = one group) */
 #include "engine/content.h"
 #include "engine/pkg.h"
 #include "engine/propnotes.h"
@@ -582,6 +584,143 @@ static void test_assets (void)
     g_free (outside);
 }
 
+/* ------------------------------------------------ names in another case */
+
+static int misses;      /* log lines that say a file was not found */
+
+static void miss_log (const gchar *dom, GLogLevelFlags lvl, const gchar *msg, gpointer u)
+{
+    (void) dom; (void) u;
+    if ((lvl & (G_LOG_LEVEL_MESSAGE | G_LOG_LEVEL_WARNING | G_LOG_LEVEL_CRITICAL)) && strstr (msg, "not found"))
+        misses++;
+}
+
+/* A wallpaper made on Windows names its files in any letter case and with
+ * '\' between folders (common/nocase.h): they are found - below the
+ * wallpaper, regular files, as before - and a name that matches a file as
+ * it is written still means that file. */
+static void test_case (void)
+{
+    mkfile ("cs/wp/materials/sky.tex", "sky", 3);
+    mkfile ("cs/wp/Shaders/Effects/Glow.frag", "glow", 4);
+    mkfile ("cs/wp/both/a.tex", "lower", 5);
+    mkfile ("cs/wp/both/A.tex", "upper", 5);
+    mkfile ("cs/wp/both/B.TEX", "1", 1);
+    mkfile ("cs/wp/both/b.Tex", "2", 1);
+    mkfile ("cs/wp/fonts/\xc3\x9c" "ber.ttf", "f", 1);              /* U umlaut */
+    mkfile ("cs/wp/back\\slash.tex", "one file", 8);
+    mkfile ("cs/outside/secret.png", "x", 1);
+    char *wp = P ("cs/wp");
+    static const struct { const char *name, *want; } ok[] = {
+        { "Materials/Sky.TEX", "cs/wp/materials/sky.tex" },
+        { "MATERIALS/SKY.TEX", "cs/wp/materials/sky.tex" },
+        { "materials\\sky.tex", "cs/wp/materials/sky.tex" },
+        { "Materials\\Sky.tex", "cs/wp/materials/sky.tex" },
+        { "shaders/effects/glow.frag", "cs/wp/Shaders/Effects/Glow.frag" },
+        { "./SHADERS//effects/./GLOW.FRAG", "cs/wp/Shaders/Effects/Glow.frag" },
+        { "Materials/../shaders/effects/glow.frag", "cs/wp/Shaders/Effects/Glow.frag" },
+        { "both/a.tex", "cs/wp/both/a.tex" },                 /* as written: that file */
+        { "both/A.tex", "cs/wp/both/A.tex" },
+        { "BOTH/a.TEX", "cs/wp/both/A.tex" },                 /* neither: the first by name */
+        { "both/b.tex", "cs/wp/both/B.TEX" },
+        { "Fonts/\xc3\xbc" "BER.TTF", "cs/wp/fonts/\xc3\x9c" "ber.ttf" },
+        { "back\\slash.tex", "cs/wp/back\\slash.tex" },       /* a file of that very name */
+    };
+    for (guint i = 0; i < G_N_ELEMENTS (ok); i++) {
+        char *got = walpe_asset_path (wp, ok[i].name), *want = P (ok[i].want);
+        if (g_strcmp0 (got, want)) {
+            g_printerr ("FAIL name in another case: %s is %s, expected %s\n", ok[i].name, got ? got : "(not found)", want);
+            failures++;
+        }
+        g_free (got);
+        g_free (want);
+    }
+    /* ... and nothing else is found that way */
+    char *secret = P ("cs/outside/secret.png");
+    char *link = P ("cs/wp/materials/out.tex"), *dlink = P ("cs/wp/linkdir"), *outdir = P ("cs/outside");
+    gboolean links = symlink (secret, link) == 0 && symlink (outdir, dlink) == 0;
+    static const char *const no[] = {
+        "Materials/Missing.tex", "MATERIALS", "materials/", "Materials/Sky.tex/x", "../OUTSIDE/Secret.PNG",
+        "..\\outside\\secret.png", "Materials\\..\\..\\outside\\secret.png", "materials/../../OUTSIDE/secret.png",
+        "MATERIALS/OUT.TEX", "LinkDir/Secret.png", "linkdir\\secret.png", "\\", "..", "Both", "",
+    };
+    for (guint i = 0; i < G_N_ELEMENTS (no); i++) {
+        char *got = walpe_asset_path (wp, no[i]);
+        if (got) {
+            g_printerr ("FAIL name in another case: %s finds %s\n", no[i], got);
+            failures++;
+        }
+        g_free (got);
+    }
+    CHECK (links);
+    g_free (secret);
+    g_free (link);
+    g_free (dlink);
+    g_free (outdir);
+
+    /* project.json "file" */
+    mkfile ("cs/vid/project.json", "{\"type\":\"video\",\"file\":\"Clip.MP4\"}", -1);
+    mkfile ("cs/vid/clip.mp4", "x", 1);
+    char *vid = P ("cs/vid"), *want = P ("cs/vid/clip.mp4"), *media = NULL;
+    CHECK (walpe_detect_type (vid, &media) == WALPE_TYPE_VIDEO);
+    CHECK (!g_strcmp0 (media, want));
+    g_free (media);
+    g_free (want);
+    /* (a file that is not there in any case: the name as written, as before) */
+    mkfile ("cs/vid/project.json", "{\"type\":\"video\",\"file\":\"Other.MP4\"}", -1);
+    want = P ("cs/vid/Other.MP4");
+    media = NULL;
+    CHECK (walpe_detect_type (vid, &media) == WALPE_TYPE_VIDEO);
+    CHECK (!g_strcmp0 (media, want));
+    g_free (media);
+    g_free (want);
+    g_free (vid);
+
+    /* a scene whose json names its files as Windows lets it: every layer
+     * finds its model and its material */
+    const char *head = "{\"camera\":{\"center\":\"0 0 -1\",\"eye\":\"0 0 0\",\"up\":\"0 1 0\"},"
+                       "\"general\":{\"orthogonalprojection\":{\"width\":64,\"height\":36}},\"objects\":["
+                       "{\"id\":1,\"name\":\"a\",\"image\":\"%s\",\"origin\":\"32 18 0\",\"size\":\"64 36\"},"
+                       "{\"id\":2,\"name\":\"b\",\"image\":\"%s\",\"origin\":\"32 18 0\",\"size\":\"8 8\"}]}";
+    mkfile ("cs/scene/project.json", "{\"type\":\"scene\",\"file\":\"Scene.JSON\"}", -1);
+    mkfile ("cs/scene/models/solid.json", "{\"solidlayer\":true}", -1);
+    mkfile ("cs/scene/models/pic.json", "{\"autosize\":true,\"material\":\"Materials\\\\Pic.JSON\"}", -1);
+    mkfile ("cs/scene/materials/pic.json",
+            "{\"passes\":[{\"blending\":\"translucent\",\"shader\":\"genericimage2\",\"textures\":[\"Pic\"]}]}", -1);
+    mkfile ("cs/scene/materials/pic.tex", "x", 1);
+    char *sj = g_strdup_printf (head, "Models/Solid.json", "MODELS\\\\pic.JSON");
+    mkfile ("cs/scene/scene.json", sj, -1);
+    g_free (sj);
+    char *sp = P ("cs/scene");
+    GError *err = NULL;
+    misses = 0;
+    GLogFunc old = g_log_set_default_handler (miss_log, NULL);
+    WalpeContent *c = walpe_content_new (sp, NULL, &err);
+    g_log_set_default_handler (old, NULL);
+    if (!c || c->type != WALPE_TYPE_SCENE || misses) {
+        g_printerr ("FAIL a scene with names in another letter case: %s, %d file(s) not found\n",
+                    c ? "loaded" : err ? err->message : "no content", misses);
+        failures++;
+    }
+    g_clear_error (&err);
+    if (c)
+        c->free (c);
+    /* (the count above means something: a model that is in no letter case
+     * anywhere is still reported) */
+    sj = g_strdup_printf (head, "Models/Solid.json", "Models/Nowhere.json");
+    mkfile ("cs/scene/scene.json", sj, -1);
+    g_free (sj);
+    misses = 0;
+    old = g_log_set_default_handler (miss_log, NULL);
+    c = walpe_content_new (sp, NULL, NULL);
+    g_log_set_default_handler (old, NULL);
+    CHECK (c && misses > 0);
+    if (c)
+        c->free (c);
+    g_free (sp);
+    g_free (wp);
+}
+
 /* ------------------------------------------------------- wallpaper types */
 
 static const char *scan_type (GList *l, const char *id)
@@ -809,10 +948,12 @@ int main (int argc, char **argv)
     g_setenv ("WALPE_NO_MEDIA", "1", TRUE);
     g_mkdir_with_parents (home, 0755);
 
-    /* formats-test [preset|particles|pkg|tex|assets|types|notes]: one group only */
+    /* formats-test [preset|particles|pkg|tex|assets|case|types|notes]: one group only */
     const char *only = argc > 1 ? argv[1] : NULL;
     if (!only || !strcmp (only, "assets"))
         test_assets ();
+    if (!only || !strcmp (only, "case"))
+        test_case ();
     if (!only || !strcmp (only, "types"))
         test_types ();
     if (!only || !strcmp (only, "preset"))

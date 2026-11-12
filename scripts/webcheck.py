@@ -95,6 +95,9 @@ that into the daemon's log). Nothing of the user's is read or written.
             `mute` and a paused wallpaper hold it again; the wallpaper's own switch and
             volume (`walpe-ctl setprop walpe_sound=on|off walpe_volume=X`) win over the
             setting and reach the page without loading it again.
+  names     a page made on Windows: the project names it, and it names its script, a
+            picture and a text file, in another letter case than the files have; all
+            of them are found, a file that is nowhere is not.
 
 --display xvfb runs the cases that need no real output on a private X server instead
 (the daemon draws on X11); with --host x11 the pages are then on the X11 page host, with
@@ -2011,6 +2014,59 @@ def case_sound(env, W):
     healthy(env, mark, "sound")
 
 
+# -------------------------------------------------------------------- names
+# a page made on Windows: the project names it "Main.HTML" (the file is main.html), it
+# asks for its script as "JS/Part.js" (js/part.js), for a picture as "Img/Dot.PNG"
+# (img/dot.png), for a text as "DATA/Note.txt" (data/note.txt) - and for a file that is
+# there in no letter case
+NAMES_PAGE = """<!doctype html><html><body style="background:#223"><script>
+var S = {script: null, img: null, text: null, missing: null, user: 0, born: Date.now()};
+function say() { console.log('WCnames ' + JSON.stringify(S)); }
+</script><script src="JS/Part.js" onerror="S.script = 'failed'; say();"></script><script>
+var i = new Image(); i.onload = function () { S.img = i.naturalWidth + 'x' + i.naturalHeight; say(); };
+i.onerror = function () { S.img = 'failed'; say(); }; i.src = 'Img/Dot.PNG';
+fetch('DATA/Note.txt').then(function (r) { return r.ok ? r.text() : 'status ' + r.status; }).then(
+  function (t) { S.text = t.trim(); say(); }, function () { S.text = 'failed'; say(); });
+fetch('data/nowhere.txt').then(function (r) { S.missing = r.status; say(); }, function () { S.missing = 'failed'; say(); });
+window.addEventListener('load', function () { S.user = 1; say(); });
+setInterval(say, 500);
+</script></body></html>
+"""
+# a 2x2 PNG
+DOT_PNG = bytes.fromhex("89504e470d0a1a0a0000000d4948445200000002000000020802000000fdd49a"
+                        "73000000104944415478da6338a1a101440c100a00212e0461f6e1c24d0000000049454e44ae426082")
+
+
+def case_names(env, W):
+    out = W["names"]
+    if not os.path.isdir(out):
+        os.makedirs(os.path.join(out, "js"))
+        os.makedirs(os.path.join(out, "img"))
+        os.makedirs(os.path.join(out, "data"))
+        rc.jdump(os.path.join(out, "project.json"), {"type": "web", "title": "webcheck names", "file": "Main.HTML"})
+        with open(os.path.join(out, "main.html"), "w") as f:
+            f.write(NAMES_PAGE)
+        with open(os.path.join(out, "js", "part.js"), "w") as f:
+            f.write("S.script = 'ran'; say();\n")
+        with open(os.path.join(out, "img", "dot.png"), "wb") as f:
+            f.write(DOT_PNG)
+        with open(os.path.join(out, "data", "note.txt"), "w") as f:
+            f.write("a note\n")
+    if not start(env, [("A", 1280, 720, 0, 0)], "names"):
+        return
+    mark = env.mark()
+    opened = env.open(out)
+    st = wait_state(env, "names", lambda s: s.get("user") == 1 and all(s.get(k) is not None for k in ("script", "img", "text", "missing")),
+                    90, mark)
+    if not check(bool(opened) and bool(st), "names: a page the project names in another letter case loads", web_status(env)):
+        return
+    check(st.get("script") == "ran", "names: its script, asked for as JS/Part.js, runs (the file is js/part.js)", st.get("script"))
+    check(st.get("img") == "2x2", "names: its picture, asked for as Img/Dot.PNG, loads (img/dot.png)", st.get("img"))
+    check(st.get("text") == "a note", "names: its text, asked for as DATA/Note.txt, is read (data/note.txt)", st.get("text"))
+    check(st.get("missing") == 404, "names: a file that is there in no letter case is still not found", st.get("missing"))
+    healthy(env, mark, "names")
+
+
 CASES = [("start", case_start), ("live", case_live), ("snapshot", case_snapshot), ("raflimit", case_raflimit),
          ("props", case_props), ("audio", case_audio),
          ("pointer", case_pointer), ("two", case_two), ("outputs", case_outputs), ("pause", case_pause),
@@ -2018,7 +2074,7 @@ CASES = [("start", case_start), ("live", case_live), ("snapshot", case_snapshot)
          ("mixedpause", case_mixedpause),
          ("restart", case_restart), ("crash", case_crash), ("stale", case_stale), ("leftover", case_leftover),
          ("sandbox", case_sandbox), ("widgets", case_widgets), ("clipboard", case_clipboard),
-         ("offline", case_offline), ("sound", case_sound)]
+         ("offline", case_offline), ("sound", case_sound), ("names", case_names)]
 # cases that need outputs that can be made, changed and removed
 NEED_OUTPUTS = ("two", "outputs", "mixedpause")
 
@@ -2085,7 +2141,7 @@ def main():
             return 2
         wp = os.path.join(env.tmp, "wallpapers")
         W = {k: os.path.join(wp, k) for k in ("still", "live", "other", "widgets", "clip", "offline", "intro",
-                                              "sound", "raf")}
+                                              "sound", "raf", "names")}
         gen_page(W["still"], "still", False)
         gen_page(W["live"], "live", True)
         gen_page(W["other"], "other", False)

@@ -62,6 +62,7 @@
 #include "modules.h"
 #include "glutil.h"
 #include "common/util.h"
+#include "common/nocase.h"
 #include "common/lazy.h"
 #include "common/config.h"
 #include "common/audio.h"
@@ -539,6 +540,15 @@ static char *sh_resolve_in (const char *rootdir, const char *escaped_path)
         char *canon = joined ? g_canonicalize_filename (joined, NULL) : NULL;
         char *root = g_canonicalize_filename (rootdir, NULL);
         char *real = canon ? realpath (canon, NULL) : NULL;     /* resolves symlinks */
+        if (!real && rel) {
+            /* Nothing of that name: a page written on Windows asks for
+             * "JS/App.js" where the folder is js and the file app.js, and
+             * gets it there (nocase.h). What is found that way is resolved
+             * and tested below like a name that matched. */
+            char *as_on_disk = walpe_path_nocase (rootdir, rel, FALSE);
+            real = as_on_disk ? realpath (as_on_disk, NULL) : NULL;
+            g_free (as_on_disk);
+        }
         char *rroot = realpath (root, NULL);
         gsize rl = rroot ? strlen (rroot) : 0;
         if (real && rroot && !strncmp (real, rroot, rl) && (real[rl] == '/' || real[rl] == 0) &&
@@ -4469,13 +4479,29 @@ WalpeContent *walpe_web_new (const char *path, const WalpeLoadOpts *opts, GError
                            ? wpj_str (json_node_get_object (pj), "file", NULL) : NULL;
     if (file && !strchr (file, '/') && strcmp (file, ".."))
         html = g_build_filename (path, file, NULL);
-    if (pj)
-        json_node_unref (pj);
     const char *cands[] = { "index.html", "index.htm", NULL };
     for (int i = 0; cands[i] && (!html || !g_file_test (html, G_FILE_TEST_IS_REGULAR)); i++) {
         g_free (html);
         html = g_build_filename (path, cands[i], NULL);
     }
+    /* none of them as written: the page in another letter case ("file":
+     * "Main.html" next to main.html, a folder with Index.HTML), as Windows
+     * opens it (nocase.h). Names without a folder, as above. */
+    if (!g_file_test (html, G_FILE_TEST_IS_REGULAR)) {
+        const char *names[] = { file && !strchr (file, '/') && !strchr (file, '\\') && strcmp (file, "..") ? file : NULL,
+                                cands[0], cands[1] };
+        for (guint i = 0; i < G_N_ELEMENTS (names); i++) {
+            char *as_on_disk = names[i] ? walpe_path_nocase (path, names[i], FALSE) : NULL;
+            if (as_on_disk && g_file_test (as_on_disk, G_FILE_TEST_IS_REGULAR)) {
+                g_free (html);
+                html = as_on_disk;
+                break;
+            }
+            g_free (as_on_disk);
+        }
+    }
+    if (pj)
+        json_node_unref (pj);
     if (!g_file_test (html, G_FILE_TEST_IS_REGULAR)) {
         g_set_error (err, G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "index.html not found in %s", path);
         g_free (html);

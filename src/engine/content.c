@@ -202,6 +202,16 @@ static WalpeType detect_type_at (const char *path, char **media_path, int depth)
                  * exists, with links resolved): "file" stays inside the
                  * wallpaper's own directory */
                 char *mp = g_build_filename (abs, file_c, NULL);
+                if (!g_file_test (mp, G_FILE_TEST_EXISTS)) {
+                    /* "file": "Clip.MP4" next to clip.mp4: a project made
+                     * on Windows, found as Windows finds it (nocase.h; a
+                     * regular file below the wallpaper, or none) */
+                    char *as_on_disk = walpe_asset_path (abs, file_c);
+                    if (as_on_disk) {
+                        g_free (mp);
+                        mp = as_on_disk;
+                    }
+                }
                 if (walpe_path_is_inside (mp, abs))
                     *media_path = mp;
                 else {

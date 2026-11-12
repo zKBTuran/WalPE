@@ -2399,7 +2399,8 @@ endif
 # go, pause and resume (CPU time of the page), a page opened while paused,
 # restarts, a page process that dies, DISPLAY left over without an X server,
 # what is left behind, what the page's sandbox can see, popups and choosers,
-# the session's clipboard, network access off. Skipped (77) without sway +
+# the session's clipboard, network access off, files named in another
+# letter case. Skipped (77) without sway +
 # grim, and where WebKit does not start; not registered in a build without
 # the private page host.
 if have_web and have_webhost_wl and lifecheck_py.found()
