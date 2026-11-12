@@ -1044,6 +1044,68 @@ JsonNode *wpj_parse_first (char *text, gsize len, GError **err)
     return root ? json_node_copy (root) : NULL;
 }
 
+/* Half a surrogate pair with the wrong other half. json-glib (seen with
+ * 1.8.0) reads the escape of a surrogate, "\ud800" to "\udfff", takes the
+ * next two characters, and when those are "\u" reads a second escape; if
+ * the two are no pair - the first no high half, or the second no low one -
+ * it ends with "malformed surrogate pair" and does not free the string it
+ * was reading: every character of the string up to there, at every parse.
+ * A project.json whose title is 30 MiB of text and then "\ud800\u0041" left
+ * 32 MiB behind each time the library was listed or the wallpaper loaded.
+ *
+ * TRUE when the text has such a place. Read the way json-glib reads a
+ * string: a backslash takes the character behind it; "\u" takes up to four
+ * hex digits, the first of them the highest, and the character that ends
+ * them early; a surrogate takes one character more, or two when the first
+ * is a backslash. Every backslash is read as if it stood in a string:
+ * outside of one a backslash is no JSON, and a text json-glib takes is told
+ * apart from one it refuses only by what is inside its strings. */
+static guint32 jsonglib_unichar (const char *p, const char *end, gsize *used)
+{
+    guint32 u = 0;
+    gsize i = 0;
+    while (i < 4 && p + i < end) {
+        const int h = g_ascii_xdigit_value (p[i]);
+        if (h < 0) {
+            i++;        /* (it is taken too) */
+            break;
+        }
+        u += (guint32) h << ((3 - i) * 4);
+        i++;
+    }
+    *used = i;
+    return u;
+}
+
+static gboolean json_bad_surrogate_pair (const char *d, gsize len)
+{
+    const char *end = d + len, *p = d;
+    while (p < end && (p = memchr (p, '\\', (gsize) (end - p))) != NULL) {
+        if (end - p < 3 || p[1] != 'u' || g_ascii_xdigit_value (p[2]) < 0) {
+            /* another escape; "\u" without a digit is the letter u */
+            p = end - p > 2 ? p + 2 : end;
+            continue;
+        }
+        gsize n = 0;
+        const guint32 first = jsonglib_unichar (p + 2, end, &n);
+        const char *q = p + 2 + n;
+        if (first < 0xd800 || first > 0xdfff) {
+            p = q;
+            continue;
+        }
+        if (end - q >= 2 && q[0] == '\\' && q[1] == 'u') {
+            const guint32 second = jsonglib_unichar (q + 2, end, &n);
+            if (first > 0xdbff || second < 0xdc00 || second > 0xdfff)
+                return TRUE;
+            p = q + 2 + n;
+        } else {
+            const gsize take = q < end && q[0] == '\\' ? 2 : 1;
+            p = (gsize) (end - q) > take ? q + take : end;
+        }
+    }
+    return FALSE;
+}
+
 /* the parse itself; *msg (if asked for) = why the text was refused, to be
  * freed by the caller; a text that parses but is no object gives NULL
  * without a message, as before. own: the same text, writable (it may be
@@ -1055,6 +1117,13 @@ static JsonNode *wpj_parse_quiet (const char *data, gssize len, char **msg, char
     if (!wpj_depth_ok (data, (gsize) len, WPJ_MAX_DEPTH)) {
         if (msg)
             *msg = g_strdup_printf ("nested deeper than %d levels", WPJ_MAX_DEPTH);
+        return NULL;
+    }
+    if (json_bad_surrogate_pair (data, (gsize) len)) {
+        /* (json-glib's own answer to it, without the string it would keep) */
+        if (msg)
+            *msg = g_strdup ("malformed surrogate pair (the escape of one half, \\ud800 to \\udfff, "
+                             "without its other half)");
         return NULL;
     }
     g_autoptr (GError) err = NULL;

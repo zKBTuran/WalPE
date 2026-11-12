@@ -372,6 +372,83 @@ static void test_json (void)
         g_free (f);
     }
 
+    /* Half a surrogate pair with the wrong other half: json-glib 1.8 says
+     * "malformed surrogate pair" and keeps the string it was reading - all
+     * of it up to that place, at every parse. Such a text is refused before
+     * json-glib reads it (it was refused before, too); what json-glib takes
+     * is taken as before. */
+    {
+        static const char *const bad[] = {
+            "\\ud800\\u0041",      /* a first half, then a letter */
+            "\\uD83D\\ud83d",      /* two first halves */
+            "\\udc00\\udc00",      /* two second halves */
+            "\\udbff\\ue000",
+            "\\ud800\\u12",        /* a second escape that is cut short */
+            "\\ud8Z\\u0041",       /* two digits read as d800, and take the character behind them */
+            "\\ud83d\\ude00\\ud800\\u0041",   /* a good pair first */
+        };
+        static const char *const good[] = {
+            "\\ud83d\\ude00",                  /* a pair */
+            "\\\\ud800\\\\u0041",              /* the two characters backslash and u, twice: no escape of a half */
+            "\\u00e9\\u0041 \\n \\u1234",
+            "\\\\\\ud83d\\ude00",              /* a backslash, then a pair */
+        };
+        GString *body = g_string_new (NULL);
+        for (int i = 0; i < 1024 * 1024; i++)
+            g_string_append_c (body, 'x');
+        gsize heap0 = heap_in_use ();
+        for (guint i = 0; i < G_N_ELEMENTS (bad); i++) {
+            for (int in_name = 0; in_name < 2; in_name++) {
+                GString *t = g_string_new (in_name ? "{\"" : "{\"t\":\"");
+                g_string_append (t, body->str);
+                g_string_append (t, bad[i]);
+                g_string_append (t, in_name ? "\":1}" : "\"}");
+                for (int k = 0; k < 6; k++) {
+                    n = wpj_parse_data (t->str, (gssize) t->len);
+                    CHECK (n == NULL);
+                    g_clear_pointer (&n, json_node_unref);
+                }
+                g_string_free (t, TRUE);
+            }
+        }
+        gsize heap1 = heap_in_use ();
+        if (heap1 > heap0 + 8 * 1024 * 1024)
+            g_printerr ("   parses of texts with half a surrogate pair left %.1f MiB allocated\n",
+                        (double) (heap1 - heap0) / 1048576.0);
+        CHECK (heap1 <= heap0 + 8 * 1024 * 1024);
+        for (guint i = 0; i < G_N_ELEMENTS (good); i++) {
+            char *t = g_strdup_printf ("{\"t\":\"%s\",\"%s\":[\"%s\"]}", good[i], good[i], good[i]);
+            n = wpj_parse_data (t, -1);
+            CHECK (n != NULL && jsonglib_takes (t));
+            g_clear_pointer (&n, json_node_unref);
+            g_free (t);
+        }
+        /* a half with something else behind it is json-glib's business, as before */
+        static const char *const its[] = { "{\"t\":\"a\\ud800b\"}", "{\"t\":\"\\ud800\"}", "{\"t\":\"\\udfff\\n\"}",
+                                           "{\"t\":\"\\ud800\\\\\"}", "{\"t\":\"\\u12\"}", "{\"t\":\"x\\",
+                                           /* (d800, the backslash taken with it, then "\udc00": a pair to json-glib) */
+                                           "{\"t\":\"\\ud8\\\\udc00\"}", "{\"t\":\"\\ud8\\\\udc00\\ud8", "\\ud800\\u" };
+        for (guint i = 0; i < G_N_ELEMENTS (its); i++) {
+            n = wpj_parse_data (its[i], -1);
+            CHECK ((n != NULL) == jsonglib_takes (its[i]));
+            g_clear_pointer (&n, json_node_unref);
+        }
+        /* the file reader */
+        GString *t = g_string_new ("{\"title\":\"");
+        g_string_append (t, body->str);
+        g_string_append (t, "\\ud800\\u0041\"}");
+        mkfile ("json/halfpair.json", t->str, (gssize) t->len);
+        f = P ("json/halfpair.json");
+        heap0 = heap_in_use ();
+        for (int k = 0; k < 20; k++)
+            CHECK (wpj_parse_file (f) == NULL);
+        CHECK (heap_in_use () <= heap0 + 8 * 1024 * 1024);
+        g_unlink (f);
+        g_free (f);
+        g_string_free (t, TRUE);
+        g_string_free (body, TRUE);
+    }
+
     /* one value per text: an array or object behind the first value is not
      * left in memory (json-glib 1.8 parses it and never frees it: thirty
      * times its text, at every parse). What comes back is the first value,
