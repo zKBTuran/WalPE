@@ -487,6 +487,32 @@ static char *resolve_asset (const char *dir, const char *file)
     return a;
 }
 
+/* a layer's picture by the name its material gives it, below root: the name
+ * as it is, or materials/<name>.tex */
+static char *layer_tex_file (const char *root, const char *texname)
+{
+    char *texpath = NULL;
+    if (strchr (texname, '/')) {
+        texpath = resolve_asset (root, texname);
+        /* a workshop asset's texture is named with its folder:
+         * "workshop/2652493753/bar" is materials/workshop/
+         * 2652493753/bar.tex (the bars of the script visualizers
+         * 3671993849, 2411409959 had no picture) */
+        if (!texpath) {
+            char *rel = g_strconcat ("materials/", texname, ".tex", NULL);
+            texpath = resolve_asset (root, rel);
+            g_free (rel);
+        }
+    } else {
+        char *rel = g_strconcat ("materials/", texname, ".tex", NULL);
+        texpath = resolve_asset (root, rel);
+        g_free (rel);
+        if (!texpath)
+            texpath = resolve_asset (root, texname);
+    }
+    return texpath;
+}
+
 /* resolve a model/material ref: project dir first, then the WE install */
 static char *resolve_model_ref (const char *dir, const char *ref)
 {
@@ -1604,26 +1630,15 @@ static gboolean load_image_object (SceneNodeContent *s, NodeObj *nv, const char 
                 texname = g_strdup (wpj_str (to, "texture", wpj_str (to, "diffuse", NULL)));
             }
             if (texname) {
-                /* name -> file: as-is, or materials/<name>.tex */
-                char *texpath = NULL;
-                if (strchr (texname, '/')) {
-                    texpath = resolve_asset (s->dir, texname);
-                    /* a workshop asset's texture is named with its folder:
-                     * "workshop/2652493753/bar" is materials/workshop/
-                     * 2652493753/bar.tex (the bars of the script visualizers
-                     * 3671993849, 2411409959 had no picture) */
-                    if (!texpath) {
-                        char *rel = g_strconcat ("materials/", texname, ".tex", NULL);
-                        texpath = resolve_asset (s->dir, rel);
-                        g_free (rel);
-                    }
-                } else {
-                    char *rel = g_strconcat ("materials/", texname, ".tex", NULL);
-                    texpath = resolve_asset (s->dir, rel);
-                    g_free (rel);
-                    if (!texpath)
-                        texpath = resolve_asset (s->dir, texname);
-                }
+                /* name -> file: as-is, or materials/<name>.tex - in the
+                 * wallpaper, then in Wallpaper Engine's own assets, where a
+                 * model and its material were already looked for
+                 * (resolve_model_ref): a layer made from a model of the
+                 * install has its picture there too, and was drawn without
+                 * it. */
+                char *texpath = layer_tex_file (s->dir, texname);
+                if (!texpath && walpe_we_assets_dir ())
+                    texpath = layer_tex_file (walpe_we_assets_dir (), texname);
                 /* "usertextures": [propid]: a "scenetexture" user property
                  * (e.g. set by a preset to "files/x.jpg", or the user's own
                  * file) replaces slot 0; the object instance's entry wins */
@@ -1643,9 +1658,10 @@ static gboolean load_image_object (SceneNodeContent *s, NodeObj *nv, const char 
                     /* (said once per scene, like a model that is missing:
                      * the layer has no picture and nothing told why) */
                     s->warned_tex = TRUE;
-                    g_warning ("scenenode: layer %s: its picture \"%s\" is not in the wallpaper: drawn without "
-                               "it (further misses silent)",
-                               walpe_log_str (nv->name ? nv->name : "?"), walpe_log_str (texname));
+                    g_warning ("scenenode: layer %s: its picture \"%s\" is neither in the wallpaper nor in "
+                               "Wallpaper Engine's assets (%s): drawn without it (further misses silent)",
+                               walpe_log_str (nv->name ? nv->name : "?"), walpe_log_str (texname),
+                               walpe_we_assets_dir () ? "an install is known" : "no install found");
                 }
                 g_free (texname);
                 guint64 voff = 0, vlen = 0;

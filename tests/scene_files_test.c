@@ -19,10 +19,12 @@
  *         text that changes every frame is counted once. A point size
  *         beyond any font size is refused without a complaint of the text
  *         library.
- *  pictures  (needs the same context) a layer whose picture is not in the
- *         wallpaper, or is a file that is cut off, is drawn without it and
- *         the log names the layer and the picture; a layer with its picture
- *         says nothing.
+ *  pictures  (needs the same context) the picture of a layer is found in
+ *         the wallpaper, then in Wallpaper Engine's assets (an invented
+ *         install): a layer made from a model of the install shows its
+ *         picture, the wallpaper's own picture of the same name comes
+ *         first, and a picture that is nowhere or is cut off is named in
+ *         the log.
  *  particles  particle files: particles that sit on a particle of their
  *         parent system (eventfollow) stay on it while others die around it,
  *         and 20000 deaths a step with 40 such child systems do not take
@@ -38,6 +40,7 @@
 #include "engine/propnotes.h"
 #include "engine/weparticles.h"
 #include "common/util.h"
+#include "common/weassets.h"
 #include <epoxy/gl.h>
 #include <epoxy/egl.h>
 #include <glib.h>
@@ -865,15 +868,17 @@ static gboolean pic_look (const char *dir, guint8 *rgb, gboolean *said_missing, 
     draw (c);
     draw (c);
     rgb_at (320, 180, rgb);
-    *said_missing = strstr (logged->str, "is not in the wallpaper") != NULL;
+    *said_missing = strstr (logged->str, "is neither in the wallpaper nor in") != NULL;
     *said_unread = strstr (logged->str, "cannot be read") != NULL;
     c->gl_free (c);
     c->free (c);
     return TRUE;
 }
 
-/* A layer whose picture is not there, or is no picture, was left out
- * without a word: the log now names the layer and the picture. */
+/* The picture of a layer is found where its model and material are found:
+ * in the wallpaper, then in Wallpaper Engine's own assets. A layer made
+ * from a model of the install was drawn without its picture; one whose
+ * picture is nowhere, or is no picture, was left out without a word. */
 static void test_pictures (void)
 {
     if (!gl_up ()) {
@@ -881,10 +886,32 @@ static void test_pictures (void)
         return;
     }
     walpe_glutil_init ();
+    /* an install's assets, invented here: a model, its material, its picture (red) */
+    char *text = g_strdup_printf (PIC_MODEL, "builtin");
+    mkfile ("pc/install/assets/models/builtin.json", text, -1);
+    g_free (text);
+    text = g_strdup_printf (PIC_MATERIAL, "builtin/pic");
+    mkfile ("pc/install/assets/materials/builtin.json", text, -1);
+    g_free (text);
+    mktex ("pc/install/assets/materials/builtin/pic.tex", 255, 0, 0, FALSE);
+    mkfile ("pc/install/assets/shaders/readme.txt", "x", 1);
+    char *inst = P ("pc/install/assets");
+    g_unsetenv ("WALPE_WE_ASSETS");
+    walpe_we_assets_set_configured (inst);
+    CHECK (!g_strcmp0 (walpe_we_assets_dir (), inst));
+
     guint8 rgb[3];
     gboolean missing, unread;
-    /* the wallpaper's own picture (blue): drawn, nothing said */
-    char *dir = pic_scene ("own", "mine", TRUE, "builtin/pic");
+    /* model, material and picture of the install */
+    char *dir = pic_scene ("all", "builtin", FALSE, NULL);
+    CHECK (pic_look (dir, rgb, &missing, &unread) && rgb[0] > 200 && rgb[1] < 50 && rgb[2] < 50 && !missing && !unread);
+    g_free (dir);
+    /* a model and material of the wallpaper's own that name a picture of the install */
+    dir = pic_scene ("named", "mine", TRUE, "builtin/pic");
+    CHECK (pic_look (dir, rgb, &missing, &unread) && rgb[0] > 200 && rgb[1] < 50 && rgb[2] < 50 && !missing && !unread);
+    g_free (dir);
+    /* the wallpaper's own picture of that name comes first (blue) */
+    dir = pic_scene ("own", "mine", TRUE, "builtin/pic");
     mktex ("pc/own/materials/builtin/pic.tex", 0, 0, 255, FALSE);
     CHECK (pic_look (dir, rgb, &missing, &unread) && rgb[0] < 50 && rgb[1] < 50 && rgb[2] > 200 && !missing && !unread);
     g_free (dir);
@@ -897,6 +924,9 @@ static void test_pictures (void)
     mktex ("pc/cut/materials/cut.tex", 0, 255, 0, TRUE);
     CHECK (pic_look (dir, rgb, &missing, &unread) && rgb[0] < 50 && rgb[1] < 50 && rgb[2] < 50 && !missing && unread);
     g_free (dir);
+
+    walpe_we_assets_set_configured (NULL);
+    g_free (inst);
 }
 
 int main (int argc, char **argv)
