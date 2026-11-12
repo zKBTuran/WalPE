@@ -5512,6 +5512,10 @@ static gboolean sound_props_apply (const char *wp)
 {
     char *sw = walpe_config_get_prop (wp, "walpe_sound"), *vol = walpe_config_get_prop (wp, "walpe_volume");
     guint n = walpe_sound_wallpaper_set (wp, walpe_sound_switch_parse (sw), walpe_sound_volume_parse (vol));
+#ifdef HAVE_WEB
+    /* a web wallpaper's page takes them too, without being loaded again */
+    n += walpe_web_sound_wallpaper (wp, walpe_sound_switch_parse (sw), walpe_sound_volume_parse (vol));
+#endif
     g_free (sw);
     g_free (vol);
     return n > 0;
@@ -6859,13 +6863,14 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o);
 
 /* The sound of web pages follows the three settings of wallpaper sound
  * (web.h walpe_web_sound): as loud as "volume" says while "scene_sound" is
- * on and "mute" is off, silent otherwise. At start, before a wallpaper is
+ * on and "mute" is off, silent otherwise (a wallpaper's own switch and
+ * volume come on top, sound_props_apply). At start, before a wallpaper is
  * opened, and after every `set` request: costs nothing while the level is
  * what it was, and never loads the web module. */
 static void web_sound_apply (void)
 {
 #ifdef HAVE_WEB
-    walpe_web_sound (D.cfg->scene_sound && !D.cfg->mute ? D.cfg->volume : 0.0);
+    walpe_web_sound (D.cfg->mute ? 0.0 : D.cfg->volume, D.cfg->scene_sound);
 #endif
 }
 

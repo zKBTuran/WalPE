@@ -80,7 +80,9 @@ that into the daemon's log). Nothing of the user's is read or written.
             server needed: with wallpaper sound off the Audio object is held, not
             refused; `walpe-ctl set scene_sound=on volume=0.3` starts it without a click
             and changes the element's real volume (the page reads back its own value);
-            `mute` and a paused wallpaper hold it again.
+            `mute` and a paused wallpaper hold it again; the wallpaper's own switch and
+            volume (`walpe-ctl setprop walpe_sound=on|off walpe_volume=X`) win over the
+            setting and reach the page without loading it again.
 
 --display xvfb runs the cases that need no real output on a private X server instead
 (the daemon draws on X11); with --host x11 the pages are then on the X11 page host, with
@@ -1700,6 +1702,30 @@ def case_sound(env, W):
     st = wait_state(env, "sound", lambda s: s.get("dp") is False, 20, env.mark())
     check(st.get("dp") is False and st.get("born") is not None,
           "sound: after a pause of the wallpaper it plays again", st.get("dp"))
+    # the wallpaper's own switch and volume (walpe_sound, walpe_volume): they win over the
+    # setting, reach the page that runs, and the page is not loaded again
+    born = st.get("born")
+    env.ctl("setprop", "walpe_sound=off")
+    st = wait_state(env, "sound", lambda s: s.get("dp") is True, 20, env.mark())
+    check(st.get("dp") is True, "sound: the wallpaper's own switch off holds it while sound is on", st.get("dp"))
+    env.ctl("set", "scene_sound=off")
+    env.ctl("setprop", "walpe_sound=on")
+    st = wait_state(env, "sound", lambda s: s.get("dp") is False, 20, env.mark())
+    check(st.get("dp") is False, "sound: the wallpaper's own switch on plays it while sound is off", st.get("dp"))
+    vc1 = st.get("vc", 0)
+    env.ctl("setprop", "walpe_volume=0.5")
+    st = wait_state(env, "sound", lambda s: s.get("vc", 0) > vc1, 20, env.mark())
+    check(st.get("vc", 0) > vc1 and st.get("v") == 0.5 and st.get("dp") is False,
+          "sound: the wallpaper's own volume reaches the element", (vc1, st.get("vc"), st.get("v")))
+    env.ctl("setprop", "walpe_volume=0")
+    st = wait_state(env, "sound", lambda s: s.get("dp") is True, 20, env.mark())
+    check(st.get("dp") is True, "sound: the wallpaper's own volume 0 holds it", st.get("dp"))
+    env.ctl("resetprops")
+    env.ctl("set", "scene_sound=on")
+    st = wait_state(env, "sound", lambda s: s.get("dp") is False, 20, env.mark())
+    check(st.get("dp") is False and st.get("born") == born,
+          "sound: its options reset: the setting decides again, and it is the same page all along",
+          (st.get("dp"), st.get("born") == born))
     healthy(env, mark, "sound")
 
 

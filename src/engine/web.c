@@ -219,6 +219,8 @@ typedef struct {
     gboolean js_paused;
     gboolean suspended;       /* page paused + window unmapped (sh_suspend) */
     WebKitUserScript *snd_script; /* the sound script with the level it starts with */
+    int snd_sw;               /* the wallpaper's own sound switch: -1 none, 0 off, 1 on */
+    int snd_vol_q16;          /* ... and its own volume, 0..65536 */
     char snd_key[24];         /* what its copies in the page's frames know each other by */
     int snd_q16;              /* the level the page was last given (-1 = none yet) */
     int view_w, view_h;
@@ -1408,9 +1410,11 @@ static void web_private_screen (int w, int h);
  * autoplay> that has a sound track and is not muted showed its first
  * picture for ever. The page gets WEBKIT_AUTOPLAY_ALLOW (sh_create_real).
  *
- * How loud it is: the level of walpe_web_sound (the volume setting; 0
- * while wallpaper sound is switched off or "mute" is on, and 0 in every
- * program that never set it). WebKitGTK
+ * How loud it is: a level for each page - the volume setting (0 while
+ * "mute" is on) times the wallpaper's own volume while sound is on for the
+ * wallpaper (its own switch, else the setting "scene_sound"), 0 otherwise,
+ * and 0 in every program that never said (walpe_web_sound,
+ * walpe_web_sound_wallpaper in web.h). WebKitGTK
  * has no volume for a page, only a mute, and the mute is of no use here:
  * an Audio object that is started in a muted page never plays, also not
  * after the page is unmuted (WebKitGTK 2.52) - and a wallpaper starts
@@ -1433,7 +1437,8 @@ static void web_private_screen (int w, int h);
  * knows and those in the document, and suspend the AudioContexts that
  * have an output; then the view is muted (what the script did not reach).
  * Resume unmutes first and starts them again after it. */
-static gint web_sound_q16;          /* atomic: the level, 0..65536 */
+static gint web_sound_q16;          /* atomic: the master level, 0..65536 */
+static gint web_sound_on;           /* atomic: wallpaper sound is switched on */
 static GPtrArray *sound_pages;      /* main thread: the pages that have a view */
 
 #define SOUND_JS_HEAD "(function(){var W=window;if(W.__walpeVol)return;var K='"
@@ -1510,7 +1515,10 @@ static void sh_sound_apply (WebShared *sh)
 {
     if (!sh->view || sh->dead)
         return;
-    const int q = g_atomic_int_get (&web_sound_q16);
+    /* the page's level: the master's times the wallpaper's own volume while
+     * sound is on for the wallpaper (its own switch, else the setting) */
+    const gboolean on = sh->snd_sw > 0 || (sh->snd_sw < 0 && g_atomic_int_get (&web_sound_on));
+    const int q = on ? (int) ((gint64) g_atomic_int_get (&web_sound_q16) * sh->snd_vol_q16 >> 16) : 0;
     if (q == sh->snd_q16)
         return;
     char num[G_ASCII_DTOSTR_BUF_SIZE];
@@ -1549,15 +1557,76 @@ static gboolean web_sound_main (gpointer user)
     return G_SOURCE_REMOVE;
 }
 
-/* any thread (modules.h web_sound): the level changed, or the module was
- * loaded and is told the level there is */
-static void walpe_web_sound_level (double level)
+/* any thread (modules.h web_sound): the settings changed, or the module
+ * was loaded and is told what they are */
+static void walpe_web_sound_level (double master, gboolean enabled)
 {
-    const int q = (int) (CLAMP (level, 0.0, 1.0) * 65536.0);
-    if (g_atomic_int_get (&web_sound_q16) == q)
+    const int q = (int) (CLAMP (master, 0.0, 1.0) * 65536.0);
+    if (g_atomic_int_get (&web_sound_q16) == q && g_atomic_int_get (&web_sound_on) == (enabled ? 1 : 0))
         return;
     g_atomic_int_set (&web_sound_q16, q);
+    g_atomic_int_set (&web_sound_on, enabled ? 1 : 0);
     g_idle_add (web_sound_main, NULL);
+}
+
+/* the wallpaper's own sound options as the page keeps them */
+static void sh_sound_own (WebShared *sh, int sw, double vol)
+{
+    sh->snd_sw = sw > 0 ? 1 : sw == 0 ? 0 : -1;
+    sh->snd_vol_q16 = (int) (CLAMP (isfinite (vol) ? vol : 1.0, 0.0, 1.0) * 65536.0);
+}
+
+/* ... read from the configuration (the options "walpe_sound", "walpe_volume"
+ * of the wallpaper the page was opened as; neither set: the setting decides,
+ * at full volume) */
+static void sh_sound_own_load (WebShared *sh)
+{
+    char *sw = walpe_config_get_prop (sh->origin, "walpe_sound");
+    char *vol = walpe_config_get_prop (sh->origin, "walpe_volume");
+    char *end = NULL;
+    const double v = vol && *vol ? g_ascii_strtod (vol, &end) : 1.0;
+    const gboolean yes = sw && (!g_ascii_strcasecmp (sw, "on") || !g_ascii_strcasecmp (sw, "true") ||
+                                !strcmp (sw, "1") || !g_ascii_strcasecmp (sw, "yes"));
+    const gboolean no = sw && (!g_ascii_strcasecmp (sw, "off") || !g_ascii_strcasecmp (sw, "false") ||
+                               !strcmp (sw, "0") || !g_ascii_strcasecmp (sw, "no"));
+    sh_sound_own (sh, yes ? 1 : no ? 0 : -1, vol && *vol && end && !*end && v >= 0.0 && v <= 1.0 ? v : 1.0);
+    g_free (sw);
+    g_free (vol);
+}
+
+typedef struct { char *key; int sw; double vol; } SoundOwn;
+
+static gboolean web_sound_page_main (gpointer user)
+{
+    SoundOwn *o = user;
+    for (guint i = 0; sound_pages && i < sound_pages->len; i++) {
+        WebShared *sh = sound_pages->pdata[i];
+        if (!g_strcmp0 (sh->origin, o->key)) {
+            sh_sound_own (sh, o->sw, o->vol);
+            sh_sound_apply (sh);
+        }
+    }
+    g_free (o->key);
+    g_free (o);
+    return G_SOURCE_REMOVE;
+}
+
+/* any thread (modules.h web_sound_page): the wallpaper `key` has another
+ * switch or volume of its own; -> the pages that show it */
+static guint walpe_web_sound_page (const char *key, int sw, double vol)
+{
+    guint n = 0;
+    g_mutex_lock (&reg_lock);
+    n = registry && g_hash_table_lookup (registry, key) ? 1 : 0;
+    g_mutex_unlock (&reg_lock);
+    if (n) {
+        SoundOwn *o = g_new0 (SoundOwn, 1);
+        o->key = g_strdup (key);
+        o->sw = sw;
+        o->vol = vol;
+        g_idle_add (web_sound_page_main, o);
+    }
+    return n;
 }
 
 /* Paused = no viewer wants frames: the page itself must stop too (a
@@ -3711,6 +3780,7 @@ static gboolean sh_create_real (WebShared *sh)
     g_object_unref (ucm);
     /* how loud, before the page loads anything */
     sh->snd_q16 = -1;
+    sh_sound_own_load (sh);
     sh_sound_apply (sh);
     if (!sound_pages)
         sound_pages = g_ptr_array_new ();
@@ -3843,6 +3913,12 @@ static gboolean sh_destroy_main (gpointer user)
 static gboolean sh_reprops_main (gpointer user)
 {
     WebShared *sh = user;
+    if (!sh->dead && sh->view) {
+        /* its own sound switch and volume are options too (`resetprops`
+         * takes them away without saying so to the page) */
+        sh_sound_own_load (sh);
+        sh_sound_apply (sh);
+    }
     if (!sh->dead && sh->view &&
         sh_apply_network (sh, webkit_web_view_get_network_session (sh->view)) && !sh->gave_up) {
         /* the network option changed: the page starts over under the new
@@ -4332,7 +4408,7 @@ WALPE_API const WalpeWebModule *walpe_web_module_entry (void)
         WALPE_MODULE_ABI, walpe_web_new, walpe_web_input, walpe_web_stats,
         walpe_web_media_missing, walpe_web_error, walpe_web_probe_run,
         walpe_web_input_status, walpe_web_info, walpe_web_host,
-        walpe_web_sound_level,
+        walpe_web_sound_level, walpe_web_sound_page,
     };
     return &m;
 }

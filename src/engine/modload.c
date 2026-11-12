@@ -149,7 +149,8 @@ static G_GNUC_UNUSED void mod_note_loaded (ModNote *n, const char *fallback)
 static const WalpeWebModule *web_mod;
 static gboolean web_tried;
 static char *web_err;
-static gint web_sound_q16;      /* atomic: walpe_web_sound's level, 0..65536 */
+static gint web_sound_q16;      /* atomic: walpe_web_sound's master, 0..65536 */
+static gint web_sound_on;       /* atomic: ... and its `enabled` */
 
 const WalpeWebModule *walpe_web_module (gboolean load)
 {
@@ -165,7 +166,7 @@ const WalpeWebModule *walpe_web_module (gboolean load)
             mod_note_loaded (&web_note, "the WebKit start-up test");
             /* before the module makes its first page (still under
              * mod_lock: a level set meanwhile is handed on after this one) */
-            m->web_sound (g_atomic_int_get (&web_sound_q16) / 65536.0);
+            m->web_sound (g_atomic_int_get (&web_sound_q16) / 65536.0, g_atomic_int_get (&web_sound_on));
         }
         else if (m)
             web_err = g_strdup ("walpe-web.so: ABI mismatch (rebuild)");
@@ -193,16 +194,23 @@ WalpeContent *walpe_web_new (const char *path, const WalpeLoadOpts *opts, GError
 }
 
 /* the rest only matter once a web wallpaper ran: never load for them */
-void walpe_web_sound (double level)
+void walpe_web_sound (double master, gboolean enabled)
 {
-    if (!(level > 0.0))     /* (also not a number) */
-        level = 0.0;
-    g_atomic_int_set (&web_sound_q16, (gint) (MIN (level, 1.0) * 65536.0));
-    /* (waits for a load that is going on: that one hands the module the
-     * level it found, this call the newer one after it) */
+    if (!(master > 0.0))    /* (also not a number) */
+        master = 0.0;
+    g_atomic_int_set (&web_sound_q16, (gint) (MIN (master, 1.0) * 65536.0));
+    g_atomic_int_set (&web_sound_on, enabled ? 1 : 0);
+    /* (waits for a load that is going on: that one hands the module what
+     * it found, this call the newer values after it) */
     const WalpeWebModule *m = walpe_web_module (FALSE);
     if (m)
-        m->web_sound (g_atomic_int_get (&web_sound_q16) / 65536.0);
+        m->web_sound (g_atomic_int_get (&web_sound_q16) / 65536.0, g_atomic_int_get (&web_sound_on));
+}
+
+guint walpe_web_sound_wallpaper (const char *key, int wallpaper_switch, double volume)
+{
+    const WalpeWebModule *m = walpe_web_module (FALSE);
+    return m && key ? m->web_sound_page (key, wallpaper_switch, volume) : 0;
 }
 
 void walpe_web_input (gpointer viewer, const WalpeWebInput *in)
@@ -263,9 +271,15 @@ const WalpeWebModule *walpe_web_module (gboolean load)
     return NULL;
 }
 
-void walpe_web_sound (double level)
+void walpe_web_sound (double master, gboolean enabled)
 {
-    (void) level;
+    (void) master; (void) enabled;
+}
+
+guint walpe_web_sound_wallpaper (const char *key, int wallpaper_switch, double volume)
+{
+    (void) key; (void) wallpaper_switch; (void) volume;
+    return 0;
 }
 #endif
 

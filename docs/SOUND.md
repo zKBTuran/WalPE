@@ -196,8 +196,14 @@ the application name `WebKit` in the desktop's mixer. The same three settings de
   the page had not muted showed its first picture and stood still.)
 - While the wallpaper is paused its media are paused, its AudioContexts suspended and the
   page muted; they go on where they stopped.
-- There is no switch and no volume for one web wallpaper yet (`walpe_sound` and
-  `walpe_volume` are for scenes and videos).
+- **One web wallpaper's own switch and volume**: the rows "Sound" and "Volume" at the top of
+  its options, or `walpe-ctl setprop walpe_sound=on|off walpe_volume=0.5`, as for scenes and
+  videos. The switch wins over the setting in both directions, the volume is a factor on
+  the volume setting; both reach the page that runs - it is not loaded again - and are
+  saved with the wallpaper. Every page has its level: two web wallpapers on two monitors
+  are independent (measured: one at half its amplitude and the other unchanged; one
+  switched off and the other heard). The rows are there for every web wallpaper: whether
+  a page makes any sound cannot be known without running it.
 
 State of testing: WebKitGTK 2.52 with GStreamer 1.24 against a PulseAudio null sink (WAV,
 Ogg Vorbis, WebM with VP8 and Vorbis, an oscillator), by recording the sink's monitor.

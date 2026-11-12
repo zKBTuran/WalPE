@@ -2252,6 +2252,12 @@ void walpe_props_panel_show (GtkWidget *panel, const char *path, JsonObject *def
             defs = mine;
         }
         sound_defs_add (defs);
+        /* a web wallpaper gets the rows whatever its page does: whether a
+         * page makes sound is not to be known without running it */
+        JsonObject *head = path && walpe_detect_type (path, NULL) == WALPE_TYPE_WEB
+                               ? wpj_obj (defs, "walpe_sound_head") : NULL;
+        if (head)
+            json_object_set_string_member (head, "text", "Sound of this wallpaper (if its page makes any)");
     }
     P->defs = defs ? json_object_ref (defs) : NULL;
     P->loc = loc ? json_object_ref (loc) : NULL;

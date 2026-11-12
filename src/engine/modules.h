@@ -81,7 +81,10 @@ typedef struct {
     char *(*web_input_status) (void);   /* ABI 4 */
     char *(*web_info) (void);           /* ABI 5: what renders WebGL in pages */
     char *(*web_host) (void);           /* ABI 11: where the pages' windows live */
-    void (*web_sound) (double level);   /* ABI 14: how loud pages are (web.h) */
+    /* ABI 14: how loud pages are (web.h walpe_web_sound), and one
+     * wallpaper's own switch and volume (walpe_web_sound_wallpaper) */
+    void (*web_sound) (double master, gboolean enabled);
+    guint (*web_sound_page) (const char *key, int wallpaper_switch, double volume);
 } WalpeWebModule;
 
 typedef struct {

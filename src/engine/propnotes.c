@@ -460,6 +460,10 @@ JsonObject *walpe_prop_notes_sound (const char *path, guint *sound_layers)
     WalpeType t = walpe_detect_type (abs, NULL);
     JsonNode *defs = NULL;
     JsonObject *out = NULL;
+    /* a web wallpaper counts as one that has sound: whether its page makes
+     * any is not to be known without running it */
+    if (sound_layers && t == WALPE_TYPE_WEB)
+        *sound_layers = 1;
     if (t == WALPE_TYPE_SCENE || t == WALPE_TYPE_VIDEO || t == WALPE_TYPE_GIF || t == WALPE_TYPE_IMAGE)
         defs = walpe_content_property_defs (abs, NULL);
     if (!defs && sound_layers && t == WALPE_TYPE_SCENE) {

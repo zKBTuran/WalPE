@@ -97,7 +97,9 @@ run.** One default changes: wallpaper sound is on, at half volume (under Sound).
   volume with `mute=on`): silent while sound is off, scaled by the volume setting
   otherwise. While a wallpaper is paused, `Audio` objects outside the
   document and Web Audio are silent too (only elements in the document were paused).
-  [SOUND.md](docs/SOUND.md#web-wallpapers).
+  A web wallpaper has the two sound rows of a scene in its options - its own switch and
+  its own volume (`walpe_sound`, `walpe_volume`) -, applied to the page that runs and
+  kept apart for every page. [SOUND.md](docs/SOUND.md#web-wallpapers).
 
 ### Tray
 

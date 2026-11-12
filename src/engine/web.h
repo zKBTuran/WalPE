@@ -37,14 +37,24 @@ typedef struct {
     guint32 keymap_size;
 } WalpeWebInput;
 void walpe_web_input (gpointer viewer, const WalpeWebInput *in);
-/* How loud the sound of web pages is: the volume setting, 0..1, and 0
- * while wallpaper sound is switched off or "mute" is on. Any thread; applies at once to the pages that run
- * and to every page made later. The level is kept by the core: a web
- * module loaded afterwards is told before it makes its first page. Until
- * a program says otherwise it is 0 - pages are silent (the daemon sets it
- * at start; the tools and the tests never do). At 0 a page's media play
- * all the same, without sound. */
-void walpe_web_sound (double level);
+/* How loud the sound of web pages is. master: the volume setting, 0..1,
+ * and 0 while "mute" is on; enabled: the setting "scene_sound" (wallpaper
+ * sound is switched on). A page's level is master times the wallpaper's
+ * own volume (its option "walpe_volume") while sound is on for it - the
+ * wallpaper's own switch (its option "walpe_sound"), else `enabled` - and
+ * 0 otherwise. Any thread; applies at once to the pages that run and to
+ * every page made later. Both are kept by the core: a web module loaded
+ * afterwards is told before it makes its first page. Until a program says
+ * otherwise they are 0 and off - pages are silent (the daemon sets them at
+ * start; the tools and the tests never do). At level 0 a page's videos
+ * play all the same, without sound. */
+void walpe_web_sound (double master, gboolean enabled);
+/* The wallpaper's own switch (-1 none, 0 off, 1 on) and volume (0..1) were
+ * changed while it is shown: the page of wallpaper `key` (the path it was
+ * opened as) takes them at once, and is not loaded again. Returns how many
+ * pages there are (0: no page shows that wallpaper, or the web module is
+ * not loaded - it is never loaded for this). Any thread. */
+guint walpe_web_sound_wallpaper (const char *key, int wallpaper_switch, double volume);
 /* where the pages' windows live: "x11" (an off-screen X window; on Wayland
  * through Xwayland), "private" (a Wayland display of the module's own),
  * "" = no page was created yet; g_free. WALPE_WEB_HOST=auto|x11|private.
