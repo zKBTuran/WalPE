@@ -1998,6 +1998,20 @@ test('gpu-report', find_program('sh'),
   depends: [ctl],
   timeout: 240)
 
+# The add-on for KDE Plasma (contrib/plasma) is no part of the build; this only reads it.
+# Its KWin script between a stand-in KWin and a stand-in Plasma shell: which desktop
+# window is put above the daemon's surface (the one shown on that screen, of the type
+# "WalPE", and no other - not for a desktop of an activity that is not shown), what the
+# desktops are told, two screens, a shell that is gone, a late answer. Run by node;
+# left out where there is none.
+node_prog = find_program('node', 'nodejs', required: false)
+if node_prog.found()
+  test('plasma-below', node_prog,
+    args: [meson.current_source_dir() / 'tests/plasma_below_test.js',
+           meson.current_source_dir() / 'contrib/plasma/wallpaper/contents/code/below.js'],
+    timeout: 60)
+endif
+
 # GPU statistics from the kernel (common/gpustat.c): the fdinfo parser on
 # hand-written texts (Intel i915 and xe key names, amdgpu, odd values), the
 # sampler on fake /proc and /sys trees with the clock stepped by the test
