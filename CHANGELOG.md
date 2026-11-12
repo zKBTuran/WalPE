@@ -4,6 +4,142 @@ What changed in each released version of WalPE, newest first, written for people
 it. Version numbers are `0.<minor>.<patch>`; every release is tagged `v<version>` in git.
 Release names are album titles by the band Boris, one per release.
 
+## Unreleased
+
+What has changed since 0.14.0 "Flood" and is not in a release yet: answers to the first
+reports from other machines. On KDE Plasma (Wayland) the wallpaper was gone after a click
+on the desktop and the tray's menu had no working "Quit WalPE"; wallpaper sound could only
+be switched on with a command; and a log sent with a report said too little. **State of
+testing: that of 0.14.0, with one addition: the changes for KDE Plasma were run on a
+headless Plasma 6.8.2 and a headless Plasma 5.27 (KWin on a virtual output, software
+renderer). A real Plasma session, a graphics card there and several monitors have not been
+run.** One default changes: wallpaper sound is on, at half volume (under Sound).
+
+### Wayland
+
+- KDE Plasma: the wallpaper stays where it belongs. With 0.14.0 it covered Plasma's
+  desktop icons until the first click on the desktop and was then gone behind Plasma's
+  own wallpaper - or was never seen at all - while the daemon ran on and neither its log
+  nor `walpe-ctl status` knew. On KWin the wallpaper now goes on the layer shell's bottom
+  layer, which KWin keeps above Plasma's desktop and below every window; clicks on the
+  desktop still reach Plasma (its menu opens). Every other compositor gets the background
+  layer as before. `WALPE_WL_LAYER=background|bottom|auto` in the daemon's environment
+  overrides the choice, the log says at start which layer is used on KWin, and
+  `walpe-ctl status` has `wl_layer` and `wl_layer_why`
+  ([WAYLAND.md](docs/WAYLAND.md#kde-plasma)).
+- A Wayland compositor without the layer shell (GNOME): with `backend=auto` the daemon no
+  longer goes on to X11 by itself when `DISPLAY` is set. That X11 is Xwayland, where the
+  wallpaper window lies above every other window, the library window included, and clicks
+  pass through it to windows nobody can see. The daemon now ends with status 1 and a
+  sentence that names the layer shell and the X11 session. X11 asked for by name
+  (`--backend x11`, `WALPE_BACKEND`, `walpe-ctl backend x11`) is still taken, and the log
+  says what that means there. Unchanged: an X11 session, a compositor that has the layer
+  shell, `--windowed`.
+- "Pause when covered" where the compositor offers no window list (KDE Plasma):
+  `pause_rules` said that the rule works, and it pauses there only for a locked screen
+  and a display that is off. `pause_rules.pause_covered` now has a `note` that says what
+  it pauses for and that a window covering the wallpaper is not known in this session;
+  the settings window prints it under the switch. What pauses is unchanged.
+
+### Sound
+
+- Wallpaper sound is on by default, at half volume: a new configuration has `scene_sound`
+  on and `volume` 0.5 (0.14.0: off and 0, so a wallpaper with sound was silent until two
+  settings were found). A configuration from 0.14.0 or older that holds volume 0 without
+  sound switched on takes the new defaults, once, and the daemon says so in its log;
+  sound on with volume 0, or sound off with a volume above 0, was somebody's doing and
+  is kept, and so is whatever is set from now on, "off, 0" included. A wallpaper without
+  sound costs nothing for it: no stream, no thread, no connection to the sound server.
+- Engine settings, "Audio": a switch "Wallpaper sound" above the volume, with a line
+  under it that says what is heard now and why not (off, muted, the volume is 0, no sound
+  server, the wallpaper is paused), and a switch "Mute". Until now the only way to switch
+  sound on was `walpe-ctl set scene_sound=on`, and the slider and the tray's Mute set a
+  volume that nothing played at. Switched on while the volume is 0, the switch sets the
+  volume to 0.5 as well.
+- A scene that has sound layers gets two rows at the top of its options in the library
+  window, under "Sound of this wallpaper", whether or not its author gave it a music
+  option: "Sound" (As in Engine settings / On / Off) and "Volume" (0 to 1, times the
+  volume of Engine settings). They act on the running wallpaper at once, without loading
+  it again, and are saved per wallpaper. From the command line:
+  `walpe-ctl setprop walpe_sound=on|off` and `walpe-ctl setprop walpe_volume=X`. A
+  wallpaper without sound layers has no such rows.
+- Tray: the sound entry reads "Switch wallpaper sound on" while sound is switched off and
+  does that; "Unmute" while `mute` or a volume of 0 silences it, and brings the sound
+  back in both cases; "Mute" otherwise. With 0.14.0 it read "Unmute", set the volume to
+  1, and nothing was heard.
+- `walpe-ctl status`, member `sound`: silence because the wallpaper is paused is said
+  ("nothing is playing: 1 wallpaper(s) with sound paused - sound stops while its
+  wallpaper is paused ..."). "Pause when covered" is on by default: a window that covers
+  the monitor - under a tiling window manager one tiled window, WalPE's own included -
+  pauses the wallpaper and its sound with it. `walpe-ctl set covered=off` keeps it heard
+  behind windows ([SOUND.md](docs/SOUND.md)).
+- A packaged scene (`scene.pkg`) whose package changed after its copy was made without
+  the sound files stayed silent with "cannot be opened" in the log; the log now says
+  that the package has changed and that loading the wallpaper again makes a new copy.
+
+### Tray
+
+- The menu on KDE Plasma, and on any panel that keeps the entries it has read: when the
+  tray was there before the engine - the usual start - the menu had headings where
+  entries belong, a check box in front of "Settings…", entries twice, and no "Quit
+  WalPE", or one that did nothing. A menu item now keeps its id for as long as it is in
+  the menu, whatever is added or removed above it. Not particular to Wayland; a tray
+  that docks through XEmbed was not affected.
+- "Recent wallpapers" and a monitor's list of wallpapers are read again each time they
+  are opened; on such a panel they kept the entries of the first time.
+- Wayland: the question before quitting ("Quit WalPE?") is a window of the tray's own
+  that is given the panel's activation token, so that it can come to the front on a
+  compositor that is strict about new windows. On X11 nothing changes.
+- A panel that does not answer when the tray registers its icon (a session that is still
+  starting) is asked again after 2, 5, 15 and 30 seconds and then once a minute. The
+  tray used to stay without an icon.
+
+### Library window
+
+- Wayland: "Engine settings", "Monitor resolution", the Workshop install dialog and the
+  delete dialog say the application's id (`io.github.walpe.ui`) like the library window,
+  and so get the WalPE icon instead of the generic one where the desktop entry is
+  installed. [BUILDING.md](docs/BUILDING.md) names the two files that give the icon to
+  a WalPE that is run from the build directory.
+- A video added with `walpe-ctl add` while the window is open is listed; it used to
+  appear after F5 or the next start.
+- An engine that does not start is quoted, not only counted: "The engine stopped: cannot
+  open X display (exit status 1). Restarting it…". The engine's own sentence - no display
+  to draw on, a compositor without the layer shell - was in its log and nowhere in the
+  window.
+
+### Log and bug reports
+
+- `walpe-ctl diag` prints the daemon's state in a dozen lines, made to be posted with a
+  report: version, session, the window system and why it was chosen, what the compositor
+  offers and lacks, the OpenGL driver, modules, sound, the pause rules and who reports
+  them, and per monitor what it shows and which rule pauses it. Wallpapers are named by
+  the last part of their path, the home directory is written `~`, and of `DISPLAY` and
+  `WAYLAND_DISPLAY` only whether they are set. The daemon writes the same summary into
+  its log once per start.
+- The daemon's log (`~/.cache/walpe/daemon.log` for an engine the window started) now
+  says: when a monitor pauses, by which rule, and when it runs again; who asked the
+  daemon to quit (the program and its process id for a request over the control socket,
+  the signal and who sent it); in its last line why the daemon ends, so that a start
+  without that line before it is a daemon that was killed or crashed; when the first
+  sound output opens and when the sound settings silence the wallpapers or let them be
+  heard again; that a video is decoded on the CPU and how hardware decoding is switched
+  on; and, loudly, an output for which no wallpaper surface could be made (`walpe-ctl
+  status`: `monitors_without_surface`). The start-up line about "swap with damage" is
+  worded so that it can be read. No timer and no thread were added for any of it.
+
+### Known limitations
+
+- KDE Plasma: the desktop icons and widgets cannot be seen while WalPE shows a wallpaper.
+  They are part of the window of Plasma's shell that the wallpaper lies on. An optional
+  add-on that shows them is in preparation.
+- KDE Plasma: nothing pauses the wallpaper behind a fullscreen or maximized window yet, a
+  game included. KWin offers other programs no window list; the wallpaper pauses there
+  for a locked screen and a display that is off.
+- Video wallpapers are still silent: their sound track is not played. The switches above
+  act on the sound layers of scenes.
+- The full list is in [LIMITATIONS.md](docs/LIMITATIONS.md#known-limitations).
+
 ## 0.14.0 "Flood"
 
 This release contains everything of 0.13.0 "PINK" below, which was not
