@@ -224,9 +224,22 @@ the final tree with those of that earlier tree.
   pause after a time without input (`walpe-ctl set idle=N`).
 - The tray icon uses StatusNotifierItem on Wayland sessions; the window follows the
   desktop's dark / light preference there.
-- Web wallpapers on a Wayland session run through Xwayland by default.
+- Web wallpapers on a Wayland session run through Xwayland where an X display answers,
+  and need no X where none does: the page's hidden window then lives on a Wayland display
+  inside the daemon (the "private page host", `walpe-ctl status`: `web_host`). The web
+  module builds without libX11 (`-Dx11=disabled`, or a system that has none); it needs
+  one of the two page hosts, and `-Dweb=enabled` fails at the configure step only when
+  neither can be built. `DISPLAY` left over in a session without an X server no longer
+  switches web wallpapers off: the log and `web_host` say that the private page host is
+  used instead. With that page host the page's process is not handed the compositor's
+  socket by WebKit's sandbox ([SECURITY.md](docs/SECURITY.md)). Run with real pages on the
+  headless sway, without any X; a page there is expected to animate at 60 frames a
+  second at most ([WAYLAND.md](docs/WAYLAND.md#web-wallpapers)). On an X11 session and in
+  the X11-only build nothing changes: `walpe-daemon` and `walpe-web.so` of that build are
+  the same files, byte for byte, as before this change.
 - Build options `-Dx11` and `-Dwayland`. `./build.sh -Dwayland=disabled` gives the
-  X11-only build, in which the daemon and the web module link no Wayland library.
+  X11-only build, in which the daemon and the web module link no Wayland library;
+  `./build.sh -Dx11=disabled` gives a build in which they use no X library.
 - A compositor that accepts the connection and does not answer within 10 seconds counts
   as absent: the daemon takes X11 when there is an X display, else it ends and says so.
   The connection of the pause rules gives up after 5 seconds.
@@ -345,7 +358,8 @@ the final tree with those of that earlier tree.
   an OpenGL context pass under emulation. Not run on ARM hardware. OpenGL ES 3.1 is the
   least an ARM GPU must offer.
 - Test setups for AddressSanitizer / UndefinedBehaviorSanitizer and ThreadSanitizer,
-  end-to-end tests on a headless Wayland compositor.
+  end-to-end tests on a headless Wayland compositor. `web-wayland` and `web-x11` run
+  generated pages in WebKitGTK end to end on the two page hosts (`scripts/webcheck.py`).
 - Library window: the wallpaper grid takes 64 % of the window's width by default (6
   columns at 1920 pixels) and the details panel the rest, at least 460 pixels. The share
   follows the window's size until you move the handle between the two; from then on

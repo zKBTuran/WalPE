@@ -7,7 +7,8 @@ a tray icon and a command line client. Written in C. This is the development tre
 version 0.14.0, which is not released; the last release is 0.12.2.
 
 > **What is new since 0.12.2, and how far it was tested.** A Wayland backend next to the
-> X11 one; choice of the GPU on machines with two, and support written for AMD and Intel
+> X11 one, with web wallpapers that need no X there; choice of the GPU on machines with
+> two, and support written for AMD and Intel
 > graphics; an OpenGL ES 3.1+ path for GPUs without desktop OpenGL; a render resolution
 > per monitor; hardware video decoding chosen by what the machine offers; scene sound
 > (off by default); camera parallax, camera shake, bloom, sprite-sheet layers and script
@@ -114,14 +115,15 @@ module is what `meson setup` looks for, to map them to another distribution.
 | `fontconfig` | `media-libs/fontconfig` | fonts of text layers |
 | `epoxy` | `media-libs/libepoxy` | OpenGL |
 | `egl` | `media-libs/libglvnd` with `media-libs/mesa` or the NVIDIA driver | OpenGL contexts |
-| `x11`, `xext`, `xinerama` | `x11-libs/libX11`, `libXext`, `libXinerama` | the X11 backend (`-Dx11`); `x11` also for the web module and the XEmbed tray |
+| `x11`, `xext`, `xinerama` | `x11-libs/libX11`, `libXext`, `libXinerama` | the X11 backend (`-Dx11`); `x11` also for the web module's X11 page host and for the XEmbed tray. A system without them builds the Wayland backend, web wallpapers included |
 | `wayland-client`, `wayland-egl`, the program `wayland-scanner` | `dev-libs/wayland`, `dev-util/wayland-scanner` | the Wayland backend (`-Dwayland`) |
 | `liblz4` | `app-arch/lz4` | `.tex` textures |
 | `gtk4` | `gui-libs/gtk` | the library window `walpe` |
 | `xi` (optional, found automatically) | `x11-libs/libXi` | X11: clicks on the empty desktop |
 | `xrandr` (optional, found automatically) | `x11-libs/libXrandr` | X11: monitor names for per-monitor wallpapers |
 | `wayland-cursor` (optional, found automatically) | `dev-libs/wayland` | Wayland: the pointer image over a wallpaper that takes pointer input |
-| `wayland-client` and `wayland-server` 1.20 or newer, `gtk4-wayland` (optional, found automatically) | `dev-libs/wayland`, `gui-libs/gtk` with its Wayland backend | Wayland: pause rules from the compositor (idle time, window list); the experimental private page host for web wallpapers |
+| `wayland-client` and `wayland-server` 1.20 or newer, `gtk4-wayland` (optional, found automatically) | `dev-libs/wayland`, `gui-libs/gtk` with its Wayland backend | Wayland: pause rules from the compositor (idle time, window list); the private page host for web wallpapers, which needs no X |
+| `gtk4-x11` (optional, found automatically) | `gui-libs/gtk` with its X11 backend | the X11 page host for web wallpapers |
 
 At least one of the two backends has to be built. The Wayland protocol descriptions the
 build needs are in the source tree (`protocols/`, see [Licence](#licence)), so no
@@ -134,7 +136,7 @@ Optional parts (meson `auto`; each takes `-D<option>=enabled|disabled`):
 | Option | pkg-config module | Gentoo package | Without it |
 |---|---|---|---|
 | `video` | `libavcodec`, `libavutil` | `media-video/ffmpeg` | video wallpapers and video textures do not load |
-| `web` | `webkitgtk-6.0`, `libsoup-3.0` | `net-libs/webkit-gtk:6`, `net-libs/libsoup:3.0` | web wallpapers report an error |
+| `web` | `webkitgtk-6.0`, `libsoup-3.0`, and what one of the two page hosts needs: `x11` + `gtk4-x11`, or the Wayland backend + `wayland-server` + `gtk4-wayland` | `net-libs/webkit-gtk:6`, `net-libs/libsoup:3.0` | web wallpapers report an error |
 | `audio` | `libpulse-simple`, `libpulse` | `media-libs/libpulse` | audio spectra stay 0; wallpaper sound has no output |
 | `scenescript` | none: `quickjs/quickjs.h` and `libquickjs` (searched in `<libdir>/quickjs`) | `dev-lang/quickjs` | scripted values stay static |
 | `tray` | `gtk4`; `x11` and `xrender` for XEmbed | `x11-libs/libXrender` | no `walpe-tray`. Without libX11 / libXrender the tray is built with StatusNotifierItem only |
@@ -155,23 +157,28 @@ or `media-plugins/gst-plugins-libav`; missing ones are named in `walpe-ctl statu
 
 | Option | Default | Meaning |
 |---|---|---|
-| `-Dx11=auto\|enabled\|disabled` | `auto` | the daemon's X11 backend: built when its libraries are found / configure fails when they are not / not built |
+| `-Dx11=auto\|enabled\|disabled` | `auto` | the daemon's X11 backend: built when its libraries are found / configure fails when they are not / not built. `disabled` also leaves the X11 page host out of the web module: `walpe-daemon` and `walpe-web.so` then use no X library |
 | `-Dwayland=auto\|enabled\|disabled` | `auto` | the daemon's Wayland backend (layer shell), likewise. `disabled` also leaves out the Wayland pause providers and the private page host |
 | `-Dnative_tuning=generic` | default | no `-march`, `-mtune` or cache parameters, `-pipe` only. `off` is another name for it |
 | `-Dnative_tuning=alderlake` | | `./build.sh --tuning=alderlake`: `-march=alderlake -mabm -mno-kl -mno-pconfig -mno-sgx -mno-widekl -mshstk --param=l1-cache-line-size=64 --param=l1-cache-size=32 --param=l2-cache-size=18432 -pipe`. **Such a build only runs on Alder Lake-class Intel CPUs** (12th generation Core and newer) and may die with "Illegal instruction" elsewhere |
 | `-Dnative_tuning=native` | | `-march=native -pipe` (`-mcpu=native` on aarch64); an error if the compiler rejects it, and refused in a cross build |
 | `-Dnative_tuning=auto` | | `-march=native -pipe` if the compiler accepts it, else `-pipe` only |
 | `-Dhardening=true` | default | stack protector, stack clash and control-flow protection, `_FORTIFY_SOURCE`, format-security errors, full RELRO and immediate binding |
-| `-Dvideo`, `-Dweb`, `-Daudio`, `-Dscenescript`, `-Dtray` | `auto` | the optional parts above |
+| `-Dvideo`, `-Dweb`, `-Daudio`, `-Dscenescript`, `-Dtray` | `auto` | the optional parts above. `-Dweb=enabled` fails at the configure step only when neither page host can be built |
 | `-Dquickjs_libdir=/abs/dir` | | one more directory searched first for `libquickjs.a` (a QuickJS built by hand, or the target's in a cross build) |
 
 ```sh
 ./build.sh -Dwayland=disabled                  # the X11-only build, as the 0.12 releases are
-./build.sh -Dx11=disabled -Dweb=disabled       # no X11 backend; the web module needs libX11
+./build.sh -Dx11=disabled                      # Wayland only, no X in walpe-daemon and walpe-web.so
+                                               # (what a system without libX11 builds by itself)
 ```
 
 A daemon with both backends picks one when it starts: Wayland where the compositor has the
 layer shell, else X11; `walpe-ctl backend` shows and sets it ([WAYLAND.md](docs/WAYLAND.md)).
+The web module holds the page hosts its build found the parts for (the configure summary
+lists them): the off-screen X window, and a Wayland display of its own inside the daemon
+that needs no X at all; which one a page gets is decided when the first page is made
+([WAYLAND.md](docs/WAYLAND.md#web-wallpapers)).
 Which GPU renders (`walpe-ctl gpu`) and whether desktop OpenGL or OpenGL ES is used
 (`walpe-ctl set gl_api=`) are run-time settings too ([GPU.md](docs/GPU.md)); with the
 defaults nothing is chosen differently from 0.12.2 on a machine with one GPU and desktop
@@ -179,11 +186,17 @@ OpenGL.
 
 What the second backend costs: in the X11-only build the daemon and the web module link
 no Wayland library and hold none of the Wayland code (the test `linkage` reads that from
-the binaries). A daemon with both backends needs `libwayland-client`, `-cursor` and
-`-egl`, and the loader maps them in an X11 session too; measured on the software
-renderer that was two libraries and about 20 kB of memory more than the X11-only build
-(Mesa maps `libwayland-client` in either), and no thread, descriptor, connection or
-wake-up of Wayland in an X11 session.
+the binaries). The other way round, a build without the X11 backend and the X11 page host
+(`-Dx11=disabled`, or no libX11 on the system) names no X library and calls no X function
+in `walpe-daemon` and `walpe-web.so` (the same test; GTK and WebKit load libX11 by
+themselves where they were built with X support, and the tray has XEmbed where libX11 and
+libXrender are found, whatever `-Dx11` says). A daemon with both backends needs
+`libwayland-client`, `-cursor` and `-egl`, and the loader maps them in an X11 session too;
+measured on the software renderer that was two libraries and about 20 kB of memory more
+than the X11-only build (Mesa maps `libwayland-client` in either), and no thread,
+descriptor, connection or wake-up of Wayland in an X11 session. The private page host is
+started only when a page is put on it: with a web wallpaper on an X11 session the daemon
+of a build with both backends has the same threads and descriptors as the X11-only build.
 
 **Other architectures.** The source is written for x86-64 and aarch64 (little-endian, 64
 bit; a big-endian target stops at the configure step). The aarch64 side has been
@@ -603,10 +616,12 @@ a key), `--action=next|random|pause-toggle` runs a menu entry.
   has to turn down). On Wayland
   the pointer is known only over the bare desktop, "Skip hidden areas" does not exist,
   the fullscreen and focus rules need the compositor's window list, and web wallpapers go
-  through Xwayland unless there is no X display (then through an experimental private
-  page host that has never run in a session). A compositor that accepts the connection
-  and does not answer within 10 seconds counts as absent (X11 is taken when there is an
-  X display). Known and left as they are: a wallpaper that is not shown keeps being
+  through Xwayland where an X display answers and through the private page host (a
+  Wayland display inside the daemon, no X needed) where none does. That page host ran
+  real pages on the headless sway only; a page is expected to animate at 60 frames a
+  second at most there ([WAYLAND.md](docs/WAYLAND.md#web-wallpapers)). A compositor that
+  accepts the connection and does not answer within 10 seconds counts as absent (X11 is
+  taken when there is an X display). Known and left as they are: a wallpaper that is not shown keeps being
   drawn when "pause when covered" is off; a lock screen pauses through "pause when
   covered" only, unless the locker tells logind; with no monitor left `walpe-ctl status`
   still lists the monitors; while the daemon waits for a compositor to come back,
@@ -762,11 +777,13 @@ directory; nothing of your session is read, written or disturbed:
 
 | Test | Display | Checks |
 |---|---|---|
-| `daemon-life`, `sec-daemon`, `daemon-resolution`, `daemon-scene-video`, `websec` | `Xvfb` | loads, reloads, the restart in place; what the daemon trusts on the local machine; render resolution; a scene's video played from a converted copy; a hostile web wallpaper |
+| `daemon-life`, `sec-daemon`, `daemon-resolution`, `daemon-scene-video`, `websec`, `websec-private` | `Xvfb` | loads, reloads, the restart in place; what the daemon trusts on the local machine; render resolution; a scene's video played from a converted copy; a hostile web wallpaper, on the X11 page host and on the private one |
+| `web-x11` | `Xvfb` | real pages in WebKitGTK on the X11 page host (`scripts/webcheck.py`): the picture, animation, the Wallpaper Engine listeners, pointer input, pause and resume with the page's CPU time, restarts, a page process that dies, popups and choosers, network access off |
 | `daemon-life-wayland`, `sec-daemon-wayland` | headless sway | the same cases on Wayland; the two of `daemon-life` that change the monitor layout are skipped there (the next row does that with real outputs) |
 | `daemon-wayland-silent` | none | a compositor socket that accepts the connection and never answers: the daemon gives up after ten seconds (`scripts/wlsilentcheck.py`) |
 | `daemon-wayland-wait-socket` | none | a daemon restarted in place that waits for its compositor and gives up: which control socket file it removes, and what its log says (`scripts/wlwaitcheck.py`) |
 | `daemon-wayland` | headless sway | what only outputs can do (`scripts/waylandcheck.py`): two outputs, a mode / scale / transform that changes under the running daemon, outputs that appear and go, a pointer device, the choice between the two backends |
+| `web-wayland` | headless sway without Xwayland, no `DISPLAY` | the same pages on the private page host (`scripts/webcheck.py`), and what only a Wayland session has: two outputs, outputs that come, change and go, `DISPLAY` left over without an X server, what the page's sandbox sees of the session, the session's clipboard (needs `wl-copy` / `wl-paste`) |
 
 The X ones need `Xvfb` (and use `xdotool`, `xrandr` when present), the Wayland ones `sway`
 and `grim` (`weston` adds a compositor without layer shell); each is skipped where its

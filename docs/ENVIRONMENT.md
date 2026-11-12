@@ -217,7 +217,7 @@ The other way round, `WALPE_MEM_STATS=1` switches memory numbers by kind in
 | Variable | Default | Effect |
 |---|---|---|
 | `WALPE_WEB_ACCEL=0\|1\|dmabuf\|force` | config `web_accel` (off) | WebKit hardware acceleration off / on (frames through shared memory) / on with WebKit's DMA-BUF path / on without the software-renderer check |
-| `WALPE_WEB_HOST=auto\|x11\|private` | auto | where the pages' hidden windows live: `auto` = an X window off screen whenever `DISPLAY` is set (on Wayland through Xwayland), the private Wayland display inside the daemon only without an X display; `private` asks for that one (experimental, [WAYLAND.md](WAYLAND.md)) |
+| `WALPE_WEB_HOST=auto\|x11\|private` | auto | where the pages' hidden windows live: `auto` = an X window off screen whenever `DISPLAY` is set (on Wayland through Xwayland), the private Wayland display inside the daemon without an X display - and, on a Wayland session, when the X display does not answer or WebKit fails its start-up test on it; `x11` / `private` ask for one by name, which is then never replaced. A build holds the hosts it found the libraries for ([WAYLAND.md](WAYLAND.md)) |
 | `WALPE_WEB_INPUT=js\|native\|off` | real input events, script events as fallback | mouse input: script-dispatched events only / never fall back to script events / none |
 | `WALPE_WEB_OFFLINE=1` | off | no network access for any page (per wallpaper: its option "Allow network access") |
 | `WALPE_WEB_OPEN_LINKS=1` | off | an external http(s) link you clicked is handed to `xdg-open` (default: refused) |

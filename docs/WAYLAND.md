@@ -10,7 +10,8 @@ change.
 > renderer (llvmpipe). Wallpapers were shown on one compositor, a headless sway 1.9
 > (wlroots 0.17, pixman renderer); a headless weston 13 served only as the compositor
 > without layer shell that the daemon has to turn down. What ran on sway end to end:
-> pictures, scenes, videos and web wallpapers on one and two outputs; outputs that appear,
+> pictures, scenes, videos and web wallpapers on one and two outputs (web wallpapers also
+> with no X server anywhere, see [Web wallpapers](#web-wallpapers)); outputs that appear,
 > go and change their mode, scale or transform under the running daemon; the restart in
 > place, and the wait for a compositor that was killed and started again; the pause rules
 > with stand-ins for logind and for the compositor's idle and window-list protocols.
@@ -165,21 +166,82 @@ Switches in the daemon's environment: `WALPE_LOGIND`, `WALPE_WL_COVERED`
 
 A web wallpaper is a page in WebKitGTK whose picture the engine captures and draws. WebKit
 only runs a page in a mapped window that must not be seen; where that window lives is the
-"page host":
+"page host". The web module holds the ones its build found the parts for:
 
-- `x11`: an X window off screen. The default wherever an X display is there (`DISPLAY`
-  set): on X11 sessions as always, on Wayland sessions through Xwayland.
+- `x11`: an X window off screen. The default wherever an X display answers: on X11
+  sessions as always, on Wayland sessions through Xwayland. Built when libX11 and GTK's
+  X11 backend are found and the build was not given `-Dx11=disabled`.
 - `private`: a Wayland display inside `walpe-daemon` to which only the page's toolkit is
-  connected; no X is needed. Used when there is no X display at all, or when asked for with
-  `WALPE_WEB_HOST=private`. **Experimental**: it has run only in the tests (a stand-in
-  client, and a hostile page in `websec-private`), never in a session. Not built with
-  `-Dwayland=disabled`.
+  connected. It needs no X, neither when WalPE is built nor when it runs: a system
+  without libX11, or a build with `-Dx11=disabled`, has web wallpapers through it. Used
+  when there is no X display, when the X display does not answer, or when asked for with
+  `WALPE_WEB_HOST=private`. Built with the Wayland backend when `wayland-server` and GTK's
+  Wayland backend are found; not with `-Dwayland=disabled`.
 
 `WALPE_WEB_HOST=auto|x11|private` in the daemon's environment; `walpe-ctl status` shows
-`web_host` once a page was created. Known gap: `DISPLAY` set with no X server behind it (a
-stale variable in a session without Xwayland) makes `auto` pick `x11`, the start-up test
-fails and web wallpapers are off; set `WALPE_WEB_HOST=private` or unset `DISPLAY` for the
-daemon.
+`web_host` once a page was created.
+
+With `auto` on a Wayland session a host that does not come up gives way to the other one,
+where the build has both. `DISPLAY` set with no X server behind it (a variable left over
+in a session without Xwayland) used to switch web wallpapers off; now the log says `web:
+the X11 page host did not come up (...): using the private page host instead` and status
+has `"web_host": "private (the X11 page host did not come up)"`. The same happens when
+WebKit fails its start-up test on the X window, and the other way round (`x11 (the
+private page host failed its start-up test)`). The second host is tested like the first;
+when both fail, web wallpapers are off and `web_error` says why. A host asked for by name
+is never replaced, and on an X11 session nothing of this applies: there the page host is
+`x11` and the private one is not started.
+
+> **State of testing of the private page host.** It was run with real pages, on one
+> machine and one compositor: a headless sway 1.9 (wlroots 0.17, pixman renderer) with
+> `xwayland disable`, no `DISPLAY`, in namespaces of its own without any X socket or X
+> server process, Mesa's software renderer, WebKitGTK 2.52 on GTK 4.14, the build made
+> without libX11. The test `web-wayland` (`scripts/webcheck.py`) does it again on any
+> machine with sway and grim. What it showed there: generated pages with a
+> `requestAnimationFrame` animation, a 2D canvas, a WebGL canvas, a CSS animation, the
+> Wallpaper Engine property and audio listeners and pointer input, drawn right on one
+> output and on two outputs of different sizes (one page for both, and a page of its own
+> on one of them); an output that is added, changes its mode and its scale and is
+> unplugged under the running daemon; pause and resume (while paused the page's processes
+> and the daemon used 0 to 1 hundredths of a second of CPU time in 4 seconds, as with the
+> X11 page host); the daemon ended and started again, and restarted in place; the page's
+> process killed (loaded again three times, given up at the fourth, afresh when the
+> wallpaper is opened again); `DISPLAY` left over without an X server; nothing left
+> behind after `walpe-ctl quit` (no process, no socket, no directory); popups, choosers,
+> dialogs, a new window and a link that leads away, none of which opens anything; the
+> session's clipboard and primary selection, which a page that copies on every click
+> neither reads nor replaces; network access off. The picture of a still page is the same
+> as with the X11 page host, byte for byte (compared on Xvfb, through Xwayland on sway,
+> and on sway without X). Web hardware acceleration was tried only with the software
+> renderer standing in for a GPU. **Not run: a real desktop session, a real output, a
+> GPU, any compositor but sway, a desktop's settings service (font scaling, dark
+> preference).**
+
+What differs from the X11 page host:
+
+- **Frame rate above 60.** WebKit times a page's frames by its own 60 Hz timer unless it
+  finds the monitor the page's window is on among the kernel's display connectors, and
+  the private display's one output is none of them. A page there is expected to animate
+  at 60 frames a second at most, whatever the frame rate limit and the monitor say (read
+  from WebKit's source; not measured, the test machine has no display connector).
+- **What it costs.** With a page on it the daemon has one more thread for the display
+  (it sleeps while nothing happens: no wake-up in 10 seconds with a still page) and no
+  file or directory of its own once the page is up. WebKit sets up OpenGL for the display
+  its toolkit is on in either case; on the private display Mesa can only give it the
+  software renderer, which is one idle thread per CPU and, measured on the software
+  renderer, about 10 to 15 MB more memory in the daemon than with the X11 page host
+  (204 to 209 MB against 194 MB, with one 1280 x 720 page).
+- **The page's process and the session.** WebKit runs each page in a sandbox and hands it
+  the socket of the display its toolkit is on: with the X11 page host the X server's.
+  With the private page host that would have been the compositor's (WebKit looks for
+  `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`), which no page needs; the daemon keeps WebKit from
+  finding it, and the page's process has no display socket at all there
+  ([SECURITY.md](SECURITY.md)).
+- **If the private display fails**, GTK ends the process it runs in, and that is the
+  daemon. This did not happen in any run; the display has no way of its own to drop its
+  one client.
+- The pointer and the wheel reach a page as real events on both; the keyboard never
+  reaches a page on either.
 
 A page cannot read, replace or clear what you copied or selected, on either host
 ([SECURITY.md](SECURITY.md)). The middle mouse button never reaches a page as a real click.
@@ -228,6 +290,7 @@ XDG_CURRENT_DESKTOP`.
 ## Limits
 
 - Nothing above has been confirmed on a real compositor session, a real output or a GPU.
+  That includes web wallpapers on the private page host.
   Not seen at all: `linux-dmabuf`, a hardware EGL on Wayland, connector names of real
   outputs, DPMS on a real connector, presentation feedback with a real refresh period.
 - 8 bits per channel, sRGB; no HDR, no colour management protocol.
