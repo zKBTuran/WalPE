@@ -11,8 +11,9 @@
  *     value types by key, several setprop pairs as one request, the
  *     --monitor / --path target, the sentence for a daemon that is older;
  *     and what walpe-ctl writes to the terminal when the replies carry
- *     control characters (a Workshop title, layer names of a scene): none
- *     of them, whether it prints text or the reply itself;
+ *     control characters (a Workshop title, layer names of a scene, the
+ *     file names of a memory report): none of them, whether it prints
+ *     text or the reply itself;
  *  3. common/setkeys.h: an unknown member or a value of the wrong type
  *     refuses the whole request, and every member the daemon's ipc_set ()
  *     reads is in the table (read from the source file). */
@@ -112,6 +113,19 @@ static const char hostile_layers[] =
     "{\"key\":\"words\\u009b2J\",\"type\":\"text\",\"shown\":true,\"parent\":0,\"text\":\"hello" E "[2J\\nworld\\u007f\","
     "\"adjust\":{\"dx\":1,\"visible\":\"hidden" E "\"}}],"
     "\"adjustments\":[{\"key\":\"gone" E "[5m\",\"missing\":true,\"scale\":2}]}";
+/* the memory report: the path a module was loaded for and the names of
+ * the files the daemon has mapped are names of wallpaper files */
+static const char hostile_mem[] =
+    "{\"ok\":true,\"mem\":{\"version\":\"v" E "[2J\",\"time\":\"t" E "c\",\"uptime_s\":61,\"process\":{\"pid\":7},"
+    "\"mappings\":{\"largest_files\":[{\"name\":\"font" E "]0;f\\u0007.ttf\",\"rss_kb\":2048}],"
+    "\"by_name\":[{\"name\":\"clip" E "[31m.mp4\",\"count\":1,\"rss_kb\":4096,\"size_kb\":4096}],"
+    "\"huge_pages\":{\"setting\":\"always" E "\"}},"
+    "\"threads\":{\"count\":2,\"by_name\":[{\"name\":\"thr\\u009b1m\",\"count\":2}]},"
+    "\"modules\":{\"video\":{\"loaded\":true,\"loaded_after_s\":1,\"uses\":1,"
+    "\"loaded_for\":\"a video wallpaper was opened: /v/ev" E "[31mil" E "]0;t\\u0007.mp4\"}},"
+    "\"sound\":\"snd" E "c\",\"gl_renderer\":\"r" E "c\",\"gl_version\":\"g\\u007f\","
+    "\"monitors\":[{\"index\":0,\"name\":\"DP" E "c\",\"width\":8,\"height\":8,\"type\":\"video" E "\","
+    "\"role\":\"own\",\"note\":\"note" E "[7m\"}]}}";
 /* (DEL, U+009B and 0x1F as they are: what the daemon's JSON writer leaves alone) */
 static const char hostile_raw[] = "{\"ok\":true,\"title\":\"a\x7f" "b\xc2\x9b" "1m\x1f" "c" E "[2J\"}";
 #undef E
@@ -156,6 +170,8 @@ static char *handler (const char *req, gpointer user)
             return g_strdup (hostile_raw);
         if (strstr (req, "\"cmd\":\"layers\""))
             return g_strdup (hostile_layers);
+        if (strstr (req, "\"cmd\":\"mem\""))
+            return g_strdup (hostile_mem);
         if (strstr (req, "\"cmd\":\"layeradj\""))
             return g_strdup ("{\"ok\":false,\"error\":\"no layer " "\\u001b" "[2J\"}");
         if (strstr (req, "\"cmd\":\"install\"") && strstr (req, "\"2\""))
@@ -550,6 +566,30 @@ static gpointer client_thread (gpointer u)
             json_node_unref (pn);
     }
     g_clear_pointer (&err, g_free);
+    /* the memory report, and the comparison of two saved reports (the
+     * names in them become the rows' names) */
+    CHECK (run_ctl (&err, "mem", NULL) == 0);
+    CHECK (last_out && strstr (last_out, "/v/ev\\x1b[31mil\\x1b]0;t\\x07.mp4") && strstr (last_out, "v\\x1b[2J"));
+    CHECK (last_out && strstr (last_out, "font\\x1b]0;f\\x07.ttf") && strstr (last_out, "clip\\x1b[31m.mp4") &&
+           strstr (last_out, "thr\\x9b1m") && strstr (last_out, "note\\x1b[7m"));
+    CHECK (terminal_safe (last_out) && terminal_safe (err));
+    g_clear_pointer (&err, g_free);
+    {
+        char *fa = g_build_filename (g_get_user_runtime_dir (), "mem-a.json", NULL);
+        char *fb = g_build_filename (g_get_user_runtime_dir (), "mem-b.json", NULL);
+        CHECK (g_file_set_contents (fa, "{\"mem\":{\"rows\":[{\"name\":\"clip\\u001b[31m.mp4\",\"rss_kb\":1}],"
+                                        "\"key\\u001b]0;k\\u0007\":1}}", -1, NULL) &&
+               g_file_set_contents (fb, "{\"mem\":{\"rows\":[{\"name\":\"clip\\u001b[31m.mp4\",\"rss_kb\":2}],"
+                                        "\"key\\u001b]0;k\\u0007\":3}}", -1, NULL));
+        CHECK (run_ctl (&err, "mem", "--diff", fa, fb, NULL) == 0);
+        CHECK (last_out && strstr (last_out, "rows[clip\\x1b[31m.mp4].rss_kb") && strstr (last_out, "key\\x1b]0;k\\x07"));
+        CHECK (terminal_safe (last_out) && terminal_safe (err));
+        g_clear_pointer (&err, g_free);
+        g_unlink (fa);
+        g_unlink (fb);
+        g_free (fa);
+        g_free (fb);
+    }
     g_atomic_int_set (&hostile_text, 0);
 
     g_main_loop_quit (loop);

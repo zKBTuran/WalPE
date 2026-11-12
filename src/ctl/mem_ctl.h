@@ -39,6 +39,16 @@ static JsonObject *mem_o (JsonObject *o, const char *path)
     return o;
 }
 
+/* A text of the report as it may be printed: the report names files and
+ * folders of wallpapers (the path a module was loaded for, the files the
+ * daemon has mapped), and a name can hold anything but '/' and NUL - an
+ * escape sequence too. tt () (main.c) makes control characters visible,
+ * as for every other text walpe-ctl takes from a reply. */
+static const char *mem_s (JsonObject *o, const char *key, const char *dflt)
+{
+    return tt (wpj_str (o, key, dflt));
+}
+
 #define MEM_MIB(bytes) ((double) (bytes) / 1048576.0)
 #define MEM_KMIB(kb) ((double) (kb) / 1024.0)
 
@@ -47,7 +57,7 @@ static void mem_print_sizes (JsonObject *o, const char *indent, guint max)
     JsonArray *a = o ? wpj_arr (o, "by_size") : NULL;
     for (guint i = 0; i < wpj_arr_len (a) && i < max; i++) {
         JsonObject *r = wpj_arr_obj (a, i);
-        g_print ("%s%5.0f x %-44s %9.1f MiB\n", indent, mem_n (r, "count"), wpj_str (r, "what", "?"),
+        g_print ("%s%5.0f x %-44s %9.1f MiB\n", indent, mem_n (r, "count"), mem_s (r, "what", "?"),
                  MEM_MIB (mem_n (r, "bytes")));
     }
     if (wpj_arr_len (a) > max)
@@ -64,7 +74,7 @@ static void mem_print_gl_shared (JsonObject *gl, const char *indent)
                  mem_n (t, "compressed"), MEM_MIB (mem_n (t, "compressed_bytes")),
                  mem_n (t, "render_targets"), MEM_MIB (mem_n (t, "render_target_bytes")));
     else
-        g_print ("%stextures %.0f (%s)\n", indent, mem_n (t, "count"), wpj_str (gl, "sizes_note", ""));
+        g_print ("%stextures %.0f (%s)\n", indent, mem_n (t, "count"), mem_s (gl, "sizes_note", ""));
     mem_print_sizes (t, indent, 14);
     if (sizes)
         g_print ("%sbuffers %.0f = %.2f MiB (largest %.2f MiB, mapped %.0f)", indent,
@@ -126,10 +136,10 @@ static void mem_print_content (JsonObject *c, const char *in)
                  MEM_MIB (mem_n (sc, "heap_bytes")), mem_n (sc, "heap_blocks"),
                  MEM_MIB (mem_n (sc, "heap_limit_bytes")), MEM_MIB (mem_n (sc, "live_bytes")),
                  mem_n (sc, "objects"), mem_n (sc, "strings"), mem_n (sc, "functions"),
-                 json_object_has_member (sc, "state") ? "; " : "", wpj_str (sc, "state", ""));
+                 json_object_has_member (sc, "state") ? "; " : "", mem_s (sc, "state", ""));
     else
         g_print ("%sscripts: %.0f%s%s\n", in, mem_n (sc, "scripts"),
-                 json_object_has_member (sc, "state") ? ", " : "", wpj_str (sc, "state", ""));
+                 json_object_has_member (sc, "state") ? ", " : "", mem_s (sc, "state", ""));
     JsonArray *vs = wpj_arr (c, "videos");
     for (guint i = 0; i < wpj_arr_len (vs); i++) {
         JsonObject *v = wpj_arr_obj (vs, i);
@@ -146,8 +156,8 @@ static void mem_print (JsonObject *m)
                *fd = wpj_obj (m, "fds"), *ct = wpj_obj (m, "counters");
     const double up = mem_n (m, "uptime_s");
     g_print ("walpe-daemon %s, pid %.0f, running for %.0f h %02.0f min %02.0f s  (%s)\n",
-             wpj_str (m, "version", "?"), mem_n (p, "pid"), floor (up / 3600), floor (fmod (up, 3600) / 60),
-             floor (fmod (up, 60)), wpj_str (m, "time", ""));
+             mem_s (m, "version", "?"), mem_n (p, "pid"), floor (up / 3600), floor (fmod (up, 3600) / 60),
+             floor (fmod (up, 60)), mem_s (m, "time", ""));
     g_print ("\nprocess   resident %.1f MiB = anonymous %.1f + files %.1f + shared %.1f   (peak %.1f, "
              "swapped %.1f)\n          data %.1f MiB, address space %.0f MiB, threads %.0f, open "
              "descriptors %.0f\n", MEM_KMIB (mem_n (p, "rss_kb")), MEM_KMIB (mem_n (p, "rss_anon_kb")),
@@ -196,7 +206,7 @@ static void mem_print (JsonObject *m)
     if (wpj_arr_len (lf)) {
         g_print ("          largest files (resident MiB):");
         for (guint i = 0; i < wpj_arr_len (lf) && i < 6; i++)
-            g_print (" %s %.1f", wpj_str (wpj_arr_obj (lf, i), "name", "?"),
+            g_print (" %s %.1f", mem_s (wpj_arr_obj (lf, i), "name", "?"),
                      MEM_KMIB (mem_n (wpj_arr_obj (lf, i), "rss_kb")));
         g_print ("\n");
     }
@@ -209,7 +219,7 @@ static void mem_print (JsonObject *m)
         for (guint i = 0; i < wpj_arr_len (bn) && i < 14; i++) {
             JsonObject *r = wpj_arr_obj (bn, i);
             g_print ("            %-40.40s %5.0f %9.1f   %9.1f   %8.1f   %8.1f  %8.1f\n",
-                     wpj_str (r, "name", "?"), mem_n (r, "count"), MEM_KMIB (mem_n (r, "rss_kb")),
+                     mem_s (r, "name", "?"), mem_n (r, "count"), MEM_KMIB (mem_n (r, "rss_kb")),
                      MEM_KMIB (mem_n (r, "anon_kb")), MEM_KMIB (mem_n (r, "file_kb")),
                      MEM_KMIB (mem_n (r, "shmem_kb")), MEM_KMIB (mem_n (r, "size_kb")));
         }
@@ -221,7 +231,7 @@ static void mem_print (JsonObject *m)
     JsonObject *hp = wpj_obj (maps, "huge_pages");
     if (hp)
         g_print ("          in 2 MiB units (transparent huge pages, system setting \"%s\"): anonymous "
-                 "%.1f, shared memory %.1f, file %.1f MiB\n", wpj_str (hp, "setting", "?"),
+                 "%.1f, shared memory %.1f, file %.1f MiB\n", mem_s (hp, "setting", "?"),
                  MEM_KMIB (mem_n (hp, "anon_kb")), MEM_KMIB (mem_n (hp, "shmem_kb")),
                  MEM_KMIB (mem_n (hp, "file_kb")));
     JsonObject *th = wpj_obj (m, "threads");
@@ -230,7 +240,7 @@ static void mem_print (JsonObject *m)
         g_print ("threads   %.0f:", mem_n (th, "count"));
         for (guint i = 0; i < wpj_arr_len (tn); i++)
             g_print ("%s %.0f x %s", i ? "," : "", mem_n (wpj_arr_obj (tn, i), "count"),
-                     wpj_str (wpj_arr_obj (tn, i), "name", "?"));
+                     mem_s (wpj_arr_obj (tn, i), "name", "?"));
         g_print ("\n");
     }
     g_print ("fds       sockets %.0f, pipes %.0f, anonymous inodes %.0f, /dev/nvidia* %.0f, /dev/dri "
@@ -278,7 +288,7 @@ static void mem_print (JsonObject *m)
                      MEM_KMIB (mem_n (so, "total_kb")));
             JsonArray *bs = wpj_arr (so, "by_size");
             for (guint k = 0; k < wpj_arr_len (bs); k++)
-                g_print ("%s%s: %.0f", k ? ", " : "", wpj_str (wpj_arr_obj (bs, k), "what", "?"),
+                g_print ("%s%s: %.0f", k ? ", " : "", mem_s (wpj_arr_obj (bs, k), "what", "?"),
                          mem_n (wpj_arr_obj (bs, k), "count"));
             g_print (")\n");
         }
@@ -294,7 +304,7 @@ static void mem_print (JsonObject *m)
             continue;
         if (wpj_bool (mo, "loaded", FALSE))
             g_print ("module    %s: loaded %.1f s after the start (%s); used %.0f times\n", mn[i],
-                     mem_n (mo, "loaded_after_s"), wpj_str (mo, "loaded_for", "?"), mem_n (mo, "uses"));
+                     mem_n (mo, "loaded_after_s"), mem_s (mo, "loaded_for", "?"), mem_n (mo, "uses"));
         else
             g_print ("module    %s: not loaded\n", mn[i]);
     }
@@ -313,29 +323,29 @@ static void mem_print (JsonObject *m)
                  MEM_MIB (mem_n (vm, "upload_buffer_bytes")),
                  MEM_MIB (mem_n (vm, "decoder_pool_estimate_bytes")), mem_n (vm, "frames_decoded"),
                  mem_n (vm, "decoders_opened"));
-    if (*wpj_str (m, "sound", ""))
-        g_print ("sound     %s\n", wpj_str (m, "sound", ""));
+    if (*mem_s (m, "sound", ""))
+        g_print ("sound     %s\n", mem_s (m, "sound", ""));
 
     const gboolean shared = wpj_bool (m, "gl_shared", FALSE);
     JsonArray *mons = wpj_arr (m, "monitors");
-    g_print ("\nGL        %s / %s%s\n", wpj_str (m, "gl_renderer", "?"), wpj_str (m, "gl_version", "?"),
+    g_print ("\nGL        %s / %s%s\n", mem_s (m, "gl_renderer", "?"), mem_s (m, "gl_version", "?"),
              shared ? "\n          one share group: textures, buffers, programs and shaders are the "
                       "same objects for every monitor (listed once)" : "");
     gboolean shared_done = FALSE;
     for (guint i = 0; i < wpj_arr_len (mons); i++) {
         JsonObject *mo = wpj_arr_obj (mons, i);
         if (wpj_bool (mo, "busy", FALSE)) {
-            g_print ("\nmonitor %.0f %s: no answer (%s)\n", mem_n (mo, "index"), wpj_str (mo, "name", "?"),
-                     wpj_str (mo, "note", ""));
+            g_print ("\nmonitor %.0f %s: no answer (%s)\n", mem_n (mo, "index"), mem_s (mo, "name", "?"),
+                     mem_s (mo, "note", ""));
             continue;
         }
         g_print ("\nmonitor %.0f %s %.0fx%.0f: %s%s, %s%s%s\n", mem_n (mo, "index"),
-                 wpj_str (mo, "name", "?"), mem_n (mo, "width"), mem_n (mo, "height"),
-                 wpj_str (mo, "type", "?"), wpj_bool (mo, "paused", FALSE) ? " (paused)" : "",
-                 !g_strcmp0 (wpj_str (mo, "role", "own"), "own") ? "its own wallpaper"
-                 : !g_strcmp0 (wpj_str (mo, "role", ""), "leads") ? "renders for other monitors too"
+                 mem_s (mo, "name", "?"), mem_n (mo, "width"), mem_n (mo, "height"),
+                 mem_s (mo, "type", "?"), wpj_bool (mo, "paused", FALSE) ? " (paused)" : "",
+                 !g_strcmp0 (mem_s (mo, "role", "own"), "own") ? "its own wallpaper"
+                 : !g_strcmp0 (mem_s (mo, "role", ""), "leads") ? "renders for other monitors too"
                  : "shows another monitor's frames",
-                 json_object_has_member (mo, "note") ? "; " : "", wpj_str (mo, "note", ""));
+                 json_object_has_member (mo, "note") ? "; " : "", mem_s (mo, "note", ""));
         g_print ("  frames %.0f, wake-ups %.0f, loads %.0f, pauses %.0f, resumes %.0f, frames drawn "
                  "while paused %.0f, unloaded while paused %.0f\n", mem_n (mo, "frames"),
                  mem_n (mo, "wakeups"), mem_n (mo, "loads"), mem_n (mo, "pauses"), mem_n (mo, "resumes"),
@@ -496,7 +506,8 @@ static int mem_diff (const char *fa, const char *fb)
          * appeared or is gone */
         if (!x || !y)
             g_strlcat (unit, x ? "  gone" : "  new", sizeof (unit));
-        g_print ("%-84s %14s %14s %+14.0f%s\n", key, sa, sb, d, unit);
+        /* (the keys are names from the two files) */
+        g_print ("%-84s %14s %14s %+14.0f%s\n", tt (key), sa, sb, d, unit);
         shown++;
     }
     if (!shown)
@@ -555,7 +566,7 @@ static int mem_main (int argc, char **argv)
         if (json)
             print_json (reply);
         else
-            g_printerr ("%s\n", ro ? wpj_str (ro, "error", "no memory report in the reply")
+            g_printerr ("%s\n", ro ? mem_s (ro, "error", "no memory report in the reply")
                                    : "the reply is not JSON");
         note_old_daemon (reply, "mem");
         rc = 3;
