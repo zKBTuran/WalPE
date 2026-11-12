@@ -1456,12 +1456,11 @@ static WeSys *sys_new (JsonObject *j, const char *dir, const char *we,
         g_free (s);
         return NULL;
     }
-    s->cap = MIN (s->maxcount, 256);
-    s->pts = g_new0 (Pt, s->cap);
-    if (s->renderer == RD_ROPETRAIL)
-        s->hist = g_new0 (float, (gsize) s->cap * s->rope_seg * 3);
-    if (s->nfol > 0)
-        s->fol = g_new0 (float, (gsize) s->cap * s->nfol);
+    /* (the pool - particles, trail points, follower counters - is made by
+     * the system's first particle: spawn. A system that never emits - its
+     * object is not visible, it waits for an event of its parent that never
+     * comes, a script keeps its rate at 0 - held room for 256 particles from
+     * the load to the end of the wallpaper.) */
     return s;
 }
 
@@ -1504,7 +1503,15 @@ static Pt *spawn (WeSys *s)
                        "(the limit for all particle systems together)", PT_TOTAL_CAP);
         return NULL;
     }
-    if (s->count >= s->cap) {
+    if (s->count >= s->cap && !s->cap) {
+        /* the first particle: the pool as sys_new () used to make it */
+        s->cap = MIN (s->maxcount, 256);
+        s->pts = g_new0 (Pt, s->cap);
+        if (s->renderer == RD_ROPETRAIL)
+            s->hist = g_new0 (float, (gsize) s->cap * s->rope_seg * 3);
+        if (s->nfol > 0)
+            s->fol = g_new0 (float, (gsize) s->cap * s->nfol);
+    } else if (s->count >= s->cap) {
         int nc = MIN (s->cap * 2, s->maxcount);
         s->pts = g_renew (Pt, s->pts, nc);
         if (s->hist)

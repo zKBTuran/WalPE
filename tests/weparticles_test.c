@@ -223,6 +223,31 @@ int main (void)
         CHECK (n >= 78 && n <= 81, "scene file, count 0, version 0.12: not set (%d)", n);
     walpe_weparticles_free (p);
 
+    /* the pool is made by the first particle, not by the load: a system
+     * that emits nothing (here a script keeps its count at 0) holds none;
+     * once it emits, it has the room the load used to give it and shows
+     * what a system that emitted from the start shows */
+    p = make (1, 1);
+    WalpeWeParticleMem m0 = { 0 }, m1 = { 0 }, m2 = { 0 };
+    walpe_weparticles_mem (p, &m0);
+    CHECK (m0.systems == 1 && m0.allocated == 0 && m0.pool_bytes == 0 && m0.trail_bytes == 0,
+           "loaded, nothing emitted yet: no pool (room for %d particles, %d bytes)", m0.allocated,
+           (int) m0.pool_bytes);
+    set (p, 0, 1, WALPE_WE_OV_COUNT);
+    run (p, 3);
+    walpe_weparticles_mem (p, &m1);
+    CHECK (walpe_weparticles_count (p) == 0 && m1.allocated == 0 && m1.pool_bytes == 0,
+           "3 s without a particle: still no pool (room for %d particles, %d bytes)", m1.allocated,
+           (int) m1.pool_bytes);
+    set (p, 1, 1, WALPE_WE_OV_COUNT);
+    run (p, 8);
+    walpe_weparticles_mem (p, &m2);
+    n = walpe_weparticles_count (p);
+    CHECK (n == base && m2.live == n, "then 8 s of emission: as many alive as without the wait (%d / %d)", n, base);
+    CHECK (m2.allocated == 256 && m2.pool_bytes >= 256 * 100, "... in a pool for 256 particles (%d, %d bytes)",
+           m2.allocated, (int) m2.pool_bytes);
+    walpe_weparticles_free (p);
+
     if (fails) {
         printf ("%d check(s) failed\n", fails);
         return 1;
