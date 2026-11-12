@@ -183,6 +183,29 @@ static void test_where (void)
     n = walpe_pause_rule_everywhere_note (WALPE_WLPLAN_FS_NO_NAME, TRUE);
     CHECK (n == NULL, "every monitor is what the user set (pause_fullscreen_all): nothing to explain");
     g_free (n);
+
+    /* rules.h: the note under "Pause when covered" where only the
+     * compositor's frame events report it (KWin: no window list) */
+    n = walpe_pause_rule_frames_only_note ("wl-frame", "wl-windows: the compositor has no window list");
+    CHECK (n && strstr (n, "locked screen") && strstr (n, "is not known in this session") &&
+           strstr (n, "wl-windows: the compositor has no window list"),
+           "frames only: says what pauses, what does not, and why: %s", n ? n : "(null)");
+    g_free (n);
+    n = walpe_pause_rule_frames_only_note ("wl-frame", NULL);
+    CHECK (n && !strstr (n, ": "), "frames only, no reason told: the sentence alone");
+    g_free (n);
+    n = walpe_pause_rule_frames_only_note ("wl-frame,wl-windows", "");
+    CHECK (n == NULL, "the window list reports too: nothing to explain");
+    g_free (n);
+    n = walpe_pause_rule_frames_only_note ("x11-windows", "anything");
+    CHECK (n == NULL, "another source alone (X11): no note");
+    g_free (n);
+    n = walpe_pause_rule_frames_only_note ("", "wl-windows: no");
+    CHECK (n == NULL, "no source: that is the other note's case");
+    g_free (n);
+    n = walpe_pause_rule_frames_only_note (NULL, NULL);
+    CHECK (n == NULL, "no source at all");
+    g_free (n);
 }
 
 static void test_logind_opt (void)

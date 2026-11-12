@@ -58,6 +58,29 @@ static inline char *walpe_pause_rule_note (const WalpePauseRule *r, const char *
     return g_strdup_printf ("not available in this session: nothing here reports %s", r->what);
 }
 
+/* "Pause a covered monitor" has two sources on Wayland: the backend's own
+ * ("wl-frame": the compositor stopped asking the wallpaper surface for
+ * frames) and the compositor's window list ("wl-windows"). With the first
+ * alone the rule counts as working, and it does for a locked screen or a
+ * display that is off - but a compositor that goes on asking a surface
+ * for frames while a window hides it (KWin does, 5.27 and 6.8) never
+ * pauses the wallpaper behind a fullscreen or maximized window, and
+ * nothing said so. The sentence for that; NULL when another source
+ * reports windows too, or on X11. missing: why the window list did not
+ * start (walpe_signal_missing). g_free. */
+#define WALPE_RULE_SRC_FRAMES "wl-frame"
+
+static inline char *walpe_pause_rule_frames_only_note (const char *sources, const char *missing)
+{
+    if (g_strcmp0 (sources, WALPE_RULE_SRC_FRAMES) != 0)
+        return NULL;
+    return g_strdup_printf ("only while the compositor does not show the wallpaper at all (a "
+                            "locked screen, a display that is off, a compositor that leaves "
+                            "hidden surfaces out); a window that covers the wallpaper is not "
+                            "known in this session%s%s", missing && *missing ? ": " : "",
+                            missing && *missing ? missing : "");
+}
+
 /* "Pause for fullscreen apps" pauses the monitor the focused fullscreen
  * window is on. Where the session reports such a window but not the
  * monitor it is on (a Wayland compositor that does not name the window's

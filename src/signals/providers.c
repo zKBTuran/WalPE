@@ -117,6 +117,10 @@ void walpe_sigprov_status_json (JsonBuilder *b, const WalpeConfig *cfg)
 #endif
             note = walpe_pause_rule_everywhere_note (everywhere, cfg->pause_fullscreen_all);
         }
+        if (!note && r->signal == WALPE_SIG_COVERED) {
+            /* it works, but only for what the compositor itself hides */
+            note = walpe_pause_rule_frames_only_note (sources, missing);
+        }
         json_builder_set_member_name (b, r->key);
         json_builder_begin_object (b);
         json_builder_set_member_name (b, "on");

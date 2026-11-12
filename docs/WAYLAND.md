@@ -154,9 +154,15 @@ false` means the setting has no effect in this session, whether it is on or off,
 | Pause after N seconds without input (`pause_idle`, new, off by default) | the compositor's idle notification (`ext-idle-notify-v1`). `walpe-ctl set idle=300`; 0 = off. On X11 nothing reports idle time in this version, and status says so |
 | Pause on battery (`pause_battery`) | the kernel's power-supply state, as on X11 |
 
-Expected, not tested: KWin and GNOME Shell offer other programs no window list, so the
-fullscreen and focus rules have no source there; the "no longer shown" part of the covered
-rule still works.
+KWin and GNOME Shell offer other programs no window list, so the fullscreen and focus
+rules have no source there. Of the covered rule the "no longer shown" part is left, and
+on KDE Plasma that means a locked screen or a display that is off: KWin goes on asking a
+surface for frames while a window hides it (run on KWin 5.27 with a fullscreen window in
+front; read in the source of KWin 6.8), so **a wallpaper behind a fullscreen or maximized
+window, a game included, keeps being drawn on KDE Plasma**. `pause_rules` says so in the
+`note` of `pause_covered` wherever the window list is missing, and the settings window
+prints it under the switch. `walpe-ctl pause` / `resume` and the tray's pause entry work
+everywhere.
 
 Lockers that do not tell logind that the session is locked (seen with a lock client on
 sway): the wallpaper pauses through the covered rule, because the compositor stops showing
