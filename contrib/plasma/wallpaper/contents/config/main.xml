@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The settings of the Plasma wallpaper type "WalPE" (one set per desktop of Plasma). -->
+<kcfg xmlns="http://www.kde.org/standards/kcfg/1.0"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0 http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+  <kcfgfile name=""/>
+  <group name="General">
+    <entry name="Color" type="Color">
+      <label>Shown while walpe-daemon shows nothing on this screen</label>
+      <default>#101418</default>
+    </entry>
+    <entry name="Image" type="String">
+      <label>A picture shown instead of the colour (file or URL; empty: the colour)</label>
+      <default></default>
+    </entry>
+    <entry name="Under" type="Bool">
+      <label>Not a setting: written by the KWin script "WalPE under the desktop" while a
+      surface of walpe-daemon lies under this desktop</label>
+      <default>false</default>
+    </entry>
+  </group>
+</kcfg>
