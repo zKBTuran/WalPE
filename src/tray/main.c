@@ -59,6 +59,8 @@ static struct {
     char *type;
     gboolean paused, fs_pause, covered_pause, dpms_pause;
     double volume;
+    gboolean mute;         /* the setting "mute": silent whatever the volume is */
+    gboolean sound_on;     /* the setting "scene_sound": wallpapers may make sound at all */
     GPtrArray *mons;       /* MonInfo* */
     /* settings from config.json (status does not carry them) */
     gboolean set_fs, set_covered;
@@ -402,6 +404,8 @@ static void read_config_flags (void)
         g_free (T.path);
         T.path = g_strdup (c->current);
         T.volume = c->volume;
+        T.mute = c->mute;
+        T.sound_on = c->scene_sound;
         T.paused = c->paused;
     }
     walpe_config_free (c);
@@ -426,6 +430,8 @@ static void on_status (const char *reply, gpointer user)
         T.covered_pause = wpj_bool (st, "covered_pause", FALSE);
         T.dpms_pause = wpj_bool (st, "dpms_pause", FALSE);
         T.volume = wpj_num (st, "volume", 0);
+        T.mute = wpj_bool (st, "mute", FALSE);
+        T.sound_on = wpj_bool (st, "scene_sound", FALSE);
         if (T.mons)
             g_ptr_array_set_size (T.mons, 0);
         else
@@ -1111,6 +1117,28 @@ gboolean tray_engine_alive (void)
     return T.alive;
 }
 
+/* Wallpaper sound is switched on and silent by one of the two settings the
+ * menu's "Mute" / "Unmute" stands for: the volume is 0, or "mute" is on
+ * (walpe-ctl, the settings window). Only the volume was looked at: with
+ * "mute" on the entry read "Mute", a click on it set the volume to 0 as
+ * well, and the "Unmute" that followed brought the volume back and left
+ * "mute" on - still silent, and the entry said "Mute" again. */
+static gboolean tray_silent (void)
+{
+    return T.mute || T.volume <= 0.001;
+}
+
+/* The third state, and the one a new configuration is in: wallpaper sound
+ * is switched off (the setting scene_sound). That is not "muted": the entry
+ * read "Unmute" all the same (the volume is 0 by default), a click set the
+ * volume to 1, the entry then read "Mute" - and nothing was heard, because
+ * nothing here switched the sound on. The entry names that state and
+ * switches it on. */
+static const char *tray_sound_label (void)
+{
+    return !T.sound_on ? "Switch wallpaper sound on" : tray_silent () ? "Unmute" : "Mute";
+}
+
 void tray_dispatch (const char *action, const char *arg)
 {
     if (!action)
@@ -1124,13 +1152,18 @@ void tray_dispatch (const char *action, const char *arg)
         rebuild ();
     } else if (!strcmp (action, "mute-toggle")) {
         char vb[G_ASCII_DTOSTR_BUF_SIZE];
-        if (T.volume > 0.001) {
+        if (T.sound_on && !tray_silent ()) {
             T.volume_before_mute = T.volume;
             recent_save ();
             send_cmd ("{\"cmd\":\"set\",\"volume\":0}");
         } else {
-            double v = T.volume_before_mute > 0.001 ? T.volume_before_mute : 1.0;
-            char *req = g_strdup_printf ("{\"cmd\":\"set\",\"volume\":%s}",
+            /* heard (again): the sound switched on, "mute" off, and a volume
+             * above 0 - the one that is set, else the one from before the
+             * menu's "Mute", else one half as the settings window sets it */
+            double v = T.volume;
+            if (v <= 0.001)
+                v = !T.sound_on ? 0.5 : T.volume_before_mute > 0.001 ? T.volume_before_mute : 1.0;
+            char *req = g_strdup_printf ("{\"cmd\":\"set\",\"scene_sound\":true,\"mute\":false,\"volume\":%s}",
                                          g_ascii_dtostr (vb, sizeof vb, v));
             send_cmd (req);
             g_free (req);
@@ -1228,7 +1261,7 @@ static TrayItem *build_menu (void)
     it = add (root, TRAY_ITEM_NORMAL, T.paused ? "Resume all wallpapers" : "Pause all wallpapers",
               "pause-toggle");
     it->enabled = live;
-    it = add (root, TRAY_ITEM_NORMAL, T.volume > 0.001 ? "Mute" : "Unmute", "mute-toggle");
+    it = add (root, TRAY_ITEM_NORMAL, tray_sound_label (), "mute-toggle");
     it->enabled = live;
     it = add (root, TRAY_ITEM_NORMAL, "Next wallpaper", "next");
     it->enabled = live;
@@ -1359,7 +1392,7 @@ static void rebuild (void)
             g_string_append (tip, "\nPaused while covered by windows");
         else if (T.dpms_pause)
             g_string_append (tip, "\nPaused: display asleep");
-        if (T.volume <= 0.001)
+        if (T.sound_on && tray_silent ())
             g_string_append (tip, " · muted");
     }
     gboolean changed = ist != T.icon_state || g_strcmp0 (tip->str, T.tip_text);
