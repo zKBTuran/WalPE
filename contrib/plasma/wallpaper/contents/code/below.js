@@ -40,20 +40,36 @@ function screenKey(g) {
     return Math.round(g.x) + "," + Math.round(g.y) + "," + Math.round(g.width) + "," + Math.round(g.height);
 }
 
-// what Plasma's shell runs: one line "walpe X,Y,W,H" per desktop of the type, after telling
-// each whether the daemon has a surface on its screen, and which process that is (covered:
-// screen -> process id; the type hands the pointer to that process only)
+// what Plasma's shell runs: one line "walpe X,Y,W,H" per screen whose desktop is of the type,
+// after telling that desktop whether the daemon has a surface on its screen, and which process
+// that is (covered: screen -> process id; the type hands the pointer to that process only).
+// The desktop of a screen is the one of the current activity (desktopForScreen): Plasma has
+// one desktop per screen and activity, shows them all in the one window of the screen, and
+// names the screen also for those of the other activities. A desktop of the type that is
+// not shown is told that nothing is under it: what it was told last is from another time.
 function question(covered) {
     return "const covered = " + JSON.stringify(covered) + ";" +
-        "for (const d of desktops()) {" +
-        "  if (d.screen < 0 || d.wallpaperPlugin !== '" + TYPE + "') continue;" +
-        "  const g = screenGeometry(d.screen);" +
+        "const shown = [];" +
+        "for (let s = 0; s < screenCount; s++) {" +
+        "  const d = desktopForScreen(s);" +
+        "  if (!d) continue;" +
+        "  shown.push(d.id);" +
+        "  if (d.wallpaperPlugin !== '" + TYPE + "') continue;" +
+        "  const g = screenGeometry(s);" +
         "  const key = [g.x, g.y, g.width, g.height].map(Math.round).join(',');" +
         "  const under = key in covered;" +
         "  d.currentConfigGroup = ['Wallpaper', '" + TYPE + "', 'General'];" +
         "  d.writeConfig('Daemon', under ? covered[key] : 0);" +
         "  d.writeConfig('Under', under);" +
         "  print('walpe ' + key + '\\n');" +
+        "}" +
+        "for (const d of desktops()) {" +
+        "  if (shown.indexOf(d.id) >= 0 || d.wallpaperPlugin !== '" + TYPE + "') continue;" +
+        "  d.currentConfigGroup = ['Wallpaper', '" + TYPE + "', 'General'];" +
+        "  if (String(d.readConfig('Under', false)) === 'true') {" +
+        "    d.writeConfig('Daemon', 0);" +
+        "    d.writeConfig('Under', false);" +
+        "  }" +
         "}";
 }
 
