@@ -35,6 +35,7 @@
 #include "suppoll.h"     /* how often the engine is asked for its status */
 #include "rescanpace.h"  /* when the library is scanned again after a change */
 #include "statusline.h"  /* the status line's text and its tool tip */
+#include "monline.h"     /* what each monitor shows, as text */
 #include "winstate.h"    /* is the window on screen at all */
 #ifdef WALPE_HAVE_WORKSHOP_PAGE
 #include "workshop_page.h"   /* GtkWidget *walpe_workshop_page_new (void); */
@@ -184,6 +185,7 @@ static struct {
     GtkWidget *stack;           /* Library | Workshop (when built) */
     GPtrArray *mons;            /* MonInfo, empty = no per-monitor support */
     char *mon_sig;              /* last rebuilt layout+currents (avoid churn) */
+    char *mon_marks;            /* what the texts about them said besides (monline.h) */
     gboolean mon_building;
     GtkWidget *props_panel;
     GtkWidget *layers_panel;    /* "Adjust layers" (layers.h) */
@@ -741,20 +743,25 @@ static gboolean parse_monitors (JsonObject *st)
     gboolean changed = g_strcmp0 (sig->str, U.mon_sig) != 0;
     g_ptr_array_unref (U.mons);
     U.mons = nm;
+    /* the texts that name the monitors also say "(paused)": written again
+     * when that changes, the chooser itself only with the monitors */
+    WalpeMonLine *ml = g_new0 (WalpeMonLine, nm->len ? nm->len : 1);
+    for (guint i = 0; i < nm->len; i++) {
+        MonInfo *m = nm->pdata[i];
+        ml[i] = (WalpeMonLine) { .index = m->index, .name = m->name, .w = m->w, .h = m->h,
+                                 .paused = m->paused };
+    }
+    char *marks = walpe_mon_line_marks (ml, nm->len);
+    gboolean texts = changed || g_strcmp0 (marks, U.mon_marks) != 0;
     if (changed) {
         g_free (U.mon_sig);
         U.mon_sig = g_string_free (sig, FALSE);
         guint keep = gtk_drop_down_get_selected (GTK_DROP_DOWN (U.mon_dd));
         GtkStringList *sl = gtk_string_list_new (NULL);
         gtk_string_list_append (sl, "All monitors");
-        GString *tip = g_string_new ("Currently showing:");
         for (guint i = 0; i < nm->len; i++) {
-            MonInfo *m = nm->pdata[i];
-            char *l = g_strdup_printf ("%d · %s · %d×%d", m->index + 1, *m->name ? m->name : "Monitor",
-                                       m->w, m->h);
+            char *l = walpe_mon_line_choice (&ml[i]);
             gtk_string_list_append (sl, l);
-            g_string_append_printf (tip, "\n%s: %s%s", l, title_for_path (m->current),
-                                    m->paused ? " (paused)" : "");
             g_free (l);
         }
         U.mon_building = TRUE;
@@ -762,25 +769,28 @@ static gboolean parse_monitors (JsonObject *st)
         g_object_unref (sl);
         gtk_drop_down_set_selected (GTK_DROP_DOWN (U.mon_dd), keep <= nm->len ? keep : 0);
         U.mon_building = FALSE;
-        gtk_widget_set_tooltip_text (U.mon_box, tip->str);
-        g_string_free (tip, TRUE);
         gtk_widget_set_visible (U.mon_box, nm->len > 1);
-        /* which wallpaper each monitor shows, in plain sight */
-        GString *now = g_string_new (NULL);
-        for (guint i = 0; i < nm->len && nm->len > 1; i++) {
-            MonInfo *m = nm->pdata[i];
-            g_string_append_printf (now, "%s%d · %s: %s%s", now->len ? "     " : "Showing  ",
-                                    m->index + 1, *m->name ? m->name : "Monitor",
-                                    title_for_path (m->current), m->paused ? " (paused)" : "");
-        }
-        gtk_label_set_text (U.mon_now, now->str);
-        gtk_widget_set_tooltip_text (GTK_WIDGET (U.mon_now), now->len ? now->str : NULL);
-        gtk_widget_set_visible (GTK_WIDGET (U.mon_now), now->len > 0);
-        g_string_free (now, TRUE);
         gtk_widget_queue_draw (U.mon_area);
     } else {
         g_string_free (sig, TRUE);
     }
+    if (texts) {
+        g_free (U.mon_marks);
+        U.mon_marks = g_steal_pointer (&marks);
+        for (guint i = 0; i < nm->len; i++)
+            ml[i].title = title_for_path (((MonInfo *) nm->pdata[i])->current);
+        char *tip = walpe_mon_line_tip (ml, nm->len);
+        gtk_widget_set_tooltip_text (U.mon_box, tip);
+        g_free (tip);
+        /* which wallpaper each monitor shows, in plain sight */
+        char *now = walpe_mon_line_now (ml, nm->len);
+        gtk_label_set_text (U.mon_now, now);
+        gtk_widget_set_tooltip_text (GTK_WIDGET (U.mon_now), *now ? now : NULL);
+        gtk_widget_set_visible (GTK_WIDGET (U.mon_now), *now != 0);
+        g_free (now);
+    }
+    g_free (marks);
+    g_free (ml);
     return changed;
 }
 

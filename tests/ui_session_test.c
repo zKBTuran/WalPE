@@ -11,11 +11,14 @@
  *    never in the background while the engine is stopped and its socket
  *    is watched;
  *  - src/ui/rescanpace.h: files that keep arriving in a new folder of the
- *    library do not hold its scan off for as long as they come. */
+ *    library do not hold its scan off for as long as they come;
+ *  - src/ui/monline.h: the texts that say what each monitor shows, and
+ *    that a pause which begins or ends writes them again. */
 #include "ui/appearance.h"
 #include "ui/monlist.h"
 #include "ui/suppoll.h"
 #include "ui/rescanpace.h"
+#include "ui/monline.h"
 #include "ui/winstate.h"
 #include <stdio.h>
 #include <string.h>
@@ -83,6 +86,44 @@ static void pace_arrival (Pace *p, gint64 now)
 
 int main (void)
 {
+    /* ---- what each monitor shows, as text */
+    {
+        WalpeMonLine m[2] = { { .index = 0, .name = "HDMI-0", .w = 1920, .h = 1080, .title = "Rain" },
+                              { .index = 1, .name = "", .w = 1280, .h = 1024, .title = "Dunes" } };
+        char *now = walpe_mon_line_now (m, 2), *tip = walpe_mon_line_tip (m, 2);
+        char *marks = walpe_mon_line_marks (m, 2), *c = walpe_mon_line_choice (&m[1]);
+        CHECK (!strcmp (now, "Showing  1 · HDMI-0: Rain     2 · Monitor: Dunes"), "the line: %s", now);
+        CHECK (!strcmp (tip, "Currently showing:\n1 · HDMI-0 · 1920×1080: Rain\n2 · Monitor · 1280×1024: Dunes"),
+               "the tool tip: %s", tip);
+        CHECK (!strcmp (c, "2 · Monitor · 1280×1024"), "the choice: %s", c);
+        g_free (c);
+        /* one monitor pauses: both texts say so, and what is compared to
+         * write them again is not what it was */
+        m[1].paused = TRUE;
+        char *now2 = walpe_mon_line_now (m, 2), *tip2 = walpe_mon_line_tip (m, 2);
+        char *marks2 = walpe_mon_line_marks (m, 2);
+        CHECK (!strcmp (now2, "Showing  1 · HDMI-0: Rain     2 · Monitor: Dunes (paused)"), "the line: %s", now2);
+        CHECK (g_str_has_suffix (tip2, "Dunes (paused)"), "the tool tip: %s", tip2);
+        CHECK (strcmp (marks, marks2) != 0, "a pause is a reason to write the texts again");
+        /* every combination: the same texts exactly when the marks are the same */
+        for (int a = 0; a < 4; a++)
+            for (int b = 0; b < 4; b++) {
+                WalpeMonLine x[2] = { m[0], m[1] }, y[2] = { m[0], m[1] };
+                x[0].paused = a & 1; x[1].paused = a >> 1;
+                y[0].paused = b & 1; y[1].paused = b >> 1;
+                char *nx = walpe_mon_line_now (x, 2), *ny = walpe_mon_line_now (y, 2);
+                char *tx = walpe_mon_line_tip (x, 2), *ty = walpe_mon_line_tip (y, 2);
+                char *mx = walpe_mon_line_marks (x, 2), *my = walpe_mon_line_marks (y, 2);
+                CHECK ((!strcmp (nx, ny) && !strcmp (tx, ty)) == !strcmp (mx, my), "pauses %d and %d", a, b);
+                g_free (nx); g_free (ny); g_free (tx); g_free (ty); g_free (mx); g_free (my);
+            }
+        /* one monitor: no line, the tool tip stays */
+        char *one = walpe_mon_line_now (m, 1);
+        CHECK (!*one, "one monitor: %s", one);
+        g_free (one);
+        g_free (now); g_free (tip); g_free (marks); g_free (now2); g_free (tip2); g_free (marks2);
+    }
+
     /* ---- the scans while a folder arrives */
     {
         const gint64 ms = 1000;
