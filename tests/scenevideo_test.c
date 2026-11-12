@@ -649,6 +649,8 @@ static int main_kind (void)
     char *f = walpe_scene_video_cache_file ("0123456789abcdef0123456789abcdef", 640, 360);
     char *b = f ? g_path_get_basename (f) : NULL;
     g_print ("%d %d %s\n", walpe_scene_video_fast (), walpe_scene_video_fast (), b ? b : "?");
+    g_free (b);
+    g_free (f);
     return 0;
 }
 
