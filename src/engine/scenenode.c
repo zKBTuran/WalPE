@@ -6654,6 +6654,17 @@ frame_done:
         if (!c->next_frame_us || due < c->next_frame_us)
             c->next_frame_us = due;
     }
+    if (!s->texres_applied && !s->paused && !c->next_frame_us &&
+        (s->q.tex_res > 0 || c->tex_limit > 0)) {
+        /* texture_limit and the texture quality are applied in the third
+         * frame (scenenode_texres_apply). A scene without a frame clock
+         * draws its first frames and then waits for a reason to draw: its
+         * textures stayed as large as without the setting until a pause, an
+         * exposure or a layer the user moved happened to bring that frame.
+         * Nothing is asked for without one of the two settings, and nothing
+         * once they are applied. */
+        c->next_frame_us = g_get_monotonic_time () + 1000000 / (s->fps_cap > 0 ? s->fps_cap : 30);
+    }
     walpe_cph_to (WALPE_CPH_NONE);
     return !c->frame_unchanged;
 }

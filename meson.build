@@ -2194,4 +2194,13 @@ test('scene-text-glerr', executable('scene-text-glerr-test', 'tests/scene_text_g
   link_with: fakegl,
   dependencies: [core_dep],
   install: false, build_by_default: false), timeout: 60)
+
+# texture_limit and the texture quality reach a scene in which nothing
+# moves: the frame that applies them is asked for (src/engine/scenenode.c),
+# and no frame is asked for without them. The stand-in OpenGL again.
+test('scene-texlimit-still', executable('scene-texlimit-still-test', 'tests/scene_texlimit_still_test.c',
+  include_directories: inc,
+  link_with: fakegl,
+  dependencies: [core_dep],
+  install: false, build_by_default: false), timeout: 120)
 endif  # with_tests
