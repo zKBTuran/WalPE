@@ -1444,6 +1444,15 @@ static void web_private_screen (int w, int h);
  * A frame from another site keeps scripts out: it has the level of the
  * moment it was made, and the mute.
  *
+ * Where level and mute end up. WebKit hands an element's volume and the
+ * view's mute to its audio sink, and GStreamer's pulsesink makes them the
+ * volume and mute of the stream in the sound server - stored there for
+ * later streams of the same media.role, other programs' too, and read
+ * back by WebKit into the element. A level per page does not belong
+ * there: the page process's sink is gst/walpesound.c (found through
+ * GST_PLUGIN_PATH: main.c web_env_sound_sink), which keeps both in the
+ * page process. Nothing in this file depends on which sink plays.
+ *
  * Silence while paused: sh_suspend has the script pause every element it
  * knows and those in the document, and suspend the AudioContexts that
  * have an output; then the view is muted (what the script did not reach).

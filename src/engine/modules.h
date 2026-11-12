@@ -131,3 +131,11 @@ void walpe_modules_mem_json (JsonBuilder *b, gint64 start_us);
  * (a group of one's own with umask 002 is common). FALSE: *why (optional,
  * g_free) says what is wrong. */
 gboolean walpe_module_file_trusted (const char *path, char **why);
+/* The sound output of the page process (gst/walpesound.c): a GStreamer
+ * plugin, alone in a directory gst/ next to walpe-web.so. Returns that
+ * directory (g_free) when the plugin is there and can be trusted as a
+ * module is, NULL otherwise or with WALPE_WEB_SOUND_SINK=0; what was found
+ * is logged when the web module is loaded, not before. For main (): the
+ * directory has to be on GST_PLUGIN_PATH before WebKit starts a process. */
+#define WALPE_WEB_SOUND_SINK_FILE "libgstwalpesound.so"
+char *walpe_web_sound_sink_dir (void);

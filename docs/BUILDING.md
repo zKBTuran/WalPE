@@ -65,7 +65,7 @@ Optional parts (meson `auto`; each takes `-D<option>=enabled|disabled`):
 | Option | pkg-config module | Gentoo package | Without it |
 |---|---|---|---|
 | `video` | `libavcodec`, `libavutil` | `media-video/ffmpeg` | video wallpapers and video textures do not load |
-| `web` | `webkitgtk-6.0`, `libsoup-3.0`, and what one of the two page hosts needs: `x11` + `gtk4-x11`, or the Wayland backend + `wayland-server` + `gtk4-wayland` | `net-libs/webkit-gtk:6`, `net-libs/libsoup:3.0` | web wallpapers report an error |
+| `web` | `webkitgtk-6.0`, `libsoup-3.0`, and what one of the two page hosts needs: `x11` + `gtk4-x11`, or the Wayland backend + `wayland-server` + `gtk4-wayland`. `gstreamer-1.0` (the headers of the GStreamer that WebKitGTK plays media with) for `libgstwalpesound.so` | `net-libs/webkit-gtk:6`, `net-libs/libsoup:3.0`, `media-libs/gstreamer` | web wallpapers report an error. Without `gstreamer-1.0` alone: web wallpapers are built, `meson setup` warns, and the level and mute of their sound are kept by the sound server ([SOUND.md](SOUND.md#web-wallpapers)); `-Dweb=enabled` asks for it |
 | `audio` | `libpulse-simple`, `libpulse` | `media-libs/libpulse` | audio spectra stay 0; wallpaper sound has no output |
 | `scenescript` | none: `quickjs/quickjs.h` and `libquickjs` (searched in `<libdir>/quickjs`) | `dev-lang/quickjs` (no longer in the Gentoo tree, see below) | scripted values stay static |
 | `tray` | `gtk4`; `x11` and `xrender` for XEmbed | `x11-libs/libXrender` | no `walpe-tray`. Without libX11 / libXrender the tray is built with StatusNotifierItem only |
@@ -184,6 +184,7 @@ libx11-dev libxext-dev libxinerama-dev libxi-dev libxrandr-dev libxrender-dev   
 libwayland-dev                                                                  # Wayland
 libavcodec-dev libavutil-dev            # video wallpapers
 libwebkitgtk-6.0-dev libsoup-3.0-dev    # web wallpapers
+libgstreamer1.0-dev                     # web wallpapers: their sound output (libgstwalpesound.so)
 libpulse-dev                            # audio spectra, scene sound
 libquickjs                              # SceneScript
 ```

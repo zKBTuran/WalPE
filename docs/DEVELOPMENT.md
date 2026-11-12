@@ -22,6 +22,8 @@ walpe-daemon (src/daemon/)   no GTK. Per monitor one EGL surface - an override-r
                              scenescript.c    SceneScript on QuickJS
                              video*.c, mp4demux.c   H.264 player (module walpe-video.so)
                              web.c, webinput.c      WebKitGTK backend (module walpe-web.so)
+                                              (its page process's sound output is a GStreamer
+                                              plugin of its own: gst/walpesound.c)
                              gif.c, image.c, glutil.c, gpuprof.c (profiler)
                              fx_essl.h (effect shaders as GLSL ES), bloom.c, fx_sim.h
                              (simulation effects), scenesound.c, sounddec.c (sound)

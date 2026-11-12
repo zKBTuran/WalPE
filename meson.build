@@ -379,6 +379,23 @@ if have_web
     deps_web = []
   endif
 endif
+# The sound output of the page process of web wallpapers (gst/walpesound.c):
+# a small GStreamer plugin that keeps the level and the mute of page sound
+# out of the sound server. Built with the GStreamer core headers
+# (gstreamer-1.0); at run time it needs what WebKitGTK's media playback
+# needs anyway. Without the headers the web module is built without it and
+# says so in the log (docs/SOUND.md, "Without the plugin").
+have_web_sound_sink = false
+if have_web
+  gst_dep = dependency('gstreamer-1.0', version: '>= 1.14', required: web_opt == 'enabled')
+  have_web_sound_sink = gst_dep.found()
+  if not have_web_sound_sink
+    warning('gstreamer-1.0 (headers) not found: web wallpapers are built without ' +
+            'libgstwalpesound.so. Their level and mute then are the stream volume and mute ' +
+            'in the sound server, which the server stores and gives to other programs, ' +
+            'and with PipeWire a muted page can stay muted (docs/SOUND.md)')
+  endif
+endif
 if have_webhost_x11 and not have_x11
   # (with the X11 backend these come with deps_core)
   deps_web += x11
@@ -485,6 +502,7 @@ conf.set('HAVE_XRANDR', xrandr.found())
 conf.set('HAVE_PULSE', have_pulse)
 conf.set('HAVE_FFMPEG', have_ffmpeg)
 conf.set('HAVE_WEB', have_web)
+conf.set('HAVE_WEB_SOUND_SINK', have_web_sound_sink)
 # the web module's page hosts (src/engine/webhostsel.h)
 conf.set('HAVE_WEBHOST_X11', have_webhost_x11)
 conf.set('HAVE_WEBHOST_WL', have_webhost_wl)
@@ -726,6 +744,11 @@ if have_web
     dependencies: web_deps,
     install: true,
     install_dir: moddir)
+  # (a directory of its own, in the build and installed: GStreamer loads
+  # every module below a directory of its plugin path)
+  if have_web_sound_sink
+    subdir('gst')
+  endif
 endif
 
 if with_tests
@@ -738,6 +761,23 @@ test('webhost-select', executable('webhost-select-test', 'tests/webhost_select_t
   include_directories: inc,
   dependencies: [glib],
   install: false, build_by_default: false))
+
+# the sound output of the page process (gst/walpesound.c) as GStreamer's
+# playback elements meet it: autoaudiosink takes it before pulsesink, and
+# playbin's search for the element that keeps the volume ends at the
+# plugin's "volume" element, not at pulsesink (level and mute of a page
+# then never are the stream's in the sound server). With a GStreamer
+# registry of its own in the build directory (the first run scans the
+# system's plugins); no sound server, no display. Skipped where GStreamer
+# has no pulsesink.
+if have_web_sound_sink
+  test('websink', executable('websink-test', 'tests/websink_test.c',
+    dependencies: [gst_dep],
+    install: false, build_by_default: false),
+    args: [meson.current_build_dir() / 'gst'],
+    env: ['GST_REGISTRY_1_0=' + meson.current_build_dir() / 'websink-test.registry'],
+    depends: [web_sound_sink], timeout: 180)
+endif
 
 # the private page host (src/engine/webhost_wl.c, compiled into the test)
 # against a plain Wayland client doing what GTK does: one client only and
@@ -2257,6 +2297,8 @@ summary({'x11': have_x11, 'wayland': have_wayland},
 if have_web
   summary({'x11': have_webhost_x11, 'private': have_webhost_wl},
     section: 'Page hosts of web wallpapers (walpe-web.so)', bool_yn: true)
+  summary({'level and mute kept in the page process (libgstwalpesound.so)': have_web_sound_sink},
+    section: 'Sound of web wallpapers', bool_yn: true)
 endif
 
 # What ./build.sh builds: the installed programs and modules, nothing else.
@@ -2269,6 +2311,9 @@ if have_tray
 endif
 if have_web
   programs += web_mod
+  if have_web_sound_sink
+    programs += web_sound_sink
+  endif
 endif
 if have_ffmpeg
   programs += video_mod

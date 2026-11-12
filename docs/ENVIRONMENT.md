@@ -236,6 +236,8 @@ The other way round, `WALPE_MEM_STATS=1` switches memory numbers by kind in
 | `WALPE_WEB_BIGWIN=1` | off | the page's hidden window at full size, painted by GTK |
 | `WALPE_WEB_SNAPSHOT=1` | off | capture pages with WebKit snapshots instead of the frame path |
 | `WALPE_WEB_MEMORY_MB=n` | off | experimental: page processes release memory from n/2 MB |
+| `WALPE_WEB_SOUND_SINK=0` | on | web wallpapers play through GStreamer's own `pulsesink` instead of WalPE's `libgstwalpesound.so`: their level and mute are then the volume and mute of the stream in the sound server ([SOUND.md](SOUND.md#web-wallpapers)). For finding out whether the plugin is the reason for something; read when the daemon starts |
+| `GST_PLUGIN_PATH` (`GST_PLUGIN_PATH_1_0` when that one is set) | | not WalPE's own: the daemon adds the directory of `libgstwalpesound.so` (`gst/` next to `walpe-web.so`) at its end when it starts, so that the page processes find the plugin. A value you set stays in front |
 | `WALPE_WEB_CONSOLE=1` / `WALPE_WEB_TIMING=1` | off | the page's console output and input events go to the daemon log / every 2 s the CPU cost of the page's frame path |
 
 ## Shader diagnosis and profiling

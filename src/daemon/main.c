@@ -9475,11 +9475,40 @@ static void web_env_wayland_socket (void)
 }
 #endif
 
+/* The sound of pages. WebKit's GStreamer would keep the level and the mute
+ * of a page's sound in the sound server, as the volume and the mute of the
+ * stream, where they are stored and handed to other programs' streams
+ * (gst/walpesound.c says how). The plugin there keeps both in the page
+ * process; GStreamer finds it through GST_PLUGIN_PATH, which WebKit's
+ * page processes inherit (and bind into their sandbox), and loads it with
+ * the first sound of a page, not before. GStreamer reads
+ * GST_PLUGIN_PATH_1_0 instead when that is set. A value the user has is
+ * kept in front; an image of this process that restarts itself finds the
+ * directory already there. Nothing else in this process reads the
+ * variable: the daemon itself does not use GStreamer. */
+static void web_env_sound_sink (void)
+{
+    char *dir = walpe_web_sound_sink_dir ();
+    if (!dir)
+        return;
+    const char *var = g_getenv ("GST_PLUGIN_PATH_1_0") ? "GST_PLUGIN_PATH_1_0" : "GST_PLUGIN_PATH";
+    const char *old = g_getenv (var);
+    char **have = g_strsplit (old ? old : "", ":", -1);
+    if (!g_strv_contains ((const char *const *) have, dir)) {
+        char *all = old && *old ? g_strconcat (old, ":", dir, NULL) : g_strdup (dir);
+        g_setenv (var, all, TRUE);
+        g_free (all);
+    }
+    g_strfreev (have);
+    g_free (dir);
+}
+
 static void web_env_setup (gboolean want_accel, int fps)
 {
 #ifdef HAVE_WEBHOST_WL
     web_env_wayland_socket ();
 #endif
+    web_env_sound_sink ();
     /* what an earlier image of this process set (it restarts itself after
      * a monitor layout or web_accel change) is not the user's choice */
     web_env_undo (g_getenv ("WALPE_WEB_ENV_OURS"));

@@ -64,18 +64,17 @@ __attribute__ ((used)) static const void *const walpe_module_api[] = {
 #endif
 
 #if defined(HAVE_WEB) || defined(HAVE_FFMPEG)
-/* dlopen <name>.so from $WALPE_MODULE_DIR, the executable's directory, then
- * the install dir; returns the entry symbol or NULL (*why = reason, g_free) */
-static gpointer mod_load (const char *name, const char *entry, char **why)
+/* where modules are looked for, in this order: $WALPE_MODULE_DIR, the
+ * executable's directory, the install dir (each g_free, or NULL) */
+static void mod_dirs (char *dirs[3], gboolean warn)
 {
-    char *dirs[3] = { NULL, NULL, NULL };
     const char *env = g_getenv ("WALPE_MODULE_DIR");
-    GString *err = g_string_new (NULL);
+    dirs[0] = dirs[1] = NULL;
     /* an absolute directory: a relative one meant "whatever directory the
      * daemon happens to be started in", and the module is code */
     if (env && *env && g_path_is_absolute (env))
         dirs[0] = g_strdup (env);
-    else if (env && *env)
+    else if (env && *env && warn)
         g_warning ("module: WALPE_MODULE_DIR=%s is not an absolute path: ignored", env);
     char *exe = g_file_read_link ("/proc/self/exe", NULL);
     if (exe) {
@@ -83,6 +82,15 @@ static gpointer mod_load (const char *name, const char *entry, char **why)
         g_free (exe);
     }
     dirs[2] = g_strdup (WALPE_MODULEDIR);
+}
+
+/* dlopen <name>.so from $WALPE_MODULE_DIR, the executable's directory, then
+ * the install dir; returns the entry symbol or NULL (*why = reason, g_free) */
+static gpointer mod_load (const char *name, const char *entry, char **why)
+{
+    char *dirs[3];
+    GString *err = g_string_new (NULL);
+    mod_dirs (dirs, TRUE);
     gpointer sym = NULL;
     for (int i = 0; i < 3 && !sym; i++) {
         if (!dirs[i])
@@ -151,6 +159,50 @@ static gboolean web_tried;
 static char *web_err;
 static gint web_sound_q16;      /* atomic: walpe_web_sound's master, 0..65536 */
 static gint web_sound_on;       /* atomic: ... and its `enabled` */
+static char *web_sink_note;     /* walpe_web_sound_sink_dir: what it found (said once, at the load) */
+
+/* gst/walpesound.c. Called once, by main () before any thread exists. */
+char *walpe_web_sound_sink_dir (void)
+{
+    char *dirs[3], *found = NULL;
+    const char *off = g_getenv ("WALPE_WEB_SOUND_SINK");
+    GString *err = g_string_new (NULL);
+    mod_dirs (dirs, FALSE);
+    for (int i = 0; i < 3; i++) {
+        char *dir = dirs[i] ? g_build_filename (dirs[i], "gst", NULL) : NULL;
+        char *path = dir ? g_build_filename (dir, WALPE_WEB_SOUND_SINK_FILE, NULL) : NULL;
+        char *untrusted = NULL;
+        if (found || !path || (off && !strcmp (off, "0")) || !g_file_test (path, G_FILE_TEST_IS_REGULAR)) {
+            /* not here */
+        } else if (!walpe_module_file_trusted (path, &untrusted)) {
+            /* (GStreamer loads whatever is in the directory, into the page process) */
+            g_string_append_printf (err, "%s%s", err->len ? "; " : "", untrusted);
+        } else {
+            found = g_steal_pointer (&dir);
+        }
+        g_free (untrusted);
+        g_free (path);
+        g_free (dir);
+        g_free (dirs[i]);
+    }
+#ifdef HAVE_WEB_SOUND_SINK
+    const char *none = "not found in a directory gst/ next to walpe-web.so";
+#else
+    const char *none = "this build has none: no GStreamer headers when it was built";
+#endif
+    g_free (web_sink_note);
+    if (found)
+        web_sink_note = g_strdup_printf ("web: the level and the mute of page sound are kept in the page "
+                                         "process (%s in %s)", WALPE_WEB_SOUND_SINK_FILE, found);
+    else
+        web_sink_note = g_strdup_printf ("web: %s is not used (%s): the level and the mute of page sound "
+                                         "are the sound server's stream volume and mute, see docs/SOUND.md",
+                                         WALPE_WEB_SOUND_SINK_FILE,
+                                         off && !strcmp (off, "0") ? "WALPE_WEB_SOUND_SINK=0" :
+                                         err->len ? err->str : none);
+    g_string_free (err, TRUE);
+    return found;
+}
 
 const WalpeWebModule *walpe_web_module (gboolean load)
 {
@@ -164,6 +216,8 @@ const WalpeWebModule *walpe_web_module (gboolean load)
         if (m && m->abi == WALPE_MODULE_ABI) {
             web_mod = m;
             mod_note_loaded (&web_note, "the WebKit start-up test");
+            if (web_sink_note)
+                g_message ("%s", web_sink_note);
             /* before the module makes its first page (still under
              * mod_lock: a level set meanwhile is handed on after this one) */
             m->web_sound (g_atomic_int_get (&web_sound_q16) / 65536.0, g_atomic_int_get (&web_sound_on));

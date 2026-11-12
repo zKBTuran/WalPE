@@ -199,6 +199,33 @@ the application name `WebKit` in the desktop's mixer. The same three settings de
   defeat it can be louder than the volume says, never louder than off. (The same page
   was at 0.252 of its amplitude with `volume=0.25`: it did not get round it either.) A
   frame from another site keeps the level it had when it was made, and the mute.
+- **The sound server is left alone.** WebKit's own way to be louder, quieter or muted is
+  the volume and the mute of its stream *in the sound server*: its GStreamer output
+  (pulsesink) hands both there, and reads them back into the page. Sound servers store
+  such values and give them to later streams - WirePlumber and PulseAudio's
+  module-stream-restore under the stream's role, "music" for an `<audio>`, which other
+  players use too. With WalPE setting a level for every page that went wrong in three
+  ways, all measured (PipeWire 1.0.5 with WirePlumber 0.4.17; PulseAudio 16.1 with
+  module-stream-restore): after mute and unmute a page stayed muted on PipeWire, for good
+  (3 of 3; the element itself then said `muted = true`); a daemon that quit while muted
+  or at volume 0 began silent the next time, whatever the settings said; and *another
+  program's* stream of the role "music" was silent while WalPE was muted, at half its
+  level while WalPE's volume was 0.5, and stayed so after WalPE had quit.
+  So the page process plays through an output of WalPE's own, `libgstwalpesound.so` (a
+  GStreamer plugin in `gst/` next to `walpe-web.so`): pulsesink with a volume element in
+  front of it. Level and mute are a multiplication inside the page process. The stream in
+  the server stays at 100 %, not muted - its slider in the system mixer is yours alone,
+  kept by the server as for any program -, nothing of WalPE's is stored, nothing is read
+  back. The plugin is loaded by the page process when a page plays its first sound; a
+  page without sound never loads it.
+  *Without the plugin* everything above is as it was: the daemon's log says so when the
+  first web wallpaper is opened ("web: libgstwalpesound.so is not used (...)"). That is
+  the case in a build made without GStreamer's headers (`meson setup` warns), with
+  `WALPE_WEB_SOUND_SINK=0`, when the file is missing or cannot be trusted
+  ([SECURITY.md](SECURITY.md)), and when GStreamer on the machine has no pulsesink or was
+  told to rank another output higher. GStreamer lists the plugin in its registry
+  (`~/.cache/gstreamer-1.0`), which it rewrites when a program with another plugin path
+  than the last one starts.
 - A change applies at once, and a daemon that starts shows the page with the saved values.
 - Media start by themselves, without a click on the wallpaper. (Up to 0.14.0 they did
   not: WebKit let media with sound start only after a click on the page, as a browser

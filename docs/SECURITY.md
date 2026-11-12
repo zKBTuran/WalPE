@@ -202,6 +202,10 @@ Tests: `meson test -C build websec websec-private web-x11 web-wayland webhost-wl
   a file that belongs to another account, that everybody can write to, or
   that sits in such a directory is not loaded (log: "module: ... not
   loaded"), and `WALPE_MODULE_DIR` has to be an absolute path.
+  `gst/libgstwalpesound.so` next to them is code too, of the page process
+  (inside WebKit's sandbox, not the daemon): GStreamer loads whatever is
+  in that directory, so the same rule decides whether the daemon names
+  the directory to GStreamer at all.
 - A video the player cannot read is converted once by `ffmpeg` (found in
   `PATH`, like `ffprobe`). The file is a wallpaper's: both are given it as
   a local file and nothing else (`-protocol_whitelist file`, for a clip

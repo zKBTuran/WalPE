@@ -110,6 +110,21 @@ run.** One default changes: wallpaper sound is on, at half volume (under Sound).
   once a click had started the sound). A sound whose jump back has not ended after
   0.3 s is loaded again and from then on started again each time it ends. That costs
   one break of 0.6 to 1 s at the first repeat and about 0.1 s at each later one.
+- **Web wallpapers: their level and mute stay out of the sound server.** WebKit keeps a
+  page's volume and mute as the volume and mute of its stream in the sound server, which
+  stores them for later streams of the same kind - other programs' too - and from where
+  WebKit reads them back. With a level of WalPE's on every page that meant: on PipeWire a
+  page that was muted and unmuted stayed muted; after a quit while muted, or at volume 0,
+  the next start was silent whatever the settings said; and another music player's stream
+  was silent or lowered with WalPE's (found before any release had it). The page process
+  now plays through a GStreamer plugin of WalPE's, `libgstwalpesound.so`, which keeps
+  both inside the page process: the stream in the server stays at 100 % and unmuted, and
+  its slider in the system mixer is yours alone.
+  [SOUND.md](docs/SOUND.md#web-wallpapers).
+  For packagers: one more file, `<libdir>/walpe/gst/libgstwalpesound.so`, in a directory
+  of its own; building it needs GStreamer's core headers (`gstreamer-1.0`:
+  `libgstreamer1.0-dev`, `media-libs/gstreamer`), which `-Dweb=enabled` now asks for and
+  `-Dweb=auto` only warns about ([BUILDING.md](docs/BUILDING.md)).
 
 ### Audio-reactive wallpapers and media integration
 
