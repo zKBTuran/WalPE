@@ -14,6 +14,7 @@
 #include <json-glib/json-glib.h>
 #include "ui/perf.h"
 #include "ui/uiipc.h"
+#include "ui/winstate.h"
 
 static UiIpcDone last_cb;
 static gpointer last_user;
@@ -35,6 +36,21 @@ void ui_ipc_send_node (JsonNode *req, guint flags, UiIpcDone cb, gpointer user)
 {
     (void) flags; (void) cb; (void) user;
     json_node_unref (req);
+}
+
+/* (the panel asks which failure it was, to ask a stopped engine less often:
+ * the answers of this test never fail) */
+gboolean ui_ipc_err_is_down (const char *err)
+{
+    (void) err;
+    return FALSE;
+}
+
+/* (winstate.c: what a window manager does to a hidden window. The test's
+ * window stays on screen; the panel's timer is not what is tested here) */
+void walpe_winstate_watch (GdkDisplay *d)
+{
+    (void) d;
 }
 
 gboolean ui_ipc_ok (JsonObject *reply)
