@@ -14,11 +14,13 @@
  * the wallpaper type whether a surface of the daemon is on its screen (the key Under of its
  * settings): without one it fills the desktop itself, or the desktop would be black.
  * An opaque desktop is never put above the wallpaper, and KWin drops a rule by itself when
- * one of its two windows goes away. Nothing here runs unless such a window comes or goes;
+ * one of its two windows goes away. A script whose shell is gone stays quiet (the next shell
+ * brings its own). Nothing here runs unless such a window comes or goes;
  * with print() the script says what it asked and was told (KWin's log, category
  * kwin_scripting, debug). */
 
 const TYPE = "io.github.walpe.plasma";
+let shell = 0;         // the process of the Plasma shell that loaded this script
 let serial = 0;        // of the last question; an older answer is not used
 let unanswered = 0;    // questions in a row that Plasma's shell did not answer
 const again = new QTimer();
@@ -58,8 +60,15 @@ function ask(gone) {
         return;                       // KWin before 6.5
     const all = workspace.windowList().filter(w => w !== gone);
     again.stop();
-    if (!all.some(isDesktop))
+    const desktop = all.find(isDesktop);
+    if (!desktop)
         return;                       // no desktop window: nobody to ask, nothing to order
+    // A shell that ends without taking its script out (it crashed) leaves it here; the next
+    // shell loads its own. The one whose shell is gone does nothing any more.
+    if (!shell)
+        shell = desktop.pid;
+    if (shell !== desktop.pid)
+        return;
     const covered = all.filter(isWalpe).map(w => screenKey(w.output.geometry));
     const mine = ++serial;
     print("walpe: question " + mine + ", surfaces of the daemon on [" + covered.join(" ") + "]");

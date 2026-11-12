@@ -4,9 +4,10 @@
  * The script is no KWin package and is in no list of KWin's settings: the wallpaper type
  * loads it over D-Bus (org.kde.kwin.Scripting) and takes it out again when its last item
  * goes. So it cannot be switched off behind the type's back, and what the script told the
- * type (the key Under) is believed exactly while `loaded` is true. The first item of a
- * shell replaces a script that an earlier shell left in KWin; KWin coming back on the bus
- * (it was restarted) loads it again.
+ * type (the key Under) is believed exactly while `loaded` is true. It is loaded under a
+ * name of this shell's own (../code/shared.js): KWin takes a script out a moment after it
+ * was asked to, and a fixed name would still be taken when the next shell, or the next
+ * item, asks. KWin coming back on the bus (it was restarted) loads it again.
  *
  * It also listens to KWin's "showing the desktop" ("Peek at Desktop", the "Show Desktop"
  * shortcut): KWin then hides every window that is not part of the desktop, the daemon's
@@ -20,7 +21,6 @@ Item {
     id: script
     property bool loaded: false
     property bool peek: false       // KWin is showing the desktop
-    readonly property string name: "io.github.walpe.below"
     readonly property string file: Qt.resolvedUrl("../code/below.js").toString().replace(/^file:\/\//, "")
 
     function call(path, iface, member, args, signature, then) {
@@ -32,24 +32,17 @@ Item {
 
     function load() {
         call("/Scripting", "org.kde.kwin.Scripting", "loadScript",
-             [new DBus.string(file), new DBus.string(name)], "(ss)", (reply) => {
-            const id = Number(reply.value);
-            if (id < 0) {
-                script.loaded = true;      // another item of this shell has loaded it
+             [new DBus.string(file), new DBus.string(Shared.name)], "(ss)", (reply) => {
+            if (Number(reply.value) < 0) {
+                script.loaded = true;      // the name is taken: another item of this shell has loaded it
                 return;
             }
-            call("/Scripting/Script" + id, "org.kde.kwin.Script", "run", [], "()", () => { script.loaded = true; });
+            // "start" runs every loaded script that is not running yet. Not "run" on the script's
+            // own object, /Scripting/Script<id>: the id KWin answers is the number of scripts it
+            // has loaded, and after another script was unloaded that is the id, and the object,
+            // of a script that is still there (KWin 6.8).
+            call("/Scripting", "org.kde.kwin.Scripting", "start", [], "()", () => { script.loaded = true; });
         });
-    }
-
-    function start() {
-        loaded = false;
-        if (Shared.replaced) {
-            load();
-            return;
-        }
-        Shared.replaced = true;
-        call("/Scripting", "org.kde.kwin.Scripting", "unloadScript", [new DBus.string(name)], "(s)", load);
     }
 
     DBus.SignalWatcher {
@@ -73,15 +66,15 @@ Item {
 
     Component.onCompleted: {
         Shared.users++;
-        start();
+        load();
     }
     Component.onDestruction: {
         if (--Shared.users > 0)
             return;
-        Shared.replaced = false;
         DBus.SessionBus.asyncCall({
             "service": "org.kde.KWin", "path": "/Scripting", "iface": "org.kde.kwin.Scripting",
-            "member": "unloadScript", "arguments": [new DBus.string(name)], "signature": "(s)"
+            "member": "unloadScript", "arguments": [new DBus.string(Shared.name)], "signature": "(s)"
         });
+        Shared.name = Shared.fresh();       // whoever comes next does not meet the one that is leaving
     }
 }

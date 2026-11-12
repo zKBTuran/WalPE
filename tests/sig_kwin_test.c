@@ -4,13 +4,14 @@
  * The test starts a bus of its own (GTestDBus; skipped with 77 where there
  * is no dbus-daemon) and a thread that owns org.kde.KWin on it with the
  * part of org.kde.kwin.Scripting the provider uses: loadScript,
- * unloadScript, and run on the script's object. The stand-in keeps the
+ * unloadScript and start (and an object at the id loadScript answers that
+ * is not the new script's, as in KWin after another script was unloaded). The stand-in keeps the
  * text of the script it was given and "runs" it by calling the method the
  * text names, on the connection the text names. The provider must:
  *   keep no connection and load nothing while no rule is on;
  *   load the script when one is switched on, with its own unique name,
- *   its process id and the see-through list in the text, and remove the
- *   file once KWin has run it;
+ *   its process id and the see-through list in the text, have KWin run it
+ *   by "start", and remove the file once the script has reported;
  *   turn a report into covered / focus_app / fullscreen_on per output and
  *   the global fullscreen, and take values back that a later report lacks;
  *   believe KWin's connection only;
@@ -37,6 +38,7 @@ static const char fake_xml[] =
     "  <method name='loadScript'><arg type='s' direction='in'/><arg type='s' direction='in'/>"
     "   <arg type='i' direction='out'/></method>"
     "  <method name='unloadScript'><arg type='s' direction='in'/><arg type='b' direction='out'/></method>"
+    "  <method name='start'/>"
     " </interface>"
     " <interface name='org.kde.kwin.Script'>"
     "  <method name='run'/>"
@@ -51,7 +53,7 @@ static struct {
     GDBusNodeInfo *info;
     char *address;
     gint ready;
-    gint loads, unloads, runs;
+    gint loads, unloads, runs, wrong_runs;
     gboolean old;           /* answers like a KWin before Plasma 6 */
     gboolean loaded;        /* a script of our name is in "KWin" */
     GMutex lock;
@@ -102,6 +104,11 @@ static void fake_method (GDBusConnection *c, const char *sender, const char *pat
         g_atomic_int_inc (&F.unloads);
         g_dbus_method_invocation_return_value (inv, g_variant_new ("(b)", was));
     } else if (!strcmp (method, "run")) {
+        /* the object at the id loadScript answered is another script's (see
+         * above): nothing of ours runs */
+        g_atomic_int_inc (&F.wrong_runs);
+        g_dbus_method_invocation_return_value (inv, NULL);
+    } else if (!strcmp (method, "start")) {
         char *text = NULL;
         g_mutex_lock (&F.lock);
         g_file_get_contents (F.file, &text, NULL, NULL);
@@ -152,7 +159,10 @@ static gpointer fake_thread (gpointer u)
     }
     F.info = g_dbus_node_info_new_for_xml (fake_xml, NULL);
     g_dbus_connection_register_object (F.bus, "/Scripting", F.info->interfaces[0], &fake_vt, NULL, NULL, NULL);
-    /* Plasma 6 has the script at /Scripting/Script<id>, Plasma 5 at /<id> */
+    /* the id KWin answers is the number of scripts it has loaded: after
+     * another script was unloaded, the object at that id is a script that
+     * was there before, not the new one. The stand-in is always in that
+     * state: only "start" runs the script. */
     g_dbus_connection_register_object (F.bus, "/Scripting/Script7", F.info->interfaces[1], &fake_vt, NULL,
                                        NULL, NULL);
     fake_own (TRUE);
@@ -381,7 +391,11 @@ int main (void)
     g_mutex_unlock (&F.lock);
     g_free (pid);
     g_free (text);
-    CHECK (stub_wait (file_gone, NULL, 3000), "the file is removed once KWin has run it");
+    settle ();
+    CHECK (!file_gone (NULL), "the file stays until the script has reported (KWin reads it after it has "
+           "answered)");
+    CHECK (g_atomic_int_get (&F.wrong_runs) == 0, "the object at the id that loadScript answered is not "
+           "asked to run: it can be another script's");
     CHECK (state_has ("loading"), "not counted as loaded before the first report: %s", walpe_sig_kwin_state ());
 
     /* 3. a report */
@@ -395,6 +409,7 @@ int main (void)
            stub_value (&walpe_sig_kwin, WALPE_SIG_FOCUS_APP, id_a) == 0, "and nothing else");
     CHECK (state_has ("loaded"), "the state: %s", walpe_sig_kwin_state ());
     CHECK (walpe_sig_kwin_trouble () == NULL, "no trouble");
+    CHECK (file_gone (NULL), "the file is removed once the script has reported");
 
     /* 4. the next report takes back what it does not name */
     fake_run (f_report, "A\t\nB\ta");

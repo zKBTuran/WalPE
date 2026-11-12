@@ -7,7 +7,7 @@
 #                            choosing it in Plasma's "Desktop and Wallpaper" dialog
 #   ./install.sh unselect    every desktop back to the wallpaper type it had before
 #   ./install.sh uninstall   unselect and remove
-#   ./install.sh status      what is installed, selected and loaded in KWin
+#   ./install.sh status      what is installed and selected
 #
 # Needs Plasma 6.5 or newer (KWin's workspace.constrain) in a Wayland session, and of
 # Plasma's own tools kpackagetool6 and dbus-send.
@@ -15,7 +15,6 @@ set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
 type_id=io.github.walpe.plasma
-script_id=io.github.walpe.below
 data=${XDG_DATA_HOME:-$HOME/.local/share}
 
 say() { printf '%s\n' "$*"; }
@@ -58,11 +57,6 @@ plasma_js() {
 plasma_runs() {
 	dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus \
 		org.freedesktop.DBus.NameHasOwner string:org.kde.plasmashell 2>/dev/null | grep -q 'boolean true'
-}
-# the KWin script of the type out of the running KWin: the type loads it again when it starts
-script_unload() {
-	dbus-send --session --print-reply --dest=org.kde.KWin /Scripting \
-		org.kde.kwin.Scripting.unloadScript "string:$script_id" >/dev/null 2>&1 || true
 }
 installed() { [ -f "$data/plasma/wallpapers/$type_id/metadata.json" ]; }
 selected() { plasma_js "for (const d of desktops()) { if (d.wallpaperPlugin === '$type_id') print('yes'); }" 2>/dev/null | grep -q yes; }
@@ -119,7 +113,6 @@ unselect)
 	;;
 uninstall)
 	if plasma_runs; then do_unselect || true; fi
-	script_unload
 	if installed && command -v kpackagetool6 >/dev/null 2>&1; then
 		kpackagetool6 --type Plasma/Wallpaper --remove "$type_id" >/dev/null || true
 	fi
@@ -130,13 +123,6 @@ status)
 	say "session: ${XDG_CURRENT_DESKTOP:-?} on ${XDG_SESSION_TYPE:-?}, $(kwin_wayland --version 2>/dev/null | head -n 1 || true)"
 	installed && say "wallpaper type \"WalPE\": installed ($data/plasma/wallpapers/$type_id)" ||
 		say "wallpaper type \"WalPE\": not installed"
-	loaded=$(dbus-send --session --print-reply=literal --dest=org.kde.KWin /Scripting \
-		org.kde.kwin.Scripting.isScriptLoaded "string:$script_id" 2>/dev/null | tr -d ' ' || true)
-	case "$loaded" in
-	*true*) say "its KWin script: loaded in KWin" ;;
-	*false*) say "its KWin script: not loaded in KWin (the type loads it where it is selected)" ;;
-	*) say "its KWin script: KWin did not answer on D-Bus" ;;
-	esac
 	if plasma_runs; then
 		plasma_js "for (const d of desktops()) {
 			if (d.screen < 0) continue;

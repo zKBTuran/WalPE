@@ -122,6 +122,15 @@ void walpe_sig_kwin_outputs_changed (void)
         kwin_apply ();      /* ids are looked up again; a gone output loses its values */
 }
 
+/* the file KWin is given the script in */
+static char *kwin_script_file (void)
+{
+    char *base = g_strdup_printf ("walpe-kwin-%u.js", (guint) getpid ());
+    char *f = g_build_filename (g_get_user_runtime_dir (), base, NULL);
+    g_free (base);
+    return f;
+}
+
 /* ---- the object the script calls */
 
 static const char kwin_xml[] =
@@ -141,6 +150,12 @@ static void kwin_method (GDBusConnection *c, const char *sender, const char *pat
     }
     const char *state = NULL;
     g_variant_get (args, "(&s)", &state);
+    if (!K.loaded) {
+        /* the script runs: KWin has read its file */
+        char *f = kwin_script_file ();
+        g_unlink (f);
+        g_free (f);
+    }
     if (!strcmp (state, "unsupported")) {
         kwin_forget ();
         kwin_trouble ("this KWin's script interface is older than Plasma 6: its windows cannot be "
@@ -163,14 +178,6 @@ static const GDBusInterfaceVTable kwin_vt = { kwin_method, NULL, NULL, { 0 } };
 
 /* ---- the script in KWin */
 
-static char *kwin_script_file (void)
-{
-    char *base = g_strdup_printf ("walpe-kwin-%u.js", (guint) getpid ());
-    char *f = g_build_filename (g_get_user_runtime_dir (), base, NULL);
-    g_free (base);
-    return f;
-}
-
 static void kwin_load (void);
 
 /* A load has come to its end, whichever. One that was asked for meanwhile
@@ -185,31 +192,24 @@ static void kwin_load_done (void)
     }
 }
 
+/* KWin has answered "start". It reads the script's file in a thread of its
+ * own after that: the file stays until the script has reported
+ * (kwin_method) or the rules go off. */
 static void kwin_ran (GObject *src, GAsyncResult *res, gpointer user)
 {
+    (void) user;
     GError *e = NULL;
     GVariant *r = g_dbus_connection_call_finish (G_DBUS_CONNECTION (src), res, &e);
-    char *path = user;
     if (r) {
         g_variant_unref (r);
-    } else if (!g_error_matches (e, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
-        if (g_str_has_prefix (path, "/Scripting/Script") && K.bus && K.owner) {
-            /* KWin 5 has the script's object at /<id> */
-            char *old = g_strdup_printf ("/%s", path + strlen ("/Scripting/Script"));
-            g_dbus_connection_call (K.bus, KWIN_BUS_NAME, old, "org.kde.kwin.Script", "run", NULL, NULL,
-                                    G_DBUS_CALL_FLAGS_NO_AUTO_START, 5000, K.cancel, kwin_ran, old);
-            g_clear_error (&e);
-            g_free (path);
-            return;
-        }
-        kwin_trouble (NULL, g_strdup_printf ("KWin did not run the pause script: %s", e->message));
+    } else if (g_error_matches (e, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+        g_clear_error (&e);
+        return;         /* the connection was let go, which has reset everything */
+    } else {
+        kwin_trouble (NULL, g_strdup_printf ("KWin did not run the pause script "
+                                             "(org.kde.kwin.Scripting.start): %s", e->message));
     }
     g_clear_error (&e);
-    g_free (path);
-    /* KWin has read the file */
-    char *f = kwin_script_file ();
-    g_unlink (f);
-    g_free (f);
     kwin_load_done ();
 }
 
@@ -246,9 +246,13 @@ static void kwin_loaded (GObject *src, GAsyncResult *res, gpointer user)
         return;
     }
     K.retried = FALSE;
-    char *path = g_strdup_printf ("/Scripting/Script%d", id);
-    g_dbus_connection_call (K.bus, KWIN_BUS_NAME, path, "org.kde.kwin.Script", "run", NULL, NULL,
-                            G_DBUS_CALL_FLAGS_NO_AUTO_START, 5000, K.cancel, kwin_ran, path);
+    /* Not "run" on the script's own object, /Scripting/Script<id>: the id
+     * KWin answers is the number of scripts it has loaded, so after another
+     * script was unloaded it is the id, and the object, of one that is still
+     * there (KWin 6.8), and "run" would reach that one. "start" runs every
+     * loaded script that is not running yet. */
+    g_dbus_connection_call (K.bus, KWIN_BUS_NAME, "/Scripting", "org.kde.kwin.Scripting", "start", NULL, NULL,
+                            G_DBUS_CALL_FLAGS_NO_AUTO_START, 5000, K.cancel, kwin_ran, NULL);
 }
 
 /* KWin has answered unloadScript: now the new one */
