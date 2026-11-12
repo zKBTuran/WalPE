@@ -178,7 +178,7 @@ class Env(rc.Env):
     """the harness's environment, plus: a daemon on chosen CPUs, extra
     environment for one start, the log from a mark on"""
 
-    def start_daemon(self, mons, cpus=None, extra=None, hz=None):
+    def start_daemon(self, mons, cpus=None, extra=None, hz=None, args=None):
         hz = hz or [60] * len(mons)
         self.mons = mons = self.display.place(mons, hz)
         env = dict(self.env)
@@ -188,8 +188,8 @@ class Env(rc.Env):
         self.run_env = env
         log = open(self.log, "a")
         pre = (lambda: os.sched_setaffinity(0, cpus)) if cpus else None
-        self.daemon = subprocess.Popen([self.daemon_bin], env=env, stdout=log, stderr=subprocess.STDOUT,
-                                       cwd=self.tmp, preexec_fn=pre)
+        self.daemon = subprocess.Popen([self.daemon_bin] + list(args or []), env=env, stdout=log,
+                                       stderr=subprocess.STDOUT, cwd=self.tmp, preexec_fn=pre)
         log.close()
         for _ in range(int(150 * PATIENCE)):
             time.sleep(0.1)
@@ -1294,6 +1294,50 @@ def case_fullscreen(env, W):
         # its own: the leader's scene keeps running for a follower that is shown.
         xc.close()
         xc = XClient(env.env["DISPLAY"])
+
+        # The daemon draws on the second monitor only (--monitor 1). The monitor that
+        # holds most of the window is still found among all monitors of the screen: a
+        # fullscreen window on the first one whose edge reaches a few pixels into the
+        # second is not on the second. The window is there, with the focus, before the
+        # daemon starts: its first look at the windows finds it.
+        wm = xc.window(640, 0, 640, 360)
+        xc.clients([wm])
+        xc.fullscreen(wm, True)
+        xc.focus(wm)
+        if not check(env.start_daemon([A, B], args=["--monitor", "1"]),
+                     "fullscreen: daemon started on the second monitor only"):
+            return
+        env.open(W["anim"])
+        loaded(env, W["anim"])
+
+        def only():
+            ms = env.state().get("monitors") or []
+            return ms[0] if len(ms) == 1 else {}
+
+        def only_is(here, what):
+            ok = wait_for(lambda: env.state().get("fullscreen") is True and
+                          bool(only().get("fullscreen")) == here and bool(only().get("paused")) == here, 10, 0.1)
+            time.sleep(0.5 * PATIENCE)      # (the scan that follows a move has run)
+            m = only()
+            check(bool(ok) and bool(m.get("fullscreen")) == here and bool(m.get("paused")) == here,
+                  "fullscreen: one of two monitors: %s" % what,
+                  {k: m.get(k) for k in ("index", "fullscreen", "paused")})
+        check(only().get("index") == 1, "fullscreen: one of two monitors: the daemon shows on the second",
+              rc.brief(env.state().get("monitors") or []))
+        only_is(True, "a fullscreen window that had the focus before the daemon started pauses it")
+        xc.move(wm, 0, 0, 640, 360)
+        only_is(False, "the window on the other monitor pauses nothing")
+        xc.move(wm, 4, 0, 640, 360)
+        only_is(False, "four pixels of it on this monitor: still the other monitor's window")
+        xc.move(wm, 400, 0, 640, 360)
+        only_is(True, "most of it on this monitor: paused")
+        xc.move(wm, 0, 0, 1280, 360)
+        only_is(True, "across both: paused")
+        xc.focus(0)
+        xc.clients([])
+        xc.destroy(wm)
+        env.stop_daemon()
+
         rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False})
         if not check(env.start_daemon([A, B]), "fullscreen: daemon started again, with shared rendering"):
             return

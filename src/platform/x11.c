@@ -71,6 +71,9 @@ static struct {
     Window fs_placed;        /* the window the monitors' fs_here was worked out for */
     gboolean fs_everywhere;  /* ... and where it is could not be found out: it
                               * counts for every monitor */
+    XRect *layout;           /* every monitor of the screen as x11_outputs last listed
+                              * them, also those this daemon does not draw on */
+    int n_layout;
     gboolean asleep;         /* DPMS power-save or screensaver active */
     Window watched_win;      /* active window we subscribed to */
     guint cover_timer_id;    /* debounced coverage recompute */
@@ -841,13 +844,29 @@ static void fs_place_report (void)
         }
     }
     X.fs_placed = known ? X.fs_win : None;
-    WalpeFsRect *mons = g_new0 (WalpeFsRect, n + 1);
-    gboolean *on = g_new0 (gboolean, n + 1);
+    guint all = n;
+    WalpeFsRect *mons = g_new0 (WalpeFsRect, n + (guint) X.n_layout + 1);
+    gboolean *on = g_new0 (gboolean, n + (guint) X.n_layout + 1);
     for (guint k = 0; k < n; k++) {
         const XRect *g = &SURF (k)->geom;
         mons[k] = (WalpeFsRect) { g->x, g->y, g->width, g->height };
     }
-    walpe_fs_decide (X.fs_active, known ? &win : NULL, mons, (int) n, on, &everywhere);
+    /* "The monitor that holds most of the window" is found among all
+     * monitors of the screen, also those this daemon does not draw on
+     * (--monitor N): a fullscreen window on one of those whose edge
+     * reaches a few pixels into ours is not on ours. They follow ours in
+     * the list; only ours are reported. */
+    for (int i = 0; i < X.n_layout; i++) {
+        const XRect *g = &X.layout[i];
+        gboolean ours = FALSE;
+        for (guint k = 0; k < n && !ours; k++) {
+            const XRect *o = &SURF (k)->geom;
+            ours = o->x == g->x && o->y == g->y && o->width == g->width && o->height == g->height;
+        }
+        if (!ours)
+            mons[all++] = (WalpeFsRect) { g->x, g->y, g->width, g->height };
+    }
+    walpe_fs_decide (X.fs_active, known ? &win : NULL, mons, (int) all, on, &everywhere);
     walpe_signals_begin ();
     if (everywhere != X.fs_everywhere) {
         X.fs_everywhere = everywhere;
@@ -1369,7 +1388,10 @@ static void x11_outputs (WalpeOutputList *out)
         g_free (names[i]);
     }
     g_free (names);
-    g_free (geoms);
+    /* the fullscreen rule places a window among all of them (fs_place_report) */
+    g_free (X.layout);
+    X.layout = geoms;
+    X.n_layout = nmon;
     g_free (hzs);
 }
 
@@ -1716,6 +1738,8 @@ static void x11_close (void)
     if (X.surfs)
         g_ptr_array_unref (X.surfs);
     X.surfs = NULL;
+    g_clear_pointer (&X.layout, g_free);
+    X.n_layout = 0;
 }
 
 /* requests the main thread has sent to the X server since start (its own
