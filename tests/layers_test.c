@@ -14,6 +14,9 @@
  *     children follow, scale, hide / show, other monitor sizes (crop), a
  *     camera layer, and that a scene without (matching) adjustments is
  *     drawn bit for bit as before.
+ *  6. (same context) the working size of the effects on a colour-only
+ *     layer: 2048 pixels at most at the output's own size, also on an
+ *     output wider than that; as wide as a chosen render size above it.
  *
  * Works in a private temp dir that is also its HOME / XDG_CONFIG_HOME. */
 #include <glib.h>
@@ -31,6 +34,7 @@
 #include "common/util.h"
 #include "engine/content.h"
 #include "engine/glutil.h"
+#include "engine/scenenode_effects.h"   /* fx_targets_stats */
 
 static int checks, fails;
 #define CHECK(c) do { checks++; if (!(c)) { fails++; \
@@ -834,6 +838,88 @@ static void test_render_view (WalpeConfig *cfg, const char *dir, int w, int h, d
     shot_close (&s);
 }
 
+/* ------------------------------ 6. effects on a colour-only layer */
+
+/* a scene of 2560 x 125 units: one white colour-only layer over all of it
+ * with one effect that copies its input */
+static char *make_wide_scene (const char *tmp)
+{
+    char *dir = g_build_filename (tmp, "scene-wide", NULL);
+    put_file (dir, "models/util/solidlayer.json", "{\"solidlayer\":true}", -1);
+    put_file (dir, "project.json", "{\"file\":\"scene.json\",\"title\":\"wide\",\"type\":\"scene\"}", -1);
+    put_file (dir, "shaders/effects/copy.vert",
+              "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
+              "varying vec2 v_TexCoord;\nvoid main() {\n"
+              "\tgl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
+              "\tv_TexCoord = a_TexCoord;\n}\n", -1);
+    put_file (dir, "shaders/effects/copy.frag",
+              "varying vec2 v_TexCoord;\nuniform sampler2D g_Texture0;\nvoid main() {\n"
+              "\tgl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n}\n", -1);
+    put_file (dir, "materials/effects/copy.json",
+              "{\"passes\":[{\"shader\":\"effects/copy\",\"blending\":\"normal\",\"depthtest\":\"disabled\","
+              "\"depthwrite\":\"disabled\",\"cullmode\":\"nocull\"}]}", -1);
+    put_file (dir, "effects/copy/effect.json",
+              "{\"name\":\"copy\",\"group\":\"t\",\"passes\":[{\"material\":\"materials/effects/copy.json\"}]}", -1);
+    put_file (dir, "scene.json",
+              "{\"camera\":{\"center\":\"0 0 -1\",\"eye\":\"0 0 0\",\"up\":\"0 1 0\"},"
+              "\"general\":{\"clearcolor\":\"0 0 0\",\"orthogonalprojection\":{\"height\":125,\"width\":2560}},"
+              "\"objects\":[{\"id\":40,\"name\":\"fill\",\"image\":\"models/util/solidlayer.json\","
+              "\"origin\":\"1280 62.5 0\",\"size\":\"2560 125\",\"color\":\"1 1 1\",\"scale\":\"1 1 1\","
+              "\"angles\":\"0 0 0\",\"alpha\":1.0,\"visible\":true,"
+              "\"effects\":[{\"file\":\"effects/copy/effect.json\",\"id\":9,\"name\":\"copy\",\"visible\":true,"
+              "\"passes\":[{}]}]}]}", -1);
+    return dir;
+}
+
+/* bytes of the effect targets after two frames of the scene on a w x h
+ * surface; rw x rh: the render size chosen for it (0 = none) */
+static gint64 wide_fx_bytes (const char *dir, int w, int h, int rw, int rh, int *count)
+{
+    Shot s;
+    gint64 bytes = -1;
+    *count = 0;
+    fx_targets_release ();
+    if (!shot_open (&s, dir, w, h))
+        return -1;
+    s.c->render_w = rw;
+    s.c->render_h = rh;
+    shot_frame (&s);
+    shot_frame (&s);
+    fx_targets_stats (&bytes, count);
+    shot_close (&s);
+    fx_targets_release ();
+    return bytes;
+}
+
+static void test_solid_cap (const char *tmp)
+{
+    char *dir = make_wide_scene (tmp);
+    int n_own = 0, n_small = 0, n_chosen = 0, n_low = 0;
+    /* an output of 2560 x 125 at its own size (the pbuffer is narrower:
+     * what is drawn of the frame does not matter here) */
+    gint64 own = wide_fx_bytes (dir, 2560, 125, 0, 0, &n_own);
+    /* the same picture size chosen for an output of another size */
+    gint64 chosen = wide_fx_bytes (dir, 1280, 62, 2560, 125, &n_chosen);
+    /* an output of 2048 x 100 at its own size, and that size chosen */
+    gint64 small = wide_fx_bytes (dir, 2048, 100, 0, 0, &n_small);
+    gint64 low = wide_fx_bytes (dir, 1024, 50, 2048, 100, &n_low);
+    if (own <= 0 || chosen <= 0 || n_own < 1)
+        printf ("  solid cap: own %" G_GINT64_FORMAT " bytes in %d, chosen %" G_GINT64_FORMAT " in %d, 2048 own %"
+                G_GINT64_FORMAT " in %d, 2048 chosen %" G_GINT64_FORMAT " in %d\n", own, n_own, chosen, n_chosen,
+                small, n_small, low, n_low);
+    /* its own size, wider than 2048: the layer's effect works at 2048 x 100 */
+    CHECK (n_own >= 1 && own == (gint64) n_own * 2048 * 100 * 4);
+    /* a chosen render size of 2560: at 2560 x 125 */
+    CHECK (n_chosen == n_own && chosen == (gint64) n_chosen * 2560 * 125 * 4);
+    /* up to 2048 nothing depends on the choice */
+    CHECK (small > 0 && small == low && n_small == n_low);
+    if (fails)
+        printf ("  solid cap: own %" G_GINT64_FORMAT " bytes in %d, chosen %" G_GINT64_FORMAT " in %d, 2048 own %"
+                G_GINT64_FORMAT " in %d, 2048 chosen %" G_GINT64_FORMAT " in %d\n", own, n_own, chosen, n_chosen,
+                small, n_small, low, n_low);
+    g_free (dir);
+}
+
 static gboolean test_render (const char *tmp)
 {
     EGLDisplay dpy = EGL_NO_DISPLAY;
@@ -882,6 +968,7 @@ static gboolean test_render (const char *tmp)
     test_render_view (cfg, dir, 1280, 1024, 1.0);    /* 5:4 - the sides are cropped */
     test_render_view (cfg, dir, 1920, 1200, 1.0);    /* 16:10 - enlarged, cropped */
     test_render_view (cfg, cam, 1920, 1080, 0.5);    /* camera layer zoomed out */
+    test_solid_cap (tmp);
     g_free (dir);
     g_free (cam);
     walpe_config_free (cfg);
