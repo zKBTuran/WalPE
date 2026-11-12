@@ -374,7 +374,7 @@ could do to the daemon. None of these was seen being used.
   for the parsers of wallpaper files (`tests/fuzz`: packages, textures, MP4, GIF and JPEG
   checks, JSON, puppets, particles, shader text, sound files, scenes) for libFuzzer
   (`-Dfuzz=enabled`, clang); their seeds and every input that once broke a parser run in
-  the suite as `fuzz-regress-<target>`; 22 targets in all, with the control socket,
+  the suite as `fuzz-regress-<target>`; 23 targets in all, with the control socket,
   `config.json`, Steam's replies, previews, the library scan and layer keys. From the
   review: the web file server (request bodies, idle connections, parts of files), the
   login answer, a stand-in music player (`media-player`), import (`%d`, a child without
