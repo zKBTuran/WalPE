@@ -10147,6 +10147,11 @@ int main (int argc, char **argv)
     g_list_free (D.mons);
     eglTerminate (D.egl_dpy);
     walpe_platform_close ();
+    /* the encoders that were stopped above have had the time of the tear-down
+     * to end: what one of them still created after it was told to stop (a
+     * ".part" file in the cache) goes now. Bounded: a child that is still
+     * not gone leaves its file to the next start (conv_cache_tidy). */
+    walpe_import_settle (400);
     if (restarting) {
         /* "Render on CPU" changed, the monitor layout changed or web
          * hardware acceleration was switched: the same daemon again (same

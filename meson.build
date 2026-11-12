@@ -1708,7 +1708,8 @@ if lifecheck_py.found() and have_x11
   # copy is made in the cache and played, status says what happens, the
   # picture with the copy against the picture with the original, the switch,
   # a start with the copy there, a conversion that is stopped when its
-  # wallpaper goes or the daemon quits, scenes that need no copy, two monitors
+  # wallpaper goes or the daemon quits, exits by signal while a copy is made
+  # (no unfinished file stays), scenes that need no copy, two monitors
   # of different size with the same clip
   if have_ffmpeg
     test('daemon-scene-video', lifecheck_py,

@@ -359,6 +359,36 @@ struct _WalpeImport {
 
 static char *encoder_list;           /* cached `ffmpeg -encoders` output */
 
+/* The encoder of a cancelled conversion.
+ *
+ * walpe_import_cancel () tells the child to end and removes the unfinished
+ * file. The child is not gone at that moment: GLib sends the signal from
+ * its worker thread, and a process that sits in the kernel - an ffmpeg at
+ * idle CPU and disk priority on a busy machine is there for a long time,
+ * opening its output - finishes that call first. A file it creates after
+ * the removal stayed: "<copy>.mp4.part" in the cache after a clean exit of
+ * the daemon, until the next start tidied it away.
+ *
+ * So the child is remembered until it has really ended, and its file is
+ * removed once more then: from the main loop when that runs
+ * (dying_cb), or by walpe_import_settle (), which the daemon calls when it
+ * ends and waits a bounded time. Not when another job writes the same file
+ * by then (the same copy asked for again at once): that file is its. */
+typedef struct {
+    GSubprocess *proc;
+    char *part;
+} Dying;
+static GPtrArray *dying;             /* Dying *; main thread */
+static GPtrArray *jobs;              /* every WalpeImport there is; main thread */
+
+static void dying_free (gpointer p)
+{
+    Dying *d = p;
+    g_object_unref (d->proc);
+    g_free (d->part);
+    g_free (d);
+}
+
 static WalpeImport *imp_ref (WalpeImport *imp)
 {
     imp->refs++;
@@ -369,6 +399,8 @@ static void imp_unref (WalpeImport *imp)
 {
     if (--imp->refs > 0)
         return;
+    if (jobs)
+        g_ptr_array_remove_fast (jobs, imp);
     g_clear_object (&imp->out);
     g_clear_object (&imp->proc);
     g_clear_object (&imp->cancel);
@@ -1015,6 +1047,9 @@ static WalpeImport *import_start (const char *src, const char *dest_dir, const c
     imp->label = base;
     imp->dst = dst_file ? g_strdup (dst_file) : unique_dst (dest_dir, base, src);
     imp->dst_part = g_strconcat (imp->dst, ".part", NULL);
+    if (!jobs)
+        jobs = g_ptr_array_new ();
+    g_ptr_array_add (jobs, imp);
     if (!dst_file) {
         gsize dl = strlen (imp->dst);
         imp->thumb = g_strdup (imp->dst);
@@ -1052,6 +1087,58 @@ const char *walpe_import_mode (WalpeImport *imp)
     return imp ? imp->mode : NULL;
 }
 
+/* does a job that runs write this file? */
+static gboolean part_in_use (const char *part)
+{
+    for (guint i = 0; jobs && i < jobs->len; i++) {
+        const WalpeImport *imp = g_ptr_array_index (jobs, i);
+        if (!imp->cancelled && imp->stage != ST_DONE && imp->dst_part && !strcmp (imp->dst_part, part))
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* the child of a cancelled conversion has ended: what it made after the
+ * cancel goes too */
+static void dying_gone (Dying *d)
+{
+    if (!part_in_use (d->part))
+        g_remove (d->part);
+    g_ptr_array_remove_fast (dying, d);     /* (frees d) */
+}
+
+static void dying_cb (GObject *o, GAsyncResult *r, gpointer user)
+{
+    g_subprocess_wait_finish (G_SUBPROCESS (o), r, NULL);
+    /* (walpe_import_settle () may have dealt with it: user is only compared) */
+    for (guint i = 0; dying && i < dying->len; i++) {
+        Dying *d = g_ptr_array_index (dying, i);
+        if (d == user && d->proc == (GSubprocess *) o) {
+            dying_gone (d);
+            break;
+        }
+    }
+}
+
+guint walpe_import_settle (guint max_ms)
+{
+    const gint64 end = g_get_monotonic_time () + (gint64) max_ms * 1000;
+    for (;;) {
+        for (guint i = 0; dying && i < dying->len;) {
+            Dying *d = g_ptr_array_index (dying, i);
+            /* (GLib notes the end of a child on its worker thread: no main loop needed) */
+            if (!g_subprocess_get_identifier (d->proc))
+                dying_gone (d);
+            else
+                i++;
+        }
+        if (!dying || !dying->len || g_get_monotonic_time () >= end)
+            break;
+        g_usleep (2000);
+    }
+    return dying ? dying->len : 0;
+}
+
 void walpe_import_cancel (WalpeImport *imp)
 {
     if (!imp || imp->cancelled || imp->stage == ST_DONE)
@@ -1061,6 +1148,16 @@ void walpe_import_cancel (WalpeImport *imp)
     if (imp->proc)
         g_subprocess_force_exit (imp->proc);
     g_remove (imp->dst_part);
+    if (imp->proc && imp->stage == ST_ENCODE && g_subprocess_get_identifier (imp->proc)) {
+        /* the encoder may still make the file: once more when it has ended */
+        Dying *d = g_new0 (Dying, 1);
+        d->proc = g_object_ref (imp->proc);
+        d->part = g_strdup (imp->dst_part);
+        if (!dying)
+            dying = g_ptr_array_new_with_free_func (dying_free);
+        g_ptr_array_add (dying, d);
+        g_subprocess_wait_async (d->proc, NULL, dying_cb, d);
+    }
     /* stopped while the thumbnail was being written: the video itself is
      * complete and stays, the half-written picture goes (nobody removed
      * it: the library showed a broken preview) */

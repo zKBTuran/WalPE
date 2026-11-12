@@ -33,6 +33,12 @@ monitor does not depend on the moment it is read.
   cancel   another wallpaper while the copy of a long clip is being made: the ffmpeg
            child (which runs at nice 19) ends, its partial file goes, status forgets
            the video; the same when the daemon quits.
+  exits    the daemon is told to end (SIGTERM) again and again while the copy of the
+           long clip is being made, a moment after its ffmpeg child appeared - when the
+           child is about to create its output: after every exit the child is gone and
+           no unfinished file is in the cache (the child of a stopped conversion ends a
+           moment after it was told to and may create the file in that moment).
+           SCENEVIDEOCHECK_EXITS=N: that many exits (default 5).
   small    a scene whose clip is not larger than it is shown, and a scene without a
            video: nothing is converted, no file is written, status says "not needed" or
            has no "scene_videos" at all.
@@ -44,7 +50,7 @@ monitor does not depend on the moment it is read.
 Exit code 0 = all passed, 1 = failures, 77 = skipped (no Xvfb, no ffmpeg that writes
 H.264, or a build without the X11 backend or the video module). LIFECHECK_PATIENCE=N
 multiplies every wait (a software renderer on a busy machine: 3 or more)."""
-import glob, os, shutil, struct, subprocess, sys, time
+import glob, os, shutil, signal, struct, subprocess, sys, time
 
 sys.dont_write_bytecode = True   # no __pycache__ next to the scripts
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -450,6 +456,81 @@ def case_cancel(env, W):
         env.stop_daemon()
 
 
+# -------------------------------------------------------------------- exits
+def case_exits(env, W):
+    try:
+        rounds = max(1, int(os.environ.get("SCENEVIDEOCHECK_EXITS", "5") or 5))
+    except ValueError:
+        rounds = 5
+    left, ran, slow = [], 0, 0
+    kept = set(copies(env))     # what the cases before this one made stays (case `monitors` uses it)
+    for n in range(rounds):
+        # (the scene is the saved wallpaper from the second start on: its copy is asked for at once)
+        if not start(env, extra={"WALPE_CONVERT_BACKGROUND": "1"}, cfg={} if n == 0 else None):
+            check(False, f"exits: daemon started (round {n + 1})")
+            return
+        if n == 0:
+            env.open(W["long"])
+        kids = lc.wait_for(lambda: ffmpeg_children(env.daemon.pid, True), 60, 0.01)
+        if not kids:
+            env.stop_daemon()
+            continue
+        ran += 1
+        time.sleep(0.03 * (n % 8))      # the moment the child creates its file is somewhere here
+        proc = env.daemon
+        os.kill(proc.pid, signal.SIGTERM)
+        try:
+            proc.wait(timeout=30 * PATIENCE)
+        except subprocess.TimeoutExpired:
+            slow += 1
+        env.stop_daemon()
+        lc.wait_for(lambda: not [k for k in kids if os.path.exists(f"/proc/{k[0]}")], 10, 0.05)
+        left += [os.path.basename(p) for p in copies(env, ".part")]
+        for p in copies(env, ".part") + [c for c in copies(env) if c not in kept]:
+            os.unlink(p)        # (a round must not find the copy made, or the file of the round before)
+    if not ran:
+        print("skip  exits: no conversion was seen running", flush=True)
+        return
+    check(not slow, f"exits: the daemon ended every time it was told to ({ran} times)", slow)
+    check(not left, f"exits: no unfinished copy is left after any of {ran} exits", left)
+    # A child that is slow to start (it runs at idle priority: a busy machine)
+    # creates its file after the daemon has removed it. This check stands in
+    # for that child: the moment the daemon's own removal is seen, it puts the
+    # file there again.
+    late = None
+    for _ in range(3):
+        if not start(env, extra={"WALPE_CONVERT_BACKGROUND": "1"}):
+            break
+        part = lc.wait_for(lambda: copies(env, ".part"), 60, 0.01)
+        if not part:
+            env.stop_daemon()
+            continue
+        part, proc = part[0], env.daemon
+        os.kill(proc.pid, signal.SIGTERM)
+        until = time.monotonic() + 20 * PATIENCE
+        while os.path.exists(part) and time.monotonic() < until:
+            time.sleep(0.0002)
+        made = not os.path.exists(part) and proc.poll() is None
+        if made:
+            with open(part, "wb") as f:
+                f.write(b"late")
+        try:
+            proc.wait(timeout=30 * PATIENCE)
+        except subprocess.TimeoutExpired:
+            pass
+        env.stop_daemon()
+        if made:
+            late = os.path.exists(part)
+        for q in copies(env, ".part") + [c for c in copies(env) if c not in kept]:
+            os.unlink(q)
+        if made:
+            break
+    if late is None:
+        print("skip  exits: the daemon was gone before a late file could be made", flush=True)
+    else:
+        check(not late, "exits: a file the stopped child still made after the daemon's removal is gone too")
+
+
 # -------------------------------------------------------------------- small
 def case_small(env, W):
     if not check(start(env, cfg={}), "small: daemon started"):
@@ -575,7 +656,7 @@ def case_webunload(env, W):
 
 
 CASES = [("copy", case_copy), ("switch", case_switch), ("restart", case_restart), ("damaged", case_damaged),
-         ("cancel", case_cancel),
+         ("cancel", case_cancel), ("exits", case_exits),
          ("small", case_small), ("monitors", case_monitors), ("webunload", case_webunload)]
 
 

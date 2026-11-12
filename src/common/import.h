@@ -116,6 +116,12 @@ const char  *walpe_import_mode    (WalpeImport *imp); /* "probe" "remux" "transc
 void         walpe_import_cancel  (WalpeImport *imp);
 /* free after done fired (or after cancel) */
 void         walpe_import_free    (WalpeImport *imp);
+/* The encoder of a cancelled conversion ends a moment after the cancel and
+ * may create its unfinished file in that moment. The file is removed again
+ * when the child has ended: from the main loop, or here, for whoever ends
+ * before the loop gets to it (the daemon when it exits). Waits at most
+ * max_ms; returns how many such children were still alive then. */
+guint        walpe_import_settle  (guint max_ms);
 /* remove the unfinished outputs ("<name>.mp4.part", regular files only) an
  * import that was killed with its daemon left in dir; returns how many.
  * Only for a moment when no import can be running (daemon start-up). */
