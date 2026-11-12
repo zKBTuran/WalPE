@@ -154,15 +154,45 @@ false` means the setting has no effect in this session, whether it is on or off,
 | Pause after N seconds without input (`pause_idle`, new, off by default) | the compositor's idle notification (`ext-idle-notify-v1`). `walpe-ctl set idle=300`; 0 = off. On X11 nothing reports idle time in this version, and status says so |
 | Pause on battery (`pause_battery`) | the kernel's power-supply state, as on X11 |
 
-KWin and GNOME Shell offer other programs no window list, so the fullscreen and focus
-rules have no source there. Of the covered rule the "no longer shown" part is left, and
-on KDE Plasma that means a locked screen or a display that is off: KWin goes on asking a
-surface for frames while a window hides it (run on KWin 5.27 with a fullscreen window in
-front; read in the source of KWin 6.8), so **a wallpaper behind a fullscreen or maximized
-window, a game included, keeps being drawn on KDE Plasma**. `pause_rules` says so in the
-`note` of `pause_covered` wherever the window list is missing, and the settings window
-prints it under the switch. `walpe-ctl pause` / `resume` and the tray's pause entry work
-everywhere.
+KWin and GNOME Shell offer other programs no window list. On GNOME the fullscreen and
+focus rules have no source, and of the covered rule the "no longer shown" part is left;
+`pause_rules` says so in the rule's `note`, and the settings window prints it under the
+switch.
+
+**On KDE Plasma the three rules work through a script in KWin.** KWin goes on asking a
+wallpaper surface for frames while a window hides it (frame callbacks and presentation
+feedback keep coming at full rate behind a fullscreen window: run on KWin 5.27 and 6.8,
+and seen in a report from a real Plasma 6.8 session), so "no longer shown" never happens
+there behind a window. What KWin does have is a script interface. While one of the rules
+`pause_fullscreen`, `pause_covered` or `focus_action` is on, the daemon loads a small
+script into KWin over the session bus (`org.kde.kwin.Scripting`; nothing is installed,
+no permission is asked for) and the script calls the daemon back when an answer changes:
+
+| | |
+|---|---|
+| `pause_fullscreen` | the active window is fullscreen; the monitor is the output KWin names for it (`pause_fullscreen_all`: every monitor) |
+| `pause_covered` | as on X11: the application windows shown on the output (not minimized, on the current virtual desktop and activity, not in the see-through list) hide at least 85 % of it. A maximized window does, two windows side by side do |
+| `focus_action` | the active window is an application's and is on that output |
+
+What it costs and when: with all three rules off there is no connection to the session
+bus and no script. With one on, the daemon holds one more connection (it owns no name on
+the bus) and KWin runs the script when a window comes, goes, moves or changes state; the
+daemon hears from it only when one of the answers changes. The script is taken out of
+KWin when the last rule is switched off and when the daemon exits, and loaded again when
+KWin was restarted. The status member `pause_kwin_script` says what the provider is
+doing, and why when it cannot report (no session bus, KWin not on it, a KWin older than
+Plasma 6: the rules then read `"works": false` with that reason). `WALPE_KWIN_SCRIPT=0`
+keeps the daemon from using it.
+
+Unlike X11, windows that are in none of task bar, pager and window switcher (a
+drop-down terminal, panels of other programs) do not count as covering, and a window's
+opacity is not looked at. Run on a headless Plasma 6.8.2 with one and two outputs
+(fullscreen on one output pauses that one and, with `pause_fullscreen_all`, both;
+maximized and nearly-covering windows; minimized; the focus rule; the see-through list;
+rules switched off and on with a fullscreen window in place) and with a stand-in KWin
+(test `sig-kwin`); not on Plasma 5.27, where the script only says that it is too old.
+
+`walpe-ctl pause` / `resume` and the tray's pause entry work everywhere.
 
 Lockers that do not tell logind that the session is locked (seen with a lock client on
 sway): the wallpaper pauses through the covered rule, because the compositor stops showing
@@ -175,10 +205,10 @@ that stays silent leaves those rules without a source, and each of them says in
 
 Tested with stand-ins only: logind (a stand-in login manager on a private bus; no system
 bus was available), the idle and window-list protocols (a stand-in compositor in the test
-`sig-wl`).
+`sig-wl`). KWin's script: a stand-in and the real KWin 6.8.2, as said above.
 
-Switches in the daemon's environment: `WALPE_LOGIND`, `WALPE_WL_COVERED`
-([ENVIRONMENT.md](ENVIRONMENT.md)).
+Switches in the daemon's environment: `WALPE_LOGIND`, `WALPE_WL_COVERED`,
+`WALPE_KWIN_SCRIPT` ([ENVIRONMENT.md](ENVIRONMENT.md)).
 
 ## Web wallpapers
 
@@ -458,3 +488,13 @@ from its start (the lines `display backend:`, `compositor:`, `present: Wayland:`
 line starting with `wayland:`), the compositor and its version. If the daemon ended with
 `wayland: protocol error ...`, that whole line: it names the request the compositor
 refused. `WAYLAND_DEBUG=1` in the daemon's environment prints the protocol exchange.
+
+On KDE Plasma also: `pause_rules` and `pause_kwin_script` of the status, the three
+`wl_plasma_*` members, the output of `contrib/plasma/install.sh status` when the add-on
+is installed, and `presented_flags` of each entry of `wl_surfaces`. That last number is
+what the compositor said about the last frame it showed (the kind bits of
+`wp_presentation_feedback`: 1 vsync, 2 hardware clock, 4 hardware completion, 8 zero
+copy). In a report from a real Plasma 6.8 session it was 15 while the wallpaper was the
+only thing on the screen and 7 from the moment Plasma's desktop lay over it: the one
+thing that changed for the daemon when the wallpaper disappeared. It is no rule to pause
+by (a panel or any window over the wallpaper ends zero copy too), only a hint.

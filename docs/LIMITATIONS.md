@@ -72,7 +72,8 @@ software renderer only ([Known limitations](#known-limitations)).
   headless weston 13 served only as the compositor without layer shell that the daemon
   has to turn down). On Wayland
   the pointer is known only over the bare desktop, "Skip hidden areas" does not exist,
-  the fullscreen and focus rules need the compositor's window list, and web wallpapers go
+  the fullscreen and focus rules need the compositor's window list (on KDE Plasma a script
+  in KWin, which the daemon loads while such a rule is on), and web wallpapers go
   through Xwayland where an X display answers and through the private page host (a
   Wayland display inside the daemon, no X needed) where none does. That page host ran
   real pages on the headless sway only; a page is expected to animate at 60 frames a
