@@ -748,10 +748,109 @@ static void http_cb (SoupServer *srv, SoupServerMessage *msg, const char *path,
  * connections from every local account). A body is read and dropped piece
  * by piece instead. Set when the request starts, before its first byte is
  * read. */
+static void http_conn_begin (SoupServerMessage *msg);
+
 static void http_request_started (SoupServer *srv, SoupServerMessage *msg, gpointer user)
 {
     (void) srv; (void) user;
     soup_message_body_set_accumulate (soup_server_message_get_request_body (msg), FALSE);
+    http_conn_begin (msg);
+}
+
+/* Connections to the file server. libsoup keeps a connection for as long
+ * as its other end does, also one that never sends a request, and every
+ * one is a file descriptor of the daemon: a program that opened a thousand
+ * and sent nothing (the port takes connections from every local account)
+ * had the daemon at its limit of open files - the control socket accepted
+ * nobody ("walpe-daemon is not running" in walpe-ctl, the tray and the
+ * window), no wallpaper could be loaded, and the main loop turned on the
+ * failing accept. At most HTTP_MAX_CONNS are open at once; for one more,
+ * the connection that has waited longest for a request is closed (a
+ * client that keeps connections for later requests opens a new one, as
+ * after any server's idle timeout; a request that is being answered is
+ * never the one). A page has a handful: WebKit opens six per host. */
+#define HTTP_MAX_CONNS 128
+typedef struct {
+    gint64 since_us;    /* waiting for a request since then */
+    gboolean busy;      /* a request is being answered, or the connection is being closed */
+} HttpConn;
+static GHashTable *http_conns;      /* GSocket * (not referenced) -> HttpConn * */
+
+static void http_conn_gone (gpointer user, GObject *sock)
+{
+    (void) user;
+    g_hash_table_remove (http_conns, sock);
+}
+
+static HttpConn *http_conn_of (SoupServerMessage *msg)
+{
+    GSocket *sk = soup_server_message_get_socket (msg);
+    return sk && http_conns ? g_hash_table_lookup (http_conns, sk) : NULL;
+}
+
+/* a request starts: on a new connection, or the next one on a kept one */
+static void http_conn_begin (SoupServerMessage *msg)
+{
+    GSocket *sk = soup_server_message_get_socket (msg);
+    if (!sk)
+        return;
+    if (!http_conns)
+        http_conns = g_hash_table_new_full (NULL, NULL, NULL, g_free);
+    HttpConn *c = g_hash_table_lookup (http_conns, sk);
+    if (!c) {
+        if (g_hash_table_size (http_conns) >= HTTP_MAX_CONNS) {
+            GHashTableIter it;
+            gpointer k, v;
+            GSocket *old = NULL;
+            HttpConn *oc = NULL;
+            g_hash_table_iter_init (&it, http_conns);
+            while (g_hash_table_iter_next (&it, &k, &v)) {
+                HttpConn *x = v;
+                if (!x->busy && (!oc || x->since_us < oc->since_us)) {
+                    old = k;
+                    oc = x;
+                }
+            }
+            static gint64 said_us;
+            gint64 now = g_get_monotonic_time ();
+            if (!said_us || now - said_us > 60 * G_USEC_PER_SEC) {
+                said_us = now;
+                g_message ("web: more than %d connections to the wallpapers' file server: the ones "
+                           "that send no request are closed", HTTP_MAX_CONNS);
+            }
+            /* both directions: libsoup reads the end of the stream and
+             * drops the connection itself (http_conn_gone) */
+            if (!oc) {
+                g_socket_shutdown (sk, TRUE, TRUE, NULL);
+                return;
+            }
+            oc->busy = TRUE;
+            g_socket_shutdown (old, TRUE, TRUE, NULL);
+        }
+        c = g_new0 (HttpConn, 1);
+        g_hash_table_insert (http_conns, sk, c);
+        g_object_weak_ref (G_OBJECT (sk), http_conn_gone, NULL);
+    }
+    c->busy = FALSE;
+    c->since_us = g_get_monotonic_time ();
+}
+
+static void http_request_read (SoupServer *srv, SoupServerMessage *msg, gpointer user)
+{
+    (void) srv; (void) user;
+    HttpConn *c = http_conn_of (msg);
+    if (c)
+        c->busy = TRUE;
+}
+
+static void http_request_finished (SoupServer *srv, SoupServerMessage *msg, gpointer user)
+{
+    (void) srv; (void) user;
+    HttpConn *c = http_conn_of (msg);
+    if (c) {
+        c->busy = FALSE;
+        c->since_us = g_get_monotonic_time ();
+    }
 }
 
 static gboolean http_start (void)
@@ -762,6 +861,8 @@ static gboolean http_start (void)
     http_srv = soup_server_new ("server-header", "walpe", NULL);
     soup_server_add_handler (http_srv, NULL, http_cb, NULL, NULL);
     g_signal_connect (http_srv, "request-started", G_CALLBACK (http_request_started), NULL);
+    g_signal_connect (http_srv, "request-read", G_CALLBACK (http_request_read), NULL);
+    g_signal_connect (http_srv, "request-finished", G_CALLBACK (http_request_finished), NULL);
     if (!soup_server_listen_local (http_srv, 0, SOUP_SERVER_LISTEN_IPV4_ONLY, &err)) {
         g_warning ("web: loopback file server failed (%s); media in pages may not play",
                    err->message);

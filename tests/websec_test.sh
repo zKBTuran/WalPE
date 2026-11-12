@@ -25,7 +25,10 @@
 #     pages used to wait for it for good, black, with nothing said;
 #  7. a request with a large body sent to the page's file server (the
 #     loopback port takes connections from any local program) is not kept
-#     in the daemon's memory - it was, whole, whatever the method.
+#     in the daemon's memory - it was, whole, whatever the method;
+#  8. connections to that port that send nothing do not use up the
+#     daemon's open files: 128 are kept, the longest idle one makes room -
+#     every one was kept, for as long as its other end stayed.
 #
 # Skipped (exit 77) without Xvfb / python3 / the web module, or when WebKit
 # does not come up here. Run: meson test -C build websec -v
@@ -177,6 +180,41 @@ except Exception:
     [ -n "$R0" ] && [ -n "$R1" ] && BODY_KB=$((R1 - R0))
 fi
 
+# --- connections to that port that send nothing: each was a file descriptor
+# of the daemon for as long as the other side cared (a thousand of them and
+# the daemon was at its limit: the control socket accepted nobody)
+CONN_HELD= CONN_GROW= CONN_STATUS=ok
+if [ -n "$HPORT" ]; then
+    F0=$(ls "/proc/$DPID/fd" 2>/dev/null | wc -l)
+    python3 -I -c '
+import resource, socket, sys, time
+port = int(sys.argv[1]); want = 500
+soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+try:
+    need = want + 64
+    if soft != resource.RLIM_INFINITY and soft < need:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (need if hard == resource.RLIM_INFINITY else min(need, hard), hard))
+except Exception:
+    pass
+ss = []; t0 = time.time()
+while len(ss) < want and time.time() - t0 < 40:
+    try:
+        s = socket.socket(); s.settimeout(3); s.connect(("127.0.0.1", port)); ss.append(s)
+    except Exception:
+        break
+open(sys.argv[2], "w").write("%d\n" % len(ss))
+time.sleep(8)
+' "$HPORT" "$T/held" &
+    HPID=$!
+    i=0; while [ ! -s "$T/held" ] && [ $i -lt 120 ]; do sleep 0.5; i=$((i+1)); done
+    sleep 1
+    F1=$(ls "/proc/$DPID/fd" 2>/dev/null | wc -l)
+    CONN_HELD=$(cat "$T/held" 2>/dev/null)
+    CONN_GROW=$((F1 - F0))
+    "$B/walpe-ctl" status >/dev/null 2>&1 || CONN_STATUS=none
+    wait "$HPID"
+fi
+
 # --- another client's selections while the page selects, and two clicks
 "$B/websec-selown" 6 > "$T/sel.log" 2>&1 &
 SPID=$!
@@ -226,6 +264,12 @@ fi
 grep -q 'NP other-port: REACHED\|NP other-port localhost: REACHED\|NP websocket: OPEN' "$T/daemon.log" && bad "the page says it got through to the other port"
 grep -q '^OWN primary=1 clipboard=1' "$T/sel.log" || { echo "SKIP: the helper could not own the selections"; cat "$T/sel.log"; exit 77; }
 if grep -q '^LOST' "$T/sel.log"; then bad "a selection of another client was taken by the wallpaper:"; sed 's/^/    /' "$T/sel.log"; fi
+if [ "${CONN_HELD:-0}" -lt 300 ]; then
+    echo "note: only ${CONN_HELD:-0} connections could be opened to the page's file server here (their limit not exercised)"
+elif [ "$CONN_GROW" -gt 220 ]; then
+    bad "$CONN_HELD connections that sent nothing were $CONN_GROW open files of the daemon"
+fi
+[ "$CONN_STATUS" = ok ] || bad "the daemon did not answer on its control socket while $CONN_HELD connections to the page's file server were open"
 grep -q 'NP mousedown trusted=true' "$T/daemon.log" || echo "note: no trusted click reached the page here (CLIPBOARD part not exercised)"
 grep -q 'NP my address is' "$T/daemon.log" || bad "the page's console line is missing from the log"
 if grep -Eq '/[0-9a-f]{32}(/|$|[ ?#])' "$T/daemon.log"; then
