@@ -565,7 +565,11 @@ WalpeContent *walpe_content_new (const char *path, const WalpeLoadOpts *opts, GE
             /* the package's sound files only for a wallpaper that may be
              * heard right now (pkg.h; the scene's sound layers fetch them
              * when sound is switched on later) */
-            char *cache = walpe_pkg_extract_cached_opts (pkg, abs, scene_sound_wanted (o2.origin_dir), &pe);
+            /* (WALPE_PKG_WHOLE=1: every package is extracted whole at its
+             * load, as before copies could be made without sound files) */
+            const char *whole = g_getenv ("WALPE_PKG_WHOLE");
+            char *cache = walpe_pkg_extract_cached_opts (pkg, abs, (whole && *whole && strcmp (whole, "0")) ||
+                                                                   scene_sound_wanted (o2.origin_dir), &pe);
             g_free (pkg);
             if (!cache) {
                 g_propagate_error (err, pe);

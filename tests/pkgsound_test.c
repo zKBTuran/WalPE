@@ -763,6 +763,23 @@ static void test_scene (void)
     run_close (&rb);
     walpe_sound_set_enabled (FALSE);
 
+    /* WALPE_PKG_WHOLE=1: the copy is made whole whatever the sound setting */
+    rm_rf (c);
+    g_setenv ("WALPE_PKG_WHOLE", "1", TRUE);
+    if (run_open (&rb, item)) {
+        CHECK (same_bytes (c, "sounds/one.wav", wav) && has (c, "music/Two.OGG") && !has (c, ".walpe-pkg-nosound"),
+               "WALPE_PKG_WHOLE=1, sound off: the copy is whole");
+        for (int i = 0; i < 3; i++)
+            run_frame (&rb);
+        CHECK (rb.drawn && fnv (rb.px, sizeof rb.px) == h_off, "... same picture (%08x / %08x)",
+               fnv (rb.px, sizeof rb.px), h_off);
+    } else {
+        CHECK (FALSE, "the packaged scene loads with WALPE_PKG_WHOLE=1");
+    }
+    run_close (&rb);
+    g_unsetenv ("WALPE_PKG_WHOLE");
+    rm_rf (c);
+
     /* the scene without its sound layer, as plain files */
     char *plain = g_build_filename (T, "wp", "plain", NULL), *m = g_build_filename (plain, "models", NULL);
     g_mkdir_with_parents (m, 0700);
