@@ -44,6 +44,11 @@ that into the daemon's log). Nothing of the user's is read or written.
             frame on: what it draws in its first second (the start of a fade, an
             intro) reaches the output, and the wallpaper before it does not stay a
             second longer.
+  mixedpause (two outputs) one page on two outputs of which one is paused - a
+            fullscreen window on it - and one runs: the page is opened then. The output
+            that runs shows it and keeps drawing, the page is not told that it is
+            paused, the paused output draws nothing after the page's first picture, and
+            shows the page when the window is gone.
   restart   the daemon is ended and started again (the page is back), and restarts in
             place (web hardware acceleration switched): the page is back, the page
             processes of the old image are gone.
@@ -963,6 +968,98 @@ def case_firstsecond(env, W):
     healthy(env, mark, "firstsecond")
 
 
+def case_mixedpause(env, W):
+    gui = os.path.join(env.build, "walpe")
+    if not os.path.exists(gui):
+        print("skip mixedpause (no library window program in the build)")
+        return
+    # (only the fullscreen rule may pause)
+    if not start(env, [("A", 1280, 720, 0, 0), ("B", 960, 540, 1280, 0)], "mixedpause",
+                 config={"pause_covered": False, "pause_dpms": False}):
+        return
+    mark = env.mark()
+    a, b = env.mons[0], env.mons[1]
+    if not open_page(env, W["still"], "still", "mixedpause"):
+        return
+    shows_page(env, a)
+    shows_page(env, b, page=(1280, 720))
+
+    def mons():
+        by = {m.get("name"): m for m in env.state().get("monitors") or []}
+        return [by.get(a[0]) or {}, by.get(b[0]) or {}]
+
+    def paused():
+        return [bool(m.get("paused")) for m in mons()]
+
+    def frames():
+        return [m.get("frames") or 0 for m in mons()]
+
+    genv = dict(env.run_env)
+    genv.update({"GDK_BACKEND": "wayland", "GSK_RENDERER": "cairo", "GTK_A11Y": "none"})
+    with open(os.path.join(env.tmp, "gui.log"), "ab") as log:
+        p = subprocess.Popen([gui], env=genv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                             cwd=env.tmp)
+    try:
+        if not wait_for(lambda: [w for w in env.display.windows() if w["pid"] == p.pid] or p.poll() is not None,
+                        60, 0.5) or p.poll() is not None:
+            print("skip mixedpause (the library window did not come up on the compositor)")
+            return
+        sel = "[pid=%d] " % p.pid
+        env.display.cmd("mouse_warping none")
+        env.display.cmd(sel + "move container to output " + b[0])
+        env.display.cmd(sel + "fullscreen enable")
+        env.display.cmd(sel + "focus")
+        ok = wait_for(lambda: paused() == [False, True], 30, 0.2)
+        if not check(bool(ok), "mixedpause: a fullscreen window on the second output pauses that output only",
+                     (paused(), env.state().get("pause_signals"))):
+            return
+        # the animated page is opened now, for both outputs: one runs, one is paused
+        f0 = frames()
+        if not open_page(env, W["live"], "live", "mixedpause"):
+            return
+        ok, lk = shows_page(env, a, TINT_RGB[TINT0], 30)
+        check(ok and yellow_at(lk["frame"]) >= 0, "mixedpause: the output that runs shows the page that was opened",
+              lk and (lk["bad"], yellow_at(lk["frame"])))
+        time.sleep(3.0)                 # past the page's first second
+        f1 = frames()
+        s1 = state(env, "live", fresh=True, timeout=6)
+        time.sleep(3.0)
+        f2 = frames()
+        s2 = state(env, "live", fresh=True, timeout=6)
+        check(bool(s2) and s1.get("paused") is not True and s2.get("paused") is not True and s2.get("npause", 0) == 0,
+              "mixedpause: the page is not told that it is paused (one of its outputs runs)",
+              {k: s2.get(k) for k in ("paused", "npause", "vis")})
+        check(s2.get("raf", 0) > s1.get("raf", 0) + 10, "mixedpause: its requestAnimationFrame runs",
+              (s1.get("raf"), s2.get("raf")))
+        check(f2[0] - f1[0] > 3, "mixedpause: the output that runs keeps drawing",
+              "%d frames in about 3 s" % (f2[0] - f1[0]))
+        check(f2[1] - f1[1] <= 2, "mixedpause: the paused output draws nothing after the page's first picture",
+              "%d frames in about 3 s" % (f2[1] - f1[1]))
+        check(paused() == [False, True], "mixedpause: the second output is still the paused one", paused())
+        note("mixedpause: frames drawn from the opening to 3 s after the page showed: running output %d, paused "
+             "output %d; in the 3 s after that: %d and %d" % (f1[0] - f0[0], f1[1] - f0[1], f2[0] - f1[0], f2[1] - f1[1]))
+        bars = set()
+        for _ in range(6):
+            bars.add(bar_at(env.display.frame(a)))
+            time.sleep(0.25)
+        bars.discard(-1)
+        check(len(bars) >= 2, "mixedpause: the picture on the output that runs moves", sorted(bars))
+    finally:
+        p.terminate()
+        try:
+            p.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+    # the window is gone: the second output runs again and has the page
+    ok = wait_for(lambda: paused() == [False, False], 30, 0.2)
+    check(bool(ok), "mixedpause: without the window no output is paused", paused())
+    ok, lk = shows_page(env, b, TINT_RGB[TINT0], 30, page=(1280, 720))
+    check(ok and yellow_at(lk["frame"]) >= 0, "mixedpause: the second output shows the page",
+          lk and (lk["bad"], yellow_at(lk["frame"])))
+    healthy(env, mark, "mixedpause")
+
+
 def host_leftovers(env):
     """what the private page host could leave in the runtime directory: its socket directories"""
     rt = env.env["XDG_RUNTIME_DIR"]
@@ -1529,11 +1626,12 @@ def case_offline(env, W):
 CASES = [("start", case_start), ("live", case_live), ("props", case_props), ("audio", case_audio),
          ("pointer", case_pointer), ("two", case_two), ("outputs", case_outputs), ("pause", case_pause),
          ("pausedopen", case_pausedopen), ("firstsecond", case_firstsecond),
+         ("mixedpause", case_mixedpause),
          ("restart", case_restart), ("crash", case_crash), ("stale", case_stale), ("leftover", case_leftover),
          ("sandbox", case_sandbox), ("widgets", case_widgets), ("clipboard", case_clipboard),
          ("offline", case_offline)]
 # cases that need outputs that can be made, changed and removed
-NEED_OUTPUTS = ("two", "outputs")
+NEED_OUTPUTS = ("two", "outputs", "mixedpause")
 
 
 def main():
@@ -1569,6 +1667,12 @@ def main():
     if skip:
         print("webcheck: skipped (%s)" % skip[0])
         return skip[1]
+    if display == "sway" and HOST == "x11":
+        # (the compositor of this check runs without Xwayland: there is no X display for
+        # the X11 page host, and every page would fail its start-up test)
+        print("webcheck: skipped (--host x11 needs an X display, and --display sway has no Xwayland: "
+              "the X11 page host is checked with --display xvfb)")
+        return displayenv.SKIP
     for b in (daemon or os.path.join(build, "walpe-daemon"), os.path.join(build, "walpe-ctl")):
         if not os.path.exists(b):
             print(f"webcheck: {b} not found")
