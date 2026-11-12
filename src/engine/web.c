@@ -3225,8 +3225,8 @@ static void probe_note_webgl (const char *out)
     g_strstrip (r);
     if (gl_is_software (r))
         g_warning ("web: WebGL in web wallpapers runs on the CPU here (%s): pages with WebGL "
-                   "effects will be slow whatever the graphics card. See README (web "
-                   "wallpapers, \"web_webgl\")", r);
+                   "effects will be slow whatever the graphics card. See docs/SETTINGS.md, "
+                   "\"Rendering\" (web_accel; \"web_webgl\" in walpe-ctl status)", r);
     else
         g_message ("web: WebGL in web wallpapers: %s", r);
     g_mutex_lock (&reg_lock);

@@ -204,8 +204,8 @@ static inline gboolean walpe_conf_bool (const char *v, gboolean *out)
 }
 
 /* a driver hint from gpu.conf -> the environment variable(s) the NVIDIA
- * driver reads (README "Specifying OpenGL Environment Variable Settings";
- * __GL_MaxFramesAllowed is not in the README). Appends "NAME=VALUE"
+ * driver reads (its README, "Specifying OpenGL Environment Variable
+ * Settings"; __GL_MaxFramesAllowed is not in it). Appends "NAME=VALUE"
  * strings (g_free) to out. Returns FALSE when key is no driver hint or
  * the value is not understood; an empty value or "default" sets nothing
  * and returns TRUE. Other drivers ignore these variables. */
@@ -339,7 +339,7 @@ static inline gboolean walpe_driver_hint_mesa (const char *key, const char *valu
 }
 
 /* can the NVIDIA driver's shader disk cache work in this environment?
- * (README: off for root unless forced, and when none of
+ * (the driver's README: off for root unless forced, and when none of
  * __GL_SHADER_DISK_CACHE_PATH, XDG_CACHE_HOME, HOME is set.) NULL = yes,
  * else why not, as a static string. Says nothing about other drivers. */
 static inline const char *walpe_shader_cache_blocker (gboolean is_root, gboolean forced_on,

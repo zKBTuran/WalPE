@@ -29,7 +29,7 @@ add_project_arguments(cc.get_supported_arguments([
 
 add_project_arguments('-D_GNU_SOURCE', language: ['c'])
 
-# ThreadSanitizer build (-Db_sanitize=thread; README.md "ThreadSanitizer").
+# ThreadSanitizer build (-Db_sanitize=thread; docs/DEVELOPMENT.md, "Tests").
 # GLib's GMutex / GCond are futex based inside libglib and invisible to the
 # sanitizer, so every program of such a build gets tests/tsan/gsync_shim.c,
 # which puts them on pthread primitives (and exports them, so the modules
@@ -443,7 +443,8 @@ if get_option('scenescript') != 'disabled'
     if quickjs_old
       warning('QuickJS: quickjs.h has no JS_EVAL_FLAG_ASYNC, so this libquickjs is older than ' +
               'the 2024-01-13 release. Wallpaper scripts run in it: install a current ' +
-              'dev-lang/quickjs (or build with -Dscenescript=disabled).')
+              'QuickJS or name one built by hand with -Dquickjs_libdir (docs/BUILDING.md, ' +
+              '"Dependencies"), or build with -Dscenescript=disabled.')
     endif
     # scenescript.c gives each runtime an allocator that keeps track of the
     # runtime's blocks (an abandoned runtime is freed through it). That

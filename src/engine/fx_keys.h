@@ -18,8 +18,9 @@
  * pass, the hash confirms them. A key can be a whole statement, the start
  * of one, or several statements in a row; the comment at each row says in
  * words which effect it belongs to and what the statement computes. A row
- * is made with the key tool of the developer tools (README, "Developer
- * tools"); tests/fx_keys_test.c checks the table against an install.
+ * is made with the key tool of the developer tools (fxkey.py:
+ * docs/DEVELOPMENT.md, "Developer tools"); tests/fx_keys_test.c checks
+ * the table against an install.
  *
  * The hash is FNV-1a over the bytes with the basis fx_region.h's pinned
  * shader hashes use (fxr_hash; it is not the textbook basis).

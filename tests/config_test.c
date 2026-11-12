@@ -1,7 +1,7 @@
 /* config_test - config.json (src/common/config.c)
  *
  * Private XDG_CONFIG_HOME, no daemon, no display:
- *  - the defaults of a new install are the ones README.md states;
+ *  - the defaults of a new install are the ones docs/SETTINGS.md states;
  *  - every key survives save + load with a value that is not its default;
  *  - members this build does not know (a newer version's, hand-written
  *    ones) are still in the file after a save;
@@ -62,7 +62,7 @@ static void test_defaults (void)
 {
     g_unlink (cfg_path);
     WalpeConfig *c = walpe_config_load ();
-    /* README "Settings" */
+    /* docs/SETTINGS.md, "config.json" */
     CHECK (c->fps == 60 && WALPE_FPS_DEFAULT == 60);
     CHECK (c->config_version == 4);
     /* a video inside a scene is played from a copy of the size shown */

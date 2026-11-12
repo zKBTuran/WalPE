@@ -93,7 +93,7 @@ static void usage (void)
              "                         same-size monitors and follows the pointer on the monitor it is on (off)\n"
              "  walpe-ctl set skip_hidden=off|auto|always [skip_hidden_margin=PX skip_hidden_inset=PX]\n"
              "                         do not render what other windows hide (off; auto = only without a\n"
-             "                         compositing manager, always = also under one: see README)\n"
+             "                         compositing manager, always = also under one: docs/SETTINGS.md)\n"
              "  walpe-ctl set present=vsync|limiter|auto  how frames are presented (NAME=mode for one\n"
              "                                 monitor), for this run of the daemon: gpu.conf keeps it\n"
              "  walpe-ctl set frame_align=on|off  the frame clocks of all monitors run on one grid (off by\n"
