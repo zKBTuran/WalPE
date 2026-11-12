@@ -864,7 +864,10 @@ def case_push(env, W):
     answered = 0
     for _ in range(3):
         for req in reads:
-            answered += 1 if env.ipc(req) is not None else 0
+            # (time is not what is asked here: `mem` waits for the render
+            # threads and reads the process's mappings, 5 to 10 s in a
+            # sanitizer build, which has terabytes of them)
+            answered += 1 if env.ipc(req, timeout=30.0 * PATIENCE) is not None else 0
     got = sub.lines(1.5)
     check(answered == 3 * len(reads), "push: the requests that only read were answered",
           f"{answered} of {3 * len(reads)}")
