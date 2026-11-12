@@ -267,16 +267,21 @@ GList *walpe_store_scan (const char *dirpath)
                                                            : g_strdup (desc);
                 const char *prev = wpj_str (o, "preview", NULL);
                 if (prev) {
-                    char *pp = g_build_filename (full, prev, NULL);
+                    /* like every file a wallpaper names, the preview is a
+                     * regular file below the wallpaper's own folder, also
+                     * once links are resolved (walpe_asset_path). The name
+                     * was joined to the folder and taken when something
+                     * existed there: "preview": "../../Pictures/x.jpg", or
+                     * a link in the folder, put any picture the user can
+                     * read on the tile and into the thumbnail cache. */
+                    char *pp = walpe_asset_path (full, prev);
                     struct stat pst;
-                    if (walpe_file_exists (pp)) {
+                    if (pp) {
                         e->preview = pp;
                         if (stat (pp, &pst) == 0) {
                             e->preview_mtime = (gint64) pst.st_mtime;
                             e->preview_size = (gint64) pst.st_size;
                         }
-                    } else {
-                        g_free (pp);
                     }
                 }
                 /* an animated preview next to a still one (or to none that
@@ -284,12 +289,10 @@ GList *walpe_store_scan (const char *dirpath)
                  * and its first frame is the still where animation is off */
                 gsize pl = e->preview ? strlen (e->preview) : 0;
                 if (pl < 4 || g_ascii_strcasecmp (e->preview + pl - 4, ".gif")) {
-                    char *gp = g_build_filename (full, "preview.gif", NULL);
-                    if (walpe_file_exists (gp)) {
+                    char *gp = walpe_asset_path (full, "preview.gif");
+                    if (gp) {
                         g_free (e->preview);
                         e->preview = gp;
-                    } else {
-                        g_free (gp);
                     }
                 }
                 JsonObject *general = wpj_obj (o, "general");

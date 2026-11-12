@@ -114,6 +114,69 @@ static void put (const char *dir, const char *name, const char *text)
     g_free (p);
 }
 
+/* the scan: the picture a project.json names as its preview is one of the
+ * wallpaper's own files. Before: "preview": "../../Pictures/x.jpg" (or a
+ * link in the folder) put any picture the user can read on the tile. */
+static void test_scan_preview (const char *root)
+{
+    char *lib = g_build_filename (root, "libp", NULL);
+    char *out = g_build_filename (root, "libp-outside", NULL);
+    static const char *const ids[] = { "4000000001", "4000000002", "4000000003", "4000000004",
+                                       "4000000005", "4000000006" };
+    char *d[G_N_ELEMENTS (ids)];
+    for (guint i = 0; i < G_N_ELEMENTS (ids); i++) {
+        d[i] = g_build_filename (lib, ids[i], NULL);
+        g_mkdir_with_parents (d[i], 0755);
+    }
+    g_mkdir_with_parents (out, 0755);
+    put (out, "private.png", "not the wallpaper's");
+    char *priv = g_build_filename (out, "private.png", NULL);
+    /* 1: its own file; 2: a name that climbs out; 3: a link that leads out;
+     * 4: a preview.gif that is such a link; 5: a file in a sub-folder;
+     * 6: a directory */
+    put (d[0], "preview.jpg", "jpg");
+    put (d[0], "project.json", "{\"title\":\"own\",\"type\":\"scene\",\"preview\":\"preview.jpg\"}");
+    put (d[1], "project.json", "{\"title\":\"climbs\",\"type\":\"scene\","
+                               "\"preview\":\"../../libp-outside/private.png\"}");
+    char *l3 = g_build_filename (d[2], "preview.png", NULL);
+    CHECK (symlink (priv, l3) == 0);
+    put (d[2], "project.json", "{\"title\":\"link\",\"type\":\"scene\",\"preview\":\"preview.png\"}");
+    char *l4 = g_build_filename (d[3], "preview.gif", NULL);
+    CHECK (symlink (priv, l4) == 0);
+    put (d[3], "project.json", "{\"title\":\"gif link\",\"type\":\"scene\"}");
+    char *sub = g_build_filename (d[4], "media", NULL);
+    g_mkdir_with_parents (sub, 0755);
+    put (sub, "p.png", "png");
+    put (d[4], "project.json", "{\"title\":\"sub\",\"type\":\"scene\",\"preview\":\"media/p.png\"}");
+    put (d[5], "project.json", "{\"title\":\"dir\",\"type\":\"scene\",\"preview\":\".\"}");
+    GList *l = walpe_store_scan (lib);
+    CHECK (g_list_length (l) == G_N_ELEMENTS (ids));
+    int seen = 0;
+    for (GList *i = l; i; i = i->next) {
+        WalpeEntry *e = i->data;
+        if (!strcmp (e->id, ids[0])) {
+            seen++;
+            CHECK (e->preview && g_str_has_suffix (e->preview, "/4000000001/preview.jpg"));
+        } else if (!strcmp (e->id, ids[4])) {
+            seen++;
+            CHECK (e->preview && g_str_has_suffix (e->preview, "/4000000005/media/p.png"));
+        } else {
+            seen++;
+            CHECK (e->preview == NULL);
+        }
+    }
+    CHECK (seen == (int) G_N_ELEMENTS (ids));
+    g_list_free_full (l, (GDestroyNotify) walpe_store_entry_free);
+    for (guint i = 0; i < G_N_ELEMENTS (ids); i++)
+        g_free (d[i]);
+    g_free (sub);
+    g_free (l3);
+    g_free (l4);
+    g_free (priv);
+    g_free (out);
+    g_free (lib);
+}
+
 /* the scan: what a project.json can put into the library's labels */
 static void test_scan (const char *root)
 {
@@ -154,6 +217,7 @@ static void test_scan (const char *root)
     CHECK (seen == 3);
     g_list_free_full (l, (GDestroyNotify) walpe_store_entry_free);
     g_free (w);
+    test_scan_preview (root);
     g_free (a);
     g_free (b);
     g_free (c);
