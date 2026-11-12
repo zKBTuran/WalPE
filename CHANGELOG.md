@@ -246,8 +246,16 @@ could do to the daemon. None of these was seen being used.
   looked at only with every 256th line of a run and never for a file a shell had opened
   with `> file`: a daemon started from an autostart entry at every login, saying little
   each time, let the file grow for ever.
+- "Adjust layers": two layers with the same name whose ids in `scene.json` are negative
+  (other than -1) got the same key, so an adjustment saved for the second one moved the
+  first; and a layer with an id of ten digits could not be adjusted at all. Every layer
+  has a key of its own now. Keys of layers with ordinary ids are what they were: saved
+  adjustments keep their meaning. Found by fuzzing.
 - Import: a video with `%d` in its name (`take %03d.mp4`) got its thumbnail under another
   name, replaced a picture of that name next to it and was shown without a preview.
+- Import: a width, height or rotation in what `ffprobe` says about a video that no
+  whole number can hold (`1e30`) was converted in a way C leaves undefined; on x86-64 it
+  happened to come out as "no size". Every build now takes it as that. Found by fuzzing.
 - Build: **the tests and the developer tools are no part of a build unless asked for.**
   The new build option `tests` is off by default, and a build directory set up without it
   has no test, no test program and no developer tool: `ninja`, `meson compile` and `meson
@@ -292,7 +300,9 @@ could do to the daemon. None of these was seen being used.
   for the parsers of wallpaper files (`tests/fuzz`: packages, textures, MP4, GIF and JPEG
   checks, JSON, puppets, particles, shader text, sound files, scenes) for libFuzzer
   (`-Dfuzz=enabled`, clang); their seeds and every input that once broke a parser run in
-  the suite as `fuzz-regress-<target>`. From the review: the web file server (request
+  the suite as `fuzz-regress-<target>`; 22 targets in all, with the control socket,
+  `config.json`, Steam's replies, previews, the library scan and layer keys. From the
+  review: the web file server (request
   bodies, idle connections, parts of files), the login answer, a stand-in music player
   (`media-player`), import (`%d`, a child without its daemon), old-format layer pictures,
   the tray and the library window next to a real daemon (`tray-life`, `ui-life`).
