@@ -44,7 +44,9 @@
  * 16. the time limit striking while a call into the scene converts an
  *     argument ends the script, not (later) all scripts;
  * 17. built-ins that never return, as the script's own statement: stopped
- *     by the watchdog, with QuickJS in the program or as a shared library.
+ *     by the watchdog, with QuickJS in the program or as a shared library;
+ * 18. a promise reaction that queues its successor does not run in every
+ *     frame for good.
  * `meson test -C build script-hostile` */
 #include "walpe-build-config.h"
 #include <glib.h>
@@ -1217,6 +1219,54 @@ static void builtins (void)
     }
 }
 
+/* ------------------------------------- 18. promise chains without an end */
+
+/* A reaction that queues the next one: an entry runs 10 000 of them and
+ * leaves the rest for the next entry, which did the same - 10 000
+ * reactions in every frame for as long as the wallpaper was shown, with no
+ * line in the log. An entry that leaves reactions behind after its share
+ * counts as one that ran out of time. */
+static void promise_chain (void)
+{
+    WalpeSceneScript *ss = make ();
+    add (ss, 0, "text", "'use strict';\nlet n = 0;\nfunction again() { n++; Promise.resolve().then(again); }\n"
+                        "export function init(v) { again(); return v; }\n"
+                        "export function update(v) { return 'n' + n; }\n");
+    start (ss);
+    for (int f = 1; f <= 8; f++)
+        tick (ss, f);
+    char *at8 = g_strdup (text[0] ? text[0] : "-");
+    double t0 = thread_cpu ();
+    for (int f = 9; f <= 108; f++)
+        tick (ss, f);
+    double later = thread_cpu () - t0;
+    WalpeSsMem m;
+    walpe_ss_mem (ss, &m);
+    CHECK (m.dead && later < 0.05, "a promise chain without end: stopped after a few frames (at frame 8: "
+           "%s reactions; scripts %s; 100 later frames %.3f s)", at8, m.dead ? "stopped" : "running", later);
+    g_free (at8);
+    walpe_ss_free (ss);
+
+    /* reactions that come to an end are run, also when two entries in a
+     * row leave some behind: 12 000 are queued in init () and 12 000 more
+     * in the first frame, the frame after that empties the queue. (Not all
+     * in one entry: making them is work too, and it has to stay well
+     * inside an entry's time limit in a sanitizer build.) */
+    ss = make ();
+    add (ss, 0, "text", "'use strict';\nlet n = 0, f = 0; const p = Promise.resolve(), inc = () => { n++; };\n"
+                        "function more() { for (let i = 0; i < 12000; i++) p.then(inc); }\n"
+                        "export function init(v) { more(); return v; }\n"
+                        "export function update(v) { if (++f === 1) more(); return 'n' + n; }\n");
+    start (ss);
+    for (int f = 1; f <= 6; f++)
+        tick (ss, f);
+    walpe_ss_mem (ss, &m);
+    CHECK (!m.dead && text[0] && !strcmp (text[0], "n24000"), "24 000 promise reactions, 12 000 queued in "
+           "each of two entries in a row, all run (%s, scripts %s)", text[0] ? text[0] : "-",
+           m.dead ? "stopped" : "running");
+    walpe_ss_free (ss);
+}
+
 int main (int argc, char **argv)
 {
     if (argc > 2 && !strcmp (argv[1], "memory-child"))
@@ -1260,6 +1310,8 @@ int main (int argc, char **argv)
         swallowed ();
     if (!only || !strcmp (only, "builtins"))
         builtins ();
+    if (!only || !strcmp (only, "chain"))
+        promise_chain ();
     if (!only || !strcmp (only, "driver")) {
         int before = contract_breaks;
         /* 6 seeds by default (each takes seconds: its scripts run into the

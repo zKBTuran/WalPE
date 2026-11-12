@@ -1624,7 +1624,8 @@ static char *ss_env_locale (const char *category, gboolean we_code)
 #define SS_HARD_RETRY_NS (50 * G_GINT64_CONSTANT (1000000))
 #define SS_LOAD_NS (5000 * G_GINT64_CONSTANT (1000000))
 #define SS_TIMEOUTS_MAX 20
-#define SS_MAX_JOBS 10000    /* promise reactions run per entry */
+#define SS_MAX_JOBS 10000    /* promise reactions run per entry; an entry that
+                              * leaves some behind counts as out of time */
 
 static __thread struct {
     sigjmp_buf jmp;
@@ -2081,14 +2082,27 @@ ss_run_armed (WalpeSceneScript *ss, const char *what, JSValueConst fn, int argc,
         timed_out = TRUE;
         blamed = FALSE;
         ss_tls.interrupted = FALSE;
+    } else if (n > SS_MAX_JOBS && JS_IsJobPending (ss->rt)) {
+        /* The entry ran its share of reactions and the queue is not empty.
+         * A reaction that queues its successor keeps it that way: every
+         * entry ran SS_MAX_JOBS of them - 11 ms of a frame, for as long as
+         * the wallpaper was shown, without a line in the log. Such an
+         * entry counts as one that ran out of time, too. */
+        timed_out = TRUE;
+        blamed = FALSE;
+        ss_host_enter ();
+        if (ss_log_allowed (ss))
+            g_message ("scenescript: %s: %d promise reactions ran and more are queued (a "
+                       "reaction that queues the next one?)", walpe_log_str (what), SS_MAX_JOBS);
+        ss_host_leave ();
     }
     /* With nobody to blame three times in a row every script stops. */
     if (timed_out && !blamed) {
         if (++ss->unblamed >= 3 && !ss->dead) {
             ss->dead = TRUE;
             ss_host_enter ();
-            g_warning ("scenescript: scripts ran out of time three times in a row: all scripts "
-                       "of this wallpaper are stopped");
+            g_warning ("scenescript: scripts ran out of time, or left promise reactions behind, "
+                       "three times in a row: all scripts of this wallpaper are stopped");
             ss_host_leave ();
         }
     } else if (timed_out || ok) {
