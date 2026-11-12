@@ -5061,15 +5061,17 @@ static void sv_start_next (void)
             walpe_scene_video_touch ();     /* it is there already: the scene finds it */
             continue;
         }
-        const WalpeImportScene sc = { w->off, w->len, w->w, w->h, w->matrix };
+        /* (which encoding: the copy's name says it, scenevideo.h) */
+        const gboolean fast = walpe_scene_video_copy_is_fast (w->dst);
+        const WalpeImportScene sc = { w->off, w->len, w->w, w->h, w->matrix, fast };
         GError *err = NULL;
         Sv.ended = FALSE;
         Sv.running = w;
         Sv.job = walpe_import_start_scene (w->src, &sc, w->dst, sv_done, NULL, &err);
         if (Sv.job) {
-            g_message ("video: %s is larger than its scene shows it: making a %dx%d copy once, "
+            g_message ("video: %s is larger than its scene shows it: making a %dx%d copy%s once, "
                        "in the background (%s); the clip plays as it is until then", w->src,
-                       w->w, w->h, w->dst);
+                       w->w, w->h, fast ? " that is cheap to decode" : "", w->dst);
             return;
         }
         Sv.running = NULL;
@@ -5166,7 +5168,10 @@ static char *sv_job_text (const char *copy, gpointer user)
         return g_strdup_printf ("failed (%s)", why);
     if (w && Sv.running == w && sv_converting ()) {
         int pc = walpe_import_percent (Sv.job);
-        return pc >= 0 ? g_strdup_printf ("converting %d %%", pc) : g_strdup ("converting");
+        /* (the kind that is not the default says so, here and when it plays) */
+        const char *kind = walpe_scene_video_copy_is_fast (copy) ? ", encoded for cheap decoding" : "";
+        return pc >= 0 ? g_strdup_printf ("converting %d %%%s", pc, kind)
+                       : g_strdup_printf ("converting%s", kind);
     }
     return g_strdup (Imp.active ? "waiting for the running import" : "waiting");
 }

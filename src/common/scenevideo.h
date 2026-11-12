@@ -73,6 +73,26 @@ char *walpe_scene_video_id (const char *path, guint64 off, guint64 len);
  * played for 90 days. Never in the wallpaper's own folder. g_free. */
 char *walpe_scene_video_cache_file (const char *id, int w, int h);
 
+/* ---- the copy's encoding ----------------------------------------------
+ * WALPE_VIDEO_COPY_FAST=1 in the daemon's environment (read once; off
+ * without it): copies made from then on are encoded for cheap decoding -
+ * no B-frames, one reference picture, no CABAC, no deblocking filter, at a
+ * rate factor that gives the same PSNR (import.h WalpeImportScene.fast):
+ * about half the decoding work of every picture and two or three pictures
+ * less in the decoder, for about twice the bytes on disk. Any thread.
+ *
+ * The two kinds are two files: a copy of this kind is
+ * <id>-scene-<W>x<H>-fast.mp4, and walpe_scene_video_cache_file () gives
+ * the name of the kind that is on - so a copy that was made the other way
+ * is never taken for this one, both can be in the cache (each under the
+ * rules above), and everything that is checked of a copy before it is
+ * played is checked of either kind. */
+gboolean walpe_scene_video_fast (void);
+char *walpe_scene_video_cache_file_as (const char *id, int w, int h, gboolean fast);
+/* is `file` (a name or a path) a copy of the kind encoded for cheap
+ * decoding? By its name alone. */
+gboolean walpe_scene_video_copy_is_fast (const char *file);
+
 /* ---- a scene wants a copy ---------------------------------------------
  * The scene (a render thread) knows the clip, the daemon (main thread)
  * converts. walpe_scene_video_want (w, TRUE) says "this copy is wanted",
@@ -83,7 +103,8 @@ char *walpe_scene_video_cache_file (const char *id, int w, int h);
 typedef struct {
     const char *src;        /* the file that holds the clip (absolute) */
     guint64 off, len;       /* the clip's bytes in it */
-    const char *dst;        /* walpe_scene_video_cache_file () */
+    const char *dst;        /* walpe_scene_video_cache_file (): its name says
+                             * which encoding (..._copy_is_fast) */
     int w, h;               /* the copy's size */
     int matrix;             /* what the player converts the clip's colours with:
                              * 1 = BT.709, 6 = BT.601, 9 = BT.2020 (the H.264

@@ -86,6 +86,27 @@ background, into a copy of the size it is needed at, and the scene plays the cop
   copies of videos in scenes"; `WALPE_VIDEO_SCENE_CONVERT=0|1` in front of `walpe-daemon`
   overrides): the clip itself again, from where it starts next; nothing is converted. The
   copies stay in the cache for the next time it is on.
+* **A copy that is cheaper to decode** (off by default; nothing changes without it).
+  `WALPE_VIDEO_COPY_FAST=1` in front of `walpe-daemon`: copies made from then on are encoded
+  without B-frames, with one reference picture, without CABAC and without the deblocking
+  filter (libx264 `-refs 1 -bf 0 -tune fastdecode`), at `-crf 17` in the place of `-crf 19`
+  so that the picture is as close to the clip as before. Measured on a 3840x2160 60 fps
+  clip of 12 s made 1920x1080 (software decoding, one thread): 2.35-2.43 ms of CPU per
+  decoded picture in the place of 4.77-5.09 ms, 16.8 MB of decoder memory in the place of
+  29.0 MB, PSNR against the reduced clip 45.50 dB in the place of 45.46 dB - and 14.5 MB on
+  disk in the place of 6.9 MB. What it changes in the picture: no in-loop deblocking, so a
+  copy that is short of bits shows block edges where the other kind shows blur; the lower
+  rate factor is there to pay for that. It needs an ffmpeg with libx264 (with another
+  encoder no such copy is made and `scene_videos` says so; the clip plays as it is).
+  The two kinds are two files, `<id>-scene-<W>x<H>.mp4` and `<id>-scene-<W>x<H>-fast.mp4`:
+  with the variable set only the second is played and made, without it only the first; a
+  copy of the other kind is never taken for the one that is on, both stay in the cache
+  under the same rules (checked when the scene is loaded, removed after 90 days in which
+  nothing played them), and going back is starting the daemon without the variable - the
+  copy made before plays at once, nothing is converted. `scene_videos` says `copy: ready,
+  encoded for cheap decoding` for this kind (`converting 42 %, encoded for cheap decoding`
+  while it is made), and `walpe-ctl mem` has `"played_from"` for every scene video:
+  `clip`, `copy`, or `copy, encoded for cheap decoding`.
 
 **Measured** (a scene whose background is a 3840x2160 60 fps H.264 clip of 12 s and 15.1 MB,
 one 1920x1080 monitor, `video_resolution=1080p`, software decoding, on a machine without a

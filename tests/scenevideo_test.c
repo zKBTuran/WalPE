@@ -12,7 +12,13 @@
  *  - the argument vector of the conversion: the byte range through the
  *    subfile protocol with the file name behind "file:", only that protocol
  *    and only MP4 allowed, the exact size, the colour matrix; a file name
- *    made of options stays one argument.
+ *    made of options stays one argument;
+ *  - the copy that is cheap to decode (WALPE_VIDEO_COPY_FAST): off unless
+ *    the variable is set (this program started again with and without it);
+ *    its own file name, so that neither kind is taken for the other; the
+ *    argument vector without it is, argument for argument, what it was
+ *    before there was such a thing, and with it differs in the rate factor
+ *    and three options of libx264's and nothing else.
  * With ffmpeg and ffprobe in PATH (else skipped), on a clip made here and
  * put into the middle of another file with a hostile name:
  *  - the copy has the size asked for, as many pictures as the clip, 8-bit
@@ -22,7 +28,12 @@
  *  - a clip that is not 8-bit 4:2:0 in limited range is left as it is, with
  *    a reason and no output;
  *  - a copy larger than the clip is refused;
- *  - a run that is stopped leaves no file and no child. */
+ *  - a run that is stopped leaves no file and no child;
+ *  - a copy that is cheap to decode: the same size, pictures and tags, and
+ *    in it what libx264 says it was made with (no CABAC, one reference, no
+ *    deblocking filter, no B-frames, rate factor 17; the other kind: CABAC,
+ *    rate factor 19); with an ffmpeg that has no libx264 none is made, with
+ *    a reason. */
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <string.h>
@@ -229,6 +240,27 @@ static void test_name (void)
     CHECK (!g_strcmp0 (f, want));
     char *f2 = walpe_scene_video_cache_file (id, 2560, 1440);
     CHECK (f2 && g_strcmp0 (f, f2) && g_str_has_prefix (f2, dir) && g_str_has_suffix (f2, ".mp4"));
+    /* the copy that is cheap to decode is another file of the same clip
+     * and size; which kind a file is shows in its name and nowhere else */
+    {
+        char *fa = walpe_scene_video_cache_file_as (id, 1920, 1080, FALSE);
+        char *fb = walpe_scene_video_cache_file_as (id, 1920, 1080, TRUE);
+        char *wantb = g_strdup_printf ("%s/%s-scene-1920x1080-fast.mp4", dir, id);
+        CHECK (!g_strcmp0 (fa, want) && !g_strcmp0 (fb, wantb) && g_strcmp0 (fa, fb));
+        CHECK (!walpe_scene_video_copy_is_fast (fa) && walpe_scene_video_copy_is_fast (fb));
+        CHECK (!walpe_scene_video_copy_is_fast (NULL) && !walpe_scene_video_copy_is_fast ("") &&
+               !walpe_scene_video_copy_is_fast ("fast.mp4") &&
+               !walpe_scene_video_copy_is_fast ("/c/x-scene-640x360-fast.mp4.part") &&
+               walpe_scene_video_copy_is_fast ("x-scene-640x360-fast.mp4"));
+        /* (what the daemon's tidying goes by: both kinds end in ".mp4",
+         * their unfinished files in ".mp4.part") */
+        CHECK (g_str_has_suffix (fa, ".mp4") && g_str_has_suffix (fb, ".mp4"));
+        CHECK (!walpe_scene_video_cache_file_as ("0123", 1920, 1080, TRUE));
+        CHECK (!walpe_scene_video_cache_file_as (id, 0, 1080, TRUE));
+        /* this process has no WALPE_VIDEO_COPY_FAST (main): the kind is the usual one */
+        CHECK (!walpe_scene_video_fast ());
+        g_free (fa); g_free (fb); g_free (wantb);
+    }
     /* a name that is not one of ours never becomes a path */
     CHECK (!walpe_scene_video_cache_file (NULL, 1920, 1080));
     CHECK (!walpe_scene_video_cache_file ("../../../../etc/passwd0000000000000", 1920, 1080));
@@ -308,6 +340,64 @@ static void test_argv (void)
         last++;
     CHECK (!strcmp (v[last], "file:/c/out.mp4.part") && !strcmp (v[last - 1], "mp4"));
     g_strfreev (v);
+    /* The whole vector without "fast", argument for argument: what it was
+     * before the copy that is cheap to decode existed (taken from a build
+     * without it). A change here changes every copy that is made from then
+     * on, and the copies that exist would not be what a new one is. */
+    {
+        static const char *const before[] = {
+            "ffmpeg", "-hide_banner", "-nostdin", "-y", "-v", "error",
+            "-max_pixels", "40000000", "-protocol_whitelist", "file,subfile",
+            "-format_whitelist", "mov", "-f", "mov", "-c:v", "h264", "-noautorotate",
+            "-i", "subfile,,start,87,end,15071131,,:file:/w/a b.tex", "-map", "0:v:0",
+            "-vf", "scale=1920:1080:flags=bicubic,setsar=1,format=yuv420p,"
+                   "setparams=colorspace=bt709:range=tv",
+            "-colorspace", "bt709", "-color_range", "tv",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "19",
+            "-profile:v", "high", "-pix_fmt", "yuv420p",
+            "-an", "-sn", "-dn", "-map_metadata", "-1", "-movflags", "+faststart",
+            "-progress", "pipe:1", "-nostats", "-f", "mp4", "file:/c/out.mp4.part", NULL };
+        WalpeImportScene so = sc;
+        so.fast = FALSE;
+        char **off = walpe_import_scene_argv ("/w/a b.tex", &so, "/c/out.mp4.part", "libx264");
+        CHECK (g_strv_equal ((const char *const *) off, before));
+        if (!g_strv_equal ((const char *const *) off, before)) {
+            char *j = g_strjoinv (" | ", off);
+            g_printerr ("  the vector is: %s\n", j);
+            g_free (j);
+        }
+        /* with it: the rate factor, and three options behind it; nothing
+         * else, nothing in another place */
+        WalpeImportScene sf = sc;
+        sf.fast = TRUE;
+        char **on = walpe_import_scene_argv ("/w/a b.tex", &sf, "/c/out.mp4.part", "libx264");
+        static const char *const more[] = { "-refs", "1", "-bf", "0", "-tune", "fastdecode" };
+        const int crf = arg_at (off, "-crf");
+        const guint n_off = g_strv_length (off), n_on = g_strv_length (on);
+        CHECK (crf > 0 && n_on == n_off + G_N_ELEMENTS (more));
+        gboolean same = n_on == n_off + G_N_ELEMENTS (more);
+        for (guint i = 0; same && i < n_on; i++) {
+            const guint at = (guint) crf + 2;      /* behind "-crf" and its value */
+            const char *exp = i < at ? off[i]
+                            : i < at + G_N_ELEMENTS (more) ? more[i - at]
+                            : off[i - G_N_ELEMENTS (more)];
+            if (i == (guint) crf + 1)
+                exp = "17";
+            same = !strcmp (on[i], exp);
+        }
+        CHECK (same);
+        CHECK (have_arg (on, "-crf", "17") && have_arg (on, "-preset", "medium") &&
+               have_arg (on, "-profile:v", "high"));
+        g_strfreev (on);
+        g_strfreev (off);
+        /* the encoders that have no such options take none of them (the job
+         * never asks them for such a copy: test_runs) */
+        on = walpe_import_scene_argv ("/w/a b.tex", &sf, "/c/out.mp4.part", "h264_nvenc");
+        off = walpe_import_scene_argv ("/w/a b.tex", &so, "/c/out.mp4.part", "h264_nvenc");
+        CHECK (g_strv_equal ((const char *const *) on, (const char *const *) off) && arg_at (on, "-refs") < 0);
+        g_strfreev (on);
+        g_strfreev (off);
+    }
     /* the other matrices; a number that is none: no tag */
     WalpeImportScene s2 = sc;
     s2.matrix = 6;
@@ -487,6 +577,107 @@ static Result run_scene (const char *src, const WalpeImportScene *sc, const char
     return r;
 }
 
+/* does the file hold this text (libx264's note of its settings)? */
+static gboolean made_with (const char *file, const char *text)
+{
+    char *d = NULL;
+    gsize n = 0;
+    if (!g_file_get_contents (file, &d, &n, NULL))
+        return FALSE;
+    gboolean hit = g_strstr_len (d, (gssize) n, text) != NULL;
+    if (!hit)   /* (binary: the text may come behind a 0 byte) */
+        for (gsize i = 0, tl = strlen (text); !hit && i + tl <= n; i++)
+            hit = d[i] == text[0] && !memcmp (d + i, text, tl);
+    g_free (d);
+    return hit;
+}
+
+static char *self;      /* this program */
+
+/* This program started again as "--no-x264 <tex> <off> <len> <dst>" with a
+ * PATH that holds the real ffprobe and an "ffmpeg" that lists one encoder,
+ * libopenh264, and can do nothing else: TRUE when the copy that is cheap to
+ * decode was refused with the reason that names libx264. */
+static gboolean child_no_x264 (const char *tex, guint64 off, guint64 len, const char *dst)
+{
+    char *bin = P ("fake bin"), *ff = P ("fake bin/ffmpeg"), *fp = P ("fake bin/ffprobe");
+    char *real = g_find_program_in_path ("ffprobe");
+    g_mkdir_with_parents (bin, 0700);
+    gboolean ok = real && symlink (real, fp) == 0 &&
+                  g_file_set_contents (ff, "#!/bin/sh\nfor a in \"$@\"; do\n  if [ \"$a\" = -encoders ]; then\n"
+                                           "    echo ' V....D libopenh264          OpenH264 H.264'\n    exit 0\n"
+                                           "  fi\ndone\necho 'this ffmpeg encodes nothing' >&2\nexit 1\n", -1, NULL) &&
+                  g_chmod (ff, 0700) == 0;
+    char *so = g_strdup_printf ("%" G_GUINT64_FORMAT, off), *sl = g_strdup_printf ("%" G_GUINT64_FORMAT, len);
+    char *out = NULL;
+    int status = -1;
+    if (ok) {
+        char **env = g_environ_setenv (g_get_environ (), "PATH", bin, TRUE);
+        const char *argv[] = { self, "--no-x264", tex, so, sl, dst, NULL };
+        ok = g_spawn_sync (NULL, (char **) argv, env, G_SPAWN_DEFAULT, NULL, NULL, &out, NULL, &status, NULL) &&
+             status == 0 && out && strstr (out, "left as it is") && strstr (out, "libx264");
+        if (!ok)
+            g_printerr ("  the child said (status %d): %s\n", status, out ? out : "(nothing)");
+        g_strfreev (env);
+    }
+    g_free (out);
+    g_unlink (ff);
+    g_unlink (fp);
+    g_rmdir (bin);
+    g_free (so); g_free (sl); g_free (real);
+    g_free (bin); g_free (ff); g_free (fp);
+    return ok;
+}
+
+static Result run_scene (const char *src, const WalpeImportScene *sc, const char *dst, int secs);
+
+/* the child of child_no_x264: prints why the job ended; 0 = it was refused */
+static int main_no_x264 (char **argv)
+{
+    const WalpeImportScene sc = { .off = g_ascii_strtoull (argv[3], NULL, 10),
+                                  .len = g_ascii_strtoull (argv[4], NULL, 10),
+                                  .w = 640, .h = 360, .matrix = 1, .fast = TRUE };
+    loop = g_main_loop_new (NULL, FALSE);
+    Result r = run_scene (argv[2], &sc, argv[5], 120);
+    g_print ("%s\n", r.error ? r.error : "(no error)");
+    return r.called && !r.ok ? 0 : 1;
+}
+
+/* the child of test_switch: which kind of copy is on in this environment */
+static int main_kind (void)
+{
+    char *f = walpe_scene_video_cache_file ("0123456789abcdef0123456789abcdef", 640, 360);
+    char *b = f ? g_path_get_basename (f) : NULL;
+    g_print ("%d %d %s\n", walpe_scene_video_fast (), walpe_scene_video_fast (), b ? b : "?");
+    return 0;
+}
+
+/* WALPE_VIDEO_COPY_FAST: off without it, with nothing in it and with 0;
+ * on with anything else. The name of the copy a scene asks for follows it. */
+static void test_switch (void)
+{
+    static const struct { const char *val; gboolean fast; } t[] = {
+        { NULL, FALSE }, { "", FALSE }, { "0", FALSE }, { "1", TRUE }, { "yes", TRUE },
+    };
+    for (guint i = 0; i < G_N_ELEMENTS (t); i++) {
+        char **env = g_get_environ ();
+        env = t[i].val ? g_environ_setenv (env, "WALPE_VIDEO_COPY_FAST", t[i].val, TRUE)
+                       : g_environ_unsetenv (env, "WALPE_VIDEO_COPY_FAST");
+        const char *argv[] = { self, "--kind", NULL };
+        char *out = NULL;
+        int status = -1;
+        gboolean ran = g_spawn_sync (NULL, (char **) argv, env, G_SPAWN_DEFAULT, NULL, NULL, &out, NULL,
+                                     &status, NULL) && status == 0 && out;
+        const char *want = t[i].fast ? "1 1 0123456789abcdef0123456789abcdef-scene-640x360-fast.mp4\n"
+                                     : "0 0 0123456789abcdef0123456789abcdef-scene-640x360.mp4\n";
+        CHECK (ran && !g_strcmp0 (out, want));
+        if (!ran || g_strcmp0 (out, want))
+            g_printerr ("  WALPE_VIDEO_COPY_FAST=%s: %s\n", t[i].val ? t[i].val : "(unset)", out ? out : "(nothing)");
+        g_free (out);
+        g_strfreev (env);
+    }
+}
+
 static void test_runs (void)
 {
     char *ff = g_find_program_in_path ("ffmpeg"), *fp = g_find_program_in_path ("ffprobe");
@@ -575,6 +766,32 @@ static void test_runs (void)
         g_free (r.dst);
         g_free (r.error);
         g_free (dstr);
+        /* the copy that is cheap to decode: the same clip, size, pictures
+         * and tags in its own file next to the other one, and made with
+         * what makes it cheap - libx264 writes its settings into the stream */
+        char *dstf = g_build_filename (cache, "0123456789abcdef0123456789abcdef-scene-640x360-fast.mp4", NULL);
+        WalpeImportScene scf = sc;
+        scf.fast = TRUE;
+        r = run_scene (tex, &scf, dstf, 240);
+        CHECK (r.called && r.ok && !g_strcmp0 (r.dst, dstf));
+        if (!r.ok)
+            g_printerr ("  error: %s\n", r.error ? r.error : "(none)");
+        got = probe (dstf);
+        CHECK (!g_strcmp0 (got, "h264,640,360,yuv420p,tv,bt709,30"));
+        g_free (got);
+        CHECK (count_names (cache, ".part") == 0 && count_names (cache, ".mp4") == 2);
+        CHECK (made_with (dstf, "cabac=0") && made_with (dstf, " ref=1 ") && made_with (dstf, "deblock=0:") &&
+               made_with (dstf, "bframes=0") && made_with (dstf, "crf=17.0"));
+        CHECK (made_with (dst, "cabac=1") && made_with (dst, "crf=19.0") && !made_with (dst, "crf=17.0") &&
+               !made_with (dst, "bframes=0"));
+        g_free (r.dst);
+        g_free (r.error);
+        /* an ffmpeg without libx264: no such copy, and a reason (this
+         * program again, with a PATH in which "ffmpeg" knows one encoder) */
+        g_unlink (dstf);
+        CHECK (child_no_x264 (tex, off, len, dstf));
+        CHECK (!g_file_test (dstf, G_FILE_TEST_EXISTS) && count_names (cache, ".part") == 0);
+        g_free (dstf);
         g_unlink (dst);
         g_free (dst);
     }
@@ -662,8 +879,15 @@ out:
     g_free (in); g_free (cache);
 }
 
-int main (void)
+int main (int argc, char **argv)
 {
+    if (argc == 2 && !strcmp (argv[1], "--kind"))
+        return main_kind ();
+    if (argc == 6 && !strcmp (argv[1], "--no-x264"))
+        return main_no_x264 (argv);
+    self = g_file_read_link ("/proc/self/exe", NULL);
+    g_assert (self);
+    g_unsetenv ("WALPE_VIDEO_COPY_FAST");
     tmp = g_dir_make_tmp ("walpe-scenevideo-test-XXXXXX", NULL);
     g_assert (tmp);
     g_setenv ("HOME", tmp, TRUE);
@@ -673,6 +897,7 @@ int main (void)
     loop = g_main_loop_new (NULL, FALSE);
     test_decision ();
     test_name ();
+    test_switch ();
     test_argv ();
     test_runs ();
     {
@@ -684,6 +909,7 @@ int main (void)
         g_free (w);
     }
     g_rmdir (tmp);
+    g_free (self);
     if (fails)
         g_printerr ("scenevideo-test: %d check(s) failed\n", fails);
     else

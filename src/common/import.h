@@ -88,12 +88,18 @@ WalpeImport *walpe_import_start_to (const char *src, const char *dst_file,
  *     BT.601, 9 BT.2020; anything else: no tag) and limited range; its
  *     samples are scaled, not converted;
  *   - ffmpeg runs at the lowest CPU and disk priority (nice 19, SCHED_IDLE,
- *     idle I/O class) and ends with the daemon.
+ *     idle I/O class) and ends with the daemon;
+ *   - with `fast` the copy is encoded for cheap decoding (scenevideo.h
+ *     WALPE_VIDEO_COPY_FAST): libx264 with -crf 17 -refs 1 -bf 0 -tune
+ *     fastdecode in the place of -crf 19. Only libx264 can do that: with
+ *     another encoder the job ends with an error that says so and no
+ *     output. Without `fast` the arguments are what they always were.
  * Source frame rate, no audio, as every import. */
 typedef struct {
     guint64 off, len;
     int w, h;
     int matrix;
+    gboolean fast;
 } WalpeImportScene;
 WalpeImport *walpe_import_start_scene (const char *src, const WalpeImportScene *sc,
                                        const char *dst_file, WalpeImportDone done, gpointer user,

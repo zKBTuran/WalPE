@@ -6933,6 +6933,14 @@ static void scenenode_mem_stats (WalpeContent *c, JsonBuilder *b)
         json_builder_begin_object (b);
         json_builder_set_member_name (b, "open");
         json_builder_add_boolean_value (b, sv->v != NULL);
+        if (sv->v) {
+            /* what is decoded: the clip, or which kind of converted copy
+             * (common/scenevideo.h) */
+            WalpeVideoTexInfo in;
+            walpe_video_tex_info (sv->v, &in);
+            walpe_mem_jstr (b, "played_from", !in.from_copy ? "clip"
+                            : in.copy_fast ? "copy, encoded for cheap decoding" : "copy");
+        }
         walpe_mem_jint (b, "width", sv->full_w);
         walpe_mem_jint (b, "height", sv->full_h);
         walpe_mem_jint (b, "texture_width", sv->w);

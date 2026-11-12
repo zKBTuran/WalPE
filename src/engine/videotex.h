@@ -71,6 +71,8 @@ typedef struct {
     int play_w, play_h;     /* what is decoded now: the clip, or a copy of it */
     double play_fps;
     gboolean from_copy;
+    gboolean copy_fast;     /* ... a copy of the kind encoded for cheap decoding
+                             * (common/scenevideo.h; by its name) */
     /* what the decoder gave: 0 = no picture yet, 1 = 8-bit 4:2:0 in
      * limited range, 2 = anything else, 3 = like 1 in a clip that is stored
      * rotated (its copy would be stored rotated too and never played: none
@@ -83,7 +85,9 @@ void walpe_video_tex_info (WalpeVideoTex *v, WalpeVideoTexInfo *info);
 
 /* For `walpe-ctl status`: one entry per scene video that is open,
  *   "<file>: source 3840x2160 60.00 fps, played 1920x1080 60.00 fps, copy: ready"
- * joined with "; ". After "copy:" - ready, off, not needed, not made (why),
+ * joined with "; ". After "copy:" - ready (for a copy of the kind encoded
+ * for cheap decoding: "ready, encoded for cheap decoding"), off, not needed,
+ * not made (why),
  * not usable (why), or for a copy that is asked for what `job` answers for
  * its file (the daemon: "converting 42 %", "waiting", "failed: ..."; job
  * NULL: "wanted"). job is called with the module's locks held: it must not

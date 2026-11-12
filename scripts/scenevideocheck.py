@@ -30,6 +30,15 @@ monitor does not depend on the moment it is read.
   damaged  the copy in the cache is cut short (the machine lost power before the file
            had reached the disk): the daemon that starts with the scene removes it,
            plays the clip as it is, makes the copy again - once - and plays that.
+  fast     WALPE_VIDEO_COPY_FAST=1 (a copy that is cheaper to decode) while the copy of
+           the usual kind is in the cache: that one is not taken - the clip plays, a copy
+           under a name of its own is made, once, and played; status and `walpe-ctl mem`
+           say which kind plays; libx264's settings in the two files are the two
+           encodings. Cut short, it is removed and made again, once; played, its time
+           stamp is refreshed; a clip that is stored rotated gets none. Without the
+           variable the usual copy plays at once, nothing is converted, and the other
+           file is neither played nor touched - until nothing has played it for 90
+           days: then the daemon removes it at its start like any other copy.
   stale    a file under the copy's name that can be read but is not the clip (fewer
            pictures: what ffmpeg makes of a clip with a variable frame rate): "not
            usable", the clip plays as it is, and the file's time stamp is NOT refreshed,
@@ -429,6 +438,197 @@ def case_damaged(env, W):
         env.stop_daemon()
 
 
+# --------------------------------------------------------------------- fast
+FAST_ON = {"WALPE_VIDEO_COPY_FAST": "1"}
+SV_PLAIN = "v.tex: source 1280x720 30.00 fps, played 640x360 30.00 fps, copy: ready"
+SV_FAST = SV_PLAIN + ", encoded for cheap decoding"
+
+
+def played_from(env):
+    """`walpe-ctl mem`: "played_from" of the scene's clip (clip / copy / copy, encoded for cheap decoding)"""
+    def find(o):
+        if isinstance(o, dict):
+            if "played_from" in o:
+                return o["played_from"]
+            o = list(o.values())
+        if isinstance(o, list):
+            for v in o:
+                r = find(v)
+                if r is not None:
+                    return r
+        return None
+    return find(env.ipc({"cmd": "mem"}) or {})
+
+
+def made_with(path, *texts):
+    """libx264 writes its settings into the stream: are these in the file?"""
+    d = open(path, "rb").read()
+    return all(t in d for t in texts)
+
+
+def case_fast(env, W):
+    cs = copies(env)
+    if len(cs) != 1 or cs[0].endswith("-fast.mp4"):
+        print("skip  fast: the copy of case `copy` is not there", flush=True)
+        return
+    plain, fast = cs[0], cs[0][:-len(".mp4")] + "-fast.mp4"
+    plain_bytes = open(plain, "rb").read()
+    old = time.time() - 10 * 86400
+
+    def conf(wp):
+        rc.jdump(env.config, {"config_version": 4, "fps": 30, "pause_covered": False, "pause_dpms": False,
+                              "video_resolution": "auto", "current": wp})
+
+    def wait_copy():
+        lc.wait_for(lambda: "played 640x360 30.00 fps, copy: ready" in scene_videos(env) or
+                    "failed" in scene_videos(env) or "not usable" in scene_videos(env), 300, 0.25)
+        return scene_videos(env)
+
+    def plain_untouched(what):
+        check(open(plain, "rb").read() == plain_bytes and abs(os.stat(plain).st_mtime - old) < 2,
+              f"fast: {what}: the copy of the other kind is as it was, its time stamp too (it is not played)",
+              time.time() - os.stat(plain).st_mtime)
+    try:
+        # 1. the variable set, a copy of the other kind in the cache
+        os.utime(plain, (old, old))
+        conf(W["vid"])
+        mark = env.mark()
+        if not check(start(env, extra=FAST_ON), "fast: daemon started with WALPE_VIDEO_COPY_FAST=1, the scene and "
+                     "its copy of the usual kind"):
+            return
+        lc.loaded(env, W["vid"])
+        sv = wait_copy()
+        log = env.since(mark)
+        if not check(sv == SV_FAST, "fast: a copy of its own is made and played, and status says which kind "
+                     "(copy: ready, encoded for cheap decoding)", sv):
+            print("\n".join(ln for ln in log.splitlines() if "video" in ln or "import" in ln)[-3000:])
+            return
+        check("video: 1280x720" in log and "is played from its converted copy " + plain + " " not in log,
+              "fast: the copy of the other kind was not taken: the clip itself played until this one was made",
+              [ln for ln in log.splitlines() if "video:" in ln][:6])
+        check(log.count("making a 640x360 copy that is cheap to decode once") == 1 and
+              log.count("making a 640x360 copy") == 1 and log.count("for its scene made") == 1,
+              "fast: one conversion, and the log says of which kind", [ln for ln in log.splitlines() if "video:" in ln][-8:])
+        check(copies(env) == sorted([plain, fast]) and not copies(env, ".part"),
+              "fast: both kinds are in the cache, each under its own name, nothing unfinished",
+              os.listdir(cache_dir(env)))
+        check(probe(fast) == "640,360,yuv420p,60", "fast: 640x360, 8-bit 4:2:0, every one of the clip's 60 pictures",
+              probe(fast))
+        if b"x264 - core" in plain_bytes:
+            check(made_with(fast, b"cabac=0", b" ref=1 ", b"deblock=0:", b"bframes=0", b"crf=17.0") and
+                  made_with(plain, b"cabac=1", b"crf=19.0") and not made_with(plain, b"crf=17.0"),
+                  "fast: made without CABAC, deblocking filter and B-frames, with one reference, at rate factor 17; "
+                  "the usual kind as before (CABAC, rate factor 19)")
+        else:
+            print("skip  fast: this ffmpeg's encoder is not libx264: its settings are not looked at", flush=True)
+        check(played_from(env) == "copy, encoded for cheap decoding",
+              "fast: `walpe-ctl mem` says which kind plays", played_from(env))
+        plain_untouched("made")
+        check(bars_ok(picture(env)), "fast: the monitor shows the clip's picture")
+        env.stop_daemon()
+
+        # 2. what is checked of a copy is checked of this kind: cut short, it is removed and made again, once
+        whole = os.path.getsize(fast)
+        with open(fast, "r+b") as f:
+            f.truncate(whole // 2)
+        mark = env.mark()
+        if not check(start(env, extra=FAST_ON), "fast: daemon started again, this copy cut to half its length"):
+            return
+        lc.loaded(env, W["vid"])
+        sv = wait_copy()
+        log = env.since(mark)
+        check(sv == SV_FAST and "cannot be read (cut short or damaged): removed" in log and
+              log.count("making a 640x360 copy that is cheap to decode once") == 1 and
+              log.count("for its scene made") == 1 and log.count("cut short or damaged") == 1,
+              "fast: a damaged copy of this kind is removed and made again, once",
+              (sv, [ln for ln in log.splitlines() if "video:" in ln or "scenenode:" in ln][-8:]))
+        check(copies(env) == sorted([plain, fast]) and probe(fast) == "640,360,yuv420p,60" and
+              not copies(env, ".part"), "fast: it is whole again; both kinds are in the cache", os.listdir(cache_dir(env)))
+        plain_untouched("made again")
+        env.stop_daemon()
+
+        # 3. the next start plays it from the first picture, and that marks it as in use
+        os.utime(fast, (old, old))
+        mark = env.mark()
+        if not check(start(env, extra=FAST_ON), "fast: daemon started a third time"):
+            return
+        lc.loaded(env, W["vid"])
+        lc.wait_for(lambda: "copy: ready" in scene_videos(env), 30, 0.2)
+        ok = lc.wait_for(lambda: time.time() - os.stat(fast).st_mtime < 3600, 15, 0.2)
+        log = env.since(mark)
+        check(scene_videos(env) == SV_FAST and "is played from its converted copy " + fast in log and
+              "making a" not in log and "video: 1280x720" not in log and "removed" not in log,
+              "fast: the copy plays from the first picture: the clip's decoder is never opened, nothing converted",
+              (scene_videos(env), [ln for ln in log.splitlines() if "video:" in ln][:6]))
+        check(bool(ok), "fast: the copy that is played has its time stamp refreshed",
+              time.time() - os.stat(fast).st_mtime)
+        plain_untouched("played")
+        # a clip that is stored rotated gets no copy of this kind either
+        if os.path.exists(os.path.join(W["rot"], "scene.json")):
+            mark = env.mark()
+            env.open(W["rot"])
+            lc.loaded(env, W["rot"])
+            lc.wait_for(lambda: "copy: not made" in scene_videos(env) or "copy: not usable" in scene_videos(env) or
+                        "copy: failed" in scene_videos(env) or "copy: ready" in scene_videos(env), 120, 0.25)
+            time.sleep(2.0)
+            check(scene_videos(env) == "v.tex: source 1280x720 30.00 fps, played 1280x720 30.00 fps, copy: not made "
+                  "(the clip is stored rotated)" and "making a" not in env.since(mark) and
+                  copies(env) == sorted([plain, fast]) and not copies(env, ".part"),
+                  "fast: a clip that is stored rotated is left alone: no copy of this kind, nothing in the cache",
+                  (scene_videos(env), os.listdir(cache_dir(env))))
+        else:
+            print("skip  fast: this ffmpeg writes no clip that is stored rotated", flush=True)
+        env.stop_daemon()
+
+        # 4. without the variable: the usual copy, at once; this kind stays where it is, unused
+        os.utime(fast, (old, old))
+        fast_bytes = open(fast, "rb").read()
+        conf(W["vid"])
+        mark = env.mark()
+        if not check(start(env), "fast: daemon started without the variable"):
+            return
+        lc.loaded(env, W["vid"])
+        lc.wait_for(lambda: "copy: ready" in scene_videos(env), 30, 0.2)
+        lc.wait_for(lambda: time.time() - os.stat(plain).st_mtime < 3600, 15, 0.2)
+        log = env.since(mark)
+        check(scene_videos(env) == SV_PLAIN and "is played from its converted copy " + plain + " " in log and
+              "making a" not in log and "video: 1280x720" not in log,
+              "fast: the copy of the usual kind plays from the first picture, nothing is converted",
+              (scene_videos(env), [ln for ln in log.splitlines() if "video:" in ln][:6]))
+        check(played_from(env) == "copy", "fast: `walpe-ctl mem` says that the usual kind plays", played_from(env))
+        check(open(plain, "rb").read() == plain_bytes and time.time() - os.stat(plain).st_mtime < 3600,
+              "fast: that copy is the file it was, now marked as in use")
+        check(open(fast, "rb").read() == fast_bytes and abs(os.stat(fast).st_mtime - old) < 2,
+              "fast: the copy of the other kind is kept as it is, its time stamp too (the rule for unused copies "
+              "covers it)", time.time() - os.stat(fast).st_mtime)
+        check(bars_ok(picture(env)), "fast: the monitor shows the clip's picture")
+        env.stop_daemon()
+
+        # 5. the daemon's tidying at its start goes by ".mp4" and ".mp4.part": this kind's files too
+        ancient = time.time() - 91 * 86400
+        os.utime(fast, (ancient, ancient))
+        with open(fast + ".part", "wb") as f:
+            f.write(b"left by a daemon that was killed")
+        mark = env.mark()
+        if not check(start(env), "fast: daemon started once more, that copy unused for 91 days, an unfinished one "
+                     "next to it"):
+            return
+        lc.loaded(env, W["vid"])
+        lc.wait_for(lambda: "copy: ready" in scene_videos(env), 30, 0.2)
+        log = env.since(mark)
+        check(copies(env) == [plain] and not copies(env, ".part") and
+              f"removing {fast} (converted copy not used for a long time)" in log and
+              f"removing {fast}.part (unfinished conversion)" in log and scene_videos(env) == SV_PLAIN,
+              "fast: a copy of this kind that nothing played for 90 days is removed like any other, an unfinished "
+              "one too; the copy in use stays and plays", (os.listdir(cache_dir(env)), scene_videos(env)))
+        env.stop_daemon()
+    finally:
+        env.stop_daemon()
+        for f in (fast, fast + ".part"):    # (the cases after this one count the copies)
+            if os.path.exists(f):
+                os.unlink(f)
+
+
 # -------------------------------------------------------------------- stale
 def case_stale(env, W):
     cs = copies(env)
@@ -781,6 +981,7 @@ def case_webunload(env, W):
 
 
 CASES = [("copy", case_copy), ("switch", case_switch), ("restart", case_restart), ("damaged", case_damaged),
+         ("fast", case_fast),
          ("stale", case_stale), ("refused", case_refused), ("cancel", case_cancel), ("exits", case_exits),
          ("small", case_small), ("monitors", case_monitors), ("webunload", case_webunload)]
 

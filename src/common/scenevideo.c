@@ -122,17 +122,41 @@ char *walpe_scene_video_id (const char *path, guint64 off, guint64 len)
     return id;
 }
 
-char *walpe_scene_video_cache_file (const char *id, int w, int h)
+gboolean walpe_scene_video_fast (void)
+{
+    static gint env = -1;   /* atomic: -1 = not looked at */
+    int e = g_atomic_int_get (&env);
+    if (e < 0) {
+        const char *v = g_getenv ("WALPE_VIDEO_COPY_FAST");
+        e = v && *v && *v != '0';
+        g_atomic_int_set (&env, e);
+    }
+    return e;
+}
+
+#define SV_FAST_END "-fast.mp4"
+
+gboolean walpe_scene_video_copy_is_fast (const char *file)
+{
+    return file && g_str_has_suffix (file, SV_FAST_END);
+}
+
+char *walpe_scene_video_cache_file_as (const char *id, int w, int h, gboolean fast)
 {
     if (!id || strlen (id) != 32 || w < 2 || h < 2)
         return NULL;
     for (const char *p = id; *p; p++)
         if (!g_ascii_isxdigit (*p))
             return NULL;
-    char *name = g_strdup_printf ("%s-scene-%dx%d.mp4", id, w, h);
+    char *name = g_strdup_printf ("%s-scene-%dx%d%s", id, w, h, fast ? SV_FAST_END : ".mp4");
     char *p = g_build_filename (g_get_user_cache_dir (), "walpe", "video", name, NULL);
     g_free (name);
     return p;
+}
+
+char *walpe_scene_video_cache_file (const char *id, int w, int h)
+{
+    return walpe_scene_video_cache_file_as (id, w, h, walpe_scene_video_fast ());
 }
 
 /* set once, by the daemon, before its render threads exist */

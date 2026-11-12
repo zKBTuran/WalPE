@@ -26,6 +26,11 @@
 #endif
 
 #define CRF "19"   /* visually lossless-ish for wallpapers, ~1/3 of crf 15 size */
+/* WalpeImportScene.fast: no B-frames, one reference, CAVLC and no deblocking
+ * filter cost about a decibel at the same rate factor; two steps lower
+ * gives the PSNR of CRF again (measured on a 3840x2160 clip made 1920x1080:
+ * 45.46 dB at 19, 45.50 dB this way at 17, for 2.1 times the bytes) */
+#define CRF_FAST "17"
 /* the box of the converted copies written before the box was a setting
  * (walpe_video_cache_file: their names stay valid for it) */
 #define CACHE_V1_W 1920
@@ -282,6 +287,12 @@ static char **build_argv (const char *src, const char *dst_part, const WalpeMedi
             push (a, "-b:v");     push (a, "0");
         } else if (!g_strcmp0 (encoder, "libopenh264")) {
             push (a, "-b:v");     push (a, "12M");
+        } else if (sc && sc->fast) { /* libx264, a copy that is cheap to decode */
+            push (a, "-preset");  push (a, "medium");
+            push (a, "-crf");     push (a, CRF_FAST);
+            push (a, "-refs");    push (a, "1");
+            push (a, "-bf");      push (a, "0");
+            push (a, "-tune");    push (a, "fastdecode");
         } else { /* libx264 */
             push (a, "-preset");  push (a, "medium");
             push (a, "-crf");     push (a, CRF);
@@ -749,16 +760,25 @@ static void probe_cb (GObject *o, GAsyncResult *res, gpointer user)
         finish (imp, FALSE, msg);
         g_free (msg);
     } else if (imp->is_scene) {
-        const char *enc = pick_encoder (imp->encoder);
-        if (!enc) {
+        /* (a copy that is cheap to decode is libx264's whatever encoder is
+         * set: the others have no such settings, and no copy is better
+         * than one of the other kind under this kind's name) */
+        const char *enc = !imp->scene.fast ? pick_encoder (imp->encoder)
+                        : have_encoder ("libx264") ? "libx264" : NULL;
+        if (!enc && imp->scene.fast) {
+            finish (imp, FALSE, "left as it is: a copy that is cheap to decode "
+                                "(WALPE_VIDEO_COPY_FAST) needs an ffmpeg with the libx264 "
+                                "encoder");
+        } else if (!enc) {
             finish (imp, FALSE, "this ffmpeg build has no H.264 encoder (libx264, h264_nvenc "
                                 "or libopenh264)");
         } else {
             imp->remux = FALSE;     /* never: the point is another size */
             imp->used_encoder = g_strdup (enc);
             g_message ("import: %s (%" G_GUINT64_FORMAT " bytes at %" G_GUINT64_FORMAT "): h264 "
-                       "%dx%d -> %s %dx%d", imp->src, imp->scene.len, imp->scene.off,
-                       imp->mi.width, imp->mi.height, enc, imp->scene.w, imp->scene.h);
+                       "%dx%d -> %s %dx%d%s", imp->src, imp->scene.len, imp->scene.off,
+                       imp->mi.width, imp->mi.height, enc, imp->scene.w, imp->scene.h,
+                       imp->scene.fast ? ", encoded for cheap decoding" : "");
             start_encode (imp);
         }
     } else {

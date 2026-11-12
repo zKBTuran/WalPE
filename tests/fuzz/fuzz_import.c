@@ -49,12 +49,20 @@ int LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
                                   (double) num (data, size, 24) / 1000.0, &ow, &oh))
         FUZZ_CHECK (ow > 0 && oh > 0);
     WalpeImportScene sc = { (guint64) (guint32) num (data, size, 0), (guint64) (guint32) num (data, size, 4),
-                            num (data, size, 8), num (data, size, 12), size > 16 ? data[16] % 12 : 1 };
+                            num (data, size, 8), num (data, size, 12), size > 16 ? data[16] % 12 : 1,
+                            size > 17 && (data[17] & 1) };
     g_strfreev (walpe_import_scene_argv ("/in/clip.tex", &sc, "/out/copy.part", "libx264"));
     const char *path = fuzz_file (0, data, size);
     char *id = walpe_scene_video_id (path, sc.off % (size + 2), sc.len % (size + 2));
     if (id) {
         g_free (walpe_scene_video_cache_file (id, ow, oh));
+        /* (the two kinds of copy: two names, told apart by the name) */
+        char *fa = walpe_scene_video_cache_file_as (id, ow, oh, FALSE);
+        char *fb = walpe_scene_video_cache_file_as (id, ow, oh, TRUE);
+        FUZZ_CHECK (!fa == !fb && (!fa || (!walpe_scene_video_copy_is_fast (fa) &&
+                                           walpe_scene_video_copy_is_fast (fb))));
+        g_free (fa);
+        g_free (fb);
         g_free (id);
     }
     g_free (walpe_scene_video_id (path, 0, 0));

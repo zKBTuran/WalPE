@@ -202,6 +202,7 @@ The other way round, `WALPE_MEM_STATS=1` switches memory numbers by kind in
 | `WALPE_VIDEO_ZEROCOPY=0\|1` | config `video_zerocopy` (off) | hardware-decoded pictures stay in GPU memory where that is exact |
 | `WALPE_VIDEO_LIMIT=0\|1` | config `video_limit` (off) | videos follow the frame rate limit |
 | `WALPE_VIDEO_SCENE_CONVERT=0\|1` | config `video_scene_convert` (on) | a video inside a scene that is larger than it is shown is played from a converted copy of the size shown ([VIDEO.md](VIDEO.md)) |
+| `WALPE_VIDEO_COPY_FAST=1` | off | copies of scene videos made from then on are encoded for cheap decoding (libx264 `-crf 17 -refs 1 -bf 0 -tune fastdecode` in the place of `-crf 19`): about half the CPU per decoded picture and 12 MB less decoder memory for a 1920x1080 copy, the same PSNR, about twice the bytes on disk. Such a copy is its own file (`…-scene-<W>x<H>-fast.mp4`): copies made without the variable are neither replaced nor played while it is set, and the other way round ([VIDEO.md](VIDEO.md)) |
 | `WALPE_CONVERT_BACKGROUND=0` | lowest priority | (testing) the ffmpeg that makes such a copy runs at the daemon's priority instead of nice 19 / `SCHED_IDLE` / idle I/O: on a machine that is never idle it would not finish |
 | `WALPE_VIDEO_UPLOAD=mode` | config `video_upload` (legacy) | how frames reach their textures: `legacy`, `pbo`, `pbodata`, `persist`, `direct`, each also `+pingpong` |
 | `WALPE_VIDEO_THREADS=n` | by need, at most 1 up to 720p, 2 up to 1080p, 3 up to 1440p, 4 above | fixed number of decoder threads |

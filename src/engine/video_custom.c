@@ -5547,6 +5547,15 @@ static void cv_tex_set_copy (WalpeVideoTex *v, const WalpeVideoTexCopy *copy)
     cv_alt_update (src);
 }
 
+/* Is this copy of a scene's clip of the kind that is encoded for cheap
+ * decoding (WALPE_VIDEO_COPY_FAST)? By its name, as everywhere
+ * (common/scenevideo.h walpe_scene_video_copy_is_fast, which this module
+ * does not link). NULL: no. */
+static gboolean cv_copy_fast (const char *copy)
+{
+    return copy && g_str_has_suffix (copy, "-fast.mp4");
+}
+
 static void cv_tex_info (WalpeVideoTex *v, WalpeVideoTexInfo *info)
 {
     CvSource *src = v->vw->src;
@@ -5560,6 +5569,7 @@ static void cv_tex_info (WalpeVideoTex *v, WalpeVideoTexInfo *info)
     info->play_h = src->play_h;
     info->play_fps = src->play_fps;
     info->from_copy = src->alt_path != NULL;
+    info->copy_fast = cv_copy_fast (src->alt_path);
     g_mutex_unlock (&src->lock);
     info->format = g_atomic_int_get (&src->pic_format);
     info->matrix = g_atomic_int_get (&src->pic_matrix);
@@ -5602,8 +5612,12 @@ static char *cv_scene_note (WalpeVideoJobText job, gpointer user)
             const int st = say ? say->copy_state : WALPE_VTEX_COPY_UNDECIDED;
             if (src->alt_path && !pending) {
                 g_string_append (all, "ready");
+                if (cv_copy_fast (src->alt_path))
+                    g_string_append (all, ", encoded for cheap decoding");
             } else if (pending && src->alt_next) {
                 g_string_append (all, "ready (played from where the clip starts again)");
+                if (cv_copy_fast (src->alt_next))
+                    g_string_append (all, ", encoded for cheap decoding");
             } else if (st == WALPE_VTEX_COPY_WAITING) {
                 char *t = job && say->copy_path ? job (say->copy_path, user) : NULL;
                 g_string_append (all, t ? t : "wanted");
