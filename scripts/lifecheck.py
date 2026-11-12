@@ -47,9 +47,16 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             managers), inside a frame window (reparenting ones), moved to
             the other monitor, across both; nothing pauses while the focus
             is on another window; `set fs_all=on` pauses every monitor as
-            earlier versions did; status says all of it per monitor. Then
-            again with shared rendering (one monitor following the other's
-            frames): each monitor still pauses on its own.
+            earlier versions did; status says all of it per monitor. Two
+            fullscreen windows, one per monitor: the pause follows the
+            focus; the focused one destroyed; with "pause while covered"
+            on the monitor stays paused when the focus leaves and draws
+            nothing in between; a window that turns fullscreen right after
+            it got the focus; the daemon's own windows named as the focused
+            one. A daemon on one of the two monitors (--monitor 1), with
+            the window there before it starts. Then again with shared
+            rendering (one monitor following the other's frames): each
+            monitor still pauses on its own.
   video     a video's load ends with its first picture: a clip the decoder
             cannot do anything with (its container reads well) is a failed
             load with a reason in status, and the wallpaper from before
@@ -1233,6 +1240,46 @@ def case_fullscreen(env, W):
         is_state([True, False], [True, False], "its frame moved to the first monitor")
         xc.focus(0)
         is_state([False, False], [False, False], "no window has the focus")
+
+        # two fullscreen windows, one on each monitor: the monitor of the one that has
+        # the focus pauses, and the pause moves with the focus
+        w6, w7 = xc.window(0, 0, 640, 360), xc.window(640, 0, 640, 360)
+        xc.clients([w1, w2, w3, w6, w7])
+        xc.fullscreen(w6, True)
+        xc.fullscreen(w7, True)
+        xc.focus(w6)
+        is_state([True, False], [True, False], "two fullscreen windows, the focus on the first monitor's")
+        xc.focus(w7)
+        is_state([False, True], [False, True], "two fullscreen windows, the focus on the second monitor's")
+        # the focused one is destroyed; the window manager says a moment later where the
+        # focus went (until then the property names a window that is gone)
+        xc.destroy(w7)
+        time.sleep(0.5 * PATIENCE)
+        check(env.daemon.poll() is None, "fullscreen: the focused fullscreen window was destroyed: the daemon runs")
+        xc.clients([w1, w2, w3, w6])
+        xc.focus(w6)
+        is_state([True, False], [True, False], "the focus went to the fullscreen window that is left")
+        # "Pause while covered" on, as it is by default: when the focus leaves the
+        # fullscreen window its monitor stays paused, as covered now, and draws nothing
+        # while one rule takes over from the other
+        env.ctl("set", "covered=on")
+        is_state([True, False], [True, False], "pause_covered on, the focus on the fullscreen window")
+        n0 = (mons()[0].get("frames") or 0)
+        xc.focus(w2)
+        st = is_state([False, False], [True, False], "the focus on a small window of the second monitor: "
+                      "the first one stays paused, as covered")
+        check("mon0:paused,covered" in (st.get("monitors_state") or ""),
+              "fullscreen: monitors_state names the rule that pauses it now", st.get("monitors_state"))
+        xc.focus(w6)
+        is_state([True, False], [True, False], "the focus back on the fullscreen window")
+        n1 = (mons()[0].get("frames") or 0)
+        check(n1 - n0 <= 2, "fullscreen: the monitor drew nothing while fullscreen and covered took turns",
+              "%d frames" % (n1 - n0))
+        env.ctl("set", "covered=off")
+        xc.destroy(w6)
+        xc.clients([w1, w2, w3])
+        xc.focus(0)
+        is_state([False, False], [False, False], "both fullscreen windows are gone")
 
         # a window that turns fullscreen right after it got the focus (an application
         # asks for fullscreen as soon as its window is mapped): the daemon must have
