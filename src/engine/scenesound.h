@@ -164,6 +164,22 @@ void walpe_sound_stop (WalpeSound *s);    /* stop; the next play starts the file
  * While the layer is not heard the place is kept for when it is. For the
  * sound track of a video (video.c), which has to follow the picture. */
 void walpe_sound_restart_at (WalpeSound *s, double seconds);
+/* A looping player (WALPE_SOUND_LOOP, one file) whose pass is to take
+ * exactly `seconds` of output, to the sample: the loop of a video's sound
+ * track, which has to be as long as the clip's. The file is played from
+ * its beginning for that long, again and again, in one stream and without
+ * a seam of the player's making - sample n of a pass is followed by sample
+ * 0 of the next, as the file has them. A file that is shorter is followed
+ * by silence until the pass is over (the clip is still running); one that
+ * is longer is cut there - as it is when it is longer by no more than
+ * WALPE_SOUND_PERIOD_PAD_S (what an encoder pads a track's last frame
+ * with), faded out over 5 ms when it is longer than that (FLAC files, whose
+ * header says their length; any other file is cut as it is).
+ * WalpeSoundStats.pos is then the place in the pass, and
+ * walpe_sound_restart_at a place in it. To be set before the first play;
+ * 0 = no such length (the default). */
+#define WALPE_SOUND_PERIOD_PAD_S 0.05
+void walpe_sound_set_period (WalpeSound *s, double seconds);
 /* told to play and not ended (a "single" sound ends by itself) - also
  * while nothing is heard because the scene is paused or sound is off */
 gboolean walpe_sound_is_playing (WalpeSound *s);

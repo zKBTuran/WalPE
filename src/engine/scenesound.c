@@ -48,6 +48,7 @@ struct WalpeSound {
     gboolean rewind;     /* stop (): let the file go, start again at the next play */
     gboolean restart;    /* walpe_sound_restart_at (): the first file again, from restart_s */
     double restart_s;
+    double period;       /* walpe_sound_set_period (), 0 = none */
     gboolean broken;     /* none of its files can be played: never tried again */
     float volume;
     gint wp_q16;         /* atomic: the wallpaper's own volume, 16.16 (the group's) */
@@ -935,6 +936,21 @@ static void stream_wait (WalpeSound *s)
     g_mutex_unlock (&s->lock);
 }
 
+/* the number of sample frames a FLAC file says it has in its header
+ * (STREAMINFO, the first block of every FLAC file), 0 = no FLAC file, or
+ * one that does not say */
+static gint64 flac_frames (const char *path)
+{
+    guint8 b[42];
+    gint64 n = 0;
+    FILE *f = fopen (path, "rb");
+    if (f && fread (b, 1, sizeof b, f) == sizeof b && !memcmp (b, "fLaC", 4) && (b[4] & 0x7f) == 0)
+        n = (gint64) (b[21] & 0x0f) << 32 | (gint64) b[22] << 24 | b[23] << 16 | b[24] << 8 | b[25];
+    if (f)
+        fclose (f);
+    return n;
+}
+
 static gpointer sound_thread (gpointer data)
 {
     WalpeSound *s = data;
@@ -949,6 +965,12 @@ static gpointer sound_thread (gpointer data)
                                * next block starts at its own gain (a file's first
                                * sample sounds as it was made) */
     double skip_s = 0;        /* walpe_sound_restart_at: the file opened next begins there */
+    /* walpe_sound_set_period: a pass is pass_n frames of output (0 = the
+     * file's own length); pass_out of them are out; the file has ended and
+     * the rest is silence (pass_pad); the file is longer than the pass by
+     * more than an encoder's padding and is faded where it is cut (pass_fade) */
+    gint64 pass_n = 0, pass_out = 0;
+    gboolean pass_pad = FALSE, pass_fade = FALSE;
     GRand *rng = g_rand_new ();
     gint16 buf[WALPE_SOUND_BLOCK * 2];
     memset (&src, 0, sizeof src);
@@ -989,6 +1011,7 @@ static gpointer sound_thread (gpointer data)
                 int n = have && k_prev > 0 ? src_read (&src, buf, MIN (WALPE_SOUND_BLOCK, MAX (out.rate / 50, 1))) : 0;
                 if (n > 0) {
                     played += n;
+                    pass_out += n;      /* (they are part of the pass they were taken from) */
                     scale_block (buf, n, src.channels, k_prev, 0, n);
                     out_write (&out, buf, n, s->name);
                 }
@@ -1058,6 +1081,16 @@ static gpointer sound_thread (gpointer data)
             }
             have = TRUE;
             played = 0;
+            g_mutex_lock (&s->lock);
+            const double period = s->mode == WALPE_SOUND_LOOP && s->nfiles == 1 ? s->period : 0;
+            g_mutex_unlock (&s->lock);
+            pass_n = period > 0 ? MAX ((gint64) llround (period * src.rate), 1) : 0;
+            pass_out = 0;
+            pass_pad = FALSE;
+            pass_fade = pass_n > 0 &&
+                        flac_frames (s->files[idx]) > pass_n + (gint64) (WALPE_SOUND_PERIOD_PAD_S * src.rate);
+            if (pass_n > 0 && skip_s > 0)   /* a place in the pass */
+                skip_s = fmod (skip_s, (double) pass_n / src.rate);
             if (skip_s > 0) {
                 /* a place inside the file: the decoders have no seek, the
                  * sound before it is decoded and dropped (a FLAC track
@@ -1070,6 +1103,11 @@ static gpointer sound_thread (gpointer data)
                     want -= n;
                     played += n;
                 }
+                if (pass_n > 0) {
+                    /* (behind the file's end: in the silence that follows it) */
+                    pass_out = MIN (played + MAX (want, 0), pass_n - 1);
+                    pass_pad = want > 0;
+                }
                 if (k_prev < 0)
                     k_prev = 0;     /* not the file's first sample: faded in */
             }
@@ -1078,7 +1116,7 @@ static gpointer sound_thread (gpointer data)
             s->st.rate = src.rate;
             s->st.channels = src.channels;
             s->st.opens++;
-            s->st.pos = played;
+            s->st.pos = pass_n > 0 ? pass_out : played;
             g_mutex_unlock (&s->lock);
         }
         /* The output for it, whether the file was opened just now or is one
@@ -1091,7 +1129,28 @@ static gpointer sound_thread (gpointer data)
          * the thread does not see `quit` either. (Returns at once while
          * the open output fits.) */
         out_open (&out, src.rate, src.channels, s->name);
-        int n = src_read (&src, buf, WALPE_SOUND_BLOCK);
+        int n;
+        if (pass_n > 0) {
+            /* a pass of exactly pass_n frames: the file, then silence if it
+             * is shorter; cut if it is longer */
+            const int want = (int) MIN ((gint64) WALPE_SOUND_BLOCK, pass_n - pass_out);
+            n = pass_pad ? 0 : src_read (&src, buf, want);
+            if (n <= 0 && (played > 0 || pass_pad)) {
+                pass_pad = TRUE;
+                n = want;
+                memset (buf, 0, (gsize) n * src.channels * sizeof (gint16));
+            } else if (n > 0 && pass_fade) {
+                const gint64 fade = MAX (src.rate / 200, 1);
+                for (int i = 0; i < n; i++) {
+                    const gint64 left = pass_n - (pass_out + i);
+                    if (left <= fade)
+                        for (int c = 0; c < src.channels; c++)
+                            buf[i * src.channels + c] = (gint16) (buf[i * src.channels + c] * (left - 1) / fade);
+                }
+            }
+        } else {
+            n = src_read (&src, buf, WALPE_SOUND_BLOCK);
+        }
         if (n > 0 && played + n > (gint64) src.rate * WALPE_SOUND_MAX_SECONDS) {
             g_message ("sound: layer %s: a file is longer than %d hours: it ends there", s->name,
                        WALPE_SOUND_MAX_SECONDS / 3600);
@@ -1157,7 +1216,8 @@ static gpointer sound_thread (gpointer data)
             }
             continue;
         }
-        played += n;
+        played += pass_pad ? 0 : n;
+        pass_out += n;
         /* volume: the layer's times the user's */
         g_mutex_lock (&s->lock);
         float vol = CLAMP (s->volume, 0.0f, 1.0f);
@@ -1170,11 +1230,19 @@ static gpointer sound_thread (gpointer data)
         g_mutex_lock (&s->lock);
         s->st.frames += n;
         if (!s->restart)    /* (else the place asked for stands, walpe_sound_restart_at) */
-            s->st.pos = played;
+            s->st.pos = pass_n > 0 ? pass_out : played;
         s->st.peak = MAX (s->st.peak, peak);
         s->st.null_out = out.null_out;
         s->st.running = TRUE;
+        if (pass_n > 0 && pass_out >= pass_n)
+            s->st.plays++;
         g_mutex_unlock (&s->lock);
+        if (pass_n > 0 && pass_out >= pass_n) {
+            /* the pass is over: the file again from its beginning, in the
+             * stream as it is - the next block follows this one (k_prev stays) */
+            src_close (&src);
+            have = FALSE;
+        }
     }
     if (have)
         src_close (&src);
@@ -1463,6 +1531,15 @@ void walpe_sound_restart_at (WalpeSound *s, double seconds)
         g_cond_broadcast (&s->cond);
     }
     kick_locked (s);
+    g_mutex_unlock (&s->lock);
+}
+
+void walpe_sound_set_period (WalpeSound *s, double seconds)
+{
+    if (!s || !isfinite (seconds))
+        return;
+    g_mutex_lock (&s->lock);
+    s->period = seconds > 0 ? MIN (seconds, (double) WALPE_SOUND_MAX_SECONDS) : 0;
     g_mutex_unlock (&s->lock);
 }
 

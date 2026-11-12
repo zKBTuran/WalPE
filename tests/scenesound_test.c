@@ -29,7 +29,10 @@
  *     one gets its output when another falls silent.
  *  9. walpe_sound_restart_at (the sound track of a video): the file from a
  *     place inside it, from its beginning again, from behind its end, and
- *     a place asked for while the player is not heard. */
+ *     a place asked for while the player is not heard.
+ * 10. walpe_sound_set_period (the loop of a video's sound track): every
+ *     pass is exactly that long - a file that is longer is cut, one that
+ *     is shorter is followed by silence - and a place in the silence. */
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <math.h>
@@ -844,6 +847,52 @@ static void test_restart (const char *dir)
     g_free (two);
 }
 
+/* ---- 10 ---- */
+static void test_period (const char *dir)
+{
+    walpe_sound_use_null (TRUE);
+    char *two = write_wav (dir, "two.wav", 48000, 2, 16, 1, 96000, TRUE, -1);   /* two seconds */
+    static const double periods[3] = { 1.5, 2.5, 2.0 };
+    for (int k = 0; k < 3; k++) {
+        const gint64 pass = (gint64) (periods[k] * 48000.0);
+        WalpeSoundGroup *g = group_on ("/w/period");
+        WalpeSound *s = snd_new (g, two, NULL, WALPE_SOUND_LOOP, 1.0f);
+        walpe_sound_set_period (s, periods[k]);
+        walpe_sound_play (s);
+        gboolean ok = TRUE;
+        int seen = 0;
+        for (int i = 0; i < 4000 && seen < 6; i++) {
+            /* whenever it is looked at: as many passes as whole periods are out */
+            WalpeSoundStats st = stats_of (s);
+            ok = ok && st.plays == st.frames / pass && st.pos >= 0 && st.pos <= pass &&
+                 (st.opens == st.plays || st.opens == st.plays + 1);
+            seen = st.plays;
+            g_usleep (200);
+        }
+        CHECK (ok && seen >= 6, "a pass of %.1f s of a file of 2 s: %d passes, each %" G_GINT64_FORMAT " frames",
+               periods[k], seen, pass);
+        walpe_sound_group_free (g);
+        CHECK (threads_gone (), "period: the threads end");
+    }
+    /* a place in the silence behind a file that is shorter than the pass */
+    WalpeSoundGroup *g = walpe_sound_group_new ("/w/period2", 1);
+    WalpeSound *s = snd_new (g, two, NULL, WALPE_SOUND_LOOP, 1.0f);
+    walpe_sound_set_period (s, 2.5);
+    walpe_sound_restart_at (s, 2.2);
+    walpe_sound_group_set_active (g, TRUE);
+    WAIT (stats_of (s).plays >= 1, 5000);
+    walpe_sound_group_set_active (g, FALSE);
+    WAIT (!stats_of (s).running, 5000);
+    WalpeSoundStats st = stats_of (s);
+    /* 0.3 s of silence ended the first pass: 14400 frames, then whole passes of 120000 */
+    CHECK (st.plays >= 1 && (st.frames - 14400) / 120000 == st.plays - 1 && st.frames >= 14400,
+           "from 2.2 s of a pass of 2.5 s: %d passes, %" G_GINT64_FORMAT " frames", st.plays, st.frames);
+    walpe_sound_group_free (g);
+    CHECK (threads_gone (), "period: the threads end");
+    g_remove (two);
+    g_free (two);
+}
+
 int main (void)
 {
     test_names ();
@@ -880,6 +929,7 @@ int main (void)
     test_free_running (dir);
     test_stream_cap (dir);
     test_restart (dir);
+    test_period (dir);
 
     g_remove (sine);
     g_rmdir (dir);
