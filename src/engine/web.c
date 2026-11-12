@@ -3963,8 +3963,14 @@ static gboolean web_gl_render (WalpeContent *c, int w, int h, float px, float py
      * paints the first one when it arrives, also on a paused monitor. And
      * the ones after it while the page draws its first picture
      * (sh_first_frame_wanted): the frame taken when loading ended is
-     * often an empty page. */
-    c->first_frame_pending = !v->drawn_seq || !first_done;
+     * often an empty page.
+     * That second part on a paused monitor only. While the flag is up the
+     * daemon presents nothing (content.h), so a monitor that runs was kept
+     * on the wallpaper before for that time too: every page came a second
+     * later than it used to, and what it drew in its first second - the
+     * start of a fade, an intro - never reached the screen. A monitor that
+     * runs gets every frame anyway; it needs no first picture kept for it. */
+    c->first_frame_pending = !v->drawn_seq || (!first_done && v->paused);
     return TRUE;
 }
 

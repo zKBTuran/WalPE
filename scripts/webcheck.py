@@ -40,6 +40,10 @@ that into the daemon's log). Nothing of the user's is read or written.
             then the page is told that it is paused; from there its
             requestAnimationFrame does not run and its processes use (next to) no
             CPU time, as with a page that was paused while it ran. `resume` starts it.
+  firstsecond a page opened on an output that is not paused is shown from its first
+            frame on: what it draws in its first second (the start of a fade, an
+            intro) reaches the output, and the wallpaper before it does not stay a
+            second longer.
   restart   the daemon is ended and started again (the page is back), and restarts in
             place (web hardware acceleration switched): the page is back, the page
             processes of the old image are gone.
@@ -907,6 +911,58 @@ def case_pausedopen(env, W):
 
 
 # ------------------------------------------------------------------ restart
+# A page that is green until 0.75 s after its load event and blue from then on.
+INTRO = """<!doctype html><html><head><meta charset="utf-8"></head>
+<body style="margin:0;background:rgb(32,192,32)"><script>
+window.wallpaperPropertyListener = { applyUserProperties: function (p) {} };
+window.addEventListener('load', function () {
+  console.log('WCintro ' + JSON.stringify({at: 'load'}));
+  setTimeout(function () { document.body.style.background = 'rgb(32,32,192)';
+    console.log('WCintro ' + JSON.stringify({at: 'blue'})); }, 750);
+});
+</script></body></html>
+"""
+
+
+def gen_intro(out):
+    os.makedirs(out)
+    rc.jdump(os.path.join(out, "project.json"), {"type": "web", "title": "webcheck intro", "file": "index.html"})
+    with open(os.path.join(out, "index.html"), "w") as f:
+        f.write(INTRO)
+
+
+def case_firstsecond(env, W):
+    if not start(env, [("A", 1280, 720, 0, 0)], "firstsecond"):
+        return
+    mark = env.mark()
+    mon = env.mons[0]
+    if not open_page(env, W["still"], "still", "firstsecond"):
+        return
+    shows_page(env, mon)
+    # nothing is paused. The page that is opened now is green for its first 0.75 s and
+    # blue after that: the colours in the middle of the output, in the order they come
+    m1 = env.mark()
+    env.open(W["intro"], None)
+    seen, blue, t0 = [], 0, time.time()
+    while time.time() - t0 < 90 and blue < 5:
+        f = env.display.frame(mon)
+        c = displayenv.pixel_of(f, f[0] // 2, f[1] // 2) if f else displayenv.NO_PICTURE
+        name = "green" if near(c, GREEN) else "blue" if near(c, BLUE) else "other"
+        if not seen or seen[-1] != name:
+            seen.append(name)
+        blue = blue + 1 if name == "blue" else 0
+        time.sleep(0.03)
+    if not check(blue >= 5 and any(s.get("at") == "blue" for s in states(env, "intro", m1)),
+                 "firstsecond: the page that was opened is shown", (seen, web_status(env))):
+        return
+    # (a page held back until a second after it loaded came up blue: the wallpaper before
+    # it stayed for that second and the green was never on the output)
+    check("green" in seen and seen.index("green") < seen.index("blue"),
+          "firstsecond: an output that is not paused shows what the page draws in its first second "
+          "(green, then blue)", seen)
+    healthy(env, mark, "firstsecond")
+
+
 def host_leftovers(env):
     """what the private page host could leave in the runtime directory: its socket directories"""
     rt = env.env["XDG_RUNTIME_DIR"]
@@ -1472,7 +1528,7 @@ def case_offline(env, W):
 
 CASES = [("start", case_start), ("live", case_live), ("props", case_props), ("audio", case_audio),
          ("pointer", case_pointer), ("two", case_two), ("outputs", case_outputs), ("pause", case_pause),
-         ("pausedopen", case_pausedopen),
+         ("pausedopen", case_pausedopen), ("firstsecond", case_firstsecond),
          ("restart", case_restart), ("crash", case_crash), ("stale", case_stale), ("leftover", case_leftover),
          ("sandbox", case_sandbox), ("widgets", case_widgets), ("clipboard", case_clipboard),
          ("offline", case_offline)]
@@ -1535,12 +1591,13 @@ def main():
                   "pass --tmp <a short directory>")
             return 2
         wp = os.path.join(env.tmp, "wallpapers")
-        W = {k: os.path.join(wp, k) for k in ("still", "live", "other", "widgets", "clip", "offline")}
+        W = {k: os.path.join(wp, k) for k in ("still", "live", "other", "widgets", "clip", "offline", "intro")}
         gen_page(W["still"], "still", False)
         gen_page(W["live"], "live", True)
         gen_page(W["other"], "other", False)
         gen_widgets(W["widgets"])
         gen_clip(W["clip"])
+        gen_intro(W["intro"])
         if not env.start_x(1280, 720):
             print("webcheck: skipped (the %s display did not start)" % display)
             if display == "sway":
