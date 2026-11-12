@@ -2144,6 +2144,67 @@ static gboolean loader_mapped (const char *name)
     return in;
 }
 
+/* a 4 x 4 TGA picture: colour map type cmap (1: with a colour map of two
+ * entries, used or not), picture type 1 / 2 / 3 / 9 / 10 / 11, the colour
+ * map's first index `first` */
+static void save_tga (const char *rel, int cmap, int type, int first)
+{
+    guint8 b[18 + 6 + 4 * (1 + 4 * 3)], *o = b;
+    const int grey = type == 3 || type == 11, mapped = type == 1 || type == 9, rle = type >= 9;
+    const int bytes = grey || mapped ? 1 : 3;
+    memset (b, 0, sizeof b);
+    b[1] = (guint8) cmap;
+    b[2] = (guint8) type;
+    b[3] = (guint8) (first & 0xff);
+    b[4] = (guint8) (first >> 8);
+    b[5] = cmap ? 2 : 0;
+    b[7] = cmap ? 24 : 0;
+    b[12] = b[14] = 4;
+    b[16] = (guint8) (bytes * 8);
+    b[17] = 0x20;
+    o += 18;
+    if (cmap) {
+        static const guint8 map[6] = { 10, 20, 30, 200, 210, 220 };
+        memcpy (o, map, 6);
+        o += 6;
+    }
+    for (int y = 0; y < 4; y++) {
+        if (rle)
+            *o++ = 3;       /* a raw packet of four pixels */
+        for (int x = 0; x < 4; x++)
+            for (int c = 0; c < bytes; c++)
+                *o++ = mapped ? (guint8) ((x + y) & 1) : (guint8) (40 * x + 20 * y + 30 * c);
+    }
+    mkfile (rel, b, o - b);
+}
+
+/* a 4 x 4 RGB picture as a TIFF file of the 64-bit kind ("BigTIFF") */
+static void save_bigtiff (const char *rel)
+{
+    static const struct { guint16 tag, type; guint64 count, value; } e[] = {
+        { 256, 3, 1, 4 }, { 257, 3, 1, 4 }, { 258, 3, 3, 8 | 8 << 16 | (guint64) 8 << 32 }, { 259, 3, 1, 1 },
+        { 262, 3, 1, 2 }, { 273, 16, 1, 232 }, { 277, 3, 1, 3 }, { 278, 3, 1, 4 }, { 279, 16, 1, 48 },
+        { 284, 3, 1, 1 },
+    };
+    guint8 b[232 + 48], *o = b;
+    memset (b, 0, sizeof b);
+    memcpy (o, "II+\0\10\0\0\0\20\0\0\0\0\0\0\0", 16);     /* 8-byte offsets, the directory at 16 */
+    o += 16;
+    *o = G_N_ELEMENTS (e);
+    o += 8;
+    for (guint i = 0; i < G_N_ELEMENTS (e); i++, o += 20) {
+        o[0] = (guint8) (e[i].tag & 0xff);
+        o[1] = (guint8) (e[i].tag >> 8);
+        o[2] = (guint8) e[i].type;
+        o[4] = (guint8) e[i].count;
+        for (int k = 0; k < 8; k++)
+            o[12 + k] = (guint8) (e[i].value >> (8 * k));
+    }
+    for (int i = 0; i < 48; i++)
+        b[232 + i] = (guint8) (5 * i);
+    mkfile (rel, b, sizeof b);
+}
+
 static void gl_part (void)
 {
     walpe_glutil_init ();
@@ -2268,6 +2329,65 @@ static void gl_part (void)
         CHECK (t.tex == 0);
         if (t.tex)
             glDeleteTextures (1, &t.tex);
+        g_free (f);
+    }
+
+    /* 1b. ... and all of those. The format is settled from the file's
+     * first bytes, and a TGA header or a TIFF file can say more than the
+     * common case: a true-colour or grey TGA picture that carries a colour
+     * map, one without a colour map whose colour map fields are not zero
+     * (its first bytes are a Windows cursor's), a TIFF of the 64-bit kind.
+     * All were layer pictures while gdk-pixbuf chose the loader - it knew
+     * them by their names - and stay ones. */
+    {
+        static const struct { const char *file; int cmap, type, first; } tga[] = {
+            { "gl/tga/plain.tga", 0, 2, 0 }, { "gl/tga/mapped.tga", 1, 1, 0 },
+            { "gl/tga/true-with-map.tga", 1, 2, 0 }, { "gl/tga/true-rle-with-map.tga", 1, 10, 0 },
+            { "gl/tga/grey-with-map.tga", 1, 3, 0 }, { "gl/tga/grey-rle-with-map.TGA", 1, 11, 0 },
+            { "gl/tga/map-origin.tga", 0, 2, 256 },
+        };
+        for (guint i = 0; i < G_N_ELEMENTS (tga); i++) {
+            save_tga (tga[i].file, tga[i].cmap, tga[i].type, tga[i].first);
+            f = P (tga[i].file);
+            t = walpe_gl_tex_from_file (f);
+            if (!(t.tex && t.width == 4 && t.height == 4))
+                g_printerr ("parsers-test: %s is no layer picture any more\n", tga[i].file);
+            CHECK (t.tex && t.width == 4 && t.height == 4);
+            if (t.tex)
+                glDeleteTextures (1, &t.tex);
+            g_free (f);
+        }
+        /* the same bytes under a name that is no TGA's: not a TGA by them alone */
+        save_tga ("gl/tga/true-with-map.png", 1, 2, 0);
+        f = P ("gl/tga/true-with-map.png");
+        t = walpe_gl_tex_from_file (f);
+        CHECK (t.tex == 0);
+        if (t.tex)
+            glDeleteTextures (1, &t.tex);
+        g_free (f);
+
+        save_bigtiff ("gl/big.tif");
+        f = P ("gl/big.tif");
+        char *raw = NULL;
+        gsize raw_len = 0;
+        GdkPixbufLoader *ld = gdk_pixbuf_loader_new_with_type ("tiff", NULL);
+        gboolean reads = ld && g_file_get_contents (f, &raw, &raw_len, NULL) &&
+                         gdk_pixbuf_loader_write (ld, (const guchar *) raw, raw_len, NULL);
+        if (ld)
+            reads = gdk_pixbuf_loader_close (ld, NULL) && reads && gdk_pixbuf_loader_get_pixbuf (ld) != NULL;
+        g_clear_object (&ld);
+        g_free (raw);
+        if (!reads) {
+            g_printerr ("parsers-test: this gdk-pixbuf's TIFF loader does not read a 64-bit TIFF file "
+                        "(check cannot fail here)\n");
+        } else {
+            t = walpe_gl_tex_from_file (f);
+            if (!(t.tex && t.width == 4 && t.height == 4))
+                g_printerr ("parsers-test: a TIFF file of the 64-bit kind is no layer picture any more\n");
+            CHECK (t.tex && t.width == 4 && t.height == 4);
+            if (t.tex)
+                glDeleteTextures (1, &t.tex);
+        }
         g_free (f);
     }
 
