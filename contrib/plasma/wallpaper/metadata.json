@@ -1,0 +1,13 @@
+{
+    "KPackageStructure": "Plasma/Wallpaper",
+    "KPlugin": {
+        "Id": "io.github.walpe.plasma",
+        "Name": "WalPE",
+        "Description": "Shows the WalPE wallpaper under the desktop icons (draws nothing itself)",
+        "Icon": "preferences-desktop-wallpaper",
+        "License": "BSD-3-Clause",
+        "Version": "0.1"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0",
+    "X-KDE-ParentApp": "org.kde.plasmashell"
+}
