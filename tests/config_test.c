@@ -79,8 +79,8 @@ static void test_defaults (void)
     CHECK (c->web_unload);
     /* hardware decoding and its zero-copy path are opt-in */
     CHECK (!c->video_hwdec_api && !c->video_zerocopy && !strcmp (walpe_config_hwdec_word (c), "off"));
-    /* wallpaper sound is off, not muted, and the volume is 0 until set */
-    CHECK (!c->scene_sound && !c->mute && c->volume == 0.0);
+    /* wallpaper sound is on, not muted, at half volume until set */
+    CHECK (c->scene_sound && !c->mute && c->volume == 0.5 && !c->sound_migrated);
     CHECK (c->preview_anim == WALPE_PREVIEW_ALWAYS);
     CHECK (c->focus_action == WALPE_FOCUS_RUN && !c->pause_battery && c->battery_fps == 0);
     CHECK (c->pause_idle == 0);     /* the idle rule is opt-in */
@@ -362,7 +362,7 @@ static void test_broken (void)
                 "\"particle_density\":1e300,\"render_scale\":-5,\"software_threads\":99,"
                 "\"focus_action\":\"dance\",\"preview_anim\":3,\"fx_quality\":\"best\"}");
     c = walpe_config_load ();
-    CHECK (!c->broken_copy && c->fps == 60 && c->volume == 0.0 && !c->paused);
+    CHECK (!c->broken_copy && c->fps == 60 && c->volume == 0.5 && !c->paused);
     CHECK (!g_strcmp0 (c->current, "") && !c->pause_covered);
     CHECK (c->particle_density == 100 && c->render_scale == 25 && c->software_threads == 32);
     CHECK (c->focus_action == WALPE_FOCUS_RUN && c->preview_anim == WALPE_PREVIEW_ALWAYS &&
@@ -563,6 +563,57 @@ static void test_save_failure (void)
     walpe_config_free (c);
 }
 
+/* Wallpaper sound is on by default, at half volume; up to 0.14.0 it was
+ * off at volume 0, and those versions wrote both values into every
+ * config.json. A file of theirs that still holds the old defaults takes the
+ * new ones once; every pair that was somebody's choice is kept. */
+static void test_sound_defaults (void)
+{
+    static const struct { const char *json; gboolean on; double vol; gboolean migrated; const char *what; } k[] = {
+        { "{\"config_version\":4,\"volume\":0.0,\"scene_sound\":false,\"mute\":false}", TRUE, 0.5, TRUE,
+          "0.14.0, nothing set: this version's defaults" },
+        { "{\"config_version\":2,\"volume\":0.0}", TRUE, 0.5, TRUE,
+          "0.12 (no switch yet), volume 0 as it wrote it: this version's defaults" },
+        { "{\"config_version\":2,\"volume\":0.3}", TRUE, 0.3, FALSE,
+          "0.12 with a volume: kept, and sound is on" },
+        { "{\"config_version\":4,\"volume\":0.0,\"scene_sound\":true}", TRUE, 0.0, FALSE,
+          "0.14.0, switched on, volume 0: kept (on, silent)" },
+        { "{\"config_version\":4,\"volume\":0.8,\"scene_sound\":false}", FALSE, 0.8, FALSE,
+          "0.14.0, off with a volume: stays off" },
+        { "{\"config_version\":4,\"volume\":0.0,\"scene_sound\":false,\"sound_defaults\":2}", FALSE, 0.0, FALSE,
+          "this version, switched off and turned down: a choice, kept" },
+        { "{\"config_version\":4}", TRUE, 0.5, FALSE, "neither key: the defaults, nothing migrated" },
+    };
+    for (guint i = 0; i < G_N_ELEMENTS (k); i++) {
+        put_config (k[i].json);
+        WalpeConfig *c = walpe_config_load ();
+        if (!(c->scene_sound == k[i].on && c->volume == k[i].vol && c->sound_migrated == k[i].migrated && !c->mute)) {
+            printf ("FAIL sound defaults, %s: scene_sound %d volume %g migrated %d\n", k[i].what, c->scene_sound,
+                    c->volume, c->sound_migrated);
+            fails++;
+        }
+        walpe_config_free (c);
+    }
+    /* once: the daemon saves a migrated configuration, and what the user
+     * sets afterwards - also back to "off, 0" - stays */
+    put_config (k[0].json);
+    WalpeConfig *c = walpe_config_load ();
+    walpe_config_save (c);
+    walpe_config_free (c);
+    c = walpe_config_load ();
+    CHECK (c->scene_sound && c->volume == 0.5 && !c->sound_migrated);
+    c->scene_sound = FALSE;
+    c->volume = 0.0;
+    walpe_config_save (c);
+    walpe_config_free (c);
+    c = walpe_config_load ();
+    CHECK (!c->scene_sound && c->volume == 0.0 && !c->sound_migrated);
+    walpe_config_free (c);
+    CHECK (walpe_config_migrate_sound (1, TRUE, FALSE, 0.0) && walpe_config_migrate_sound (1, FALSE, TRUE, 0.0));
+    CHECK (!walpe_config_migrate_sound (2, TRUE, FALSE, 0.0) && !walpe_config_migrate_sound (1, TRUE, TRUE, 0.0) &&
+           !walpe_config_migrate_sound (1, TRUE, FALSE, 0.5));
+}
+
 int main (void)
 {
     /* before any GLib call that caches the config dir */
@@ -581,6 +632,7 @@ int main (void)
     test_hwdec_words ();
     test_unknown_keys ();
     test_round12 ();
+    test_sound_defaults ();
     test_broken ();
     test_backend_keys ();
     test_fullscreen_all ();

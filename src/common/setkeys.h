@@ -116,7 +116,7 @@ static const WalpeSetKey walpe_set_keys[] = {
     { "fluid_sim", WALPE_SET_BOOL },
     { "fluid_quality", WALPE_SET_STR },
     /* wallpaper sound (engine/scenesound.h): scenes play their sound layers
-     * (off by default); silence that keeps the volume setting */
+     * (on by default); silence that keeps the volume setting */
     { "scene_sound", WALPE_SET_BOOL },
     { "mute", WALPE_SET_BOOL },
 };

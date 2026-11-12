@@ -10,7 +10,7 @@
  *  - the process allowed sound output (walpe_sound_allow: the daemon does,
  *    the settings window, the tools and the tests never do);
  *  - sound is switched on for the wallpaper: the setting "scene_sound"
- *    (walpe_sound_set_enabled, OFF by default), over which the wallpaper's
+ *    (walpe_sound_set_enabled; on in a new configuration), over which the wallpaper's
  *    own switch wins (the group's override);
  *  - the volume setting is above 0 and "mute" is off, and the wallpaper's
  *    own volume (walpe_sound_group_set_volume) is above 0;
@@ -89,7 +89,9 @@ typedef struct {
 void walpe_sound_allow (gboolean allow);
 gboolean walpe_sound_allowed (void);
 /* the setting "scene_sound": wallpapers without a switch of their own play
- * their sound layers. Off until switched on. Takes effect at once. */
+ * their sound layers. Off in this library until a program sets it (the
+ * daemon does, from its configuration, where it is on by default). Takes
+ * effect at once. */
 void walpe_sound_set_enabled (gboolean on);
 gboolean walpe_sound_enabled (void);
 /* the user's volume for every wallpaper (0..1; 1 until set) and "mute" */

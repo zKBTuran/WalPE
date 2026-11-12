@@ -10033,6 +10033,16 @@ int main (int argc, char **argv)
                    "from now on is kept)", D.cfg->fps_migrated_from, D.cfg->fps);
         walpe_config_save (D.cfg);
     }
+    if (D.cfg->sound_migrated) {
+        /* config.h walpe_config_migrate_sound: sound off at volume 0 was the
+         * default up to 0.14.0, written into every config.json. Saved now,
+         * so it happens once and a choice made from now on is kept. */
+        g_message ("config: wallpaper sound was off at volume 0, the default of versions up to 0.14.0, "
+                   "not a choice: it is on now, at volume %s (the GUI's Engine settings, \"Wallpaper "
+                   "sound\", or walpe-ctl set scene_sound=off, switches it off; that is kept)",
+                   G_STRINGIFY (WALPE_VOLUME_DEFAULT));
+        walpe_config_save (D.cfg);
+    }
     present_settings_load ();   /* gpu.conf / WALPE_*: before any thread, before EGL */
     D.no_refresh_cap = g_getenv ("WALPE_NO_REFRESH_CAP") != NULL;
     D.leader_first = !g_strcmp0 (g_getenv ("WALPE_LEADER"), "first");
@@ -10304,7 +10314,8 @@ int main (int argc, char **argv)
     particles_apply ();
     /* wallpaper sound: only this program may play (the settings window,
      * the tools and the tests never do); what is heard follows the three
-     * settings, of which scene_sound is off until the user switches it on */
+     * settings (scene_sound is on unless the user switched it off; a
+     * wallpaper without sound layers makes no player, thread or stream) */
     walpe_sound_allow (TRUE);
     walpe_sound_set_master (D.cfg->volume);
     walpe_sound_set_muted (D.cfg->mute);

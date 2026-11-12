@@ -127,6 +127,8 @@ static JsonNode *config_to_json (WalpeConfig *c)
     json_builder_add_boolean_value (b, c->scene_sound);
     json_builder_set_member_name (b, "mute");
     json_builder_add_boolean_value (b, c->mute);
+    json_builder_set_member_name (b, "sound_defaults");   /* (config.h: the two above are choices now) */
+    json_builder_add_int_value (b, WALPE_SOUND_DEFAULTS);
     json_builder_set_member_name (b, "paused");
     json_builder_add_boolean_value (b, c->paused);
     json_builder_set_member_name (b, "monitor_current");
@@ -459,6 +461,11 @@ guint walpe_config_save_count (void)
     return (guint) g_atomic_int_get (&save_count);
 }
 
+gboolean walpe_config_migrate_sound (int sound_defaults, gboolean has_switch, gboolean scene_sound, double volume)
+{
+    return sound_defaults < WALPE_SOUND_DEFAULTS && volume == 0.0 && !(has_switch && scene_sound);
+}
+
 int walpe_config_migrate_fps (int version, int fps)
 {
     if (version < 2 && fps == WALPE_FPS_LEGACY_DEFAULT)
@@ -549,8 +556,8 @@ WalpeConfig *walpe_config_load (void)
     c->fps               = WALPE_FPS_DEFAULT; /* cap; each monitor is paced at
                                                * min(cap, its refresh rate) */
     c->config_version    = WALPE_CONFIG_VERSION;
-    c->volume            = 0.0;
-    c->scene_sound       = FALSE;   /* wallpapers are silent until asked */
+    c->volume            = WALPE_VOLUME_DEFAULT;
+    c->scene_sound       = TRUE;    /* wallpapers with sound are heard (config.h) */
     c->mute              = FALSE;
     c->paused            = FALSE;
     c->pause_fullscreen  = TRUE;
@@ -674,6 +681,14 @@ WalpeConfig *walpe_config_load (void)
         c->volume = CLAMP (wpj_num (o, "volume", c->volume), 0.0, 1.0);
         c->scene_sound = wpj_bool (o, "scene_sound", c->scene_sound);
         c->mute = wpj_bool (o, "mute", c->mute);
+        if (walpe_config_migrate_sound ((int) CLAMP (wpj_num (o, "sound_defaults", 1), 1.0, 1000.0),
+                                        json_object_has_member (o, "scene_sound"), c->scene_sound, c->volume)) {
+            /* the defaults of versions up to 0.14.0, written by them and
+             * never chosen: this version's */
+            c->scene_sound = TRUE;
+            c->volume = WALPE_VOLUME_DEFAULT;
+            c->sound_migrated = TRUE;
+        }
         c->paused = wpj_bool (o, "paused", c->paused);
         { JsonObject *mc = wpj_obj (o, "monitor_current");
           GList *ks = mc ? json_object_get_members (mc) : NULL;

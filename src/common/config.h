@@ -44,10 +44,14 @@ typedef struct WalpeConfig_ {
     int     fps_migrated_from; /* the value it replaced (for the log line) */
     char   *broken_copy;      /* config.json could not be read at this load: the
                                * damaged file was kept under this name (else NULL) */
-    double  volume;           /* 0..1: the volume of wallpaper sound (0 until set) */
-    gboolean scene_sound;     /* scenes play their sound layers (engine/scenesound.h).
-                               * Off by default; a wallpaper's own switch (its
-                               * option "walpe_sound") wins over it */
+    double  volume;           /* 0..1: the volume of wallpaper sound (WALPE_VOLUME_DEFAULT
+                               * until set) */
+    gboolean scene_sound;     /* wallpaper sound: scenes play their sound layers
+                               * (engine/scenesound.h). On by default; a wallpaper's
+                               * own switch (its option "walpe_sound") wins over it */
+    gboolean sound_migrated;  /* this load replaced the sound defaults of versions up
+                               * to 0.14.0 (walpe_config_migrate_sound); the daemon
+                               * says so and saves */
     gboolean mute;            /* wallpaper sound is silent; `volume` keeps its value */
     gboolean paused;
     gboolean pause_fullscreen; /* pause the monitor a focused fullscreen window is on */
@@ -262,6 +266,17 @@ typedef struct WalpeConfig_ {
  *     resolution_migrate), video_resolution "1080p" - the picture and the
  *     files written are what they were. */
 #define WALPE_CONFIG_VERSION 4
+/* Wallpaper sound of a new install: on, at half volume (the owner's decision
+ * after 0.14.0, where it was off at volume 0 and could be switched on from
+ * the command line only). Half: what the settings window and the tray set
+ * when sound is switched on at volume 0. A wallpaper without sound layers
+ * costs nothing for it (no player, no thread, no stream; libpulse-simple is
+ * not even loaded). */
+#define WALPE_VOLUME_DEFAULT 0.5
+/* "sound_defaults" in config.json: the generation of these defaults the
+ * file was written under. Absent = 1 (versions up to 0.14.0), 2 = on at
+ * WALPE_VOLUME_DEFAULT; always written from now on. */
+#define WALPE_SOUND_DEFAULTS 2
 /* the frame rate limit of a new install. 60, not the monitor's rate: at
  * the old default (200, i.e. the refresh rate) two 4K scenes on a 144 Hz
  * monitor were rendered 144 times a second and kept the GPU at 82 %.
@@ -288,6 +303,16 @@ typedef struct WalpeConfig_ {
  * before version 0.12, 30) on purpose gets the default once and has to set it
  * again. */
 int walpe_config_migrate_fps (int version, int fps);
+/* A file of sound_defaults < 2. Every config.json a daemon has saved holds
+ * "volume" (since 0.12) and "scene_sound" (0.14.0) whether the user set them
+ * or not, so a missing key cannot say "never chosen". What says it is the
+ * old default itself: volume 0 without sound switched on - 0.14.0's untouched
+ * pair (off, 0), and a file from before 0.14.0 that has no switch at all and
+ * a volume of 0. TRUE: that is what the file holds, and the new defaults
+ * replace it. Everything else was somebody's doing and is kept: sound on
+ * with volume 0 (silent, and the settings window says so), sound off with a
+ * volume above 0. has_switch: the file has "scene_sound". */
+gboolean walpe_config_migrate_sound (int sound_defaults, gboolean has_switch, gboolean scene_sound, double volume);
 
 /* focus_action ("run" / "limit" / "pause" in config.json and IPC) */
 enum { WALPE_FOCUS_RUN, WALPE_FOCUS_LIMIT, WALPE_FOCUS_PAUSE };

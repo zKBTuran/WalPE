@@ -60,7 +60,8 @@ enum { PKG_ALL = 0, PKG_BUT_SOUND = 1, PKG_ONLY_SOUND = 2 };
 /* ---- sound files ------------------------------------------------------
  * A scene's sound layers play files of the package: MP3, Ogg, WAV, FLAC -
  * 29 % of the bytes of 88 Workshop packages, and nothing reads them while
- * sound is switched off for the wallpaper (the default). Such a copy is
+ * sound is switched off for the wallpaper (the setting, or the wallpaper's
+ * own switch; it is on by default since the version after 0.14.0). Such a copy is
  * made without them (walpe_pkg_extract_cached_opts, with_sound FALSE): the
  * names it left out are listed in PKG_NOSOUND, and they are extracted the
  * moment somebody needs them - a later load with sound on, or a sound

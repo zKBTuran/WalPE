@@ -456,9 +456,9 @@ static void server_error_set (const char *why)
 }
 
 /* libpulse-simple is loaded when the first stream is opened, not with the
- * program (as libXss in platform/x11.c): scene sound is off until the user
- * switches it on, and a program that never plays a sound layer does not
- * have the library mapped. Only the five functions below come from it
+ * program (as libXss in platform/x11.c): most wallpapers have no sound
+ * layer, and a program that never plays one does not have the library
+ * mapped. Only the five functions below come from it
  * (pa_strerror is libpulse's, which the audio capture links anyway). A
  * library that is not there is reported like a server that is not there:
  * the layer plays into nothing. */
