@@ -62,8 +62,9 @@ enum { PKG_ALL = 0, PKG_BUT_SOUND = 1, PKG_ONLY_SOUND = 2 };
  * file appears under its name complete or not at all (g_file_set_contents
  * renames a finished file into place), and the list goes only when all of
  * them are there: an extraction that was interrupted is simply done again.
- * An entry is a sound file by the end of its name; a sound layer that
- * names a file of another kind finds it extracted, as always. */
+ * An entry is a sound file by the end of its name and by its first bytes
+ * (pkg_sound_bytes); a sound layer that names a file of another kind finds
+ * it extracted, as always. */
 gboolean walpe_pkg_sound_name (const char *path)
 {
     static const char *const ext[] = { "mp3", "ogg", "oga", "opus", "wav", "flac", NULL };
@@ -74,6 +75,38 @@ gboolean walpe_pkg_sound_name (const char *path)
         if (!g_ascii_strcasecmp (dot + 1, ext[i]))
             return TRUE;
     return FALSE;
+}
+
+/* ... and by its first bytes: Ogg, RIFF / WAVE, FLAC, an ID3 tag or an MPEG
+ * audio frame. A file that is only NAMED like a sound file - a model, a
+ * font, a text - is something else's to read, with sound off as well: left
+ * out, a layer that shows with sound on was missing with sound off. It is
+ * extracted with the rest. */
+static gboolean pkg_sound_bytes (const guint8 *d, gsize n)
+{
+    if (n < 12)
+        return FALSE;
+    return !memcmp (d, "OggS", 4) || !memcmp (d, "fLaC", 4) || !memcmp (d, "ID3", 3) ||
+           (!memcmp (d, "RIFF", 4) && !memcmp (d + 8, "WAVE", 4)) ||
+           (d[0] == 0xff && (d[1] & 0xe0) == 0xe0);
+}
+
+/* the file an entry's path names, spelled one way: "./a//b/./c" is "a/b/c" */
+static char *pkg_path_key (const char *path)
+{
+    GString *k = g_string_new (NULL);
+    for (const char *c = path; *c;) {
+        while (*c == '/')
+            c++;
+        gsize n = strcspn (c, "/");
+        if (n && !(n == 1 && c[0] == '.')) {
+            if (k->len)
+                g_string_append_c (k, '/');
+            g_string_append_len (k, c, n);
+        }
+        c += n;
+    }
+    return g_string_free (k, FALSE);
 }
 
 /* Is the first component of an entry's path one of the cache's own two
@@ -194,6 +227,7 @@ static gboolean pkg_extract_mode (const char *pkg_path, const char *dest_dir, in
      * table's END (linux-wallpaperengine's baseOffset) */
     GPtrArray *paths = g_ptr_array_new_with_free_func (g_free);
     GHashTable *dirs = NULL;     /* directories the entries so far lie in */
+    GHashTable *kinds = NULL;    /* pkg_path_key of a sound-named entry -> 2 a sound file, 1 not */
     GArray *foffs = g_array_new (FALSE, FALSE, sizeof (guint32));
     GArray *fszs = g_array_new (FALSE, FALSE, sizeof (guint32));
     for (guint32 i = 0; i < n && off + 8 <= len; i++) {
@@ -225,6 +259,8 @@ static gboolean pkg_extract_mode (const char *pkg_path, const char *dest_dir, in
     guint64 written = 0, budget = (guint64) len * 4 + (16u << 20);
     guint objects = 0;
     dirs = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+    if (mode != PKG_ALL)
+        kinds = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
 
     /* pass 2: every entry is checked before the first one is written (a
      * package that is refused writes nothing), pass 3: extract */
@@ -267,10 +303,24 @@ static gboolean pkg_extract_mode (const char *pkg_path, const char *dest_dir, in
                                  "holds): %s", pkg_path);
                     goto fail;
                 }
+                /* Where one file is named by several entries the last one
+                 * is the file (it is written last), so the last one says
+                 * what the file is - for all of them: a copy made without
+                 * its sound files and completed later holds what a copy
+                 * made in one go holds, and completing it never writes
+                 * over a file the scene has already read. */
+                if (kinds && walpe_pkg_sound_name (path))
+                    g_hash_table_replace (kinds, pkg_path_key (path),
+                                          GINT_TO_POINTER (pkg_sound_bytes (buf + base + foff, fsz) ? 2 : 1));
                 continue;
             }
             if (mode != PKG_ALL) {
-                gboolean snd = walpe_pkg_sound_name (path);
+                gboolean snd = FALSE;
+                if (walpe_pkg_sound_name (path)) {
+                    char *key = pkg_path_key (path);
+                    snd = GPOINTER_TO_INT (g_hash_table_lookup (kinds, key)) == 2;
+                    g_free (key);
+                }
                 if (mode == PKG_BUT_SOUND && snd) {
                     if (left)
                         g_string_append_printf (left, "%s\n", path);
@@ -296,6 +346,7 @@ static gboolean pkg_extract_mode (const char *pkg_path, const char *dest_dir, in
     }
 
     g_hash_table_unref (dirs);
+    g_clear_pointer (&kinds, g_hash_table_unref);
     g_array_free (foffs, TRUE);
     g_array_free (fszs, TRUE);
     g_ptr_array_free (paths, TRUE);
@@ -304,6 +355,7 @@ static gboolean pkg_extract_mode (const char *pkg_path, const char *dest_dir, in
 
 fail:
     g_clear_pointer (&dirs, g_hash_table_unref);
+    g_clear_pointer (&kinds, g_hash_table_unref);
     g_array_free (foffs, TRUE);
     g_array_free (fszs, TRUE);
     g_ptr_array_free (paths, TRUE);

@@ -21,8 +21,10 @@ void walpe_pkg_cache_release (const char *cache_dir);
  * sound gets them at that moment. */
 char *walpe_pkg_extract_cached_opts (const char *pkg_path, const char *project_dir, gboolean with_sound,
                                      GError **err);
-/* an entry the copy of a silent wallpaper is made without: *.mp3 *.ogg
- * *.oga *.opus *.wav *.flac (letter case ignored) */
+/* the name of an entry the copy of a silent wallpaper is made without:
+ * *.mp3 *.ogg *.oga *.opus *.wav *.flac (letter case ignored) - if it also
+ * begins like a sound file; an entry of that name with other content is
+ * extracted with the rest */
 gboolean walpe_pkg_sound_name (const char *entry_path);
 /* The sound files a cached copy was made without, extracted now, with the
  * checks of every extraction (any thread; at once when there are none).

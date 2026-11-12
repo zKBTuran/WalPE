@@ -219,6 +219,60 @@ static void drop_copy (char *cache)
     g_free (cache);
 }
 
+/* ---- what counts as a sound file ---- */
+static gboolean same_text (const char *dir, const char *rel, const char *want)
+{
+    GByteArray *w = g_byte_array_new ();
+    g_byte_array_append (w, (const guint8 *) want, (guint) strlen (want));
+    gboolean same = same_bytes (dir, rel, w);
+    g_byte_array_unref (w);
+    return same;
+}
+
+static void test_kinds (void)
+{
+    static const char FONT[] = "wOFF: named like a sound file, read by something that is not a player";
+    const Ent e[] = {
+        { "scene.json", (const guint8 *) SCENE, strlen (SCENE) },
+        { "models/solid.json", (const guint8 *) SOLID, strlen (SOLID) },
+        { "sounds/one.wav", wav->data, wav->len },
+        { "models/m.wav", (const guint8 *) SOLID, strlen (SOLID) },      /* a model */
+        { "fonts/f.ogg", (const guint8 *) FONT, strlen (FONT) },         /* a font */
+        { "twice/a.ogg", (const guint8 *) SOLID, strlen (SOLID) },       /* the last entry is the file: sound */
+        { "twice/a.ogg", (const guint8 *) OGG, strlen (OGG) },
+        { "twice/b.ogg", (const guint8 *) OGG, strlen (OGG) },           /* the last entry is the file: a model */
+        { "./twice//b.ogg", (const guint8 *) SOLID, strlen (SOLID) },
+        { "empty.mp3", (const guint8 *) "", 0 },
+    };
+    write_pkg (pkg, e, G_N_ELEMENTS (e), 0);
+    char *c = cache_copy (FALSE);
+    CHECK (c != NULL, "a copy without sound files (names that are not sound files)");
+    if (c) {
+        char *list = list_of (c);
+        CHECK (same_text (c, "models/m.wav", SOLID) && same_text (c, "fonts/f.ogg", FONT) && has (c, "empty.mp3"),
+               "sound off: a file that is only named like a sound file is in the copy");
+        CHECK (!has (c, "sounds/one.wav") && !has (c, "twice/a.ogg"), "sound off: the sound files are not");
+        CHECK (same_text (c, "twice/b.ogg", SOLID),
+               "a file named twice whose last entry is no sound file: in the copy, the last entry's bytes");
+        CHECK (!g_strcmp0 (list, "sounds/one.wav\ntwice/a.ogg\ntwice/a.ogg\n"), "the list: \"%s\"",
+               list ? list : "(none)");
+        g_free (list);
+        CHECK (walpe_pkg_fetch_sound (c), "the outstanding files are fetched");
+        CHECK (same_bytes (c, "sounds/one.wav", wav) && same_text (c, "twice/a.ogg", OGG),
+               "fetched: the sound files, of a file named twice the last entry's bytes");
+        CHECK (same_text (c, "twice/b.ogg", SOLID) && same_text (c, "models/m.wav", SOLID),
+               "... and the files the copy had are as they were");
+        drop_copy (c);
+    }
+    c = cache_copy (TRUE);
+    CHECK (c && same_text (c, "twice/a.ogg", OGG) && same_text (c, "twice/b.ogg", SOLID) &&
+           same_text (c, "models/m.wav", SOLID) && same_bytes (c, "sounds/one.wav", wav),
+           "a copy made with sound holds the same files");
+    if (c)
+        drop_copy (c);
+    make_item (0);
+}
+
 /* ---- A ---- */
 static void test_cache (void)
 {
@@ -572,6 +626,7 @@ int main (void)
            !walpe_pkg_sound_name ("a.mp3/scene.json") && !walpe_pkg_sound_name ("a\nb.mp3"),
            "which entries are sound files");
     test_cache ();
+    test_kinds ();
     walpe_sound_allow (TRUE);
     walpe_sound_use_null (TRUE);
     test_player ();
