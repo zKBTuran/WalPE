@@ -640,7 +640,12 @@ static int main_no_x264 (char **argv)
     loop = g_main_loop_new (NULL, FALSE);
     Result r = run_scene (argv[2], &sc, argv[5], 120);
     g_print ("%s\n", r.error ? r.error : "(no error)");
-    return r.called && !r.ok ? 0 : 1;
+    const int rc = r.called && !r.ok ? 0 : 1;
+    g_free (r.error);
+    g_free (r.dst);
+    g_main_loop_unref (loop);
+    loop = NULL;
+    return rc;
 }
 
 /* the child of test_switch: which kind of copy is on in this environment */
