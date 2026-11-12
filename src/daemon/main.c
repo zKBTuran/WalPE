@@ -688,8 +688,10 @@ static void present_egl_probe (void)
                version ? version : "?", vendor ? vendor : "?",
                walpe_platform_egl_note (), (int) lo, (int) hi,
                D.fake_vsync ? " (WALPE_FAKE_VSYNC: emulated)" : "",
-               P.has_damage ? (P.swap_damage ? "yes (used)" : "yes (not used: swap_damage=on)")
-                            : "no",
+               P.has_damage ? (P.swap_damage ? "available, used (swap_damage = on)"
+                                               : "available, not used (gpu.conf: swap_damage = on "
+                                                 "would use it)")
+                            : "not available",
                epoxy_has_egl_extension (D.egl_dpy, "EGL_EXT_buffer_age") ? "yes" : "no");
     if (vendor && strstr (vendor, "NVIDIA")) {
         /* the driver's own disk cache of compiled shaders is what makes
