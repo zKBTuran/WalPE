@@ -5563,6 +5563,8 @@ static void ipc_props (JsonBuilder *b, const char *wp)
  * holds, and for every pause signal who reports it in this session ("" =
  * nobody: the rule that reads it cannot fire) */
 static WalpeOutputList layout_now;   /* (the layout code further down fills it) */
+static char *mons_no_surface;        /* outputs that got no wallpaper surface at start, by name
+                                      * (NULL = every one got its own; diag.h) */
 
 static void status_backend (JsonBuilder *b)
 {
@@ -5574,6 +5576,8 @@ static void status_backend (JsonBuilder *b)
             walpe_backends_built (walpe_platform_built (WALPE_BACKEND_X11),
                                   walpe_platform_built (WALPE_BACKEND_WAYLAND)));
     jb_str (b, "wayland_pointer", D.cfg->wayland_pointer ? "off" : "auto");
+    if (mons_no_surface)    /* outputs the daemon shows nothing on: no surface at start */
+        jb_str (b, "monitors_without_surface", mons_no_surface);
     json_builder_set_member_name (b, "pause_signals");
     json_builder_begin_object (b);
     for (int s = 0; s < WALPE_SIG_N; s++) {
@@ -10261,8 +10265,11 @@ int main (int argc, char **argv)
                 if (nm) {
                     nm->hz = o->refresh_hz;
                     D.max_hz = MAX (D.max_hz, o->refresh_hz);
+                } else {
+                    diag_mon_failed (i, o->name);   /* said, and kept for status */
                 }
             }
+        diag_mons_checked (nmon);
     }
 
     {

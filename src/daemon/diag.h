@@ -181,7 +181,11 @@ static char *diag_text (void)
     }
     g_string_append_c (s, '\n');
     if (!D.mons)
-        g_string_append (s, "monitors: none\n");
+        g_string_append (s, "monitors: NONE - the daemon runs and shows nothing\n");
+    if (mons_no_surface)
+        g_string_append_printf (s, "NO WALLPAPER SURFACE on: %s (the window system gave none at start; "
+                                "nothing is shown there until the daemon is started again)\n",
+                                mons_no_surface);
     for (GList *l = D.mons; l; l = l->next) {
         Mon *m = l->data;
         const char *cur = m->want_path ? m->want_path : walpe_config_monitor_path (D.cfg, m->name);
@@ -294,4 +298,28 @@ static void diag_end_line (gboolean restarting)
     g_message ("walpe-daemon %s (pid %d) %s after %.0f s: %s", WALPE_VERSION, (int) getpid (),
                restarting ? "restarts in place" : "ends",
                (double) (g_get_monotonic_time () - daemon_start_us) / 1e6, why);
+}
+
+/* main, at start: output idx got no surface (make_monitor has said why:
+ * on Wayland the compositor did not configure the layer surface in time,
+ * or EGL made no surface for it). The daemon went on without a word of its
+ * own - with one output that is a daemon that runs, answers and shows
+ * nothing. Said here, kept for `status` ("monitors_without_surface") and
+ * the summary. */
+static void diag_mon_failed (int idx, const char *name)
+{
+    char *all = mons_no_surface ? g_strdup_printf ("%s, %s", mons_no_surface, name ? name : "?")
+                                : g_strdup (name ? name : "?");
+    g_free (mons_no_surface);
+    mons_no_surface = all;
+    g_warning ("monitor %d (%s): NO WALLPAPER SURFACE could be made on it (the line above says why): "
+               "nothing is shown there. walpe-daemon does not try again by itself: start it again "
+               "(walpe-ctl quit, then walpe-daemon) once the desktop is up", idx, name ? name : "?");
+}
+
+static void diag_mons_checked (int outputs)
+{
+    if (!D.mons && outputs > 0)
+        g_warning ("NO MONITOR has a wallpaper surface (%d output(s) found): walpe-daemon keeps running "
+                   "and answers walpe-ctl, but shows nothing", outputs);
 }
