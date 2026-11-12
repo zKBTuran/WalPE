@@ -47,6 +47,15 @@ monitor does not depend on the moment it is read.
   refused  a clip that is stored rotated: its copy would be stored rotated too and is
            never played, so none is made - status "not made (the clip is stored
            rotated)", no ffmpeg and no ffprobe is started, the clip plays as it is.
+  paused   a daemon that starts with the pause saved: the scene's video layer has its
+           picture on the paused monitor (it was drawn once, before the picture, and
+           stayed black), played from the copy and from the clip itself; then the
+           monitor rests - no frame, and the clip's decoder is freed after the usual
+           five seconds. A scene without a video draws as before. A clip that never
+           gives a picture is waited for three seconds, once, with one log line.
+  pausedrestart  the same after a restart in place: the wallpapers paused by hand when
+           the last web wallpaper is replaced, and the restart that was put off and
+           is carried out while the displays sleep.
   cancel   another wallpaper while the copy of a long clip is being made: the ffmpeg
            child (which runs at nice 19) ends, its partial file goes, status forgets
            the video; the same when the daemon quits.
@@ -728,6 +737,203 @@ def case_refused(env, W):
             os.unlink(c)
 
 
+# ------------------------------------------------------------------- paused
+def frames(env):
+    return [m.get("frames") for m in env.state().get("monitors") or []]
+
+
+def video_module(env):
+    """ "video_module" of `walpe-ctl mem`: the clips, their decoders, how many are parked"""
+    def find(o):
+        if isinstance(o, dict):
+            if "video_module" in o:
+                return o["video_module"]
+            for v in o.values():
+                r = find(v)
+                if r is not None:
+                    return r
+        return None
+    return find(env.ipc({"cmd": "mem"}, timeout=20) or {}) or {}
+
+
+def shows_clip(env, mon=A, timeout=15):
+    return bool(lc.wait_for(lambda: bars_ok(env.display.frame(mon)), timeout, 0.1))
+
+
+def rests(env, what, most=40):
+    """no monitor draws any more (and none drew more than `most` frames to get there)"""
+    f1 = frames(env)
+    time.sleep(2.5)
+    f2 = frames(env)
+    return check(bool(f1) and f1 == f2 and max(f1) <= most, what, (f1, f2))
+
+
+def gen_dead(src, dst):
+    """src with its pictures' bytes zeroed: the tables are whole, the decoder gets nothing out of it"""
+    d = bytearray(open(src, "rb").read())
+    i, j = d.find(b"mdat"), d.find(b"moov")
+    if i < 0:
+        return False
+    hi = j - 4 if j > i else len(d)
+    d[i + 4:hi] = bytes(hi - i - 4)
+    with open(dst, "wb") as f:
+        f.write(d)
+    return True
+
+
+def case_paused(env, W):
+    base = {"config_version": 4, "fps": 30, "pause_covered": False, "pause_dpms": False,
+            "video_resolution": "auto", "paused": True}
+    for tag, cfg, played in (("copy", {}, "played 640x360"), ("clip", {"video_scene_convert": False}, "played 1280x720")):
+        if tag == "copy" and not copies(env):
+            print("skip  paused (copy): the copy of case `copy` is not there", flush=True)
+            continue
+        rc.jdump(env.config, dict(base, current=W["vid"], **cfg))
+        mark = env.mark()
+        if not check(start(env), f"paused ({tag}): daemon started with the pause saved"):
+            return
+        lc.loaded(env, W["vid"])
+        check(shows_clip(env) and env.state().get("paused") is True,
+              f"paused ({tag}): the paused monitor shows the clip's picture", (env.state().get("paused"), frames(env)))
+        check(played in scene_videos(env), f"paused ({tag}): it is the {tag} that is played", scene_videos(env))
+        rests(env, f"paused ({tag}): then the monitor rests: no frame is drawn any more")
+        if tag == "clip":
+            f1 = frames(env)
+            ok = lc.wait_for(lambda: video_module(env).get("parked") == 1 and
+                             video_module(env).get("decoders_open") == 0, 25, 0.5)
+            check(bool(ok) and frames(env) == f1,
+                  "paused (clip): its decoder is freed after the usual five seconds, and no frame was drawn for it",
+                  (video_module(env), f1, frames(env)))
+        check("gave no picture" not in env.since(mark), f"paused ({tag}): nothing was given up")
+        env.ipc({"cmd": "resume"})
+        check(bool(lc.wait_for(lambda: frames(env) and frames(env)[0] > 40, 20, 0.2)) and bars_ok(picture(env)),
+              f"paused ({tag}): resumed, it plays", frames(env))
+        env.stop_daemon()
+    # two monitors of one size with the same scene: one renders, the other presents its frames
+    B = ("B", 640, 360, 640, 0)
+    rc.jdump(env.config, dict(base, current=W["vid"], video_scene_convert=False, render_shared=True))
+    if check(env.start_daemon([A, B], extra={"WALPE_CONVERT_BACKGROUND": "0"}),
+             "paused (shared): daemon started on two monitors with the pause saved"):
+        lc.loaded(env, W["vid"])
+        check(shows_clip(env, env.mons[0]) and shows_clip(env, env.mons[1]),
+              "paused (shared): both paused monitors show the clip's picture", frames(env))
+        rests(env, "paused (shared): then both rest")
+        env.stop_daemon()
+    # a scene without a video: what it drew before
+    rc.jdump(env.config, dict(base, current=W["red"]))
+    if check(start(env), "paused (no video): daemon started with the pause saved"):
+        lc.loaded(env, W["red"])
+        c = lc.colour_is(env, A, lambda c: rc.name_of(c) == "red")
+        check(rc.name_of(c) == "red", "paused (no video): the scene is on the paused monitor", c)
+        rests(env, "paused (no video): a frame for the load and one for each Expose of the window, and no more",
+              most=3)
+        env.stop_daemon()
+    # a clip that never gives a picture: the wait has an end, and is not repeated
+    if not os.path.exists(os.path.join(W["dead"], "scene.json")):
+        print("skip  paused (dead clip): the clip could not be made", flush=True)
+        return
+    rc.jdump(env.config, dict(base, current=W["dead"], video_scene_convert=False))
+    mark = env.mark()
+    if not check(start(env), "paused (dead clip): daemon started with the pause saved"):
+        return
+    lc.loaded(env, W["dead"])
+    check(bool(lc.wait_for(lambda: "gave no picture in 3 s" in env.since(mark), 15, 0.2)),
+          "paused (dead clip): after three seconds the scene gives the clip up (the log says so)",
+          [ln for ln in env.since(mark).splitlines() if "scenenode:" in ln][-3:])
+    rests(env, "paused (dead clip): then the monitor rests", most=200)
+    env.ipc({"cmd": "resume"})
+    time.sleep(1.0)
+    env.ipc({"cmd": "pause"})
+    lc.wait_for(lambda: env.state().get("paused") is True, 10, 0.1)
+    time.sleep(0.5)
+    f1 = frames(env)
+    time.sleep(4.5)
+    check(frames(env) == f1 and env.since(mark).count("gave no picture") == 1,
+          "paused (dead clip): paused again: it is not waited for a second time (one log line)",
+          (f1, frames(env), env.since(mark).count("gave no picture")))
+    env.stop_daemon()
+
+
+# ------------------------------------------------------------ pausedrestart
+def case_pausedrestart(env, W):
+    """the picture of a scene's video on a paused monitor after a restart in place"""
+    B = ("B", 640, 360, 640, 0)
+    said, unseen = "restarting in place to unload the web module", "nobody can see a wallpaper now"
+    web = os.path.join(env.tmp, "wallpapers", "page")
+    lc.gen_web(web)
+    dpms = os.path.join(env.tmp, "dpms")
+
+    def displays(state):
+        with open(dpms, "w") as f:
+            f.write(state + "\n")
+
+    def modules():
+        return env.state().get("modules", "")
+
+    def paused():
+        return [bool(m.get("paused")) for m in env.state().get("monitors") or []]
+
+    def page_on_b():
+        env.open(web, 1)
+        return lc.loaded(env, web, 1, 120) and "web=loaded" in modules()
+
+    displays("on")
+    rc.jdump(env.config, {"config_version": 4, "fps": 30, "pause_covered": False, "pause_dpms": True,
+                          "video_resolution": "auto", "video_scene_convert": False, "current": W["red"]})
+    if not check(env.start_daemon([A, B], extra={"WALPE_WEB_UNLOAD_GAP_S": "0", "WALPE_FAKE_DPMS": dpms}),
+                 "pausedrestart: daemon started"):
+        return
+    st = env.state()
+    if "web_accel" not in st or "web_unload" not in st:
+        print("skip  pausedrestart (no web module in this build)", flush=True)
+        return
+    pid = env.daemon.pid
+    env.open(W["vid"], 0)
+    lc.loaded(env, W["vid"], 0)
+    if not page_on_b():
+        print("skip  pausedrestart (no web wallpaper came up here)", flush=True)
+        return
+    # 1. paused by hand, the page is replaced: the restart at that change
+    env.ipc({"cmd": "pause"})
+    lc.wait_for(lambda: paused() == [True, True], 10, 0.1)
+    mark = env.mark()
+    env.open(W["red"], 1)
+    ok = lc.wait_for(lambda: said in env.since(mark) and "web=not loaded" in modules(), 90, 0.3)
+    check(bool(ok) and env.daemon.poll() is None and env.daemon.pid == pid and env.state().get("paused") is True,
+          "pausedrestart: paused by hand, the page replaced: the daemon restarted in place and is paused",
+          (env.since(mark)[-300:], modules()))
+    lc.loaded(env, W["vid"], 0)
+    check(shows_clip(env), "pausedrestart: the paused monitor with the video scene shows the clip's picture",
+          frames(env))
+    rests(env, "pausedrestart: and rests")
+    env.ipc({"cmd": "resume"})
+    lc.wait_for(lambda: paused() == [False, False], 10, 0.1)
+    # 2. a restart that was put off, carried out while the displays sleep
+    env.ipc({"cmd": "set", "web_unload": False})
+    if not page_on_b():
+        print("skip  pausedrestart: the web wallpaper did not come up again", flush=True)
+        return
+    mark = env.mark()
+    env.open(W["red"], 1)
+    lc.loaded(env, W["red"], 1)
+    env.ipc({"cmd": "set", "web_unload": True})
+    time.sleep(1.0)
+    displays("off")
+    ok = lc.wait_for(lambda: unseen in env.since(mark) and "web=not loaded" in modules(), 90, 0.3)
+    check(bool(ok) and env.daemon.poll() is None and env.daemon.pid == pid,
+          "pausedrestart: the displays sleep: the restart that was put off is carried out",
+          (env.since(mark)[-300:], modules()))
+    lc.loaded(env, W["vid"], 0)
+    check(bool(lc.wait_for(lambda: paused() == [True, True], 40, 0.3)) and shows_clip(env),
+          "pausedrestart: the new image is paused, and the clip's picture is there for the moment the displays wake",
+          (paused(), frames(env)))
+    rests(env, "pausedrestart: and it rests")
+    displays("on")
+    check(bool(lc.wait_for(lambda: paused() == [False, False], 40, 0.3)) and bars_ok(picture(env)),
+          "pausedrestart: the displays wake: the scene plays", paused())
+    env.stop_daemon()
+
+
 # ------------------------------------------------------------------- cancel
 def case_cancel(env, W):
     # at the lowest priority, as it runs for a user (nice 19 is checked here)
@@ -982,7 +1188,8 @@ def case_webunload(env, W):
 
 CASES = [("copy", case_copy), ("switch", case_switch), ("restart", case_restart), ("damaged", case_damaged),
          ("fast", case_fast),
-         ("stale", case_stale), ("refused", case_refused), ("cancel", case_cancel), ("exits", case_exits),
+         ("stale", case_stale), ("refused", case_refused), ("paused", case_paused),
+         ("pausedrestart", case_pausedrestart), ("cancel", case_cancel), ("exits", case_exits),
          ("small", case_small), ("monitors", case_monitors), ("webunload", case_webunload)]
 
 
@@ -1021,7 +1228,7 @@ def main():
             print(f"scenevideocheck: {env.sock} is too long for a socket: pass --tmp <a short directory>")
             return 2
         wp = os.path.join(env.tmp, "wallpapers")
-        W = {k: os.path.join(wp, k) for k in ("red", "vid", "long", "fit", "rot", "fit2")}
+        W = {k: os.path.join(wp, k) for k in ("red", "vid", "long", "fit", "rot", "fit2", "dead")}
         clips = os.path.join(env.tmp, "clips")
         if not (gen_clip(f"{clips}/big.mp4", "1280x720", 2) and gen_clip(f"{clips}/long.mp4", "1280x720", 90) and
                 gen_clip(f"{clips}/fit.mp4", "640x360", 2)):
@@ -1036,6 +1243,8 @@ def main():
         if gen_rotated(f"{clips}/big.mp4", f"{clips}/rot.mp4"):
             gen_video_scene(W["rot"], f"{clips}/rot.mp4", 1280, 720)
         gen_video_scene(W["fit2"], f"{clips}/big.mp4", 1280, 720)
+        if gen_dead(f"{clips}/big.mp4", f"{clips}/dead.mp4"):
+            gen_video_scene(W["dead"], f"{clips}/dead.mp4", 1280, 720)
         if not env.start_x(1920, 720):
             print("scenevideocheck: skipped (Xvfb did not start)")
             return displayenv.SKIP

@@ -70,7 +70,12 @@ struct WalpeContent {
     /* set by gl_render: nothing could be drawn yet (a video whose first
      * frame is still being decoded). The host does not present the
      * buffer and paints the first frame when it arrives, also while the
-     * monitor is paused. */
+     * monitor is paused.
+     * A scene sets it, in set_paused and gl_render, only while it is paused
+     * and a video layer of it has given no picture yet: its frames are
+     * presented, and the host goes on drawing the paused monitor until the
+     * scene clears it (the picture is there, or the clip gave none in a
+     * few seconds). */
     gboolean first_frame_pending;
     /* Frame skipping (scenes). A gl_render call that finds the picture
      * unchanged since the frame it drew last (nothing animated moved: a

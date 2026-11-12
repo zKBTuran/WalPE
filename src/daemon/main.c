@@ -232,6 +232,8 @@ typedef struct Mon {
     gboolean force_frame;    /* draw one frame now, also while paused / covered */
     gint64 force_until_us;   /* following: present the leader's frames until then,
                               * also while paused */
+    gboolean present_req;    /* leader's thread -> follower (lock): present the leader's
+                              * newest frame once, also while paused (sf_show_followers) */
     /* quality knobs (common/quality.h) */
     WalpeQuality quality;    /* main -> thread (lock): what its wallpaper runs with */
     int rt_render_scale;     /* render thread: quality.render_scale as last taken */
@@ -1244,6 +1246,42 @@ static void mon_free_content (Mon *m)
 }
 
 /* render thread: hand the wanted pause state to the content */
+/* A scene that is paused before a video layer of it has given its first
+ * picture - a daemon that starts paused, a wallpaper loaded on a paused
+ * monitor - used to rest on the one frame a paused monitor draws, and in
+ * that frame the layer has no picture: a scene whose background is a video
+ * was black for as long as the pause lasted. Such a scene now says so
+ * (content.h first_frame_pending, set by its set_paused and its gl_render;
+ * the video module decodes a paused clip's first picture as it always
+ * did) and the paused monitor draws a frame every
+ * SCENE_FIRST_US until the picture is in it, or the scene gives up on the
+ * clip (scenenode.c SCENE_VIDEO_FIRST_US). Then it rests as before: no
+ * frame clock, no wake-up. A scene without a video, and one that is not
+ * paused, never set the flag. Render thread. */
+#define SCENE_FIRST_US 50000
+
+static gboolean mon_scene_first (Mon *m)
+{
+    return m->needs_first_frame && m->content && m->content->type == WALPE_TYPE_SCENE &&
+           m->content->first_frame_pending;
+}
+
+/* render thread of a leader whose paused scene has just drawn the frame
+ * with that picture: its followers are paused too and present a frame of
+ * their leader only when one is owed to their window - this one is */
+static void sf_show_followers (Mon *m)
+{
+    SharedFrame *sf = m->lead_sf;
+    for (int i = 0; i < sf->nfollowers; i++) {
+        Mon *f = sf->fol[i];
+        g_mutex_lock (&f->lock);
+        f->present_req = TRUE;
+        f->render_req = TRUE;
+        g_cond_signal (&f->cond);
+        g_mutex_unlock (&f->lock);
+    }
+}
+
 static void mon_apply_pause (Mon *m, gboolean p)
 {
     if (m->content && m->content->set_paused && p != m->pause_applied)
@@ -1711,8 +1749,8 @@ static void mon_do_render_frame (Mon *m, gboolean paused, gboolean force, gboole
     /* a video that has no frame yet drew nothing: keep what is on screen
      * (swapping now showed an undefined buffer); its first frame comes
      * with a redraw request and is painted even on a paused monitor */
-    if (m->content->first_frame_pending && !m->lead_sf)
-        return;
+    if (m->content->first_frame_pending && !m->lead_sf && m->content->type != WALPE_TYPE_SCENE)
+        return;     /* (a scene drew: what it waits for is one layer's picture) */
     /* content.h: gl_render returns whether a change was drawn. Nothing
      * drawn = nothing to show: the back buffer is undefined after a swap
      * (EGL_BUFFER_DESTROYED), and presenting it again costs a full-screen
@@ -2190,6 +2228,12 @@ static gpointer mon_thread (gpointer data)
         gboolean force = m->force_frame;
         m->force_frame = FALSE;
         gint64 force_until = m->force_until_us;
+        if (m->present_req) {
+            /* (the frame its leader has just published is owed to this
+             * window, like a first frame) */
+            m->present_req = FALSE;
+            m->needs_first_frame = TRUE;
+        }
         gboolean idle_release = FALSE;
         if (!paused)
             m->paused_since_us = 0;
@@ -2257,6 +2301,11 @@ static gpointer mon_thread (gpointer data)
                 due = first_due;           /* (not yet: first_tick is clear) */
             if (m->clip_due_us && (!due || m->clip_due_us < due))
                 due = m->clip_due_us;      /* "Skip hidden areas": what became visible */
+            /* a paused scene one of whose video layers has no picture yet
+             * (mon_scene_first): it looks again shortly, until it has it */
+            if (paused && m->pause_applied && mon_scene_first (m) &&
+                (!due || m->last_draw_us + SCENE_FIRST_US < due))
+                due = m->last_draw_us + SCENE_FIRST_US;
             if (m->content && paused != m->pause_applied) {
                 /* pause transition only: apply it, no frame */
             } else if (!due) {
@@ -2389,8 +2438,11 @@ static gpointer mon_thread (gpointer data)
          * (unless a newer load, or a leader, has taken over since) */
         if (blank && !load && !m->content && !m->follow_sf)
             mon_load_failed_frame (m, FALSE);
-        if (paused != m->pause_applied)
+        if (paused != m->pause_applied) {
             mon_apply_pause (m, paused);
+            if (paused && mon_scene_first (m))
+                m->needs_first_frame = TRUE;    /* (the sleep above ends for it) */
+        }
         /* live fps cap (a load above already used the new value; shared
          * followers have no content: their leader paces them) */
         if (fps_changed && !load && m->content && m->content->set_fps)
@@ -2471,9 +2523,12 @@ static gpointer mon_thread (gpointer data)
                 }
             }
         } else if (render) {
+            const gboolean first_was = mon_scene_first (m);
             mon_do_render (m, paused, m->needs_first_frame || force || clip_owed, self_paused,
                            ptr_x, ptr_y, clip_gen);
             m->needs_first_frame = m->content && m->content->first_frame_pending;
+            if (first_was && !m->needs_first_frame && m->lead_sf)
+                sf_show_followers (m);  /* (paused, they hold the frame without that picture) */
             m->clip_owed = FALSE;
             shown = TRUE;
         }

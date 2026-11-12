@@ -82,6 +82,13 @@ background, into a copy of the size it is needed at, and the scene plays the cop
   an edit list that cuts its start): making it again would give the same file, so it is
   kept, but it does not count as played and goes with the copies nothing has played for 90
   days; the conversion is then tried once more.
+* **Paused before the first picture.** A daemon that starts paused (the pause saved, the
+  displays asleep, a restart in place while paused) draws a monitor once and lets it rest.
+  A scene's video layer had no picture yet in that frame and stayed without one - a scene
+  whose background is a video stayed black - until the pause ended. The paused monitor is
+  now drawn again until the picture is in the frame, then rests as before; the clip's
+  decoder is freed after the usual five seconds. A clip that gives no picture is waited for
+  three seconds, once (the log says so).
 * **The switch.** `walpe-ctl set video_scene_convert=off` (window: Engine settings, "Smaller
   copies of videos in scenes"; `WALPE_VIDEO_SCENE_CONVERT=0|1` in front of `walpe-daemon`
   overrides): the clip itself again, from where it starts next; nothing is converted. The

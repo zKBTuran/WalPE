@@ -224,6 +224,9 @@ typedef struct {
     char *plan_copy;         /* ... and its file */
     gboolean wanted;         /* the daemon was asked for plan_copy */
     gboolean copy_removed;   /* a copy that could not be read was removed (once per load) */
+    /* the scene was paused before this video gave its first picture: the
+     * paused monitor draws until it is there (scene_videos_first) */
+    gboolean first_wait, first_gave_up;
     char *id;                /* walpe_scene_video_id, looked up when first needed */
 } SceneVideo;
 /* the frame skip asks this counter whether a video layer shows another
@@ -238,6 +241,7 @@ typedef struct {
     char *dir;           /* project dir (cache dir for pkgs) */
     int fps_cap;
     gboolean paused;
+    gint64 first_wait_us;    /* when the wait for a video's first picture began (SceneVideo.first_wait) */
     gint64 t0;           /* content-local clock for g_Time (float precision) */
     gint64 paused_at;    /* monotonic us the scene clock stopped (0 = running) */
     gboolean text_held;  /* walpe_text_hold (text layers) */
@@ -618,6 +622,43 @@ ok:
     nv->premult = TRUE;      /* decoded frames are opaque */
     nv->tex_ready = FALSE;   /* until the first decoded frame */
     return TRUE;
+}
+
+/* Render thread, a paused scene some of whose videos had given no picture
+ * when it was paused - a daemon that starts paused, a wallpaper loaded on a
+ * paused monitor. The video module decodes the first picture of a paused
+ * clip, but a paused monitor draws one frame and rests, and that frame
+ * came before the picture: the layer stayed without one, a scene whose
+ * background is a video black, for as long as the pause lasted. The scene
+ * now says that a frame is still owed (content.h first_frame_pending) and
+ * is drawn again until the pictures are in it; this is called with each of
+ * those frames, after the videos' newest pictures were taken. A clip that
+ * gives none - damaged, or one the decoder cannot read - is waited for
+ * SCENE_VIDEO_FIRST_US and never again: a paused monitor is not to draw
+ * for it. Nothing else of a paused scene runs meanwhile (its clock stands,
+ * the videos are paused), and once the flag is clear it rests as before. */
+#define SCENE_VIDEO_FIRST_US (3 * G_USEC_PER_SEC)
+
+static void scene_videos_first (SceneNodeContent *s)
+{
+    const gboolean late = g_get_monotonic_time () - s->first_wait_us > SCENE_VIDEO_FIRST_US;
+    gboolean wait = FALSE;
+    for (guint i = 0; i < s->videos->len; i++) {
+        SceneVideo *sv = &g_array_index (s->videos, SceneVideo, i);
+        if (!sv->first_wait)
+            continue;
+        if (!sv->tex && !late) {
+            wait = TRUE;
+            continue;
+        }
+        if (!sv->tex) {
+            sv->first_gave_up = TRUE;
+            g_message ("scenenode: video texture %s gave no picture in %d s: the paused scene "
+                       "rests without it", sv->path, (int) (SCENE_VIDEO_FIRST_US / G_USEC_PER_SEC));
+        }
+        sv->first_wait = FALSE;
+    }
+    s->base.first_frame_pending = wait;
 }
 
 /* the daemon is not to make plan_copy for this scene any more */
@@ -5726,6 +5767,8 @@ static gboolean scenenode_gl_render (WalpeContent *c, int w, int h, float px, fl
         if (iv > 0 && (!video_iv || iv < video_iv))
             video_iv = iv;
     }
+    if (c->first_frame_pending)
+        scene_videos_first (s);     /* (paused before a video had its first picture) */
 
     /* "Adjust layers": look again only when something changed there */
     walpe_cph_to (WALPE_CPH_OTHER);
@@ -7008,12 +7051,21 @@ static void scenenode_set_paused (WalpeContent *c, gboolean p)
     /* media integration stays subscribed while paused (gl_init .. gl_free):
      * the MPRIS state keeps updating, and the first frame after a resume
      * dispatches what changed, so a media widget is right when uncovered */
-    /* the shared decoder sleeps once every user (monitor) is paused */
+    /* the shared decoder sleeps once every user (monitor) is paused - when
+     * it has a picture: a paused decoder that has none decodes its first
+     * one (video_custom.c). The frame a paused monitor rests on is to have
+     * that picture: scene_videos_first */
+    gboolean wait = FALSE;
     for (guint i = 0; i < s->videos->len; i++) {
         SceneVideo *sv = &g_array_index (s->videos, SceneVideo, i);
-        if (sv->v)
-            walpe_video_tex_set_paused (sv->v, p);
+        if (!sv->v)
+            continue;
+        walpe_video_tex_set_paused (sv->v, p);
+        sv->first_wait = p && !sv->tex && !sv->first_gave_up;
+        wait = wait || sv->first_wait;
     }
+    s->first_wait_us = wait ? now : 0;
+    c->first_frame_pending = wait;
 }
 
 /* render thread; no main-loop source references the content any more
