@@ -6,21 +6,31 @@
 #include <gdk/x11/gdkx.h>
 #include <X11/Xlib.h>
 
-/* three ways to hide a window that GDK does not call "minimised" */
-#define WM_UNMAPPED  1u     /* the window itself is unmapped (bspwm, awesome, xmonad) */
-#define WM_OFFSCREEN 2u     /* parked outside the screen (dwm) */
-#define WM_WITHDRAWN 4u     /* its frame is unmapped: WM_STATE says so (i3) */
+/* three ways to hide a window that GDK does not call "minimised"
+ * (the marks of winstate.h) */
+#define WM_UNMAPPED  WALPE_WM_UNMAPPED      /* the window itself is unmapped (bspwm, awesome, xmonad) */
+#define WM_OFFSCREEN WALPE_WM_OFFSCREEN     /* parked outside the screen (dwm) */
+#define WM_WITHDRAWN WALPE_WM_WITHDRAWN     /* its frame is unmapped: WM_STATE says so (i3) */
 
-static void wm_hidden_set (GdkSurface *sf, guint bit, gboolean on)
+static void wm_hidden_store (GdkSurface *sf, guint was, guint now)
 {
-    guint was = GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (sf), WALPE_WM_HIDDEN_KEY));
-    guint now = on ? was | bit : was & ~bit;
     if (now == was)
         return;
     g_object_set_data (G_OBJECT (sf), WALPE_WM_HIDDEN_KEY, GUINT_TO_POINTER (now));
     /* who follows the toplevel's state looks again (walpe_surface_hidden) */
     if (!was != !now)
         g_object_notify (G_OBJECT (sf), "state");
+}
+
+static guint wm_hidden_get (GdkSurface *sf)
+{
+    return GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (sf), WALPE_WM_HIDDEN_KEY));
+}
+
+static void wm_hidden_set (GdkSurface *sf, guint bit, gboolean on)
+{
+    guint was = wm_hidden_get (sf);
+    wm_hidden_store (sf, was, on ? was | bit : was & ~bit);
 }
 
 static gboolean on_xevent (GdkDisplay *d, gpointer xevent, gpointer u)
@@ -35,8 +45,21 @@ static gboolean on_xevent (GdkDisplay *d, gpointer xevent, gpointer u)
         if (e->xmap.event != e->xmap.window)
             break;
         sf = gdk_x11_surface_lookup_for_display (d, e->xmap.window);
+        if (!sf || !GDK_IS_TOPLEVEL (sf))
+            break;
+        if (e->type == UnmapNotify)
+            wm_hidden_set (sf, WM_UNMAPPED, TRUE);
+        else    /* mapped: also the newer word than what WM_STATE said (winstate.h) */
+            wm_hidden_store (sf, wm_hidden_get (sf), walpe_wm_marks_mapped (wm_hidden_get (sf)));
+        break;
+    case ReparentNotify:
+        /* back under the root: the frame WM_STATE spoke of is gone */
+        if (e->xreparent.event != e->xreparent.window ||
+            e->xreparent.parent != DefaultRootWindow (e->xreparent.display))
+            break;
+        sf = gdk_x11_surface_lookup_for_display (d, e->xreparent.window);
         if (sf && GDK_IS_TOPLEVEL (sf))
-            wm_hidden_set (sf, WM_UNMAPPED, e->type == UnmapNotify);
+            wm_hidden_store (sf, wm_hidden_get (sf), walpe_wm_marks_unframed (wm_hidden_get (sf)));
         break;
     case ConfigureNotify: {
         const XConfigureEvent *c = &e->xconfigure;

@@ -35,6 +35,35 @@ static inline gboolean walpe_wm_state_gone (long wm_state)
     return wm_state == 0 || wm_state == 3;
 }
 
+/* X11: the marks winstate.c keeps on a toplevel that its window manager
+ * hid without saying "minimised": the window itself unmapped, parked
+ * outside the screen, WM_STATE withdrawn / iconic. Each is taken away by
+ * the event that undoes it - and WM_STATE's also by a newer word that is
+ * no PropertyNotify:
+ *  - the window itself is mapped (MapNotify): whoever mapped it wants it
+ *    shown, whatever the property still says;
+ *  - the window is put back under the root (ReparentNotify): the frame
+ *    WM_STATE spoke of is gone.
+ * Both happen when a window manager ends while the window is on a
+ * workspace it does not show: the X server reparents the window to the
+ * root and maps it, it is on screen, and nobody writes WM_STATE again.
+ * Without them it counted as hidden for good: no numbers, no previews. A
+ * window manager that maps a window without writing WM_STATE normal is
+ * the other case. */
+#define WALPE_WM_UNMAPPED  1u
+#define WALPE_WM_OFFSCREEN 2u
+#define WALPE_WM_WITHDRAWN 4u
+
+static inline guint walpe_wm_marks_mapped (guint marks)
+{
+    return marks & ~(WALPE_WM_UNMAPPED | WALPE_WM_WITHDRAWN);
+}
+
+static inline guint walpe_wm_marks_unframed (guint marks)
+{
+    return marks & ~WALPE_WM_WITHDRAWN;
+}
+
 /* X11: the window lies wholly outside the screen (sw x sh), where a window
  * manager that never unmaps (dwm) parks the windows of tags not shown. A
  * position inside a frame - what a reparenting window manager's own events

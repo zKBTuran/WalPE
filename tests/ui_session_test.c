@@ -80,6 +80,16 @@ int main (void)
     CHECK (walpe_wm_state_gone (0), "WM_STATE withdrawn (i3: a workspace that is not shown)");
     CHECK (walpe_wm_state_gone (3), "WM_STATE iconic");
     CHECK (!walpe_wm_state_gone (1), "WM_STATE normal: on screen");
+    /* the window manager went while the window was on a workspace not
+     * shown (the server puts it under the root and maps it), or it maps
+     * the window without writing WM_STATE: the newer word counts */
+    CHECK (walpe_wm_marks_mapped (WALPE_WM_WITHDRAWN) == 0, "mapped after WM_STATE said withdrawn: on screen");
+    CHECK (walpe_wm_marks_mapped (WALPE_WM_UNMAPPED | WALPE_WM_WITHDRAWN) == 0, "mapped: both marks go");
+    CHECK (walpe_wm_marks_mapped (WALPE_WM_OFFSCREEN | WALPE_WM_WITHDRAWN) == WALPE_WM_OFFSCREEN,
+           "mapped outside the screen: still not on screen");
+    CHECK (walpe_wm_marks_unframed (WALPE_WM_WITHDRAWN) == 0, "back under the root: WM_STATE's frame is gone");
+    CHECK (walpe_wm_marks_unframed (WALPE_WM_UNMAPPED | WALPE_WM_WITHDRAWN) == WALPE_WM_UNMAPPED,
+           "back under the root and unmapped: not on screen");
     CHECK (walpe_wm_offscreen (-3840, 0, 1920, 1080, 1920, 1080), "parked left of the screen (dwm)");
     CHECK (walpe_wm_offscreen (0, 1080, 800, 600, 1920, 1080), "below the screen");
     CHECK (walpe_wm_offscreen (1920, 0, 800, 600, 1920, 1080), "right of the screen");
