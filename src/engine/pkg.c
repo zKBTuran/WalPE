@@ -642,6 +642,21 @@ static gboolean pkg_fetch_sound_locked (const char *cache, gboolean *grew)
         now = g_strdup_printf ("v3:%lld:%lld", (long long) st.st_mtime, (long long) st.st_size);
         ok = !g_strcmp0 (old, now);     /* the package the copy is of, unchanged */
     }
+    if (!ok) {
+        /* Said, once per copy (every sound layer of the scene asks): the
+         * layers that wait for these files then report "cannot be opened"
+         * for each of them, and nothing told why - sound that was switched
+         * on stayed silent until the wallpaper was loaded again, which
+         * makes a new copy. */
+        static char *said;      /* pkg_lock: the copy this was last said for */
+        if (g_strcmp0 (said, cache)) {
+            g_free (said);
+            said = g_strdup (cache);
+            g_message ("pkg: the sound files of %s are not extracted: its package %s since the copy was made; "
+                       "a new copy, with them, is made when the wallpaper is loaded again", walpe_log_str (cache),
+                       now ? "has changed" : "is gone or cannot be read");
+        }
+    }
     if (ok) {
         GError *e = NULL;
         ok = pkg_extract_mode (src, cache, PKG_ONLY_SOUND, NULL, &e);
