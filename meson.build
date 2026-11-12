@@ -2103,6 +2103,10 @@ endif  # with_tests
 # nvidia-smi, /proc samples, then a profile
 install_data('scripts/walpe-gpu-report.sh', rename: 'walpe-gpu-report',
   install_dir: get_option('bindir'), install_mode: 'rwxr-xr-x')
+# the facts for a bug report about sound, the Wayland window or the tray, collected
+# into ~/walpe-report (docs/BUG-REPORTS.md); it finds the programs next to itself
+install_data('scripts/walpe-collect.sh', rename: 'walpe-collect',
+  install_dir: get_option('bindir'), install_mode: 'rwxr-xr-x')
 install_data('data/walpe-autostart.desktop',
   install_dir: get_option('sysconfdir') / 'xdg/autostart')
 install_data('data/style.css', install_dir: get_option('datadir') / 'walpe')

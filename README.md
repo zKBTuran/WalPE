@@ -102,6 +102,7 @@ More: [docs/USAGE.md](docs/USAGE.md).
 - [VIDEO.md](docs/VIDEO.md): playback, import, hardware decoding
 - [SECURITY.md](docs/SECURITY.md): limits on wallpaper files, reporting a problem
 - [DEVELOPMENT.md](docs/DEVELOPMENT.md): architecture, tests, developer tools
+- [BUG-REPORTS.md](docs/BUG-REPORTS.md): reporting a bug: `walpe-ctl diag`, the collector script
 
 The developer tools (harnesses and generators that are not needed to build, test or use
 WalPE) live on the separate branch `devtools`
