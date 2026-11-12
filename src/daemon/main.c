@@ -407,6 +407,9 @@ static gboolean swap_restart;           /* main: the restart under way follows s
 static gint64 swap_restarted_us;        /* monotonic time of the last such restart (main (), 0 = none) */
 static void pointer_update (void);
 static void pointer_repace (void);
+static char *restart_failed;            /* main: a restart in place was wanted and could not be
+                                         * begun: why (status "restart_failed"; NULL = none) */
+static gboolean restart_begin (const char *what);
 static void follow_pace_update (void);
 static void vis_push (void);          /* "Skip hidden areas" */
 static void state_touch (void);
@@ -6011,6 +6014,8 @@ static void ipc_status (JsonBuilder *b)
     g_free (au);
     if (Imp.job && Imp.active)
         Imp.percent = walpe_import_percent (Imp.job);
+    if (restart_failed)     /* a restart in place that could not be begun (restart_begin) */
+        jb_str (b, "restart_failed", restart_failed);
     jb_bool (b, "import_active", Imp.active);
     if (Imp.job)    /* "add" = library import, "convert" = a video wallpaper being made playable */
         jb_str (b, "import_purpose", Imp.purpose ? Imp.purpose : "add");
@@ -8485,10 +8490,46 @@ static void sw_setup (void)
     g_free (searched);
 }
 
+/* May a restart in place begin?
+ *
+ * The restart leaves the main loop, takes the daemon apart - render
+ * threads, wallpapers, GL, the display - and execs the same binary. When
+ * that exec fails there is nothing left to go back to: the daemon ends, and
+ * the desktop has no wallpaper until somebody starts it again. So whoever
+ * wants a restart asks here first, while everything still stands: can the
+ * binary be executed (by its path, or through /proc/self/exe)? If not, the
+ * restart does not happen: the daemon runs on as it was, the log says so
+ * once, and status carries "restart_failed" with the reason. What the
+ * restart was for (another monitor layout, a setting that needs a new
+ * process, the web module that was to be left behind) is not done.
+ * WALPE_RESTART_EXEC=fail (tests): as if the binary could not be executed.
+ * An exec that fails although this said yes (no memory, a file system that
+ * went away in between) still ends the daemon: restart_exec. */
+static gboolean restart_begin (const char *what)
+{
+    const char *t = g_getenv ("WALPE_RESTART_EXEC");
+    const gboolean can = g_strcmp0 (t, "fail") != 0 &&
+                         ((Sw.exe && g_file_test (Sw.exe, G_FILE_TEST_IS_EXECUTABLE)) ||
+                          access ("/proc/self/exe", X_OK) == 0);
+    if (can)
+        return TRUE;
+    if (!restart_failed)
+        g_warning ("%s: walpe-daemon cannot be restarted in place (%s can no longer be executed): it "
+                   "runs on as it is; start it again to apply this (walpe-ctl status: restart_failed)",
+                   what, Sw.exe ? Sw.exe : "its binary");
+    g_free (restart_failed);
+    restart_failed = g_strdup_printf ("%s: the daemon's binary can no longer be executed, the restart "
+                                      "in place was not begun", what);
+    state_touch ();
+    return FALSE;
+}
+
 static gboolean sw_restart_cb (gpointer user)
 {
     (void) user;
     Sw.restart_id = 0;
+    if (!restart_begin ("software rendering setting changed"))
+        return G_SOURCE_REMOVE;
     Sw.restart = TRUE;
     g_message ("software rendering setting changed: restarting in place");
     g_main_loop_quit (D.loop);
@@ -8633,8 +8674,16 @@ static void restart_exec (gboolean layout_stamp)
         env = g_environ_setenv (env, "WALPE_IPC_FD", n, TRUE);
     }
     fflush (NULL);
-    execve (g_file_test (Sw.exe, G_FILE_TEST_IS_EXECUTABLE) ? Sw.exe : "/proc/self/exe", Sw.argv,
-            env);
+    {
+        /* by its path; should that fail, the image this process runs (the
+         * same file unless it was replaced meanwhile) */
+        const gboolean by_path = g_file_test (Sw.exe, G_FILE_TEST_IS_EXECUTABLE);
+        execve (by_path ? Sw.exe : "/proc/self/exe", Sw.argv, env);
+        const int e1 = errno;
+        if (by_path && strcmp (Sw.exe, "/proc/self/exe") != 0)
+            execve ("/proc/self/exe", Sw.argv, env);
+        errno = e1;
+    }
     g_warning ("restart in place failed (%s): walpe-daemon stops; start it again",
                g_strerror (errno));
     {
@@ -8907,7 +8956,12 @@ static gboolean layout_check (gpointer user)
     case WALPE_LAYOUT_RESTART:
         break;
     }
-    {
+    if (!restart_begin ("the monitor layout changed")) {
+        /* (the next change of the outputs looks again) */
+        walpe_output_list_free (&layout_pending);
+        layout_force = FALSE;
+        swap_restart = FALSE;
+    } else {
         GString *d = g_string_new (NULL);
         for (int i = 0; i < l.n; i++)
             g_string_append_printf (d, "%s%s %dx%d+%d+%d", i ? ", " : "", l.o[i].name,
@@ -9285,6 +9339,8 @@ static gboolean web_accel_restart (gpointer user)
     }
     if (D.restart)      /* (the switch was flipped more than once while it waited) */
         return G_SOURCE_REMOVE;
+    if (!restart_begin ("web hardware acceleration switched"))
+        return G_SOURCE_REMOVE;
     g_message ("web hardware acceleration switched %s: restarting to apply it",
                D.cfg->web_accel ? "on" : "off");
     D.restart = TRUE;
@@ -9348,6 +9404,12 @@ static gboolean web_unload_cb (gpointer user)
         apply_wallpapers (NULL, NULL, FALSE, FALSE);
         return G_SOURCE_REMOVE;
     }
+    if (!restart_begin ("no web wallpaper is shown any more")) {
+        /* the module stays; the wallpapers of this change are loaded here
+         * (web_unload_due does not decide for a restart again) */
+        apply_wallpapers (NULL, NULL, FALSE, FALSE);
+        return G_SOURCE_REMOVE;
+    }
     web_unload_restart = TRUE;
     D.restart = TRUE;
     g_main_loop_quit (D.loop);
@@ -9364,6 +9426,7 @@ static gboolean web_unload_due (gboolean changed)
     if (web_unload_pending)
         return TRUE;        /* (a second change before the restart's idle has run) */
     if (!changed || restore_apply || !D.cfg->web_unload || D.windowed || D.restart || !D.loop ||
+        restart_failed ||   /* (it was tried: restart_begin) */
         !walpe_web_module (FALSE) || Imp.active || Ws.active || sv_converting () ||
         (load_skip && g_hash_table_size (load_skip) > 0))
         return FALSE;

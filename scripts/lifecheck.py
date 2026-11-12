@@ -111,6 +111,12 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             restart, the daemon answers and quits. With an error that says
             nothing of the kind: no restart, and its log line at most once
             in five seconds per monitor.
+  norestart a restart in place that cannot be begun (the daemon's binary
+            cannot be executed: WALPE_RESTART_EXEC=fail, a switch for this
+            check): the daemon runs on as it was - same process, wallpapers
+            on screen, requests answered -, says so once and in status
+            ("restart_failed"), and still quits when told to. X11 only (the
+            layout is changed as in `restart`).
   video     a video's load ends with its first picture: a clip the decoder
             cannot do anything with (its container reads well) is a failed
             load with a reason in status, and the wallpaper from before
@@ -2239,6 +2245,67 @@ def case_swaplost(env, W):
     env.stop_daemon()
 
 
+# ---------------------------------------------------------------- norestart
+def case_norestart(env, W):
+    """A restart in place whose exec would fail. The daemon took itself apart
+    first and found out last: it ended, and the desktop had no wallpaper
+    until somebody started it again."""
+    A, B = ("A", 640, 360, 0, 0), ("B", 640, 360, 640, 0)
+    mf = os.path.join(env.tmp, "monitors-norestart")
+    if env.display.winsys != "x11":
+        print("skip norestart (the layout is changed through WALPE_MONITORS=@FILE and an X event: X11 only)")
+        return
+    if not poke_root(env.env["DISPLAY"]):
+        print("skip norestart (no libX11 for ctypes: cannot announce a layout change)")
+        return
+
+    def layout(bw):
+        with open(mf, "w") as f:
+            f.write(f"A=640x360+0+0@60,B={bw}x360+640+0@60")
+
+    def is_red(c):
+        return rc.name_of(c) == "red"
+
+    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False})
+    layout(640)
+    if not check(env.start_daemon([A, B], extra={"WALPE_MONITORS": "@" + mf, "WALPE_RESTART_EXEC": "fail"}),
+                 "norestart: daemon started"):
+        return
+    pid = env.daemon.pid
+    env.open(W["red"])
+    loaded(env, W["red"])
+    mark = env.mark()
+    layout(600)
+    poke_root(env.env["DISPLAY"])
+    said = wait_for(lambda: "cannot be restarted in place" in env.since(mark), 40, 0.1)
+    check(bool(said), "norestart: the daemon says that it cannot restart", env.since(mark)[-300:])
+    st = env.state()
+    check("layout" in (st.get("restart_failed") or ""), "norestart: status has restart_failed with the reason",
+          st.get("restart_failed"))
+    check(env.daemon.poll() is None and os.path.exists(f"/proc/{pid}") and "restarting to follow it" not in
+          env.since(mark), "norestart: it runs on: same process, nothing was taken apart")
+    ms = st.get("monitors") or []
+    check(len(ms) == 2 and all(m.get("current") == W["red"] and m.get("type") == "scene" for m in ms) and
+          is_red(colour_is(env, A, is_red)), "norestart: the wallpapers are still shown", rc.brief(ms))
+    # the layout changes once more: looked at again, said once
+    layout(560)
+    poke_root(env.env["DISPLAY"])
+    time.sleep(4.0 * PATIENCE)
+    check(env.since(mark).count("cannot be restarted in place") == 1 and env.daemon.poll() is None,
+          "norestart: a second change: still running, the line is not repeated",
+          env.since(mark).count("cannot be restarted in place"))
+    check(env.open(W["blue"]) and loaded(env, W["blue"]), "norestart: another wallpaper can be opened")
+    rep = env.ipc({"cmd": "quit"})
+    try:
+        code = env.daemon.wait(timeout=20 * PATIENCE)
+    except subprocess.TimeoutExpired:
+        code = None
+    if code is not None:
+        env.daemon = None
+    check(bool(rep and rep.get("ok")) and code == 0, "norestart: and the daemon quits when told to", (rep, code))
+    env.stop_daemon()
+
+
 # ------------------------------------------------------------------ winlost
 def case_winlost(env, W):
     """Another X client destroys a wallpaper window. The daemon drew into a
@@ -2477,7 +2544,7 @@ CASES = [("logcap", case_logcap), ("pointer", case_pointer), ("reload", case_rel
          ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("scan", case_scan), ("tray", case_tray), ("window", case_window), ("panel", case_panel), ("busy", case_busy), ("probe", case_probe),
          ("fullscreen", case_fullscreen), ("video", case_video), ("webunload", case_webunload),
          ("winlost", case_winlost), ("convert", case_convert),
-         ("swaplost", case_swaplost)]
+         ("swaplost", case_swaplost), ("norestart", case_norestart)]
 
 
 

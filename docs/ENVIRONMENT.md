@@ -275,6 +275,7 @@ Not for daily use: test hooks, measuring aids and names the programs set for the
 | `WALPE_CHECK_WL_RENDERER=gles2` | the end-to-end checks | run the headless compositor on GLES 2 instead of pixman (needs a DRM render node) |
 | `WALPE_LOAD_DELAY_MS=n` | daemon | every wallpaper load takes at least `n` ms more (what must hold while a load runs) |
 | `WALPE_SWAP_FAIL=n[,always][,0xERROR]` | daemon | every monitor's buffer swaps fail from its `n`th frame on, with `EGL_CONTEXT_LOST` or the EGL error given (what the daemon does when a GL context is lost: status `swap_error`, one restart in place); not in the process restarted for it unless `always` |
+| `WALPE_RESTART_EXEC=fail` | daemon | a restart in place cannot be begun, as if the daemon's binary could no longer be executed (the daemon runs on as it is; status `restart_failed`) |
 | `WALPE_WEB_UNLOAD_GAP_S=n` | daemon | the least time between two restarts in place that unload the web module (`web_unload`; default 60 seconds) |
 | `WALPE_WS_API_BASE=http://127.0.0.1:PORT/` | Workshop client | a loopback stand-in for the Steam Web API; nothing but that spelling is accepted, so the variable cannot send the key elsewhere |
 | `WALPE_WS_TOTAL_TIMEOUT=n` | Workshop client | seconds one Workshop request may take in all (default 120) |

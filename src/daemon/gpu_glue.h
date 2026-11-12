@@ -614,6 +614,8 @@ static gboolean gpu_restart_cb (gpointer user)
 {
     (void) user;
     Gpu.restart_id = 0;
+    if (!restart_begin ("gpu setting changed"))
+        return G_SOURCE_REMOVE;
     Sw.restart = TRUE;      /* the restart in place of main () */
     g_message ("gpu setting changed: restarting in place");
     g_main_loop_quit (D.loop);
