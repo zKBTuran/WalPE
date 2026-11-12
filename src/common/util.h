@@ -79,6 +79,22 @@ typedef struct _GdkPixbuf GdkPixbuf;
 typedef gboolean (*WalpePictureSizeFunc) (const char *kind, int w, int h, int *sw, int *sh,
                                           gpointer user);
 const char *walpe_picture_kind (const guint8 *d, gsize len);
+/* A "BM" file before it reaches gdk-pixbuf's BMP decoder. The decoder
+ * reserves buffers of sizes it reads from the file's first bytes, each up
+ * to 4 GiB, before it has checked anything else: one of the size of the info
+ * header (4 bytes at offset 14; also when only the picture's size is asked
+ * for), one that reaches up to the pixel data (the offset at 10; pictures
+ * without a palette), one for the palette (the count at 46). Here: the info
+ * header has one of the sizes the format knows (12, 40, 52, 56, 64, 108,
+ * 124; the decoder refuses any other afterwards), the pixel data starts
+ * inside the file, and a palette has no more entries than the bits of a
+ * pixel can name.
+ * d[0..len) = the file's first bytes (54 or more of a file that has them),
+ * size = the whole file's length. TRUE for what does not start with "BM". */
+gboolean walpe_bmp_header_ok (const guint8 *d, gsize len, guint64 size);
+/* the same for a file (TRUE when it cannot be read: whoever opens it next
+ * says why) */
+gboolean walpe_bmp_file_header_ok (const char *path);
 GdkPixbuf *walpe_picture_decode (const guint8 *d, gsize len, const char *const *kinds,
                                  WalpePictureSizeFunc size, gpointer user, GError **err);
 GdkPixbuf *walpe_picture_decode_file (const char *path, const char *const *kinds,

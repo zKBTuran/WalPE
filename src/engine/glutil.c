@@ -2806,7 +2806,10 @@ WalpeGlTex walpe_gl_tex_from_file (const char *path)
      * large the picture is, or that is none of the formats above, is not
      * decoded at all. */
     int iw = 0, ih = 0;
-    GdkPixbufFormat *fmt = gdk_pixbuf_get_file_info (path, &iw, &ih);
+    /* (a "BM" file without the header sizes of a BMP file: refused by the
+     * loader above for what its decoder would reserve, not read here either) */
+    GdkPixbufFormat *fmt = walpe_bmp_file_header_ok (path) ? gdk_pixbuf_get_file_info (path, &iw, &ih)
+                                                           : NULL;
     const gint64 max_side = 16384, max_px = (gint64) 8192 * 8192;
     if (!fmt || iw <= 0 || ih <= 0 || !tex_file_format_ok (fmt)) {
         g_debug ("texture %s: not a picture format a wallpaper texture can have", path);

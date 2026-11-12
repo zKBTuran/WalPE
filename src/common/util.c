@@ -339,6 +339,43 @@ const char *walpe_picture_kind (const guint8 *d, gsize len)
     return NULL;
 }
 
+static guint32 bmp_le32 (const guint8 *p)
+{
+    return (guint32) p[0] | ((guint32) p[1] << 8) | ((guint32) p[2] << 16) | ((guint32) p[3] << 24);
+}
+
+gboolean walpe_bmp_header_ok (const guint8 *d, gsize len, guint64 size)
+{
+    if (!d || len < 2 || d[0] != 'B' || d[1] != 'M')
+        return TRUE;
+    if (len < 18)
+        return FALSE;
+    guint32 off = bmp_le32 (d + 10), hs = bmp_le32 (d + 14);
+    if ((hs != 12 && hs != 40 && hs != 52 && hs != 56 && hs != 64 && hs != 108 && hs != 124) ||
+        off > size)
+        return FALSE;
+    if (hs >= 40) {
+        if (len < 54)
+            return FALSE;       /* shorter than its own header */
+        guint bpp = (guint) d[28] | ((guint) d[29] << 8);
+        if (bpp <= 8 && bmp_le32 (d + 46) > (1u << bpp))
+            return FALSE;
+    }
+    return TRUE;
+}
+
+gboolean walpe_bmp_file_header_ok (const char *path)
+{
+    guint8 h[54];
+    GStatBuf st;
+    FILE *f = path && g_stat (path, &st) == 0 && S_ISREG (st.st_mode) ? fopen (path, "rb") : NULL;
+    if (!f)
+        return TRUE;
+    gsize n = fread (h, 1, sizeof h, f);
+    fclose (f);
+    return walpe_bmp_header_ok (h, n, (guint64) st.st_size);
+}
+
 typedef struct {
     const char *kind;
     WalpePictureSizeFunc size;
@@ -360,8 +397,8 @@ static void picture_size_prepared (GdkPixbufLoader *ld, int w, int h, gpointer u
 }
 
 /* the loader for the format the first bytes name, when it is one of kinds */
-static GdkPixbufLoader *picture_loader (const guint8 *head, gsize n, const char *const *kinds,
-                                        PictureLoad *pl, GError **err)
+static GdkPixbufLoader *picture_loader (const guint8 *head, gsize n, guint64 size,
+                                        const char *const *kinds, PictureLoad *pl, GError **err)
 {
     const char *kind = walpe_picture_kind (head, n);
     gboolean accepted = FALSE;
@@ -370,6 +407,12 @@ static GdkPixbufLoader *picture_loader (const guint8 *head, gsize n, const char 
     if (!accepted) {
         g_set_error_literal (err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
                              "not a picture of an accepted format");
+        return NULL;
+    }
+    /* head = the file's first bytes, size = its whole length */
+    if (!strcmp (kind, "bmp") && !walpe_bmp_header_ok (head, n, size)) {
+        g_set_error_literal (err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                             "a BMP whose header sizes are not those of a BMP file");
         return NULL;
     }
     GdkPixbufLoader *ld = gdk_pixbuf_loader_new_with_type (kind, NULL);
@@ -419,7 +462,7 @@ GdkPixbuf *walpe_picture_decode (const guint8 *d, gsize len, const char *const *
                                  WalpePictureSizeFunc size, gpointer user, GError **err)
 {
     PictureLoad pl = { NULL, size, user, FALSE };
-    GdkPixbufLoader *ld = picture_loader (d, len, kinds, &pl, err);
+    GdkPixbufLoader *ld = picture_loader (d, len, len, kinds, &pl, err);
     if (!ld)
         return NULL;
     if (!picture_jpeg_ok (&pl, !strcmp (pl.kind, "jpeg") ? walpe_jpeg_store_bytes (d, len) : 0, err)) {
@@ -456,7 +499,7 @@ GdkPixbuf *walpe_picture_decode_file (const char *path, const char *const *kinds
     guint8 *buf = g_malloc (65536);
     gsize n = fread (buf, 1, 65536, f);
     PictureLoad pl = { NULL, size, user, FALSE };
-    GdkPixbufLoader *ld = picture_loader (buf, n, kinds, &pl, err);
+    GdkPixbufLoader *ld = picture_loader (buf, n, (guint64) st.st_size, kinds, &pl, err);
     if (ld && !picture_jpeg_ok (&pl, !strcmp (pl.kind, "jpeg") ? walpe_jpeg_store_bytes_file (path) : 0,
                                 err)) {
         gdk_pixbuf_loader_close (ld, NULL);

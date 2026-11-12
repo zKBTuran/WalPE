@@ -94,12 +94,25 @@ static gboolean picture_dims_ok (int w, int h, GError **err)
     return TRUE;
 }
 
+/* a "BM" file goes to gdk-pixbuf (also for its size alone) only with the
+ * header sizes of a BMP file (util.h, walpe_bmp_header_ok) */
+static gboolean picture_bmp_ok (const char *path, GError **err)
+{
+    if (walpe_bmp_file_header_ok (path))
+        return TRUE;
+    g_set_error (err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                 "%s: a BMP whose header sizes are not those of a BMP file", path);
+    return FALSE;
+}
+
 /* decode path so that its longer side is `side` pixels (0 = its own size)
  * and upload it. The longer side, not width x height: a photo turned by
  * its EXIF orientation has them the other way round in the file. */
 static ImageTex *image_tex_load (const char *path, int side, GError **error)
 {
     int fw = 0, fh = 0;
+    if (!picture_bmp_ok (path, error))
+        return NULL;
     GdkPixbufFormat *fmt = gdk_pixbuf_get_file_info (path, &fw, &fh);
     gboolean pixbuf_format = fmt != NULL;
     /* the declared size, not `side`: see the top of the file. Checked
@@ -283,6 +296,8 @@ static gboolean image_gl_init (WalpeContent *c, GError **err)
 {
     ImageContent *s = (ImageContent *) c;
     int fw = 0, fh = 0;
+    if (!picture_bmp_ok (s->base.path, err))
+        return FALSE;
     GdkPixbufFormat *fmt = gdk_pixbuf_get_file_info (s->base.path, &fw, &fh);
     s->scalable = fmt != NULL;
     /* too large by its header (or another kind of file now): refused
@@ -396,6 +411,8 @@ static gboolean picture_format_ok (GdkPixbufFormat *fmt, const char *path, GErro
 gboolean walpe_picture_size_ok (const char *path, GError **err)
 {
     int w = 0, h = 0;
+    if (!picture_bmp_ok (path, err))
+        return FALSE;
     GdkPixbufFormat *fmt = gdk_pixbuf_get_file_info (path, &w, &h);
     if (!fmt)
         return TRUE;    /* not a gdk-pixbuf format: its own loader decides */

@@ -652,6 +652,10 @@ static WalpeTex *tex_load_mem (const guint8 *d, gsize len, const char *path, gui
          * that picture alone */
         if (kind && !walpe_gif_layout_ok (d, len, NULL))
             kind = NULL;
+        /* a BMP: only with header sizes a BMP file has - its decoder
+         * reserves buffers of whatever sizes the file states (util.h) */
+        if (kind && !walpe_bmp_header_ok (d, len, len))
+            kind = NULL;
         if (kind) {
             GdkPixbuf *pb = tex_pixbuf_from_data (d, len, kind);
             if (pb)

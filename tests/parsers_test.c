@@ -576,6 +576,47 @@ static void test_tex (void)
         g_object_unref (pb);
     }
 
+    /* A "BM" file whose first bytes make gdk-pixbuf's BMP decoder reserve
+     * gigabytes before it checks anything (found by tests/fuzz, target tex):
+     * an info header of 3 GiB, pixel data at 3 GiB (no palette), a palette
+     * of 4 thousand million entries. Not handed to the decoder; a real BMP
+     * (the loop above) still is. The same files lie in
+     * tests/fuzz/regress/tex, where the address sanitizer watches the
+     * allocation itself. */
+    {
+        static const struct { guint32 off, hs, used; guint16 bpp; } bad[] = {
+            { 54, 0xBFFFFFF2u, 0, 32 }, { 0xC0000000u, 40, 0, 32 }, { 0, 40, 0xFFFFFFFFu, 1 },
+            { 54, 41, 0, 24 }, { 54, 40, 257, 8 },
+        };
+        for (guint i = 0; i <= G_N_ELEMENTS (bad); i++) {
+            /* the last round: a header with nothing wrong (2 x 2 pixels, 32 bit) */
+            gboolean good = i == G_N_ELEMENTS (bad);
+            GByteArray *a = g_byte_array_new ();
+            g_byte_array_append (a, (const guint8 *) "BM", 2);
+            put32 (a, 70); put32 (a, 0); put32 (a, good ? 54 : bad[i].off);
+            put32 (a, good ? 40 : bad[i].hs); put32 (a, 2); put32 (a, 2);
+            put32 (a, 1u | ((guint32) (good ? 32 : bad[i].bpp) << 16));
+            put32 (a, 0); put32 (a, 16); put32 (a, 2835); put32 (a, 2835);
+            put32 (a, good ? 0 : bad[i].used); put32 (a, 0);
+            for (int k = 0; k < 4; k++)
+                put32 (a, 0xff336699u);
+            CHECK (walpe_bmp_header_ok (a->data, a->len, a->len) == good);
+            CHECK (walpe_bmp_header_ok (a->data, 17, a->len) == FALSE);
+            char *rel = g_strdup_printf ("tex/bmp%u.tex", i);
+            mkfile (rel, a->data, a->len);
+            f = P (rel);
+            CHECK (walpe_bmp_file_header_ok (f) == good);
+            t = walpe_tex_load (f);
+            if (!good)
+                CHECK (t == NULL);
+            walpe_tex_free (t);
+            g_free (f);
+            g_free (rel);
+            g_byte_array_unref (a);
+        }
+        CHECK (walpe_bmp_header_ok ((const guint8 *) "\x89PNG....", 10, 10));   /* not a BMP: not this check's */
+    }
+
     /* 600 JPEG starts, each in the comment segment of the one before, then
      * 4 MiB of zeros: every start was a decode attempt that read to the end
      * of the file (17 s of CPU for this one; the time grew with the file).
