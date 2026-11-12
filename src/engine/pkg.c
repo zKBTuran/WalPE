@@ -165,6 +165,40 @@ static guint pkg_new_dirs (GHashTable *seen, const char *path)
     return n;
 }
 
+/* Can the entry `key` (pkg_path_key of its path) be written next to the
+ * entries before it? `files` and `folders` hold what those are. A name can
+ * be a file or a folder, not both, and a file's name has to leave room for
+ * the seven bytes of the temporary name it is written under (NAME_MAX is
+ * 255). Without this check such a package was refused only when the write
+ * failed: after part of it had been written, and - once a copy could be
+ * made without its sound files - not at all while the entry in question was
+ * one of those, so that one package loaded with sound off and was refused
+ * with sound on. */
+#define PKG_NAME_MAX 255
+#define PKG_TMP_TAIL 7      /* ".XXXXXX", g_file_set_contents */
+static gboolean pkg_entry_fits (GHashTable *files, GHashTable *folders, const char *key)
+{
+    if (!*key || g_hash_table_contains (folders, key))
+        return FALSE;       /* the entry names a folder */
+    for (const char *c = key;;) {
+        const char *sl = strchr (c, '/');
+        gsize n = sl ? (gsize) (sl - c) : strlen (c);
+        if (n > (gsize) (sl ? PKG_NAME_MAX : PKG_NAME_MAX - PKG_TMP_TAIL))
+            return FALSE;
+        if (!sl)
+            break;
+        char *dir = g_strndup (key, sl - key);
+        if (g_hash_table_contains (files, dir)) {
+            g_free (dir);
+            return FALSE;   /* a folder of the entry is a file */
+        }
+        g_hash_table_add (folders, dir);
+        c = sl + 1;
+    }
+    g_hash_table_add (files, g_strdup (key));
+    return TRUE;
+}
+
 static gboolean set_ioerr (GError **err, const char *fmt, ...) G_GNUC_PRINTF (2, 3);
 static gboolean set_ioerr (GError **err, const char *fmt, ...)
 {
@@ -228,6 +262,7 @@ static gboolean pkg_extract_mode (const char *pkg_path, const char *dest_dir, in
     GPtrArray *paths = g_ptr_array_new_with_free_func (g_free);
     GHashTable *dirs = NULL;     /* directories the entries so far lie in */
     GHashTable *kinds = NULL;    /* pkg_path_key of a sound-named entry -> 2 a sound file, 1 not */
+    GHashTable *files = NULL, *folders = NULL;   /* pkg_entry_fits */
     GArray *foffs = g_array_new (FALSE, FALSE, sizeof (guint32));
     GArray *fszs = g_array_new (FALSE, FALSE, sizeof (guint32));
     for (guint32 i = 0; i < n && off + 8 <= len; i++) {
@@ -259,6 +294,8 @@ static gboolean pkg_extract_mode (const char *pkg_path, const char *dest_dir, in
     guint64 written = 0, budget = (guint64) len * 4 + (16u << 20);
     guint objects = 0;
     dirs = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+    files = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+    folders = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
     if (mode != PKG_ALL)
         kinds = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
 
@@ -303,6 +340,15 @@ static gboolean pkg_extract_mode (const char *pkg_path, const char *dest_dir, in
                                  "holds): %s", pkg_path);
                     goto fail;
                 }
+                char *key = pkg_path_key (path);
+                if (!pkg_entry_fits (files, folders, key)) {
+                    g_set_error (err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                                 "pkg: an entry cannot be written (a file and a folder of one "
+                                 "name, or a name of more than %d bytes): %s",
+                                 PKG_NAME_MAX - PKG_TMP_TAIL, pkg_path);
+                    g_free (key);
+                    goto fail;
+                }
                 /* Where one file is named by several entries the last one
                  * is the file (it is written last), so the last one says
                  * what the file is - for all of them: a copy made without
@@ -310,8 +356,10 @@ static gboolean pkg_extract_mode (const char *pkg_path, const char *dest_dir, in
                  * made in one go holds, and completing it never writes
                  * over a file the scene has already read. */
                 if (kinds && walpe_pkg_sound_name (path))
-                    g_hash_table_replace (kinds, pkg_path_key (path),
+                    g_hash_table_replace (kinds, key,
                                           GINT_TO_POINTER (pkg_sound_bytes (buf + base + foff, fsz) ? 2 : 1));
+                else
+                    g_free (key);
                 continue;
             }
             if (mode != PKG_ALL) {
@@ -347,6 +395,8 @@ static gboolean pkg_extract_mode (const char *pkg_path, const char *dest_dir, in
 
     g_hash_table_unref (dirs);
     g_clear_pointer (&kinds, g_hash_table_unref);
+    g_clear_pointer (&files, g_hash_table_unref);
+    g_clear_pointer (&folders, g_hash_table_unref);
     g_array_free (foffs, TRUE);
     g_array_free (fszs, TRUE);
     g_ptr_array_free (paths, TRUE);
@@ -356,6 +406,8 @@ static gboolean pkg_extract_mode (const char *pkg_path, const char *dest_dir, in
 fail:
     g_clear_pointer (&dirs, g_hash_table_unref);
     g_clear_pointer (&kinds, g_hash_table_unref);
+    g_clear_pointer (&files, g_hash_table_unref);
+    g_clear_pointer (&folders, g_hash_table_unref);
     g_array_free (foffs, TRUE);
     g_array_free (fszs, TRUE);
     g_ptr_array_free (paths, TRUE);

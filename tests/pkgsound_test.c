@@ -273,6 +273,62 @@ static void test_kinds (void)
     make_item (0);
 }
 
+/* ---- what no extraction can write is refused, whatever the sound setting ---- */
+static char *cache_of_item (void);
+
+static void test_refused (void)
+{
+    static char longname[300], fits[300];
+    memset (longname, 'a', 245);
+    strcpy (longname + 245, ".ogg");     /* 249 bytes: no room for the name it is written under */
+    memset (fits, 'a', 244);
+    strcpy (fits + 244, ".ogg");         /* 248: the longest that can be written */
+    const struct { const char *what; gboolean ok; Ent e[3]; } t[] = {
+        { "a sound file, then a folder of its name", FALSE,
+          { { "scene.json", (const guint8 *) SCENE, strlen (SCENE) },
+            { "x.ogg", (const guint8 *) OGG, strlen (OGG) },
+            { "x.ogg/y.png", (const guint8 *) SOLID, strlen (SOLID) } } },
+        { "a folder, then a sound file of its name", FALSE,
+          { { "scene.json", (const guint8 *) SCENE, strlen (SCENE) },
+            { "x.ogg/y.png", (const guint8 *) SOLID, strlen (SOLID) },
+            { "x.ogg", (const guint8 *) OGG, strlen (OGG) } } },
+        { "the same, spelled apart", FALSE,
+          { { "scene.json", (const guint8 *) SCENE, strlen (SCENE) },
+            { "./s//x.ogg", (const guint8 *) OGG, strlen (OGG) },
+            { "s/./x.ogg/y.png", (const guint8 *) SOLID, strlen (SOLID) } } },
+        { "a sound file with a name too long to write", FALSE,
+          { { "scene.json", (const guint8 *) SCENE, strlen (SCENE) },
+            { "models/solid.json", (const guint8 *) SOLID, strlen (SOLID) },
+            { longname, (const guint8 *) OGG, strlen (OGG) } } },
+        { "a sound file with the longest name", TRUE,
+          { { "scene.json", (const guint8 *) SCENE, strlen (SCENE) },
+            { "models/solid.json", (const guint8 *) SOLID, strlen (SOLID) },
+            { fits, (const guint8 *) OGG, strlen (OGG) } } },
+    };
+    char *where = cache_of_item ();
+    for (guint i = 0; i < G_N_ELEMENTS (t); i++) {
+        write_pkg (pkg, t[i].e, 3, 0);
+        for (int with_sound = 1; with_sound >= 0; with_sound--) {
+            GError *err = NULL;
+            rm_rf (where);
+            char *c = walpe_pkg_extract_cached_opts (pkg, item, with_sound, &err);
+            if (t[i].ok) {
+                CHECK (c != NULL, "%s, sound %s: accepted (%s)", t[i].what, with_sound ? "on" : "off",
+                       err ? err->message : "");
+                CHECK (c && walpe_pkg_fetch_sound (c) && same_text (c, fits, OGG), "... and whole after the fetch");
+            } else {
+                CHECK (!c && err, "%s, sound %s: refused", t[i].what, with_sound ? "on" : "off");
+                CHECK (!g_file_test (where, G_FILE_TEST_EXISTS), "... and nothing of it is in the cache");
+            }
+            g_clear_error (&err);
+            if (c)
+                drop_copy (c);
+        }
+    }
+    g_free (where);
+    make_item (0);
+}
+
 /* ---- A ---- */
 static void test_cache (void)
 {
@@ -627,6 +683,7 @@ int main (void)
            "which entries are sound files");
     test_cache ();
     test_kinds ();
+    test_refused ();
     walpe_sound_allow (TRUE);
     walpe_sound_use_null (TRUE);
     test_player ();
