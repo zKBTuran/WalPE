@@ -278,6 +278,15 @@ could do to the daemon. None of these was seen being used.
   notice: that monitor showed the root window for as long as the daemon ran. It now
   restarts itself in place, at most once in ten seconds.
 - A video conversion that cannot start, or is cancelled, leaves no memory behind.
+- A lost GL context (suspend and resume, a GPU reset) no longer leaves a black monitor
+  and a log line per frame: `walpe-ctl status` names it per monitor (`swap_error`), and
+  the daemon restarts in place once, at most once a minute. Tried by making swaps fail
+  on purpose; no driver here loses a context.
+- A restart in place that cannot be begun (the daemon's binary can no longer be
+  executed, as after an update that removed it) leaves the daemon running instead of
+  ending it; `walpe-ctl status` has `restart_failed`.
+- The unfinished copy of a scene's video no longer stays in the cache when the daemon
+  ends while the copy is being started.
 - The daemon's log file is capped from the start. The cap (16 MiB, `WALPE_LOG_MAX_MB`) was
   looked at only with every 256th line of a run and never for a file a shell had opened
   with `> file`: a daemon started from an autostart entry at every login, saying little
