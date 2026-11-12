@@ -3,6 +3,7 @@
 #include "uiipc.h"
 #include "numfield.h"
 #include "common/util.h"
+#include "common/uitext.h"
 #include <math.h>
 #include <string.h>
 
@@ -473,16 +474,13 @@ static void walk (Walk *w, int i, int depth)
         const char *name = wpj_str (lo, "name", ""), *text = wpj_str (lo, "text", NULL);
         const char *file = wpj_str (lo, "file", NULL);
         r->key = g_strdup (wpj_str (lo, "key", ""));
-        r->name = g_strdup (*name ? name : "(no name)");
+        /* the scene author's strings, of any length and with whatever
+         * characters: one clean line each (uitext.h). A name of 100 kB was
+         * laid out whole for its row, and a direction control in it
+         * turned the row's words round. */
+        r->name = walpe_ui_layer_name (name);
         r->type = g_strdup (type);
-        if (text) {
-            char *one = g_strdup (text);
-            g_strdelimit (one, "\n\r\t", ' ');
-            r->detail = g_strdup_printf ("“%s”", one);
-            g_free (one);
-        } else if (file) {
-            r->detail = g_strdup (file);
-        }
+        r->detail = walpe_ui_layer_detail (text, file);
         r->index = i;
         r->parent = (int) wpj_num (lo, "parent", -1);
         r->depth = depth;

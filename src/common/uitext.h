@@ -51,4 +51,17 @@ char *walpe_ui_text (const char *s, glong max_chars, WalpeUiTextMode mode);
  * alone. Not valid UTF-8 is made valid first. NULL gives "". g_free. */
 char *walpe_ui_search_fold (const char *s);
 
+/* A layer of a scene in a list of layers. Both strings are the scene
+ * author's (object names and the text of text layers in scene.json, of any
+ * length): one clean line each, shown as plain text.
+ * walpe_ui_layer_name: the name, at most 200 characters; "(no name)" for
+ * one that is empty or has nothing printable in it.
+ * walpe_ui_layer_detail: what else tells the layer apart: the text of a
+ * text layer in quotation marks (at most 80 characters of it), else the
+ * name of its picture file (at most 120); NULL when it has neither.
+ * g_free. */
+#define WALPE_UI_LAYER_NAME_MAX 200
+char *walpe_ui_layer_name (const char *name);
+char *walpe_ui_layer_detail (const char *text, const char *file);
+
 G_END_DECLS

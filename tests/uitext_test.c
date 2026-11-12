@@ -107,6 +107,51 @@ static void test_text (void)
     g_free (cjk);
 }
 
+/* the rows of the layers pane (src/ui/layers.c): names and texts of a
+ * scene's objects, as long and as odd as its author likes */
+static void test_layer_rows (void)
+{
+    char *t = walpe_ui_layer_name ("Clock hands");
+    CHECK (!strcmp (t, "Clock hands"));
+    g_free (t);
+    t = walpe_ui_layer_name ("");
+    CHECK (!strcmp (t, "(no name)"));
+    g_free (t);
+    t = walpe_ui_layer_name (NULL);
+    CHECK (!strcmp (t, "(no name)"));
+    g_free (t);
+    t = walpe_ui_layer_name ("\xe2\x80\xae\n\t ");            /* nothing printable */
+    CHECK (!strcmp (t, "(no name)"));
+    g_free (t);
+    /* 100 kB with markup, a line break and a direction control in it: one
+     * line of at most 200 characters, the markup as the text it is */
+    {
+        GString *big = g_string_new ("<b>bold</b> <span size=\"99999\">&amp;\nline two \xe2\x80\xaeover");
+        while (big->len < 100000)
+            g_string_append (big, " <i>name</i>W");
+        t = walpe_ui_layer_name (big->str);
+        CHECK (g_utf8_strlen (t, -1) <= WALPE_UI_LAYER_NAME_MAX + 1);
+        CHECK (g_str_has_prefix (t, "<b>bold</b> <span size=\"99999\">&amp; line two over <i>name</i>W"));
+        CHECK (!strchr (t, '\n') && !strstr (t, "\xe2\x80\xae") && g_utf8_validate (t, -1, NULL));
+        g_free (t);
+        t = walpe_ui_layer_detail (big->str, NULL);
+        CHECK (g_utf8_strlen (t, -1) <= 80 + 3 && g_str_has_prefix (t, "\xe2\x80\x9c<b>bold</b>") &&
+               g_str_has_suffix (t, "\xe2\x80\x9d") && !strchr (t, '\n'));
+        g_free (t);
+        t = walpe_ui_layer_detail (NULL, big->str);
+        CHECK (g_utf8_strlen (t, -1) <= 120 + 1 && !strchr (t, '\n'));
+        g_free (t);
+        g_string_free (big, TRUE);
+    }
+    t = walpe_ui_layer_detail ("12:30\nMonday", "ignored.tex");
+    CHECK (!strcmp (t, "\xe2\x80\x9c" "12:30 Monday" "\xe2\x80\x9d"));
+    g_free (t);
+    t = walpe_ui_layer_detail (NULL, "background.tex");
+    CHECK (!strcmp (t, "background.tex"));
+    g_free (t);
+    CHECK (walpe_ui_layer_detail (NULL, NULL) == NULL);
+}
+
 static void put (const char *dir, const char *name, const char *text)
 {
     char *p = g_build_filename (dir, name, NULL);
@@ -522,6 +567,7 @@ int main (void)
     g_free (tmp);
     g_setenv ("HOME", T, TRUE);
     test_text ();
+    test_layer_rows ();
     test_scan (T);
     test_search (T);
     test_import (T);

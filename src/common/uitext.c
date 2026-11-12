@@ -90,3 +90,24 @@ char *walpe_ui_search_fold (const char *s)
     g_free (f);
     return g_string_free (o, FALSE);
 }
+
+char *walpe_ui_layer_name (const char *name)
+{
+    char *line = walpe_ui_text (name, WALPE_UI_LAYER_NAME_MAX, WALPE_UITEXT_LINE);
+    g_strstrip (line);
+    if (*line)
+        return line;
+    g_free (line);
+    return g_strdup ("(no name)");
+}
+
+char *walpe_ui_layer_detail (const char *text, const char *file)
+{
+    if (text) {
+        char *one = walpe_ui_text (text, 80, WALPE_UITEXT_LINE);
+        char *d = g_strdup_printf ("\xe2\x80\x9c%s\xe2\x80\x9d", one);
+        g_free (one);
+        return d;
+    }
+    return file ? walpe_ui_text (file, 120, WALPE_UITEXT_LINE) : NULL;
+}
