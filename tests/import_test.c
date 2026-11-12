@@ -178,6 +178,31 @@ static void test_decisions (void)
                                    "\"format\":{\"format_name\":\"mov,mp4\",\"duration\":\"12.5\"}}", &p));
     CHECK (p.has_video && p.width == 1920 && p.height == 1080 && p.rotation == 270 && p.duration == 12.5);
     walpe_media_info_clear (&p);
+    /* numbers that are no int, angles that are no number: no size, no rotation
+     * (the casts they went through are undefined for them) */
+    CHECK (walpe_media_info_parse ("{\"streams\":[{\"codec_name\":\"hevc\",\"width\":1e30,\"height\":\"1e999\","
+                                   "\"side_data_list\":[{\"rotation\":1e308}]}]}", &p));
+    CHECK (p.has_video && p.width <= 0 && p.height <= 0 && p.rotation == 270);  /* 1e308 mod 360 = 296 */
+    {
+        int tw = 0, th = 0;
+        WalpeVideoBox b4k = { 3840, 2160 };
+        walpe_import_target_size (&p, &b4k, &tw, &th);      /* a stream that does not say its size */
+        CHECK (tw >= 2 && th >= 2 && tw <= 3840 && th <= 3840);
+        CHECK (!walpe_import_can_remux (&p, &b4k));
+    }
+    walpe_media_info_clear (&p);
+    CHECK (walpe_media_info_parse ("{\"streams\":[{\"width\":-1e30,\"height\":4294967298,"
+                                   "\"tags\":{\"rotate\":\"nan\"}}]}", &p));
+    CHECK (p.width <= 0 && p.height <= 0 && p.rotation == 0);
+    walpe_media_info_clear (&p);
+    CHECK (walpe_media_info_parse ("{\"streams\":[{\"width\":8,\"height\":8,"
+                                   "\"side_data_list\":[{\"rotation\":\"-inf\"}]}]}", &p));
+    CHECK (p.width == 8 && p.rotation == 0);
+    walpe_media_info_clear (&p);
+    CHECK (walpe_media_info_parse ("{\"streams\":[{\"width\":8,\"height\":8,"
+                                   "\"side_data_list\":[{\"rotation\":-450.4}]}]}", &p));
+    CHECK (p.rotation == 270);                               /* as before: -450 = 270 */
+    walpe_media_info_clear (&p);
     CHECK (!walpe_media_info_parse ("[1]", &p) && !walpe_media_info_parse ("{", &p));
     CHECK (walpe_media_info_parse ("{\"streams\":[]}", &p) && !p.has_video);
     walpe_media_info_clear (&p);

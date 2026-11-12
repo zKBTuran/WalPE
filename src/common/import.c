@@ -141,8 +141,10 @@ gboolean walpe_media_info_parse (const char *json, WalpeMediaInfo *mi)
         mi->has_video = TRUE;
         mi->codec = g_strdup (wpj_str (st, "codec_name", ""));
         mi->pix_fmt = g_strdup (wpj_str (st, "pix_fmt", ""));
-        mi->width = (int) json_num_any (st, "width", 0);
-        mi->height = (int) json_num_any (st, "height", 0);
+        /* (a size that is no int - 1e30, "1e999" - is no size: walpe_d2i,
+         * not the cast, which is undefined for it) */
+        mi->width = walpe_d2i (json_num_any (st, "width", 0));
+        mi->height = walpe_d2i (json_num_any (st, "height", 0));
         parse_ratio (wpj_str (st, "sample_aspect_ratio", NULL), &mi->sar_num, &mi->sar_den);
         /* rotation: display-matrix side data (ffprobe >= 5) or the legacy
          * "rotate" tag */
@@ -155,6 +157,8 @@ gboolean walpe_media_info_parse (const char *json, WalpeMediaInfo *mi)
         }
         if (rot == 0)
             rot = json_num_any (wpj_obj (st, "tags"), "rotate", 0);
+        /* (an angle that is no number, or one lround () cannot hold: none) */
+        rot = isfinite (rot) ? fmod (rot, 360.0) : 0;
         int r = ((int) lround (rot) % 360 + 360) % 360;
         mi->rotation = (r + 45) / 90 * 90 % 360;
         mi->duration = json_num_any (st, "duration", 0);
