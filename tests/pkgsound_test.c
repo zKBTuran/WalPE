@@ -330,6 +330,42 @@ static void test_refused (void)
     make_item (0);
 }
 
+/* ---- a copy is made without 256 sound files at most ---- */
+static void test_many (void)
+{
+    enum { MOST = 256 };
+    static char names[MOST + 1][24];
+    Ent *e = g_new0 (Ent, MOST + 3);
+    e[0] = (Ent) { "scene.json", (const guint8 *) SCENE, strlen (SCENE) };
+    e[1] = (Ent) { "models/solid.json", (const guint8 *) SOLID, strlen (SOLID) };
+    for (int i = 0; i <= MOST; i++) {
+        g_snprintf (names[i], sizeof names[i], "many/%d.ogg", i);
+        e[2 + i] = (Ent) { names[i], (const guint8 *) OGG, strlen (OGG) };
+    }
+    for (int over = 0; over < 2; over++) {
+        write_pkg (pkg, e, 2 + MOST + over, 0);
+        char *c = cache_copy (FALSE);
+        guint files = 0, lines = 0;
+        gint64 bytes = 0;
+        if (c)
+            tally (c, NULL, &files, &bytes);
+        char *list = c ? list_of (c) : NULL;
+        for (const char *l = list; l && *l; l++)
+            lines += *l == '\n';
+        if (over)
+            CHECK (c && files == 2 + MOST + 1 && !list,
+                   "%d sound files, sound off: the copy is whole (%u files, %u listed)", MOST + 1, files, lines);
+        else
+            CHECK (c && files == 2 && lines == MOST,
+                   "%d sound files, sound off: a copy without them (%u files, %u listed)", MOST, files, lines);
+        g_free (list);
+        if (c)
+            drop_copy (c);
+    }
+    g_free (e);
+    make_item (0);
+}
+
 /* ---- A ---- */
 static void test_cache (void)
 {
@@ -745,7 +781,7 @@ static void test_replaced (void)
 {
     const char *env = g_getenv ("WALPE_PKGSOUND_STRESS");
     int rounds = env ? CLAMP (atoi (env), 1, 100000) : 3, late = 0;
-    /* a fetch that takes a while */
+    /* a fetch that takes a while: as many sound files as a copy is made without */
     enum { MANY = 255 };
     static char names[MANY][32];
     Ent *e = g_new0 (Ent, MANY + 3);
@@ -822,6 +858,7 @@ int main (void)
     test_cache ();
     test_kinds ();
     test_refused ();
+    test_many ();
     walpe_sound_allow (TRUE);
     walpe_sound_use_null (TRUE);
     test_player ();

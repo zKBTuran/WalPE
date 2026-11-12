@@ -49,6 +49,13 @@ static gboolean safe_rel_path (const char *p)
 
 /* which entries are extracted */
 enum { PKG_ALL = 0, PKG_BUT_SOUND = 1, PKG_ONLY_SOUND = 2 };
+/* The most sound files a copy is made without. They are fetched later by a
+ * sound layer's thread, with the cache's lock held, and every other
+ * packaged wallpaper's load waits for that lock: 32000 sound files of 12
+ * bytes kept a second wallpaper's load waiting for six seconds. A package
+ * with more of them (88 Workshop packages have 83 between them) is
+ * extracted whole at its load, as every package was. */
+#define PKG_DEFER_MAX 256
 
 /* ---- sound files ------------------------------------------------------
  * A scene's sound layers play files of the package: MP3, Ogg, WAV, FLAC -
@@ -396,6 +403,16 @@ static gboolean pkg_extract_mode (const char *pkg_path, const char *dest_dir, in
                 goto fail;
             }
             g_free (dst);
+        }
+        if (!writing && mode == PKG_BUT_SOUND) {
+            guint sounds = 0;
+            GHashTableIter it;
+            gpointer kind;
+            g_hash_table_iter_init (&it, kinds);
+            while (g_hash_table_iter_next (&it, NULL, &kind))
+                sounds += GPOINTER_TO_INT (kind) == 2;
+            if (sounds > PKG_DEFER_MAX)
+                mode = PKG_ALL;
         }
     }
 
