@@ -2770,7 +2770,10 @@ static void loadmark_add (const char *mon, const char *path)
     while (g_hash_table_iter_next (&it, &k, &v))
         g_string_append_printf (s, "%s\t%s\n", (char *) k, (char *) v);
     char *p = loadmark_file ();
-    g_file_set_contents (p, s->str, (gssize) s->len, NULL);
+    /* for the owner alone, like config.json: it names wallpaper paths, and
+     * without XDG_RUNTIME_DIR it lies in ~/.cache, which is not private
+     * everywhere (it was written with whatever the umask left: 0644) */
+    walpe_write_private (p, s->str, (gssize) s->len, NULL);
     g_free (p);
     g_string_free (s, TRUE);
     if (loadmark_timer)

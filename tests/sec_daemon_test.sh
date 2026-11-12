@@ -13,7 +13,9 @@
 #  3. `walpe-ctl set` cannot be made to send another command through a key;
 #  4. software_threads=nan does not put a number outside 0..32 in the config;
 #  5. the layout restart does not hand its open descriptors to the new image
-#     and leaves no zombie children.
+#     and leaves no zombie children;
+#  6. the crash-loop marker ("walpe.sock.loading": the paths of the
+#     wallpapers being loaded) is written for the owner alone.
 # exit 77: skipped (the display's programs are not installed, or the build has
 # no backend for it); WALPE_CHECK_STRICT=1 makes that a failure.
 daemon=$1
@@ -188,6 +190,24 @@ if [ "$kind" = xvfb ] && leaked && command -v xrandr >/dev/null 2>&1; then
     fi
 else
     echo "sec-daemon: no X server with xrandr (or no /proc/<pid>/fd); the layout restart part is skipped"
+fi
+
+# 6. the crash-loop marker next to the socket names the wallpaper that is
+# being loaded: for the owner alone, like config.json (a 1 x 1 BMP picture
+# is the wallpaper; the marker stays for 20 s after a load began)
+printf 'BM:\0\0\0\0\0\0\0\066\0\0\0\050\0\0\0\001\0\0\0\001\0\0\0\001\0\030\0\0\0\0\0\004\0\0\0\023\013\0\0\023\013\0\0\0\0\0\0\0\0\0\0\100\040\020\0' > "$tmp/pic.bmp"
+if "$ctl" open "$tmp/pic.bmp" 2>/dev/null | grep -q '"ok":true'; then
+    n=0
+    while [ ! -e "$sock.loading" ] && [ $n -lt 40 ]; do sleep 0.25; n=$((n + 1)); done
+    if [ -f "$sock.loading" ]; then
+        m=$(stat -c %a "$sock.loading")
+        [ "$m" = 600 ] || fail "the crash-loop marker (it names the wallpaper's path) has mode $m, not 600"
+        grep -q -F "$tmp/pic.bmp" "$sock.loading" || fail "the crash-loop marker does not name the wallpaper that was opened"
+    else
+        fail "no crash-loop marker next to the socket after a wallpaper was opened"
+    fi
+else
+    fail "the test picture could not be opened as a wallpaper"
 fi
 
 "$ctl" quit >/dev/null 2>&1

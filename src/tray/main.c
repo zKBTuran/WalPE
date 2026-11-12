@@ -255,7 +255,10 @@ static void recent_save (void)
     char *p = state_file ("tray-recent");
     char *dir = g_path_get_dirname (p);
     g_mkdir_with_parents (dir, 0700);
-    g_file_set_contents (p, s->str, -1, NULL);
+    /* the paths of the wallpapers last shown: for the owner alone, like
+     * config.json (an existing directory keeps its mode, and the file was
+     * written with whatever the umask left: 0644) */
+    walpe_write_private (p, s->str, -1, NULL);
     g_free (dir);
     g_free (p);
     g_string_free (s, TRUE);
