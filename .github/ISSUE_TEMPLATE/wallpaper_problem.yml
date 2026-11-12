@@ -113,6 +113,13 @@ body:
     validations:
       required: true
   - type: textarea
+    id: diag
+    attributes:
+      label: Output of walpe-ctl diag
+      description: |
+        A dozen lines of text: version, session, the window system and why it was chosen, the OpenGL driver, modules, sound, and per monitor what it shows and which rule pauses it. Wallpapers are named by the last part of their path and your home directory is written `~`, so it can be pasted as it is. WalPE 0.14.0 does not have this command: leave the field empty there.
+      render: text
+  - type: textarea
     id: log
     attributes:
       label: Log output

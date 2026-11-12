@@ -161,6 +161,13 @@ run.** One default changes: wallpaper sound is on, at half volume (under Sound).
   on; and, loudly, an output for which no wallpaper surface could be made (`walpe-ctl
   status`: `monitors_without_surface`). The start-up line about "swap with damage" is
   worded so that it can be read. No timer and no thread were added for any of it.
+- `scripts/walpe-collect.sh` (installed as `walpe-collect`) collects the facts for a
+  report about sound, the wallpaper window on Wayland or the tray: it runs the daemon with
+  its debug output going to files, asks for the few things only the user can do, puts
+  everything back and packs `~/walpe-report`. `--redact` replaces the home path, the user
+  name and the host name; nothing is uploaded. What the files hold and what to look at
+  before sending: [BUG-REPORTS.md](docs/BUG-REPORTS.md). The issue forms ask for
+  `walpe-ctl diag` and for that archive.
 
 ### Known limitations
 

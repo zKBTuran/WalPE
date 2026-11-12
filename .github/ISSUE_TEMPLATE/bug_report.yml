@@ -9,6 +9,8 @@ body:
 
         **Before you post logs or command output, please remove your home path and your user name from them** (for example replace `/home/yourname` with `~`). `walpe-ctl status` and the log name the folders of your wallpapers.
 
+        Two things save the most questions: the output of `walpe-ctl diag`, and for a problem with sound, with the wallpaper window on Wayland or with the tray the archive that `sh scripts/walpe-collect.sh --redact` makes ([docs/BUG-REPORTS.md](https://github.com/Fired-Cloud/WalPE/blob/main/docs/BUG-REPORTS.md)).
+
         If one wallpaper looks wrong or does not load, please use the form "A wallpaper looks wrong or does not load" instead.
   - type: input
     id: version
@@ -79,6 +81,13 @@ body:
     validations:
       required: true
   - type: textarea
+    id: diag
+    attributes:
+      label: Output of walpe-ctl diag
+      description: |
+        A dozen lines of text: version, session, the window system and why it was chosen, the OpenGL driver, modules, sound, and per monitor what it shows and which rule pauses it. Wallpapers are named by the last part of their path and your home directory is written `~`, so it can be pasted as it is. WalPE 0.14.0 does not have this command: leave the field empty there and fill in `walpe-ctl status` below.
+      render: text
+  - type: textarea
     id: log
     attributes:
       label: Log output
@@ -91,6 +100,12 @@ body:
       label: Output of walpe-ctl status
       description: One line of JSON with the monitors, what they show and why something is paused. It contains the paths of your wallpapers and, if you set one, your Steam account name (`steam_user`) - please shorten your home path and blank the account name.
       render: json
+  - type: textarea
+    id: collect
+    attributes:
+      label: Archive of walpe-collect (for sound, the wallpaper window on Wayland, the tray)
+      description: |
+        In the source directory: `sh scripts/walpe-collect.sh --redact` (installed with WalPE: `walpe-collect --redact`). It takes about ten minutes: it stops the daemon and the tray, starts the daemon with its debug output going to files, asks you to do a few things and to answer a few questions, and starts both again as they were. Drag `~/walpe-report.tar.gz` or `~/walpe-report.zip` here (the same content). Look into `~/walpe-report` first: `--redact` replaces your home path, user name and host name, while the names of your wallpapers, of the programs that have windows open or play sound, and of your devices stay in the files. Nothing is uploaded by the script.
   - type: textarea
     id: gpu-report
     attributes:
