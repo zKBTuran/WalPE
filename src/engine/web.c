@@ -2696,7 +2696,12 @@ static const char *WE_API_JS =
     "  try{window.webkit.messageHandlers.walpe.postMessage('audio');}catch(e){}};\n"
     /* media integration: one listener per kind (the last registration
      * wins); registering asks the daemon for the current state */
-    " window.wallpaperMediaIntegration={PLAYBACK_STOPPED:0,PLAYBACK_PLAYING:1,PLAYBACK_PAUSED:2};\n"
+    /* (both spellings of Wallpaper Engine's documentation: its list of
+     * the states names PLAYBACK_PLAYING ..., its example compares with
+     * wallpaperMediaIntegration.playback.PLAYING - a page written after
+     * the example threw a TypeError in its playback listener here) */
+    " window.wallpaperMediaIntegration={PLAYBACK_STOPPED:0,PLAYBACK_PLAYING:1,PLAYBACK_PAUSED:2,\n"
+    "  playback:{STOPPED:0,PLAYING:1,PAUSED:2}};\n"
     " var mcb={};\n"
     " window.__walpeMedia=function(k,e){var c=mcb[k];if(c){try{c(e);}catch(x){console.error(x);}}};\n"
     " [['Status','status'],['Properties','properties'],['Thumbnail','thumbnail'],['Playback','playback'],\n"
