@@ -6,7 +6,8 @@
 #   ./install.sh select      "WalPE" as the wallpaper type of every desktop; the same as
 #                            choosing it in Plasma's "Desktop and Wallpaper" dialog
 #   ./install.sh unselect    every desktop back to the wallpaper type it had before
-#   ./install.sh uninstall   unselect and remove
+#   ./install.sh uninstall   unselect and remove (in the Plasma session: Plasma's shell has
+#                            to be there to give the desktops their wallpaper type back)
 #   ./install.sh status      what is installed and selected
 #
 # Needs Plasma 6.5 or newer (KWin's workspace.constrain) in a Wayland session, and of
@@ -16,6 +17,7 @@ set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 type_id=io.github.walpe.plasma
 data=${XDG_DATA_HOME:-$HOME/.local/share}
+config=${XDG_CONFIG_HOME:-$HOME/.config}
 
 say() { printf '%s\n' "$*"; }
 refuse() {
@@ -59,6 +61,15 @@ plasma_runs() {
 		org.freedesktop.DBus.NameHasOwner string:org.kde.plasmashell 2>/dev/null | grep -q 'boolean true'
 }
 installed() { [ -f "$data/plasma/wallpapers/$type_id/metadata.json" ]; }
+# what Plasma's shell wrote down: a desktop (of any activity) has the type. The file is a
+# few seconds behind the shell, and it is all there is to go by while the shell is not running.
+written_selected() { grep -qx "wallpaperplugin=$type_id" "$config/plasma-org.kde.plasma.desktop-appletsrc" 2>/dev/null; }
+# sudo with the user's environment (sudo -E) would leave root's files in the user's home,
+# which the user can then neither update nor remove
+own_home() {
+	[ -O "$HOME" ] || refuse "$HOME is not the home directory of the user this runs as ($(id -un))." \
+		"Run it as the user of the Plasma session, without sudo: it needs no root."
+}
 selected() { plasma_js "for (const d of desktops()) { if (d.wallpaperPlugin === '$type_id') print('yes'); }" 2>/dev/null | grep -q yes; }
 
 do_unselect() {
@@ -74,6 +85,7 @@ do_unselect() {
 case "${1:-}" in
 install)
 	check_session
+	own_home
 	if kpackagetool6 --type Plasma/Wallpaper --show "$type_id" >/dev/null 2>&1; then
 		kpackagetool6 --type Plasma/Wallpaper --upgrade "$here/wallpaper" >/dev/null
 		say "Updated: the wallpaper type \"WalPE\"."
@@ -112,7 +124,16 @@ unselect)
 	do_unselect
 	;;
 uninstall)
-	if plasma_runs; then do_unselect || true; fi
+	# A desktop that keeps the type after its files are gone has no wallpaper at all: Plasma
+	# shows it black behind the icons. So the type is taken off the desktops first, and
+	# where that cannot be done nothing is removed.
+	if plasma_runs; then
+		do_unselect || refuse "Plasma's shell did not take the wallpaper type off its desktops (see above)."
+	elif written_selected; then
+		refuse "a desktop still has the wallpaper type \"WalPE\", and Plasma's shell (plasmashell) is not" \
+			"running here to give it another one: without the type's files that desktop would be black." \
+			"Run this in the Plasma session, or choose another wallpaper type there first."
+	fi
 	if installed && command -v kpackagetool6 >/dev/null 2>&1; then
 		kpackagetool6 --type Plasma/Wallpaper --remove "$type_id" >/dev/null || true
 	fi

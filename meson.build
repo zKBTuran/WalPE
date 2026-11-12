@@ -1998,7 +1998,15 @@ test('gpu-report', find_program('sh'),
   depends: [ctl],
   timeout: 240)
 
-# The add-on for KDE Plasma (contrib/plasma) is no part of the build; this only reads it.
+# The add-on for KDE Plasma (contrib/plasma) is no part of the build; these two only read
+# it. Its installer against stand-ins for kpackagetool6, dbus-send and kwin_wayland in a
+# home directory of its own: where it refuses, install and update, and that uninstall
+# removes nothing while a desktop still has the wallpaper type and nobody can take it off
+# (such a desktop would be black).
+test('plasma-install', find_program('sh'),
+  args: [meson.current_source_dir() / 'tests/plasma_install_test.sh',
+         meson.current_source_dir() / 'contrib/plasma/install.sh'],
+  timeout: 120)
 # Its KWin script between a stand-in KWin and a stand-in Plasma shell: which desktop
 # window is put above the daemon's surface (the one shown on that screen, of the type
 # "WalPE", and no other - not for a desktop of an activity that is not shown), what the
