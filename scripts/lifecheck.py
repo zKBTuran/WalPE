@@ -1555,7 +1555,8 @@ def case_webunload(env, W):
     if not check(web_shown(), "webunload: a web wallpaper on both monitors, the module is loaded",
                  (rc.brief(env.monitors()), modules())):
         return
-    kids = children(pid)
+    # (status says "loaded" some tens of milliseconds before WebKit's first process is there)
+    kids = wait_for(lambda: children(pid), 5, 0.05)
     check(len(kids) > 0, "webunload: WebKit's processes run", kids)
     # one monitor leaves the page, the other still shows it: nothing restarts
     mark = env.mark()
