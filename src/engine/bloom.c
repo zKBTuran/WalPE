@@ -250,6 +250,8 @@ static GLuint bloom_program (int taps, const char *fs_body, const char *what)
     glAttachShader (p, fs);
     glBindAttribLocation (p, 0, "a_pos");
     glLinkProgram (p);
+    glDetachShader (p, vs);
+    glDetachShader (p, fs);
     glDeleteShader (vs);
     glDeleteShader (fs);
     GLint ok = 0;

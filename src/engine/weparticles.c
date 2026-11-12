@@ -2178,6 +2178,8 @@ static void prog_build (PtProg *p, const char *vs_body, gboolean quad)
         glBindAttribLocation (p->prog, 4, "a_uvb");
     }
     glLinkProgram (p->prog);
+    glDetachShader (p->prog, vs);
+    glDetachShader (p->prog, fs);
     glDeleteShader (vs);
     glDeleteShader (fs);
     GLint ok = 0;
@@ -2297,6 +2299,8 @@ static void thread_gl_init (void)
     glAttachShader (pt_blit.prog, bfs);
     glBindAttribLocation (pt_blit.prog, 0, "a_pos");
     glLinkProgram (pt_blit.prog);
+    glDetachShader (pt_blit.prog, bvs);
+    glDetachShader (pt_blit.prog, bfs);
     glDeleteShader (bvs);
     glDeleteShader (bfs);
     pt_blit.map = glGetUniformLocation (pt_blit.prog, "u_map");

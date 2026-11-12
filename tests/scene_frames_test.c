@@ -20,6 +20,9 @@
  *  5. a layer with a blend mode that reads the frame under it: the copy
  *     of the frame it works on goes when the scene pauses and when it is
  *     freed, and the picture after a pause is the one before it.
+ *  6. programs that are linked and in use keep no shader object alive
+ *     (the effect pass programs of two loaded scenes and the renderer's
+ *     own).
  * Skipped (exit 0, "skip") without EGL surfaceless / GL 3.3.
  * `meson test -C build scene-frames` */
 #include <glib.h>
@@ -231,6 +234,22 @@ static int max_diff (const guint8 *a, const guint8 *b, gsize n)
     return d;
 }
 
+/* shader objects alive in this context (programs and shaders share one
+ * name space, which is probed: GL cannot list its objects) */
+static int shader_objects (void)
+{
+    int n = 0;
+    for (GLuint name = 1, misses = 0; misses < 1024; name++) {
+        if (glIsShader (name))
+            n++;
+        if (glIsShader (name) || glIsProgram (name))
+            misses = 0;
+        else
+            misses++;
+    }
+    return n;
+}
+
 static void scene_checks (void)
 {
     gsize npx = (gsize) W * H * 4;
@@ -301,6 +320,16 @@ static void scene_checks (void)
     result (draws_plain >= 8 && draws_baked <= draws_plain - 4,
             "animated scene: the bake replaces the static layers' draws");
     result (draws_plain <= 8, "a layer scaled to nothing runs no effect pass and no draw");
+
+    /* ---- 6. both scenes are loaded and their effect has drawn: no program
+     * holds on to the two shader objects it was linked from (a shader that
+     * is attached outlives glDeleteShader, with its source text) */
+    {
+        int left = shader_objects ();
+        if (left)
+            printf ("   %d shader object(s) alive\n", left);
+        result (left == 0, "linked programs keep no shader object alive");
+    }
 
     /* ---- 3. resize */
     plain.w = baked.w = 240;

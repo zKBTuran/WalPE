@@ -190,6 +190,8 @@ void walpe_particles_gl_init (WalpeParticles *p)
     glBindAttribLocation (p->prog, 1, "a_size");
     glBindAttribLocation (p->prog, 2, "a_alpha");
     glLinkProgram (p->prog);
+    glDetachShader (p->prog, vs);
+    glDetachShader (p->prog, fs);
     glDeleteShader (vs);
     glDeleteShader (fs);
     p->loc_mvp = glGetUniformLocation (p->prog, "u_mvp");

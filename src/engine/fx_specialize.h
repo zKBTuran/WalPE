@@ -721,6 +721,8 @@ static GLuint fxs_link_quiet (const char *vsrc, const char *fsrc, const char *sh
     glBindAttribLocation (prog, 0, "a_Position");
     glBindAttribLocation (prog, 1, "a_TexCoord");
     glLinkProgram (prog);
+    glDetachShader (prog, sh[0]);
+    glDetachShader (prog, sh[1]);
     glDeleteShader (sh[0]);
     glDeleteShader (sh[1]);
     GLint ok = 0;

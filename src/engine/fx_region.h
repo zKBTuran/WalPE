@@ -1240,6 +1240,8 @@ static void fxr_support (EffPass *pass, int ow, int oh)
         glAttachShader (fxr_sup_prog, sh[1]);
         glBindAttribLocation (fxr_sup_prog, 0, "a_pos");
         glLinkProgram (fxr_sup_prog);
+        glDetachShader (fxr_sup_prog, sh[0]);
+        glDetachShader (fxr_sup_prog, sh[1]);
         glDeleteShader (sh[0]);
         glDeleteShader (sh[1]);
         GLint ok = 0;

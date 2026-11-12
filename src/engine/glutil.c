@@ -399,6 +399,8 @@ void walpe_glutil_init (void)
     glBindAttribLocation (g_prog, 0, "a_pos");
     glBindAttribLocation (g_prog, 1, "a_uv");
     glLinkProgram (g_prog);
+    glDetachShader (g_prog, vs);
+    glDetachShader (g_prog, fs);
     GLint ok = 0;
     glGetProgramiv (g_prog, GL_LINK_STATUS, &ok);
     if (!ok) {
@@ -500,6 +502,8 @@ void walpe_glutil_draw_yuv_range (GLuint ty, GLuint tu, GLuint tv, const float *
         glBindAttribLocation (y_prog, 0, "a_pos");
         glBindAttribLocation (y_prog, 1, "a_uv");
         glLinkProgram (y_prog);
+        glDetachShader (y_prog, vs);
+        glDetachShader (y_prog, fs);
         glDeleteShader (vs);
         glDeleteShader (fs);
         y_loc_mvp = glGetUniformLocation (y_prog, "u_mvp");
@@ -652,6 +656,8 @@ static gboolean blend_prog_init (void)
     glBindAttribLocation (p, 0, "a_pos");
     glBindAttribLocation (p, 1, "a_uv");
     glLinkProgram (p);
+    glDetachShader (p, vs);
+    glDetachShader (p, fs);
     glDeleteShader (vs);
     glDeleteShader (fs);
     GLint ok = 0;

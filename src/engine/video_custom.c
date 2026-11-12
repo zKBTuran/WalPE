@@ -4007,6 +4007,8 @@ static CvProg *cv_program (int kind, gboolean surface)
     glBindAttribLocation (p->prog, 0, "a_pos");
     glBindAttribLocation (p->prog, 1, "a_uv");
     glLinkProgram (p->prog);
+    glDetachShader (p->prog, vs);
+    glDetachShader (p->prog, fs);
     glDeleteShader (vs);
     glDeleteShader (fs);
     p->mvp = glGetUniformLocation (p->prog, "u_mvp");

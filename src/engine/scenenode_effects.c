@@ -2332,6 +2332,15 @@ static GLuint fx_build_program (char **vsrc, char **fsrc, const char *shader,
         glBindAttribLocation (prog, 0, "a_Position");
         glBindAttribLocation (prog, 1, "a_TexCoord");
         glLinkProgram (prog);
+        /* The linked program needs its shader objects no longer, and
+         * glDeleteShader alone only marks them: a shader stays alive,
+         * with its source text and whatever the compiler keeps for it,
+         * for as long as a program has it attached - which was the life
+         * of every program (two shader objects each; a scene with many
+         * effects has several hundred programs). Detached, they go now.
+         * The same is done wherever a program is linked. */
+        glDetachShader (prog, vs);
+        glDetachShader (prog, fs);
         glDeleteShader (vs);
         glDeleteShader (fs);
         GLint ok = 0;
@@ -4771,6 +4780,8 @@ static void fx_tint_program (void)
         glBindAttribLocation (tint_prog, 0, "a_pos");
         glBindAttribLocation (tint_prog, 1, "a_uv");
         glLinkProgram (tint_prog);
+        glDetachShader (tint_prog, sh[0]);
+        glDetachShader (tint_prog, sh[1]);
         glDeleteShader (sh[0]);
         glDeleteShader (sh[1]);
         tint_loc_tex = glGetUniformLocation (tint_prog, "u_tex");
@@ -4809,6 +4820,8 @@ static void fx_tint_uv_program (void)
     glBindAttribLocation (tint_uv_prog, 0, "a_pos");
     glBindAttribLocation (tint_uv_prog, 1, "a_uv");
     glLinkProgram (tint_uv_prog);
+    glDetachShader (tint_uv_prog, sh[0]);
+    glDetachShader (tint_uv_prog, sh[1]);
     glDeleteShader (sh[0]);
     glDeleteShader (sh[1]);
     tint_uv_loc_tex = glGetUniformLocation (tint_uv_prog, "u_tex");
