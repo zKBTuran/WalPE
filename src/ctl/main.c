@@ -213,7 +213,7 @@ static void usage (void)
              "                                 rests (off: a scene at rest is the picture its file\n"
              "                                 describes); scripts move and zoom the view; animated\n"
              "                                 (sprite sheet) pictures play (*) / scripts drive\n"
-             "                                 them. (*) loads the wallpaper again.\n"
+             "                                 them (*). (*) loads the wallpaper again.\n"
              "                                 `walpe-ctl status` shows them as \"features\";\n"
              "                                 WALPE_FEATURES=name=off,... in the daemon's\n"
              "                                 environment wins\n"
