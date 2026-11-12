@@ -1713,6 +1713,143 @@ static void gl_statement_check (GLuint in)
 
 static guint n_built, n_null, n_failed_chains, n_draws;
 
+/* The pass table of a chain has the size of the effect's pass list
+ * (fx_chain_new): a list of exactly the most passes an effect may have is
+ * built and drawn with its last entry a real pass, a longer one, an empty
+ * one and one that is no list are refused, entries that are no objects
+ * end the build, and an instance that names more passes than the effect
+ * has changes nothing. (Under AddressSanitizer a pass written or read
+ * outside the table ends the test.) */
+static struct FxSet *pass_list_set (const char *list, const char *inst_passes)
+{
+    put ("shaders/effects/s_0.vert", tpl_vert[0]);
+    put ("shaders/effects/s_0.frag", tpl_frag[0]);
+    put ("materials/effects/s_0.json", "{\"passes\":[{\"shader\":\"effects/s_0\"}]}");
+    char *ej = g_strdup_printf ("{\"fbos\":[{\"name\":\"_rt_a\",\"scale\":1},{\"name\":\"_rt_b\",\"scale\":2}],"
+                                "\"passes\":%s}", list);
+    put ("effects/s/effect.json", ej);
+    g_free (ej);
+    char *ij = g_strdup_printf ("{\"effects\":[{\"file\":\"effects/s/effect.json\",\"name\":\"s\","
+                                "\"visible\":true,\"passes\":%s}]}", inst_passes);
+    JsonNode *root = wpj_parse_data (ij, -1);
+    g_free (ij);
+    JsonObject *up = json_object_new ();
+    struct FxSet *set = root ? fx_build_for_object (tmpdir, wpj_arr (json_node_get_object (root), "effects"),
+                                                    "passes", up) : NULL;
+    json_object_unref (up);
+    if (root)
+        json_node_unref (root);
+    return set;
+}
+
+/* n entries: copies between the two targets, `odd` in place of entry 5,
+ * the material pass last */
+static char *pass_list (guint n, const char *odd)
+{
+    GString *l = g_string_new ("[");
+    for (guint i = 0; i < n; i++) {
+        if (i)
+            g_string_append_c (l, ',');
+        if (odd && i == 5)
+            g_string_append (l, odd);
+        else if (i + 1 == n)
+            g_string_append (l, "{\"material\":\"materials/effects/s_0.json\"}");
+        else
+            g_string_append_printf (l, "{\"command\":\"copy\",\"target\":\"%s\",\"source\":\"%s\"}",
+                                    i & 1 ? "_rt_a" : "_rt_b", i & 1 ? "_rt_b" : "_rt_a");
+    }
+    g_string_append_c (l, ']');
+    return g_string_free (l, FALSE);
+}
+
+static void gl_pass_count_checks (GLuint in)
+{
+    g_atomic_int_set (&fxs_share_on, 0);
+    g_atomic_int_set (&fxs_spec_on, 0);
+    g_atomic_int_set (&fxs_verify_on, 0);
+    g_atomic_int_set (&fxs_quality, 0);
+    guint bad = 0;
+    static const guint counts[] = { 1, 2, FX_MAX_PASSES - 1, FX_MAX_PASSES };
+    for (guint k = 0; k < G_N_ELEMENTS (counts); k++) {
+        char *l = pass_list (counts[k], NULL);
+        struct FxSet *set = pass_list_set (l, "[{}]");
+        g_free (l);
+        gboolean ok = set && set->n == 1 && set->chains[0] && !fx_failed_count (set) &&
+                      set->chains[0]->n_passes == (int) counts[k] &&
+                      set->chains[0]->passes[counts[k] - 1].program != 0;
+        for (guint i = 0; ok && i + 1 < counts[k]; i++)
+            ok = set->chains[0]->passes[i].is_copy && !set->chains[0]->passes[i].program;
+        if (ok) {
+            fx_set_frame_info (W, H, 0.5f, 0.5f, 1.0f / 30);
+            for (int d = 0; d < 3; d++)
+                fx_run_for_object (set, in, W, H, W, H, d * 0.37, 1.0f, d == 2);
+            fx_free_targets_for_object (set);
+        }
+        bad += !ok;
+        if (set)
+            fx_free_for_object (set);
+        clear_effect_files ();
+    }
+    char *m = g_strdup_printf ("pass table: effects of 1, 2, %d and %d passes build with the last one a program, and draw",
+                               FX_MAX_PASSES - 1, FX_MAX_PASSES);
+    result (bad == 0, m);
+    g_free (m);
+
+    bad = 0;
+    char *over = pass_list (FX_MAX_PASSES + 1, NULL), *far = pass_list (2000, NULL);
+    char *odd1 = pass_list (FX_MAX_PASSES, "7"), *odd2 = pass_list (FX_MAX_PASSES, "null");
+    char *odd3 = pass_list (FX_MAX_PASSES, "[{\"command\":\"copy\"}]");
+    const char *const refused[] = { over, far, "[]", "{}", "7", "\"copy\"", "null", odd1, odd2, odd3 };
+    for (guint k = 0; k < G_N_ELEMENTS (refused); k++) {
+        struct FxSet *set = pass_list_set (refused[k], "[{}]");
+        /* no chain, counted as failed: the layer is drawn without the effect */
+        gboolean ok = set && set->n == 1 && !set->chains[0] && fx_failed_count (set) == 1;
+        if (ok) {
+            fx_set_frame_info (W, H, 0.5f, 0.5f, 1.0f / 30);
+            ok = fx_run_for_object (set, in, W, H, W, H, 0.1, 1.0f, FALSE) == in;
+        }
+        if (!ok)
+            printf ("  pass list %u of the refused ones was not refused\n", k);
+        bad += !ok;
+        if (set)
+            fx_free_for_object (set);
+        clear_effect_files ();
+    }
+    g_free (over); g_free (far); g_free (odd1); g_free (odd2); g_free (odd3);
+    m = g_strdup_printf ("pass table: %d and 2000 passes, no passes, no list, entries that are no objects: "
+                         "no chain, the layer's own picture", FX_MAX_PASSES + 1);
+    result (bad == 0, m);
+    g_free (m);
+
+    /* the instance names 40 passes, the effect has 3 */
+    GString *ip = g_string_new ("[");
+    for (int i = 0; i < 40; i++)
+        g_string_append_printf (ip, "%s{\"constantshadervalues\":{\"gain\":%d}}", i ? "," : "", i);
+    g_string_append_c (ip, ']');
+    char *l = pass_list (3, NULL);
+    struct FxSet *set = pass_list_set (l, ip->str);
+    gboolean ok = set && set->chains[0] && set->chains[0]->n_passes == 3 && !fx_failed_count (set);
+    if (ok) {
+        fx_set_frame_info (W, H, 0.5f, 0.5f, 1.0f / 30);
+        fx_run_for_object (set, in, W, H, W, H, 0.1, 1.0f, FALSE);
+        /* what scripts ask for: passes that do not exist */
+        float fv[4] = { 0.5f, 0, 0, 0 }, gv[4] = { 0, 0, 0, 0 };
+        for (int ps = -2; ps < 45; ps++) {
+            fx_set_constant (set, 0, ps, "gain", fv, 1);
+            fx_get_constant (set, 0, ps, "gain", gv);
+        }
+        fx_run_for_object (set, in, W, H, W, H, 0.2, 1.0f, FALSE);
+    }
+    result (ok, "pass table: an instance with 40 pass entries for an effect of 3, and script constants "
+                "of passes that do not exist");
+    if (set)
+        fx_free_for_object (set);
+    clear_effect_files ();
+    g_free (l);
+    g_string_free (ip, TRUE);
+    fx_targets_release ();
+}
+
 static void gl_one (guint32 seed, GLuint in)
 {
     rs = seed * 2654435761u + 777u;
@@ -1777,6 +1914,7 @@ static void gl_fuzz (guint count, guint32 first)
     GLuint in = input_tex ();
     gl_seed_checks (in);
     gl_statement_check (in);
+    gl_pass_count_checks (in);
     gint64 t0 = g_get_monotonic_time ();
     guint leaks = 0;
     guint32 first_leak = 0;
