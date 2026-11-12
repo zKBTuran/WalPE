@@ -66,6 +66,11 @@ copy it to `~/.config/systemd/user/`; its `ExecStart` names `~/.local/bin/walpe-
 Wayland compositors such as sway do not run autostart entries: start both from the
 compositor's configuration ([WAYLAND.md](WAYLAND.md#starting-with-the-session)).
 
+On an X11 desktop (XFCE, LXQt, LXDE, MATE, Cinnamon, GNOME, KDE Plasma) the wallpaper
+has to share the screen with the desktop's own desktop window and panel:
+[DESKTOPS.md](DESKTOPS.md) says per desktop what was run, where the wallpaper window is,
+what becomes of the desktop's icons and where the autostart entries have to be.
+
 ## walpe-ctl
 
 `walpe-ctl help` prints the full list. Exit status: 0 done, 1 bad input (or the output could not

@@ -87,6 +87,14 @@ software renderer only ([Known limitations](#known-limitations)).
   later; and a session started with a one-time socket (`WAYLAND_SOCKET`) cannot be
   restarted in place, so the daemon ends at the first change of a monitor there.
   [WAYLAND.md](WAYLAND.md#limits).
+- **X11 desktops with a file manager's desktop: no desktop icons while a wallpaper is
+  shown.** On XFCE, LXQt, LXDE, MATE and KDE Plasma's X11 session the desktop's icons and
+  its own picture are one window that nothing is seen through; the wallpaper window is a
+  child of that window, above both. The desktop's menu still opens, and the icons still
+  react to clicks where they lie. On Cinnamon the icons are a see-through window of their
+  own and stay above the wallpaper. All of it was run headless on a software renderer
+  only, each desktop started by hand; what was run, what was not and the switches are in
+  [DESKTOPS.md](DESKTOPS.md).
 - **KDE Plasma on Wayland: desktop icons only with the add-on, and then only part of
   the pointer for the wallpaper.** Plasma's wallpaper, its desktop icons and its widgets are one window of
   Plasma's shell, and a wallpaper program of its own can only be in front of that window

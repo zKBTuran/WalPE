@@ -117,6 +117,35 @@ renders on a laptop's discrete GPU where there is one (under Graphics cards;
   reports a fullscreen window, the wallpaper behind one pauses through "pause when
   covered" (on by default) only.
 
+### X11 desktops
+
+- XFCE, LXQt, LXDE, MATE: the wallpaper is seen. With 0.14.0 the daemon ran and said
+  "running" while the wallpaper lay behind the file manager's desktop window (xfdesktop,
+  pcmanfm-qt, pcmanfm, caja). The wallpaper window now becomes a child of that window:
+  above the desktop's own picture, below every window and panel; the desktop's menu still
+  opens on a right click. The desktop's icons are behind the wallpaper
+  ([DESKTOPS.md](docs/DESKTOPS.md) says how to switch them off per desktop).
+- Cinnamon, GNOME on X11, KDE Plasma on X11: the wallpaper no longer covers every window
+  and the panel. Mutter, Muffin and KWin paint a window they do not manage above
+  everything; there the wallpaper window is a managed window of the desktop type. On
+  Cinnamon the desktop's icons are seen above the wallpaper; under KWin the wallpaper
+  window goes into Plasma's desktop window, as on the four desktops above.
+- A bare window manager (dwm, i3, openbox, bspwm ...) gets the window of 0.14.0, unchanged:
+  what is done is chosen by the desktop window that is found and by the window manager's
+  name.
+- Clicks on the desktop reach a wallpaper that takes them (web pages, cursor scripts)
+  under window managers that put a frame around the desktop window (xfwm4, openbox); they
+  counted as clicks on a window.
+- `WALPE_X11_DESKTOP=auto|root|window` and `WALPE_X11_WINDOW=auto|override|managed` in the
+  daemon's environment override both choices; `walpe-ctl diag` names the desktop window
+  and the kind of the wallpaper windows, `walpe-ctl status` has `x11_window`,
+  `x11_window_manager`, `x11_desktop_windows`, `x11_wallpaper_parent`.
+- The library window has its icon in task bars that show only what the window carries
+  (MATE, LXQt, LXDE).
+- **State of testing: every desktop named here was run headless on a software renderer,
+  started by hand in Xvfb (XFCE 4.18, LXQt 1.4, LXDE, MATE 1.26, Cinnamon 6.0, GNOME
+  Shell 46, KDE Plasma 5.27); none in a real session, none with a graphics card.**
+
 ### Sound
 
 - Wallpaper sound is on by default, at half volume: a new configuration has `scene_sound`
