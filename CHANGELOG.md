@@ -262,7 +262,14 @@ could do to the daemon. None of these was seen being used.
     performance panel: every 10 seconds);
   - a wallpaper that is copied into the library slowly is shown complete without Rescan;
   - the search ignores accents (é = e, ü = u) and treats i, ı, İ and I as one letter;
-  - screen readers get names for the choices and the search field.
+  - screen readers get names for the choices and the search field;
+  - an engine that is running but does not answer (stopped, hung, its socket's queue
+    full) is called "Engine not responding" for as long as that lasts. It was taken for
+    stopped after 44 seconds and for "keeps crashing" after 66, and a restart was tried;
+  - the error of a wallpaper that could not be loaded no longer stays as the tool tip
+    of the status line after the line itself is gone;
+  - "(paused)" in the line that says what the monitors show appears and goes with the
+    pause (within a second); it used to change only with a wallpaper or the layout.
 - `walpe-ctl quit` (and "Quit" in the tray) stops the daemon for good while the library
   window is open: the window used to start it again at once. A daemon that crashed or
   was killed is still started again by an open window.
