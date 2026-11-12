@@ -995,17 +995,103 @@ static void on_confirm (GObject *src, GAsyncResult *res, gpointer user)
     g_application_release (G_APPLICATION (T.app));
 }
 
+static const char *quit_detail (void)
+{
+    return T.alive ? "This stops the wallpaper engine (the desktop goes back to its plain background) "
+                     "and removes the tray icon."
+                   : "This removes the tray icon.";
+}
+
+/* ---- "Quit WalPE?" on a Wayland session
+ * The question is a window of the tray's own there, not a GtkAlertDialog:
+ * a Wayland compositor brings a new window to the front only for an
+ * activation token, and the token for this click is the one the panel
+ * handed over right before the menu's event (KDE Plasma does that for
+ * every entry of the menu; ProvideXdgActivationToken in sni.c). The alert
+ * dialog makes its window itself and takes none, so the question could
+ * come up without the focus or behind the windows that are open - with
+ * nothing else on the screen saying that "Quit WalPE" waits for an answer.
+ * Without a token (a panel that gives none) the window is shown as any new
+ * window is. */
+static GtkWidget *quit_win;
+
+static void on_quit_answer (GtkButton *b, gpointer user)
+{
+    (void) user;
+    gboolean quit = g_object_get_data (G_OBJECT (b), "walpe-quit") != NULL;
+    if (quit_win)
+        gtk_window_destroy (GTK_WINDOW (quit_win));
+    if (quit)
+        quit_all ();
+}
+
+static void ask_quit_window (void)
+{
+    char *token = take_activation_token ();
+    if (!quit_win) {
+        GtkWidget *w = quit_win = gtk_window_new ();
+        g_object_add_weak_pointer (G_OBJECT (w), (gpointer *) &quit_win);
+        gtk_window_set_application (GTK_WINDOW (w), T.app);
+        gtk_window_set_title (GTK_WINDOW (w), "Quit WalPE?");
+        gtk_window_set_resizable (GTK_WINDOW (w), FALSE);
+        GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 12);
+        gtk_widget_set_margin_top (box, 18);
+        gtk_widget_set_margin_bottom (box, 18);
+        gtk_widget_set_margin_start (box, 18);
+        gtk_widget_set_margin_end (box, 18);
+        GtkWidget *head = gtk_label_new ("Quit WalPE?");
+        gtk_widget_add_css_class (head, "title-2");
+        gtk_box_append (GTK_BOX (box), head);
+        GtkWidget *detail = gtk_label_new (quit_detail ());
+        gtk_label_set_wrap (GTK_LABEL (detail), TRUE);
+        gtk_label_set_max_width_chars (GTK_LABEL (detail), 48);
+        gtk_label_set_xalign (GTK_LABEL (detail), 0);
+        gtk_box_append (GTK_BOX (box), detail);
+        GtkWidget *row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
+        gtk_box_set_homogeneous (GTK_BOX (row), TRUE);
+        gtk_widget_set_margin_top (row, 6);
+        GtkWidget *no = gtk_button_new_with_label ("Cancel");
+        GtkWidget *yes = gtk_button_new_with_label ("Quit");
+        g_object_set_data (G_OBJECT (yes), "walpe-quit", GINT_TO_POINTER (1));
+        g_signal_connect (no, "clicked", G_CALLBACK (on_quit_answer), NULL);
+        g_signal_connect (yes, "clicked", G_CALLBACK (on_quit_answer), NULL);
+        gtk_box_append (GTK_BOX (row), no);
+        gtk_box_append (GTK_BOX (row), yes);
+        gtk_box_append (GTK_BOX (box), row);
+        gtk_window_set_child (GTK_WINDOW (w), box);
+        /* as in the alert dialog: Return is "Quit", Escape is "Cancel" */
+        gtk_window_set_default_widget (GTK_WINDOW (w), yes);
+        gtk_window_set_focus (GTK_WINDOW (w), yes);
+        GtkEventController *keys = gtk_shortcut_controller_new ();
+        gtk_shortcut_controller_add_shortcut (
+            GTK_SHORTCUT_CONTROLLER (keys),
+            gtk_shortcut_new (gtk_keyval_trigger_new (GDK_KEY_Escape, 0),
+                              gtk_named_action_new ("window.close")));
+        gtk_widget_add_controller (w, keys);
+    }
+    /* before it is shown: the token goes out with the window's first
+     * appearance. For a question that is already open (a second click on
+     * "Quit WalPE") it brings that window to the front. */
+    if (token)
+        gtk_window_set_startup_id (GTK_WINDOW (quit_win), token);
+    gtk_window_present (GTK_WINDOW (quit_win));
+    g_free (token);
+}
+
+static gboolean session_is_x11 (void);
+
 static void ask_quit (void)
 {
     if (!T.conf->confirm_quit || !gdk_display_get_default ()) {
         quit_all ();
         return;
     }
+    if (!session_is_x11 ()) {
+        ask_quit_window ();
+        return;
+    }
     GtkAlertDialog *d = gtk_alert_dialog_new ("Quit WalPE?");
-    gtk_alert_dialog_set_detail (d, T.alive
-        ? "This stops the wallpaper engine (the desktop goes back to its plain background) "
-          "and removes the tray icon."
-        : "This removes the tray icon.");
+    gtk_alert_dialog_set_detail (d, quit_detail ());
     const char *btns[] = { "Cancel", "Quit", NULL };
     gtk_alert_dialog_set_buttons (d, btns);
     gtk_alert_dialog_set_cancel_button (d, 0);

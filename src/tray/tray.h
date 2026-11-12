@@ -77,7 +77,9 @@ const char *tray_tooltip_text (void);
 TrayIconState tray_icon_state (void);
 
 /* "Quit" asks first (tray.ini confirm_quit); the popup menu asks in
- * place, other hosts get a dialog. "quit-now" skips the question. */
+ * place, other hosts get a dialog (on a Wayland session a window of the
+ * tray's own, shown with the panel's activation token). "quit-now" skips
+ * the question. */
 gboolean tray_confirm_quit (void);
 gboolean tray_engine_alive (void);
 
