@@ -795,6 +795,7 @@ static gboolean parse_monitors (JsonObject *st)
 }
 
 static void settings_software_info (void);
+static void settings_sound_info (void);
 static void settings_follow (void);
 
 static void on_status_reply (JsonObject *reply, const char *err, gpointer u)
@@ -857,6 +858,7 @@ static void on_status_reply (JsonObject *reply, const char *err, gpointer u)
         json_object_unref (U.last_state);
     U.last_state = json_object_ref (st);
     settings_software_info ();   /* the engine restarts itself for that switch */
+    settings_sound_info ();      /* what is heard now, or why nothing is */
     /* render resolution per monitor: the dialog, its rows in the settings
      * window and the announcement of a new monitor all follow this line */
     walpe_res_ui_status (st);
@@ -2072,6 +2074,8 @@ static gboolean tray_set (gboolean on, char **err)
 typedef struct {
     GtkWidget *tray, *tray_info;
     GtkWidget *fps, *volume, *fs, *fs_all, *covered, *dpms, *transparent, *parallax, *assets, *steam;
+    GtkWidget *sound, *sound_info, *mute;   /* "Wallpaper sound" (scene_sound) + what is heard now
+                                             * (status "sound"), mute */
     GtkWidget *shared, *fxcache, *texdown, *covtrans, *webaccel, *webaccel_info, *hwdec;
     GtkWidget *vlimit, *vscene;
     GtkWidget *software, *software_info;   /* "Render on CPU" + what renders now */
@@ -2278,6 +2282,32 @@ static void on_switch_set (GObject *o, GParamSpec *ps, gpointer key)
               g_object_get_data (o, "walpe-what"));
 }
 
+/* "Wallpaper sound". Switched on while the volume is still 0 - its default -
+ * the switch alone would change nothing that can be heard: the same request
+ * then sets the volume to one half, and the slider under the switch follows
+ * (the tray's "Unmute" does the same with a volume of 0). A volume the user
+ * has set is never touched, and switching off changes nothing else. */
+static void on_sound_switch (GObject *o, GParamSpec *ps, gpointer u)
+{
+    (void) ps; (void) u;
+    if (SW.building)
+        return;
+    gboolean on = gtk_switch_get_active (GTK_SWITCH (o));
+    JsonBuilder *b = json_builder_new ();
+    json_builder_begin_object (b);
+    json_builder_set_member_name (b, "cmd");
+    json_builder_add_string_value (b, "set");
+    json_builder_set_member_name (b, "scene_sound");
+    json_builder_add_boolean_value (b, on);
+    if (on && !SW.vol_id && gtk_range_get_value (GTK_RANGE (SW.volume)) < 0.5) {
+        json_builder_set_member_name (b, "volume");
+        json_builder_add_double_value (b, 0.5);
+    }
+    json_builder_end_object (b);
+    ui_ipc_send_node (json_builder_get_root (b), UI_IPC_AUTOSTART, on_set_reply, g_strdup ("Wallpaper sound"));
+    g_object_unref (b);
+}
+
 static void on_tray_switch (GObject *o, GParamSpec *ps, gpointer u)
 {
     (void) ps; (void) u;
@@ -2455,6 +2485,31 @@ static void settings_software_info (void)
     g_string_free (s, TRUE);
 }
 
+/* "Wallpaper sound" (the setting scene_sound): the line under the switch
+ * ends with the engine's own account of what is heard, or why nothing is
+ * (status "sound": off, muted, volume 0, no sound server, the wallpaper
+ * paused). The switch used to exist on the command line only - `walpe-ctl
+ * set scene_sound=on` - while this window had the volume: a volume that
+ * was turned up here changed nothing that could be heard, and nothing here
+ * said why. The row is named for what it is to the user, not for the kind
+ * of wallpaper: whatever sound wallpapers make belongs under this one
+ * switch (today: the sound layers of scenes). */
+static void settings_sound_info (void)
+{
+    if (!SW.sound_info)
+        return;
+    JsonObject *st = U.last_state;
+    const char *now = st ? wpj_str (st, "sound", "") : "";
+    char *t = g_strdup_printf ("Wallpapers may make sound: scenes play their sound layers (music, rain, "
+                               "wind) at the volume below; one wallpaper's own switch and volume are in "
+                               "its options. Switching it on while the volume is 0 sets the volume to "
+                               "50. A paused wallpaper is silent - also while windows cover its monitor "
+                               "(\"Pause a monitor when windows cover it\", above).%s%s",
+                               *now ? "\nNow: " : "", now);
+    gtk_label_set_text (GTK_LABEL (SW.sound_info), t);
+    g_free (t);
+}
+
 /* a number the user is changing right now (its send is still waiting) is
  * left alone while the window follows the engine */
 static gboolean num_pending (GtkWidget *sb)
@@ -2484,6 +2539,9 @@ static void settings_fill (gboolean follow)
         gtk_spin_button_set_value (GTK_SPIN_BUTTON (SW.fps), st ? wpj_num (st, "fps", c->fps) : c->fps);
     if (!(follow && SW.vol_id))
         gtk_range_set_value (GTK_RANGE (SW.volume), 100.0 * (st ? wpj_num (st, "volume", c->volume) : c->volume));
+    gtk_switch_set_active (GTK_SWITCH (SW.sound), st ? wpj_bool (st, "scene_sound", c->scene_sound) : c->scene_sound);
+    gtk_switch_set_active (GTK_SWITCH (SW.mute), st ? wpj_bool (st, "mute", c->mute) : c->mute);
+    settings_sound_info ();
     gtk_switch_set_active (GTK_SWITCH (SW.fs), c->pause_fullscreen);
     gtk_switch_set_active (GTK_SWITCH (SW.fs_all), c->pause_fullscreen_all);
     gtk_switch_set_active (GTK_SWITCH (SW.covered), c->pause_covered);
@@ -2764,14 +2822,21 @@ static GtkWidget *settings_window (void)
     settings_row (g, r++, "Mouse parallax", "Scene layers follow the pointer.", SW.parallax);
 
     settings_group (g, r++, "Audio");
+    SW.sound = gtk_switch_new ();
+    g_signal_connect (SW.sound, "notify::active", G_CALLBACK (on_sound_switch), NULL);
+    g_object_set_data (G_OBJECT (SW.sound), "walpe-what", (gpointer) "Wallpaper sound");
+    SW.sound_info = settings_row (g, r++, "Wallpaper sound", "…", SW.sound);
     SW.volume = gtk_scale_new_with_range (GTK_ORIENTATION_HORIZONTAL, 0, 100, 1);
     gtk_scale_set_draw_value (GTK_SCALE (SW.volume), TRUE);
     gtk_scale_set_value_pos (GTK_SCALE (SW.volume), GTK_POS_RIGHT);
     gtk_widget_set_size_request (SW.volume, 240, -1);
     g_signal_connect (SW.volume, "value-changed", G_CALLBACK (on_volume), NULL);
     settings_row (g, r++, "Wallpaper volume",
-                  "The volume of wallpaper sound. Scenes play their sound layers once that is "
-                  "switched on: walpe-ctl set scene_sound=on.", SW.volume);
+                  "The volume of wallpaper sound, once \"Wallpaper sound\" above is switched on. "
+                  "0 is silence.", SW.volume);
+    SW.mute = mk_switch ("mute", "Mute");
+    settings_row (g, r++, "Mute",
+                  "Silence that keeps the volume and leaves \"Wallpaper sound\" switched on.", SW.mute);
 
     settings_group (g, r++, "Content");
     SW.assets = mk_entry ("we_assets", "Wallpaper Engine assets folder", "auto-detect");
