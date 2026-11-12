@@ -186,7 +186,7 @@ static void test_decisions (void)
     CHECK (have_arg (av, "-i", "file:/in/-i evil.mp4") && have_arg (av, "file:/c/x-sound.flac.part", NULL) &&
            have_arg (av, "-protocol_whitelist", "file") && have_arg (av, "-format_whitelist", NULL) &&
            have_arg (av, "-map", "0:a:0") && have_arg (av, "-vn", NULL) && have_arg (av, "-c:a", "flac") &&
-           have_arg (av, "-ac", "2") && have_arg (av, "-t", "21600") && have_arg (av, "-fs", NULL) &&
+           have_arg (av, "-ac", "2") && have_arg (av, "-ar", "48000") && have_arg (av, "-t", "21600") && have_arg (av, "-fs", NULL) &&
            have_arg (av, "-f", "flac") && have_arg (av, "-nostdin", NULL));
     g_strfreev (av);
 

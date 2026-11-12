@@ -1029,6 +1029,11 @@ char **walpe_video_sound_argv (const char *src, const char *dst_part)
     push (a, "-1");
     push (a, "-ac");
     push (a, "2");
+    /* one rate, whatever the track declares: the player takes 8000..192000
+     * Hz (scenesound.h), and a track outside that would be written and then
+     * never played; it also bounds what a second of a track costs on disk */
+    push (a, "-ar");
+    push (a, "48000");
     push (a, "-c:a");
     push (a, "flac");
     push (a, "-sample_fmt");

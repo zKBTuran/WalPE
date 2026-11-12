@@ -11,6 +11,7 @@
 #include "common/config.h" /* IWYU pragma: keep */
 #include "common/import.h" /* walpe_video_cache_file, walpe_video_sound_file */
 #include "scenesound.h"    /* a video wallpaper's sound track */
+#include "common/util.h"   /* walpe_log_str */
 #include <glib/gstdio.h>
 #include <math.h>
 #include <string.h>
@@ -275,13 +276,13 @@ static void vc_sound_prepare (const char *media)
     const gint64 t0 = g_get_monotonic_time ();
     int r = walpe_video_sound_extract (media, file, &err);
     if (r > 0)
-        g_message ("video: sound track of %s taken out into %s (%.1f s)", media, file,
-                   (g_get_monotonic_time () - t0) / 1e6);
+        g_message ("video: sound track of %s taken out into %s (%.1f s)", walpe_log_str (media),
+                   walpe_log_str (file), (g_get_monotonic_time () - t0) / 1e6);
     else if (r == 0)
-        g_message ("video: %s has no sound track", media);
-    else
+        g_message ("video: %s has no sound track", walpe_log_str (media));
+    else    /* (the name is the wallpaper's and ffmpeg quotes the file: neither as it is) */
         g_warning ("video: the sound track of %s could not be taken out (%s): the video stays silent",
-                   media, err ? err : "?");
+                   walpe_log_str (media), err ? walpe_log_strn (err, 400) : "?");
     g_free (err);
     g_free (file);
 }
