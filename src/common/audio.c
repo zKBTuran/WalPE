@@ -786,9 +786,24 @@ static gpointer capture_thread (gpointer data)
 }
 #endif
 
+/* WALPE_NO_AUDIO: nothing is captured, for whoever asks (it was looked at
+ * by scenes only: a web page with an audio listener captured all the
+ * same). Read once. */
+static G_GNUC_UNUSED gboolean capture_off (void)
+{
+    static gsize v;
+    if (g_once_init_enter (&v)) {
+        const char *e = g_getenv ("WALPE_NO_AUDIO");
+        g_once_init_leave (&v, e && *e && strcmp (e, "0") ? 2 : 1);
+    }
+    return v == 2;
+}
+
 void walpe_audio_ref (void)
 {
 #ifdef HAVE_CAPTURE
+    if (capture_off ())
+        return;
     g_mutex_lock (&lock);
     refs++;
     if (!thread_running) {
@@ -803,6 +818,8 @@ void walpe_audio_ref (void)
 void walpe_audio_unref (void)
 {
 #ifdef HAVE_CAPTURE
+    if (capture_off ())
+        return;
     g_mutex_lock (&lock);
     if (refs > 0)
         refs--;
@@ -865,6 +882,8 @@ gboolean walpe_audio_get (WalpeAudioSpectrum *out)
 char *walpe_audio_status (void)
 {
 #ifdef HAVE_CAPTURE
+    if (capture_off ())
+        return g_strdup ("disabled (WALPE_NO_AUDIO)");
     g_mutex_lock (&lock);
     char *s = g_strdup (refs > 0 && status_msg ? status_msg : "off");
     g_mutex_unlock (&lock);

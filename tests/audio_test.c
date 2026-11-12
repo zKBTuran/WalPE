@@ -131,6 +131,21 @@ int main (void)
     CHECK (walpe_audio_source_ok (FALSE, "alsa_input.usb-headset"));
     CHECK (walpe_audio_source_ok (TRUE, "some.monitor"));
 
+    /* WALPE_NO_AUDIO: a reference starts nothing and status says why
+     * (set before the first reference of this process: no sound server
+     * is contacted by this test) */
+    g_setenv ("WALPE_NO_AUDIO", "1", TRUE);
+    walpe_audio_ref ();
+    {
+        char *st = walpe_audio_status ();
+        CHECK (g_str_has_prefix (st, "disabled"));
+        g_free (st);
+        WalpeAudioSpectrum off;
+        CHECK (!walpe_audio_get (&off));
+        CHECK (off.left[27] == 0 && off.stamp_us == 0);
+    }
+    walpe_audio_unref ();
+
     /* silence in: silence out */
     memset (&s, 0, sizeof s);
     walpe_audio_analyze (zero, zero, N, RATE, &s, 1.0f / 30);
@@ -139,6 +154,6 @@ int main (void)
 
     if (!fails)
         printf ("audio: channel separation, band values, bands of six tones, folding, silence decay, "
-                "source rule OK\n");
+                "source rule, WALPE_NO_AUDIO OK\n");
     return fails ? 1 : 0;
 }

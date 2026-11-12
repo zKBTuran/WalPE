@@ -33,7 +33,9 @@ WALPE_API gboolean walpe_audio_get (WalpeAudioSpectrum *out);
  * started: PipeWire starts it when the output plays) | "capturing <source>"
  * (the source's name as the server gives it:
  * "<output>.monitor"; with " (WALPE_AUDIO_SOURCE)" after it when the user
- * named it) | "error: ..." | "disabled (built without libpulse)" */
+ * named it) | "error: ..." | "disabled (WALPE_NO_AUDIO)" (the variable is
+ * set: walpe_audio_ref starts nothing, for scenes and web pages alike) |
+ * "disabled (built without libpulse)" */
 char *walpe_audio_status (void);
 /* bass level (mean of the lowest bands, both channels), 0..~1 */
 float walpe_audio_level (const WalpeAudioSpectrum *s);
