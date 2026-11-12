@@ -29,7 +29,9 @@ WALPE_API void walpe_audio_ref (void);
 WALPE_API void walpe_audio_unref (void);
 /* copy the newest spectrum; FALSE (and zeros) when nothing is captured */
 WALPE_API gboolean walpe_audio_get (WalpeAudioSpectrum *out);
-/* "off" | "capturing <source>" (the source's name as the server gives it:
+/* "off" | "waiting for <source>: ..." (the stream is asked for and has not
+ * started: PipeWire starts it when the output plays) | "capturing <source>"
+ * (the source's name as the server gives it:
  * "<output>.monitor"; with " (WALPE_AUDIO_SOURCE)" after it when the user
  * named it) | "error: ..." | "disabled (built without libpulse)" */
 char *walpe_audio_status (void);

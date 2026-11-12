@@ -11,7 +11,9 @@
  * uses, and it cannot set stream flags. The stream now carries
  * PA_STREAM_DONT_INHIBIT_AUTO_SUSPEND: while nothing plays, the server
  * may suspend the output device and its monitor delivers nothing, so the
- * thread sleeps; before, the capture itself kept the device running. A
+ * thread sleeps; before, the capture itself kept the device running. (On
+ * PipeWire it still did: there the stream's property "node.passive" is
+ * what lets the output suspend, see capture_thread.) A
  * native libpipewire-0.3 stream was implemented and measured earlier:
  * it was no better, so libpulse stays.
  *
@@ -503,8 +505,16 @@ static void cap_server_info (pa_context *ctx, const pa_server_info *i, void *use
      * for a moment after the default output was removed) */
     if (!i || !i->default_sink_name || !*i->default_sink_name || *i->default_sink_name == '@')
         return;
-    g_free (c->def_sink);
+    char *was = c->def_sink;
     c->def_sink = g_strdup (i->default_sink_name);
+    if (!c->chosen && !c->checked && !c->restart && was && strcmp (was, c->def_sink)) {
+        /* the stream has not started yet (PipeWire starts it when its
+         * output plays something) and was asked for on the output that
+         * was the default then: it would wait there */
+        g_message ("audio: the default output is %s now (was %s): capturing its monitor", c->def_sink, was);
+        c->restart = TRUE;
+    }
+    g_free (was);
     cap_follow (c);
 }
 
@@ -643,7 +653,19 @@ static gpointer capture_thread (gpointer data)
             pa_buffer_attr ba = { .maxlength = (guint32) -1, .tlength = (guint32) -1,
                                   .prebuf = (guint32) -1, .minreq = (guint32) -1,
                                   .fragsize = (guint32) (ring->hop * 2 * sizeof (float)) };
-            st = pa_stream_new (ctx, "audio-reactive wallpaper", &ss, NULL);
+            /* PipeWire: a stream linked to an output's monitor keeps that
+             * output running - the device never suspends and the monitor
+             * delivers silence for ever - unless its node is passive.
+             * pipewire-pulse does not take DONT_INHIBIT_AUTO_SUSPEND for
+             * that (1.0.5); it does hand the stream's properties on.
+             * PulseAudio keeps the property and makes nothing of it. */
+            pa_proplist *pl = pa_proplist_new ();
+            if (pl)
+                pa_proplist_sets (pl, "node.passive", "true");
+            st = pl ? pa_stream_new_with_proplist (ctx, "audio-reactive wallpaper", &ss, NULL, pl)
+                    : pa_stream_new (ctx, "audio-reactive wallpaper", &ss, NULL);
+            if (pl)
+                pa_proplist_free (pl);
             if (!st) {
                 cap_fail (&cap, "stream", ctx);
             } else {
@@ -659,6 +681,11 @@ static gpointer capture_thread (gpointer data)
                                               PA_STREAM_DONT_INHIBIT_AUTO_SUSPEND |
                                               PA_STREAM_DONT_MOVE) < 0)
                     cap_fail (&cap, "stream", ctx);
+                else
+                    /* PulseAudio: for a moment. PipeWire starts a stream
+                     * on the monitor of an output that is suspended when
+                     * the output plays again */
+                    set_status ("waiting for %s: the stream starts when the output plays", dev);
             }
             /* (until the server has said which source it is) */
             while (!cap.failed && !cap.restart && !(cap.st_ready && cap.checked) && wanted ())
