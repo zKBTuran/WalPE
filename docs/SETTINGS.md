@@ -87,7 +87,7 @@ All of these are written to the file only while they are not at their default.
 |---|---|---|---|
 | `backend` | `auto` | | the window system the daemon draws on: `auto`, `x11`, `wayland`. Read when the daemon starts; `walpe-ctl backend` shows the one in use and sets it too ([WAYLAND.md](WAYLAND.md)) |
 | `wayland_pointer` | `auto` | | Wayland: the wallpaper takes pointer input while it uses the pointer (`auto`), or never (`off`) |
-| `gpu` | `auto` | | which GPU renders: `auto`, `integrated`, `discrete`, or one device by PCI address, DRM node, ids or name; the daemon restarts itself ([GPU.md](GPU.md)) |
+| `gpu` | `auto` | | which GPU renders: `auto` (a discrete GPU when there is one: on a laptop with two GPUs the second one, after a test; everywhere else the same as `display`), `display` (the GPU that drives the displays; the one to choose on a laptop to save battery), `integrated`, `discrete`, or one device by PCI address, DRM node, ids or name; the daemon restarts itself ([GPU.md](GPU.md)) |
 | `preset_follow_gpu` | false | | set the quality preset once when the kind of GPU that renders changes (discrete: high, integrated: balanced, CPU: low) |
 | `preset_gpu_class` | unset | (written by the daemon) | the kind of renderer the preset was last chosen for |
 | `gl_api` | `auto` | | `auto` (desktop OpenGL 3.3 where the driver has it, else OpenGL ES 3.2 / 3.1), `gl`, `gles`; the daemon restarts itself ([GPU.md](GPU.md)) |

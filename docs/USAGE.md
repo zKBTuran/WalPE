@@ -84,7 +84,7 @@ the one before it on screen; `walpe-ctl status` says why (`load_error`, `load_re
 | `diag` | the same state in a dozen lines of text, for a bug report: version, session, window system and why it was chosen, what the compositor offers and lacks, GL driver, modules, sound and why it is silent, and per monitor what it shows and which rule pauses it. Wallpapers are named by the last part of their path and the home directory is written `~`. The daemon writes the same lines to its log once, when its first wallpaper is shown |
 | `set key=value ...` | change settings ([SETTINGS.md](SETTINGS.md)); refused as a whole when one key is unknown or one value has the wrong kind |
 | `backend [auto\|x11\|wayland]` | show the window system the daemon draws on, how it was chosen, what the build holds and who reports each pause condition; or save the setting for its next start ([WAYLAND.md](WAYLAND.md)) |
-| `gpu [--json]` | the graphics devices of this machine, the one that renders, and what `set gpu=auto\|integrated\|discrete\|<device>` would pick ([GPU.md](GPU.md)) |
+| `gpu [--json]` | the graphics devices of this machine, the one that renders, and what `set gpu=auto\|display\|integrated\|discrete\|<device>` would pick ([GPU.md](GPU.md)) |
 | `gpu-stats [--sample SECONDS] [--json] ...` | GPU busy, memory, power and temperature as the kernel and the driver account them, for the whole GPU and for walpe-daemon; works without a running daemon ([GPU-PROFILING.md](GPU-PROFILING.md)) |
 | `mem [--json] [--deep] [--wait S] [--events on\|off]`, `mem --diff A B` | where the daemon's memory is, computed when asked and at no other time: resident memory by kind of mapping and by name, the allocator, descriptors, threads by name, counters since the start, and per monitor the GL objects of its context (textures by size, buffers, programs) and what its wallpaper holds. Save two reports with `--json` and `--diff` shows what grew. `--events on` starts counting how often textures, framebuffers, buffers and programs are made and deleted and pixels are read back (nothing counts them before; `off` stops it) |
 | `resolution [<monitor> <value>] ...` | the render resolution of every monitor, or set one: `native`, `720p` ... `4k`, `WxH` ([RESOLUTION.md](RESOLUTION.md)) |
@@ -127,7 +127,7 @@ is [docs/SETTINGS.md](SETTINGS.md); the most used:
 | `idle=N` | 0 | pause after N seconds without input (needs a session that reports idle time: Wayland compositors with `ext-idle-notify-v1`) |
 | `software=on\|off` | off | render on the CPU (Mesa llvmpipe) instead of the GPU |
 | `backend=auto\|x11\|wayland` | auto | the window system the daemon draws on; read at its next start |
-| `gpu=auto\|integrated\|discrete\|<device>` | auto | which GPU renders; `auto` sets nothing |
+| `gpu=auto\|display\|integrated\|discrete\|<device>` | auto | which GPU renders. `auto`: a discrete GPU when there is one (on a laptop with two GPUs the second one, after a test; on every other machine nothing is set). `display`: the GPU that drives the displays, nothing is set - on a laptop the choice that saves battery |
 | `gl_api=auto\|gl\|gles` | auto | desktop OpenGL 3.3 where the driver has it, else OpenGL ES 3.2 / 3.1 |
 | `resolution=native\|720p\|1080p\|1440p\|4k\|WxH` | native | render resolution, for every monitor or `NAME:value,...` |
 | `scene_sound=on\|off`, `volume=0..1`, `mute=on\|off` | on, 0.5, off | wallpaper sound, for scenes, video wallpapers and web pages alike: the rows "Wallpaper sound", "Wallpaper volume" and "Mute" of the settings window |

@@ -101,9 +101,13 @@ software renderer only ([Known limitations](#known-limitations)).
   (the bottom layer also on 5.27); no real session, no GPU.
   [WAYLAND.md](WAYLAND.md#kde-plasma).
 - **AMD and Intel graphics, GPU choice, OpenGL ES: written, not run on hardware.** The
-  list of graphics devices, render offload to another GPU (`gpu=integrated|discrete`),
-  the kernel's GPU statistics and the Mesa counterparts of the driver hints were tested
-  against made-up machines only. The OpenGL ES path (OpenGL ES 3.1 at least) rendered
+  list of graphics devices, render offload to another GPU (`gpu=integrated|discrete`, and
+  the default `gpu=auto` on a laptop whose integrated GPU drives the screen while a
+  discrete one sits beside it), the kernel's GPU statistics and the Mesa counterparts of
+  the driver hints were tested against made-up machines only. On such a laptop the default
+  now renders on the discrete GPU if that GPU passes a test at start, which costs a copy
+  of every frame between the GPUs and keeps both awake; `walpe-ctl set gpu=display` is
+  the earlier behaviour ([GPU.md](GPU.md)). The OpenGL ES path (OpenGL ES 3.1 at least) rendered
   every scene of the test library on Mesa's llvmpipe, and all 1934 effect programs of
   those scenes compile there; no ES-only driver and no vendor shader compiler has seen
   it. Pictures differ slightly from desktop OpenGL: OpenGL ES has no texture LOD bias,
@@ -160,8 +164,9 @@ software renderer only ([Known limitations](#known-limitations)).
   monitors is uploaded once per monitor.
 - **Off by default and not confirmed on a graphics card:** `hwdec` (hardware video decoding,
   every API), `video_zerocopy`, `web_accel`, `skip_hidden`, `pointer_share`, `video_limit`,
-  `frame_align`, the `video_upload` alternatives, `gpu` other than `auto`, `gl_api=gles`,
-  `preset_follow_gpu`, `parallax_offset` and a render resolution other than `native`.
+  `frame_align`, the `video_upload` alternatives, `gpu` other than `auto` / `display`,
+  `gl_api=gles`, `preset_follow_gpu`, `parallax_offset` and a render resolution other than
+  `native`.
   Hardware decoding and web acceleration fall back by themselves.
 - **"Skip hidden areas" under a compositing manager** (`skip_hidden=always`) cannot know
   which windows the compositor itself makes see-through: behind those the wallpaper

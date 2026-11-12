@@ -269,9 +269,10 @@ None of them has been attacked by anyone but its own tests.
   either, and what the private page host and WebKit's sandbox keep from it, is in
   [Web wallpapers](#web-wallpapers) above. The wallpaper surface itself never takes the
   keyboard.
-- **GPU choice**: for a `gpu` value other than `auto` the daemon starts short child
-  processes of itself (`--gpu-probe`) and sets driver variables in its own environment;
-  a variable that is already set is never replaced. `walpe-ctl gpu-stats` and the kernel
+- **GPU choice**: for a `gpu` value that names a device, and with `gpu=auto` on a machine
+  whose integrated GPU drives the displays beside a discrete one, the daemon starts short
+  child processes of itself (`--gpu-probe`) and sets driver variables in its own
+  environment; a variable that is already set is never replaced. `walpe-ctl gpu-stats` and the kernel
   section of a profile read `/proc/<pid>/fdinfo` of your own processes and `/sys` of the
   GPU, nothing of another user's process, and start no program but `nvidia-smi` (the
   command and the report script only, never the daemon)

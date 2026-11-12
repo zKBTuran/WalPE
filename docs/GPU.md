@@ -9,10 +9,16 @@ presentation and driver hints are in [GPU-PRESENT.md](GPU-PRESENT.md).
 > GPU, no DRM device). The GPU list, the integrated / discrete classification and the
 > kernel statistics were tested against made-up `/sys` and `/proc` trees. Nothing of it
 > has been run on real AMD, Intel or NVIDIA hardware: no render offload between two GPUs,
-> no driver that offers OpenGL ES only, no vendor OpenGL ES compiler. The NVIDIA / X11
-> path with default settings is meant to be unchanged from 0.12.2: `gpu=auto` sets no
-> variable and starts no child process, and the first context asked for is the same
-> desktop OpenGL 3.3 context as before.
+> no driver that offers OpenGL ES only, no vendor OpenGL ES compiler. One log of 0.14.0
+> from a real laptop (Intel graphics that drive the panel, an NVIDIA GPU beside them,
+> KDE Plasma on Wayland) shows the device list, integrated / discrete and "the window
+> system's GPU" as they are there; that machine rendered on the Intel GPU. **`gpu=auto`
+> choosing the discrete GPU of such a laptop is new and has not run on one**: what was
+> tested is the decision (on made-up machines) and what happens when the discrete GPU
+> fails its test. The NVIDIA / X11 path with default settings is meant to be unchanged
+> from 0.12.2: on a machine with one GPU, and wherever a card drives the displays,
+> `gpu=auto` sets no variable and starts no child process, and the first context asked
+> for is the same desktop OpenGL 3.3 context as before.
 
 ## What WalPE needs from a driver
 
@@ -50,6 +56,7 @@ textures live in system memory.
 walpe-ctl gpu                  # the graphics devices, the one in use, what each value picks here
 walpe-ctl gpu --json
 walpe-ctl set gpu=auto         # default
+walpe-ctl set gpu=display
 walpe-ctl set gpu=integrated
 walpe-ctl set gpu=discrete
 walpe-ctl set gpu=<device>     # a PCI address (01:00.0), a DRM node (card1, renderD129),
@@ -60,28 +67,61 @@ WALPE_GPU=<value> walpe-daemon # for this run; wins over the saved setting
 
 | Value | Means |
 |---|---|
-| `auto` | Nothing is set. The GPU the X server or the compositor itself uses renders, and frames reach the screen without a copy between GPUs. What every earlier version did |
+| `auto` | A discrete GPU when the machine has one. See the table below: on most machines that is `display` |
+| `display` | Nothing is set. The GPU the X server or the compositor itself uses renders, and frames reach the screen without a copy between GPUs. What `auto` meant up to 0.14.0 |
 | `integrated` | the processor's own graphics: lowest power draw, shares the machine's memory, the slowest of the choices |
 | `discrete` | the separate card or a laptop's second GPU: fastest, draws more power and keeps that GPU awake while a wallpaper is animated |
 | `<device>` | exactly that device |
 
+What `auto` does, by machine (`walpe-ctl gpu` says which line is yours, under "what the
+values mean here"):
+
+| The machine | `auto` |
+|---|---|
+| one GPU of any kind | that GPU. Nothing is set, no test process is started |
+| a card drives the displays (with or without an unused integrated GPU, or a second card) | that card. Nothing is set, no test process is started |
+| an integrated GPU drives the displays and a discrete GPU with a driver sits beside it (a laptop with two GPUs) | the discrete GPU, after the test described below. If the test fails, or takes longer than 5 seconds, the integrated GPU renders, and the log (`gpu = auto: ...`) and `gpu_note` say why |
+| the same, and the X server or compositor turns out to render on the discrete GPU itself | that GPU. Nothing is set (two test processes were started to find out) |
+| the same, but the discrete GPU has no kernel driver, or NVIDIA's driver runs without its DRM module | the integrated GPU. Nothing is tested; `gpu_note` names the reason |
+| several discrete GPUs beside the integrated one | the first that can be used: the firmware's primary one, else the lowest DRM card number. Name another one by its PCI address |
+| `DRI_PRIME`, `__NV_PRIME_RENDER_OFFLOAD` or another of the variables below is set in the daemon's environment | whatever that variable says. Nothing is tested; `gpu_note` names the variable |
+| "Render on CPU" is on | the CPU |
+
 On a machine with two GPUs every value that does not name the GPU driving the displays
 makes the driver render on one GPU and copy each finished frame to the other (PRIME render
-offload): one full-screen copy per monitor and frame, and both GPUs stay awake. A wallpaper
-is light work compared with a game; the GPU that drives the displays is usually the right
-renderer for it.
+offload): one full-screen copy per monitor and frame, and both GPUs stay awake while a
+wallpaper is animated. That is what `auto` costs on a laptop with two GPUs, and it buys the
+faster GPU for scenes with many effects.
+
+**On a laptop, to save battery: `walpe-ctl set gpu=display`.** The discrete GPU is then not
+touched by WalPE and can stay powered down. (`integrated` is the same device on a laptop
+whose panel hangs on the integrated GPU; on a desktop with a card it is a different one.)
+The other tools for battery are independent of the GPU: `battery=on` pauses every wallpaper
+on battery power, `battery_fps=N` limits the frame rate there ([USAGE.md](USAGE.md)). A
+pause stops drawing and decoding; it does not close the connection to the GPU and does not
+free the wallpaper's textures (`idle_release` in `gpu.conf` frees them after a time,
+[GPU-PRESENT.md](GPU-PRESENT.md)). Whether a paused wallpaper lets the discrete GPU power
+down is the driver's decision and has not been measured. There is no setting yet that
+renders on the discrete GPU on mains and on the display's GPU on battery.
 
 How it is applied: the drivers pick their device from environment variables when EGL
-starts. For any value but `auto` the daemon reads the device list from sysfs, starts a
+starts. When another device than the display's is to render - a value that names one, or
+`auto` on a laptop with two GPUs - the daemon reads the device list from sysfs, starts a
 short child process of itself to learn which device renders when nothing is set and, if
-another device is asked for, a second child with the variables set that must open a window
+another device is wanted, a second child with the variables set that must open a window
 surface and draw one frame on that device. Only if that worked does the daemon set the
 variables for itself (Mesa: `DRI_PRIME`; NVIDIA: `__NV_PRIME_RENDER_OFFLOAD`,
-`__GLX_VENDOR_LIBRARY_NAME`; `__EGL_VENDOR_LIBRARY_FILENAMES` where needed). A variable
-that is already set in the daemon's environment is not touched: the setting is then not
-applied and `gpu_note` says which variable decides. A change restarts the daemon in place;
-a value that names no device of this machine is refused with the list of devices. "Render
-on CPU" wins over the `gpu` setting.
+`__GLX_VENDOR_LIBRARY_NAME`; `__EGL_VENDOR_LIBRARY_FILENAMES` where needed). The daemon's
+start waits for the two children: each is ended after 10 seconds, after 5 when `auto` made
+the choice (a GPU that was powered down has to wake within that), and the log line says how
+long the test took. A variable that is already set in the daemon's environment is not
+touched: the setting is then not applied and `gpu_note` says which variable decides. A
+change restarts the daemon in place; a value that names no device of this machine is
+refused with the list of devices. "Render on CPU" wins over the `gpu` setting.
+
+Hardware video decoding (`hwdec`, off by default) asks the GPU that renders, whichever
+that is, and web wallpapers with hardware acceleration (`web_accel`, off by default) run
+their own start-up test with the same variables: neither is left on the other GPU.
 
 `walpe-ctl status`: `gpu` (the setting), `gpu_env` (`WALPE_GPU` decides), `gpu_in_use`,
 `gpu_candidates`, `gpu_offload`, `gpu_environment` (the variables set) and `gpu_note` (why
@@ -96,11 +136,18 @@ address. Virtual machines' adapters are neither.
 
 Expected limits: a display driven by the NVIDIA driver's X server usually cannot be drawn
 to by another GPU (`integrated` then fails its test, the daemon stays on the NVIDIA GPU and
-`gpu_note` says why); under Wayland the test process decides.
+`gpu_note` says why); under Wayland the test process decides. The test draws one small
+frame: a GPU that passes it and then draws wrongly, stutters or loses its context after a
+suspend is not noticed by `auto`, and nothing takes the choice back by itself. If the
+wallpaper misbehaves on a laptop with two GPUs, `walpe-ctl set gpu=display` is the first
+thing to try (`WALPE_GPU=display walpe-daemon` when the daemon does not stay up), and
+`walpe-ctl gpu --json` with the `gpu` lines of the log is what to send.
 
 `preset_follow_gpu=on` (off by default): the quality preset is set once when the kind of
 GPU that renders changes - discrete: `high`, integrated: `balanced`, CPU rendering or a
-virtual GPU: `low`. A preset you choose afterwards stays until the kind changes again.
+virtual GPU: `low`. A preset you choose afterwards stays until the kind changes again. It
+goes by the GPU that really renders: where `auto` takes a laptop's discrete GPU that is
+`high`, and `balanced` when the test failed and the integrated GPU renders.
 
 When a Mesa driver renders, the `gpu.conf` hints that have a Mesa counterpart are handed
 to Mesa as well ([GPU-PRESENT.md](GPU-PRESENT.md)).
