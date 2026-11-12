@@ -1,0 +1,9 @@
+{
+    "uuid": "walpe@walpe.github.io",
+    "name": "WalPE",
+    "description": "Keeps the windows of walpe-daemon (WalPE, live wallpapers) on the desktop: below every other window, on all workspaces, out of the overview's window list, and behind the workspaces in the overview. Needs walpe-daemon; Wayland only.",
+    "url": "https://github.com/Fired-Cloud/walpe",
+    "shell-version": ["46", "51"],
+    "session-modes": ["user", "unlock-dialog"],
+    "version-name": "0.14.0"
+}
