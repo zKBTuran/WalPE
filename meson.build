@@ -2162,12 +2162,14 @@ if have_tray
   # Xvfb, private XDG dirs): what it writes while the engine sends status
   # lines; and (case traymenu: a private session bus, sni-host-stub as the
   # panel) its menu as a panel keeps it that follows the tray from before
-  # the engine ran, and the click on "Quit WalPE". Skipped (77) without
-  # Xvfb; the case traymenu alone is left out without dbus-daemon.
+  # the engine ran, and the click on "Quit WalPE"; and (case trayreg) a
+  # watcher that does not answer the first registration. Skipped (77)
+  # without Xvfb; the two cases with the stub are left out without
+  # dbus-daemon.
   if lifecheck_py.found() and have_x11
     test('tray-life', lifecheck_py,
       args: ['-I', meson.current_source_dir() / 'scripts/lifecheck.py',
-             '--build', meson.current_build_dir(), '--display', 'xvfb', '--only', 'tray,traymenu'],
+             '--build', meson.current_build_dir(), '--display', 'xvfb', '--only', 'tray,traymenu,trayreg'],
       env: ['WALPE_BACKEND=x11'],
       depends: [daemon, ctl, tray, sni_host_stub],
       is_parallel: false,

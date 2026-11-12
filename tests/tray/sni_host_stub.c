@@ -7,7 +7,11 @@
  * Activate, then dumps everything again.
  *
  *   sni-host-stub [--png FILE] [--png-after FILE] [--click LABEL]
- *                 [--activate] [--seconds N] [--follow]
+ *                 [--activate] [--seconds N] [--follow] [--drop-register N]
+ *
+ * --drop-register N: the first N RegisterStatusNotifierItem calls are taken
+ * and never answered (a watcher whose process is held up while the session
+ * starts): the item has to ask again.
  *
  * --follow: keep the menu the way a panel does that imports it once and
  * then follows the item's LayoutUpdated signals with the rules of the
@@ -51,6 +55,7 @@ static const char xml[] =
 
 static char *png, *png_after, *click;
 static gboolean activate, follow;
+static int drop_register;   /* registrations that get no answer */
 static int seconds = 8;
 static GDBusConnection *bus;
 static char *item_bus, *item_path;
@@ -529,6 +534,14 @@ static void call (GDBusConnection *c, const char *sender, const char *path, cons
     if (!strcmp (method, "RegisterStatusNotifierItem")) {
         const char *svc;
         g_variant_get (params, "(&s)", &svc);
+        if (drop_register > 0) {
+            /* a watcher that is held up: the call is taken and never answered */
+            drop_register--;
+            printf ("RegisterStatusNotifierItem(%s) from %s: not answered\n", svc, sender);
+            fflush (stdout);
+            g_object_unref (inv);
+            return;
+        }
         g_free (item_bus);
         g_free (item_path);
         if (svc[0] == '/') {
@@ -580,6 +593,7 @@ int main (int argc, char **argv)
         { "activate", 0, 0, G_OPTION_ARG_NONE, &activate, "call Activate", NULL },
         { "seconds", 0, 0, G_OPTION_ARG_INT, &seconds, "run time", "N" },
         { "follow", 0, 0, G_OPTION_ARG_NONE, &follow, "keep the menu as a panel does; commands on standard input", NULL },
+        { "drop-register", 0, 0, G_OPTION_ARG_INT, &drop_register, "leave the first N registrations of an item unanswered", "N" },
         { NULL, 0, 0, 0, NULL, NULL, NULL },
     };
     GOptionContext *oc = g_option_context_new (NULL);

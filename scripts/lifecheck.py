@@ -47,6 +47,9 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             on "Quit WalPE" ends the engine and the tray. Skipped without
             the tray, the stub (a build without -Dtests=true) or
             dbus-daemon.
+  trayreg   a StatusNotifierWatcher that takes the tray's registration and
+            does not answer it (sni-host-stub --drop-register 1): the tray
+            asks again and is registered. Skipped like traymenu.
   window    the library window next to a running engine: open, idle and
             without the focus its main thread sleeps (no timer of a panel
             that shows nothing); status lines that say what the last one
@@ -1024,10 +1027,11 @@ class Panel:
     """sni-host-stub --follow: a StatusNotifierWatcher and host that keeps the
     item's menu the way a panel with Plasma's dbusmenu importer does"""
 
-    def __init__(self, stub, env, log):
+    def __init__(self, stub, env, log, args=()):
         self.log = log
-        self.proc = subprocess.Popen([stub, "--follow", "--seconds", str(int(3600 * PATIENCE))], env=env,
-                                     stdin=subprocess.PIPE, stdout=open(log, "w"), stderr=subprocess.STDOUT)
+        self.proc = subprocess.Popen([stub, "--follow", "--seconds", str(int(3600 * PATIENCE))] + list(args),
+                                     env=env, stdin=subprocess.PIPE, stdout=open(log, "w"),
+                                     stderr=subprocess.STDOUT)
 
     def text(self, mark=0):
         with open(self.log, errors="replace") as f:
@@ -1179,6 +1183,63 @@ def case_traymenu(env, W):
             bus.wait()
         bus.stdout.close()
     env.stop_daemon()
+
+
+def case_trayreg(env, W):
+    """A StatusNotifierWatcher that is there and does not answer the item's registration
+    (its process is held up while the session starts): the tray asked once, the call
+    ran into its time limit, and there was no icon until the watcher's name changed its
+    owner. It asks again."""
+    tray_bin = env.tray_bin or os.path.join(env.build, "walpe-tray")
+    stub = os.path.join(env.build, "sni-host-stub")
+    lack = [n for n, there in (("walpe-tray", os.path.exists(tray_bin)), ("sni-host-stub", os.path.exists(stub)),
+                               ("dbus-daemon", bool(shutil.which("dbus-daemon")))) if not there]
+    if lack:
+        print("lifecheck: trayreg skipped (no %s)" % ", ".join(lack))
+        return
+    put(os.path.join(os.path.dirname(env.config), "tray.ini"), "[tray]\nstart_with_gui=false\n")
+    tenv = dict(env.env)
+    tenv["GTK_A11Y"] = "none"
+    bus = subprocess.Popen(["dbus-daemon", "--session", "--nofork", "--print-address=1",
+                            "--address=unix:path=" + os.path.join(env.env["XDG_RUNTIME_DIR"], "trayreg-bus")],
+                           env=tenv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    tenv["DBUS_SESSION_BUS_ADDRESS"] = bus.stdout.readline().decode().strip()
+    panel = tray = None
+    try:
+        if not check(bool(tenv["DBUS_SESSION_BUS_ADDRESS"]), "trayreg: a private session bus"):
+            return
+        panel = Panel(stub, tenv, os.path.join(env.tmp, "trayreg-panel.log"), ["--drop-register", "1"])
+        wait_for(lambda: "stub up" in panel.text(), 10, 0.1)
+        tray_log = os.path.join(env.tmp, "trayreg-tray.log")
+        log = open(tray_log, "a")
+        tray = subprocess.Popen([tray_bin], env=tenv, stdout=log, stderr=subprocess.STDOUT, cwd=env.tmp)
+        log.close()
+        check(bool(wait_for(lambda: "not answered" in panel.text(), 20, 0.1)),
+              "trayreg: the watcher took the tray's registration and did not answer", panel.text()[-400:])
+        # (the call's time limit is 3 s, the next try comes 2 s after it)
+        again = wait_for(lambda: "import: done" in panel.text(), 30, 0.2)
+        with open(tray_log, errors="replace") as f:
+            said = f.read()
+        check(bool(again) and "registered with the StatusNotifierWatcher" in said,
+              "trayreg: the tray registers again and the panel has its item",
+              "panel:\n%s\ntray:\n%s" % (panel.text()[-400:], said[-600:]))
+    finally:
+        if tray and tray.poll() is None:
+            tray.terminate()
+            try:
+                tray.wait(timeout=10 * PATIENCE)
+            except subprocess.TimeoutExpired:
+                tray.kill()
+                tray.wait()
+        if panel:
+            panel.close()
+        bus.terminate()
+        try:
+            bus.wait(timeout=10 * PATIENCE)
+        except subprocess.TimeoutExpired:
+            bus.kill()
+            bus.wait()
+        bus.stdout.close()
 
 
 # ------------------------------------------------------------------- window
@@ -2996,7 +3057,7 @@ def case_scan(env, W):
 
 
 CASES = [("logcap", case_logcap), ("pointer", case_pointer), ("reload", case_reload), ("restart", case_restart),
-         ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("scan", case_scan), ("tray", case_tray), ("traymenu", case_traymenu), ("window", case_window), ("panel", case_panel), ("busy", case_busy), ("probe", case_probe),
+         ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("scan", case_scan), ("tray", case_tray), ("traymenu", case_traymenu), ("trayreg", case_trayreg), ("window", case_window), ("panel", case_panel), ("busy", case_busy), ("probe", case_probe),
          ("fullscreen", case_fullscreen), ("video", case_video), ("webunload", case_webunload),
          ("winlost", case_winlost), ("convert", case_convert),
          ("swaplost", case_swaplost), ("norestart", case_norestart),

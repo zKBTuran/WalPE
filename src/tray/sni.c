@@ -119,6 +119,8 @@ static struct {
     guint sni_reg, menu_reg, own_id, watch_id;
     char *name;
     gboolean registered;
+    gboolean watcher;       /* the StatusNotifierWatcher's name has an owner */
+    guint retry_id, retry_n;
     guint menu_serial_sent;
     TrayIconState icon_sent;
     char *tip_sent;
@@ -471,19 +473,64 @@ static const GDBusInterfaceVTable menu_vt = { menu_call, menu_get, NULL, { 0 } }
 
 /* ------------------------------------------------------------ watcher */
 
+static void register_item (void);
+
+static gboolean register_again (gpointer u)
+{
+    (void) u;
+    S.retry_id = 0;
+    if (S.watcher && !S.registered)
+        register_item ();
+    return G_SOURCE_REMOVE;
+}
+
+static void retry_cancel (void)
+{
+    if (S.retry_id)
+        g_source_remove (S.retry_id);
+    S.retry_id = 0;
+    S.retry_n = 0;
+}
+
 static void on_registered (GObject *src, GAsyncResult *res, gpointer u)
 {
     (void) u;
     GError *e = NULL;
     GVariant *r = g_dbus_connection_call_finish (G_DBUS_CONNECTION (src), res, &e);
+    if (!S.bus) {           /* the backend was stopped meanwhile */
+        if (r)
+            g_variant_unref (r);
+        g_clear_error (&e);
+        return;
+    }
     if (r) {
         S.registered = TRUE;
+        retry_cancel ();
         g_message ("sni: registered with the StatusNotifierWatcher as %s", S.name);
         g_variant_unref (r);
+        return;
+    }
+    /* A watcher that is there and does not answer in time - the session is
+     * still starting, or its process is held up - was asked this once, and
+     * the tray stayed without an icon until the watcher's name changed its
+     * owner. It is asked again: after 2, 5, 15 and 30 seconds, then once a
+     * minute, for as long as the watcher is there and the item is not
+     * registered (registering twice does no harm: a watcher knows an item by
+     * its name). Nothing runs once the answer has come. */
+    gboolean ask = S.watcher && !S.retry_id &&
+                   !g_error_matches (e, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_METHOD) &&
+                   !g_error_matches (e, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_INTERFACE) &&
+                   !g_error_matches (e, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_OBJECT);
+    static const guint secs[] = { 2, 5, 15, 30, 60 };
+    guint in = secs[MIN (S.retry_n, G_N_ELEMENTS (secs) - 1)];
+    if (ask) {
+        g_message ("sni: RegisterStatusNotifierItem failed: %s; asking again in %u s", e->message, in);
+        S.retry_n++;
+        S.retry_id = g_timeout_add_seconds (in, register_again, NULL);
     } else {
         g_message ("sni: RegisterStatusNotifierItem failed: %s", e->message);
-        g_error_free (e);
     }
+    g_error_free (e);
 }
 
 static void register_item (void)
@@ -499,6 +546,8 @@ static void register_item (void)
 static void watcher_up (GDBusConnection *c, const char *name, const char *owner, gpointer u)
 {
     (void) c; (void) name; (void) owner; (void) u;
+    S.watcher = TRUE;
+    retry_cancel ();
     register_item ();
 }
 
@@ -508,6 +557,8 @@ static void watcher_down (GDBusConnection *c, const char *name, gpointer u)
     if (S.registered)
         g_message ("sni: the StatusNotifierWatcher went away; re-registering when it is back");
     S.registered = FALSE;
+    S.watcher = FALSE;
+    retry_cancel ();
 }
 
 static void name_acquired (GDBusConnection *c, const char *name, gpointer u)
@@ -571,6 +622,8 @@ static void sni_stop (void)
         g_dbus_connection_unregister_object (S.bus, S.menu_reg);
     S.watch_id = S.own_id = S.sni_reg = S.menu_reg = 0;
     S.registered = FALSE;
+    S.watcher = FALSE;
+    retry_cancel ();
     g_clear_pointer (&S.name, g_free);
     g_clear_pointer (&S.tip_sent, g_free);
     g_clear_object (&S.bus);
