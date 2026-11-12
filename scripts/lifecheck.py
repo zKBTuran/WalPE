@@ -2172,8 +2172,29 @@ def case_logcap(env, W):
         env.stop_daemon()
 
 
+# -------------------------------------------------------------------- panel
+def case_panel(env, W):
+    """tests/perf_panel_test.c needs a display: it gets this check's"""
+    exe = os.path.join(env.build, "perf-panel-test")
+    if not os.path.exists(exe):
+        print("lifecheck: panel skipped (no perf-panel-test in the build)")
+        return
+    e = dict(env.env)
+    e.update({"GSK_RENDERER": "cairo", "GTK_A11Y": "none"})
+    try:
+        p = subprocess.run([exe], env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=env.tmp,
+                           timeout=120 * PATIENCE)
+        out, status = p.stdout.decode(errors="replace"), p.returncode
+    except subprocess.TimeoutExpired:
+        out, status = "", "no end in time"
+    lines = [ln for ln in out.splitlines() if ln.startswith(("ok  ", "FAIL"))]
+    for ln in lines:
+        check(ln.startswith("ok  "), "panel: " + ln[5:])
+    check(status == 0 and bool(lines), "panel: perf-panel-test ended well", f"exit status {status}\n{out[-600:]}")
+
+
 CASES = [("logcap", case_logcap), ("pointer", case_pointer), ("reload", case_reload), ("restart", case_restart),
-         ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("tray", case_tray), ("window", case_window), ("busy", case_busy), ("probe", case_probe),
+         ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("tray", case_tray), ("window", case_window), ("panel", case_panel), ("busy", case_busy), ("probe", case_probe),
          ("fullscreen", case_fullscreen), ("video", case_video), ("webunload", case_webunload),
          ("winlost", case_winlost), ("convert", case_convert)]
 

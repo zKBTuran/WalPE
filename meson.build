@@ -1676,12 +1676,18 @@ if lifecheck_py.found() and have_x11
     is_parallel: false,
     timeout: 900)
   # the library window next to a real daemon (the case window of
-  # scripts/lifecheck.py): the frames it draws for the engine's status lines
+  # scripts/lifecheck.py): the frames it draws for the engine's status lines;
+  # and a wallpaper's quality panel with the engine's answers (the case
+  # panel runs perf-panel-test on the check's display)
+  perf_panel_test = executable('perf-panel-test', 'tests/perf_panel_test.c', 'src/ui/perf.c',
+    include_directories: inc,
+    dependencies: [core_dep, gtk4],
+    install: false, build_by_default: false)
   test('ui-life', lifecheck_py,
     args: ['-I', meson.current_source_dir() / 'scripts/lifecheck.py',
-           '--build', meson.current_build_dir(), '--display', 'xvfb', '--only', 'window'],
+           '--build', meson.current_build_dir(), '--display', 'xvfb', '--only', 'window,panel'],
     env: ['WALPE_BACKEND=x11'],
-    depends: [daemon, ctl, ui],
+    depends: [daemon, ctl, ui, perf_panel_test],
     is_parallel: false,
     timeout: 300)
   # render resolution per monitor through a real daemon (own Xvfb, private

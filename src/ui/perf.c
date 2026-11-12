@@ -363,7 +363,10 @@ static void perf_load (Perf *P, JsonObject *q)
     if (P->expander) {
         char *t = g_strdup_printf ("Quality for this wallpaper: %s",
                                    own ? walpe_preset_label (pr) : "as in Engine settings");
-        gtk_expander_set_label (GTK_EXPANDER (P->expander), t);
+        /* (GTK makes a new label widget for every call, also for the text
+         * that is there: a layout and a frame per answer, every 2 s) */
+        if (g_strcmp0 (t, gtk_expander_get_label (GTK_EXPANDER (P->expander))))
+            gtk_expander_set_label (GTK_EXPANDER (P->expander), t);
         g_free (t);
     }
 }
