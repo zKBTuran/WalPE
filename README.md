@@ -3,8 +3,7 @@
 Animated desktop wallpapers for Linux, on X11 and on Wayland compositors with the layer
 shell. WalPE plays Wallpaper Engine scene, video and web projects, GIFs and still images.
 
-This is the development tree of version 0.14.0, which is not released; the last release
-is 0.12.2. Changes per version: [CHANGELOG.md](CHANGELOG.md).
+The current release is 0.14.0 "Flood". Changes per version: [CHANGELOG.md](CHANGELOG.md).
 
 ## Features
 
@@ -25,8 +24,10 @@ Not supported: 3D model scenes and `application` wallpapers. The full table is i
 
 Everything that is new since 0.12.2 (the Wayland backend, GPU choice, OpenGL ES, the
 arm64 build, scene sound and more) was built and tested only on Mesa's software renderer,
-a headless compositor, a null sound sink and - the arm64 build - under emulation. Nothing
-new has been run on real AMD, Intel, NVIDIA or ARM hardware or on a real Wayland desktop.
+a headless compositor, a null sound sink and - the arm64 build - under emulation, with one
+exception: the maintainer ran the X11 build of 0.14.0 on his own NVIDIA card before the
+release. Nothing else has been run on real AMD, Intel, NVIDIA or ARM hardware or on a real
+Wayland desktop.
 The details and the known limitations: [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 
 ## Requirements

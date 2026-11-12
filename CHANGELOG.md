@@ -4,15 +4,18 @@ What changed in each released version of WalPE, newest first, written for people
 it. Version numbers are `0.<minor>.<patch>`; every release is tagged `v<version>` in git.
 Release names are album titles by the band Boris, one per release.
 
-## 0.14.0 "Flood" (not released)
+## 0.14.0 "Flood"
 
-The development version. It contains everything of 0.13.0 "PINK" below, which was not
+This release contains everything of 0.13.0 "PINK" below, which was not
 released on its own. On top of it: memory and CPU that the daemon kept or spent for
 things that were not in use, corrections to the fullscreen pause per monitor, a fix for
 scene sound, a report of where the daemon's memory is, and what a review of the things
 the daemon takes from outside found (under Security). **The state of testing is that
 of 0.13.0: Mesa's software renderer (llvmpipe), Xvfb, a headless Wayland compositor (sway
-1.9) and a PulseAudio null sink. Nothing of it has been run on real graphics hardware.**
+1.9) and a PulseAudio null sink, with one addition: the maintainer ran the X11 build on
+his own NVIDIA card before the release. The Wayland backend, AMD and Intel graphics, the
+OpenGL ES path and the build for 64-bit ARM have still not been run on real hardware or
+on a real Wayland desktop.**
 Two settings are new and on by default: `video_scene_convert` (under Video) and
 `web_unload` (under Other). The fixes are meant to change no picture; the one place where
 the picture is not the same pixel for pixel is a scene's video played from its converted
@@ -448,7 +451,9 @@ could do to the daemon. None of these was seen being used.
 
 ## 0.13.0 "PINK" (not released)
 
-The development version. It contains every fix of 0.12.2. **Everything listed here was
+A development version that was not released on its own: all of it is part of 0.14.0, and
+the state of testing as it is now stands at the top of that section. It contains every
+fix of 0.12.2. **Everything listed here was
 built and tested only on Mesa's software renderer (llvmpipe), a headless Wayland
 compositor (sway 1.9), a PulseAudio null sink and - the build for 64-bit ARM - under
 emulation. Nothing of it has been run on real AMD, Intel, NVIDIA or ARM hardware or on a

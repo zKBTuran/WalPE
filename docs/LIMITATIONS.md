@@ -14,7 +14,9 @@ per monitor; hardware video decoding chosen by what the machine offers; scene so
 (off by default); camera parallax, camera shake, bloom, sprite-sheet layers and script
 camera in scenes; builds for 64-bit ARM. **All of it was built and tested only on Mesa's
 software renderer, a headless compositor, a null sound sink and - the ARM build - under
-emulation. Nothing new has been run on real AMD, Intel, NVIDIA or ARM hardware or on a
+emulation, with one exception: the maintainer ran the X11 build of 0.14.0 on his own
+NVIDIA card before the release. Nothing else has been run on real AMD, Intel, NVIDIA or
+ARM hardware or on a
 real Wayland desktop.** The NVIDIA / X11 path is meant to be unchanged from 0.12.2,
 except that scenes which ask for bloom, camera shake, sprite sheets or a script camera
 now get them, that two fixes change the picture of some scenes (layers with a tint and
@@ -24,16 +26,17 @@ software renderer only ([Known limitations](#known-limitations)).
 
 ## Known limitations
 
-- **Run on one graphics card, and that was 0.12.1.** The maintainer runs WalPE on one
+- **Run on one graphics card, under X11.** The maintainer runs WalPE on one
   NVIDIA laptop card (RTX 4050, proprietary driver, X11). A figure in the documents comes
   from that machine only where the text says so; all other sizes, counts and timings are
   counts or software-rendering numbers, not the performance of a particular card. Version
   0.12.1 was confirmed on that card as it stood before its last set of changes. The
-  fixes of 0.12.2 were built and tested only on Mesa's software renderer (llvmpipe);
-  nothing of 0.12.2 has been run on that card yet.
-  **Everything that is new since 0.12.2 was built and tested only on Mesa's software
-  renderer (llvmpipe), a headless Wayland compositor, a null sound sink and - the build
-  for 64-bit ARM - under emulation. Nothing new has been run on real AMD, Intel, NVIDIA
+  fixes of 0.12.2 were built and tested only on Mesa's software renderer (llvmpipe).
+  The X11 build of 0.14.0 was run on that card by the maintainer before the release.
+  **Apart from that, everything that is new since 0.12.2 was built and tested only on
+  Mesa's software renderer (llvmpipe), a headless Wayland compositor, a null sound sink
+  and - the build for 64-bit ARM - under emulation. Nothing else has been run on real
+  AMD, Intel, NVIDIA
   or ARM hardware or on a real Wayland desktop**; the NVIDIA / X11 path is meant to be
   unchanged from 0.12.2 with default settings, except for the scenes of the next item
   and for the fullscreen pause rule with more than one monitor ([Pausing](USAGE.md#pausing): the
