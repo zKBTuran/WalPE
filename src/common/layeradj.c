@@ -105,9 +105,19 @@ const char *walpe_layer_vis_name (int vis)
 
 /* --------------------------------------------------------------- keys */
 
+/* The id of an object as its key holds it: 0 .. 999999999 (the nine digits
+ * a key is read with), -1 = none. A scene.json may give an object any
+ * number: a negative one or a larger one is "none" - everywhere, so that
+ * such an object still has a key of its own that finds it again. */
+static int key_id (int id)
+{
+    return id >= 0 && id <= 999999999 ? id : -1;
+}
+
 char *walpe_layer_key_make (int id, int nth, const char *name)
 {
     GString *s = g_string_new (NULL);
+    id = key_id (id);
     if (id >= 0)
         g_string_append_printf (s, "%d", id);
     else
@@ -175,7 +185,7 @@ char *walpe_layer_key_for (const WalpeLayerRef *l, guint n, guint i)
         return NULL;
     int nth = 0;
     for (guint j = 0; j < i; j++)
-        nth += l[j].id == l[i].id && name_is (&l[j], l[i].name);
+        nth += key_id (l[j].id) == key_id (l[i].id) && name_is (&l[j], l[i].name);
     return walpe_layer_key_make (l[i].id, nth, l[i].name);
 }
 
@@ -187,7 +197,7 @@ int walpe_layer_find (const WalpeLayerRef *l, guint n, const char *key)
         return -1;
     int c = 0;
     for (guint i = 0; i < n; i++)
-        if ((id >= 0 ? l[i].id == id : l[i].id < 0) && name_is (&l[i], name) && c++ == nth)
+        if (key_id (l[i].id) == id && name_is (&l[i], name) && c++ == nth)
             return (int) i;
     if (id >= 0) {
         /* renamed: the id decides */

@@ -63,7 +63,9 @@ const char    *walpe_layer_vis_name (int vis);
 /* ---------------------------------------------------------------- keys */
 
 /* what a key is made of: one entry per layer of a loaded scene, in scene
- * order (id < 0 = the object has none, name may be NULL) */
+ * order (id < 0 = the object has none, name may be NULL; an id above
+ * 999999999, which the nine digits of a key cannot hold, counts as none
+ * too) */
 typedef struct { int id; const char *name; } WalpeLayerRef;
 
 /* "<id>[~n]:<name>"; nth = 0 for the first layer with this id and name */

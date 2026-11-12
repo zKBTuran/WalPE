@@ -97,6 +97,25 @@ static void test_keys (void)
         g_free (k);
     }
     CHECK (walpe_layer_key_for (sc, n, n) == NULL);
+    /* ids a key cannot hold (a scene.json may give any number: negative
+     * ones, ones of ten digits): such objects have no id as far as keys go,
+     * and each still has a key of its own that finds it */
+    {
+        const WalpeLayerRef odd[] = { { -2, "deco" }, { -3, "deco" }, { -1, "deco" }, { 2147483647, "big" },
+                                      { 1000000000, "big" }, { 999999999, "big" }, { G_MININT, NULL } };
+        static const char *const owant[] = { "-:deco", "-~2:deco", "-~3:deco", "-:big", "-~2:big",
+                                             "999999999:big", "-:" };
+        for (guint i = 0; i < G_N_ELEMENTS (odd); i++) {
+            k = walpe_layer_key_for (odd, G_N_ELEMENTS (odd), i);
+            CHECK (!strcmp (k, owant[i]));
+            CHECK (walpe_layer_key_parse (k, NULL, NULL, NULL));
+            CHECK (walpe_layer_find (odd, G_N_ELEMENTS (odd), k) == (int) i);
+            g_free (k);
+        }
+        k = walpe_layer_key_make (2000000000, 0, "x");
+        CHECK (!strcmp (k, "-:x"));
+        g_free (k);
+    }
     /* renamed layer: the id decides */
     CHECK (walpe_layer_find (sc, n, "20:Album Art") == 1);
     CHECK (walpe_layer_find (sc, n, "21~2:renamed") == 3);
