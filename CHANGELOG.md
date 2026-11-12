@@ -227,7 +227,9 @@ could do to the daemon. None of these was seen being used.
   without a picture on both monitors where it was measured); a wallpaper that then fails
   to load does not bring the web wallpaper back. At most once a minute, never on a
   timer, not while an import or a Workshop download runs or the copy of a scene's video
-  is being made. `walpe-ctl set web_unload=off` keeps the module loaded as before;
+  is being made, and not when the settings cannot be saved (the restart would bring back
+  the wallpapers that are saved). `walpe-ctl set web_unload=off` keeps the module loaded
+  as before;
   `walpe-ctl status` shows `modules`. The video module (FFmpeg) is small and stays
   loaded.
 - The daemon, `walpe-video.so` and `walpe-web.so` have to come from the same build, as
