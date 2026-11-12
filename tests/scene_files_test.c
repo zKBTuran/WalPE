@@ -2,7 +2,7 @@
  * scene.json and the files they name) and the entries of its folder must not
  * be able to do. Every file is generated here.
  *
- *   scene-files-test [pkg|notes|text|particles|all]
+ *   scene-files-test [pkg|notes|text|pictures|particles|all]
  *
  *  pkg    the package of a scene wallpaper is a regular file of its folder:
  *         a FIFO called scene.pkg does not block the load, a symbolic link
@@ -19,6 +19,10 @@
  *         text that changes every frame is counted once. A point size
  *         beyond any font size is refused without a complaint of the text
  *         library.
+ *  pictures  (needs the same context) a layer whose picture is not in the
+ *         wallpaper, or is a file that is cut off, is drawn without it and
+ *         the log names the layer and the picture; a layer with its picture
+ *         says nothing.
  *  particles  particle files: particles that sit on a particle of their
  *         parent system (eventfollow) stay on it while others die around it,
  *         and 20000 deaths a step with 40 such child systems do not take
@@ -317,7 +321,19 @@ static void test_notes (void)
 #define VW 640
 #define VH 360
 
+static gboolean gl_make (void);
+
+/* one context for the groups that draw (the engine's own GL objects belong
+ * to the first one it saw) */
 static gboolean gl_up (void)
+{
+    static int up = -1;
+    if (up < 0)
+        up = gl_make ();
+    return up;
+}
+
+static gboolean gl_make (void)
 {
     if (!epoxy_has_egl_extension (EGL_NO_DISPLAY, "EGL_MESA_platform_surfaceless"))
         return FALSE;
@@ -730,6 +746,119 @@ static void test_particles (void)
     g_free (dir);
 }
 
+/* ---------------------------------------------------------------- pictures */
+
+/* a 16 x 16 picture of one colour as a .tex (raw RGBA); cut: the file ends
+ * in the middle of its pixels */
+static void mktex (const char *rel, guint8 r, guint8 g, guint8 b, gboolean cut)
+{
+    GByteArray *a = g_byte_array_new ();
+    g_byte_array_append (a, (const guint8 *) "TEXV0005\0TEXI0001\0", 18);
+    const guint32 hdr[7] = { 0, 0, 16, 16, 16, 16, 0 };
+    for (int i = 0; i < 7; i++)
+        put32 (a, hdr[i]);
+    g_byte_array_append (a, (const guint8 *) "TEXB0003\0", 9);
+    put32 (a, 1); put32 (a, 0xffffffffu); put32 (a, 1);
+    put32 (a, 16); put32 (a, 16); put32 (a, 0); put32 (a, 16 * 16 * 4); put32 (a, 16 * 16 * 4);
+    for (int i = 0; i < 16 * 16; i++) {
+        const guint8 px[4] = { r, g, b, 255 };
+        g_byte_array_append (a, px, 4);
+    }
+    mkfile (rel, a->data, cut ? a->len / 2 : a->len);
+    g_byte_array_unref (a);
+}
+
+static void rgb_at (int x, int y, guint8 *rgb)
+{
+    guint8 px[4] = { 0 };
+    glBindFramebuffer (GL_FRAMEBUFFER, 0);
+    glPixelStorei (GL_PACK_ALIGNMENT, 1);
+    glReadPixels (x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    memcpy (rgb, px, 3);
+}
+
+#define PIC_MODEL "{\"autosize\":true,\"material\":\"materials/%s.json\"}"
+#define PIC_MATERIAL "{\"passes\":[{\"blending\":\"translucent\",\"cullmode\":\"nocull\",\"depthtest\":\"disabled\"," \
+                     "\"depthwrite\":\"disabled\",\"shader\":\"genericimage2\",\"textures\":[\"%s\"]}]}"
+#define PIC_SCENE "{\"general\":{\"clearcolor\":\"0 0 0\",\"orthogonalprojection\":{\"width\":640,\"height\":360}}," \
+                  "\"objects\":[{\"id\":1,\"name\":\"pic\",\"image\":\"models/%s.json\",\"origin\":\"320 180 0\"," \
+                  "\"size\":\"200 200\",\"scale\":\"1 1 1\",\"angles\":\"0 0 0\",\"visible\":true}]}"
+
+/* one picture layer in the middle; own_model / own_tex: the wallpaper has a
+ * model and material of its own (naming the picture `tex`) / a picture */
+static char *pic_scene (const char *name, const char *model, gboolean own_model, const char *tex)
+{
+    char *rel = g_strdup_printf ("pc/%s/project.json", name);
+    mkfile (rel, PROJECT, -1);
+    g_free (rel);
+    rel = g_strdup_printf ("pc/%s/scene.json", name);
+    char *text = g_strdup_printf (PIC_SCENE, model);
+    mkfile (rel, text, -1);
+    g_free (text);
+    g_free (rel);
+    if (own_model) {
+        rel = g_strdup_printf ("pc/%s/models/%s.json", name, model);
+        text = g_strdup_printf (PIC_MODEL, model);
+        mkfile (rel, text, -1);
+        g_free (text);
+        g_free (rel);
+        rel = g_strdup_printf ("pc/%s/materials/%s.json", name, model);
+        text = g_strdup_printf (PIC_MATERIAL, tex);
+        mkfile (rel, text, -1);
+        g_free (text);
+        g_free (rel);
+    }
+    rel = g_strdup_printf ("pc/%s", name);
+    char *dir = P (rel);
+    g_free (rel);
+    return dir;
+}
+
+/* draws the scene and says what is in the middle of it (rgb), and what the
+ * log said about a picture; FALSE: it did not load */
+static gboolean pic_look (const char *dir, guint8 *rgb, gboolean *said_missing, gboolean *said_unread)
+{
+    g_string_truncate (logged, 0);
+    WalpeContent *c = open_scene (dir);
+    if (!c)
+        return FALSE;
+    draw (c);
+    draw (c);
+    rgb_at (320, 180, rgb);
+    *said_missing = strstr (logged->str, "is not in the wallpaper") != NULL;
+    *said_unread = strstr (logged->str, "cannot be read") != NULL;
+    c->gl_free (c);
+    c->free (c);
+    return TRUE;
+}
+
+/* A layer whose picture is not there, or is no picture, was left out
+ * without a word: the log now names the layer and the picture. */
+static void test_pictures (void)
+{
+    if (!gl_up ()) {
+        g_printerr ("scene-files-test: no surfaceless GL 3.3 context, pictures part skipped\n");
+        return;
+    }
+    walpe_glutil_init ();
+    guint8 rgb[3];
+    gboolean missing, unread;
+    /* the wallpaper's own picture (blue): drawn, nothing said */
+    char *dir = pic_scene ("own", "mine", TRUE, "builtin/pic");
+    mktex ("pc/own/materials/builtin/pic.tex", 0, 0, 255, FALSE);
+    CHECK (pic_look (dir, rgb, &missing, &unread) && rgb[0] < 50 && rgb[1] < 50 && rgb[2] > 200 && !missing && !unread);
+    g_free (dir);
+    /* a picture that is nowhere: the layer has none, and the log says so */
+    dir = pic_scene ("nowhere", "mine", TRUE, "nowhere/pic");
+    CHECK (pic_look (dir, rgb, &missing, &unread) && rgb[0] < 50 && rgb[1] < 50 && rgb[2] < 50 && missing && !unread);
+    g_free (dir);
+    /* a picture file that ends in the middle: the same, with its own line */
+    dir = pic_scene ("cut", "mine", TRUE, "cut");
+    mktex ("pc/cut/materials/cut.tex", 0, 255, 0, TRUE);
+    CHECK (pic_look (dir, rgb, &missing, &unread) && rgb[0] < 50 && rgb[1] < 50 && rgb[2] < 50 && !missing && unread);
+    g_free (dir);
+}
+
 int main (int argc, char **argv)
 {
     char *tmp = g_dir_make_tmp ("walpe-scene-files-test-XXXXXX", NULL);
@@ -756,6 +885,8 @@ int main (int argc, char **argv)
         test_notes ();
     if (!only || !strcmp (only, "text"))
         test_text ();
+    if (!only || !strcmp (only, "pictures"))
+        test_pictures ();
     if (!only || !strcmp (only, "particles"))
         test_particles ();
 

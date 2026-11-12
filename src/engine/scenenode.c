@@ -267,7 +267,7 @@ typedef struct {
     gint64 ds_saved;     /* bytes saved by downscaled layer textures */
     gboolean animates;   /* particles or effects: needs the frame clock */
     gint64 due_us;       /* frame clock phase */
-    gboolean warned_script, warned_tilt, warned_particle_xform;
+    gboolean warned_script, warned_tilt, warned_particle_xform, warned_tex;
     guint fx_count;
     JsonObject *user_props; /* Tier 4: {propid: value} from project.json */
     JsonObject *user_types; /* {propid: declared type}, for the script runtime */
@@ -1624,7 +1624,6 @@ static gboolean load_image_object (SceneNodeContent *s, NodeObj *nv, const char 
                     if (!texpath)
                         texpath = resolve_asset (s->dir, texname);
                 }
-                g_free (texname);
                 /* "usertextures": [propid]: a "scenetexture" user property
                  * (e.g. set by a preset to "files/x.jpg", or the user's own
                  * file) replaces slot 0; the object instance's entry wins */
@@ -1640,6 +1639,15 @@ static gboolean load_image_object (SceneNodeContent *s, NodeObj *nv, const char 
                     g_free (texpath);
                     texpath = up;
                 }
+                if (!texpath && !s->warned_tex && !g_str_has_prefix (texname, "_rt_")) {
+                    /* (said once per scene, like a model that is missing:
+                     * the layer has no picture and nothing told why) */
+                    s->warned_tex = TRUE;
+                    g_warning ("scenenode: layer %s: its picture \"%s\" is not in the wallpaper: drawn without "
+                               "it (further misses silent)",
+                               walpe_log_str (nv->name ? nv->name : "?"), walpe_log_str (texname));
+                }
+                g_free (texname);
                 guint64 voff = 0, vlen = 0;
                 int vw = 0, vh = 0;
                 if (texpath && walpe_tex_video_range (texpath, &voff, &vlen, &vw, &vh)) {
@@ -1666,6 +1674,15 @@ static gboolean load_image_object (SceneNodeContent *s, NodeObj *nv, const char 
                     WalpeTexFrame *frames = NULL;
                     ok = node_tex_attach (nv, texpath, lf, !fxl, !fxl, &frames);
                     sprite_attach (s, nv, frames);   /* (takes the table; none without a texture) */
+                    if (!ok && !s->warned_tex) {
+                        /* the file is there and is no picture this program
+                         * reads: cut off, or a format it does not have (the
+                         * reason is a debug line of the loader) */
+                        s->warned_tex = TRUE;
+                        g_warning ("scenenode: layer %s: its picture %s cannot be read (the file is cut off or in "
+                                   "a format WalPE does not read): drawn without it (further misses silent)",
+                                   walpe_log_str (nv->name ? nv->name : "?"), walpe_log_str (texpath));
+                    }
                     g_free (texpath);
                 }
             }
