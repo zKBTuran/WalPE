@@ -1755,6 +1755,15 @@ test('restore', executable('restore-test', 'tests/restore_test.c',
   dependencies: [core_dep],
   install: false, build_by_default: false))
 
+# the daemon's child processes before a restart in place (daemon/childend.h):
+# SIGTERM, a wait, SIGKILL, a wait - and both waits end by the clock, also
+# for a child that no signal reaches. Children of the test itself; no
+# daemon, no display.
+test('child-end', executable('childend-test', 'tests/childend_test.c',
+  include_directories: inc,
+  dependencies: [glib],
+  install: false, build_by_default: false), timeout: 60)
+
 # the daemon end to end (scripts/lifecheck.py with its harness
 # scripts/checkenv.py: a private Xvfb and a private walpe-daemon on
 # generated scenes): the pointer after a load, settings

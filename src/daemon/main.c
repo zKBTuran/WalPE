@@ -8786,6 +8786,8 @@ static void sw_schedule_restart (void)
         Sw.restart_id = g_timeout_add (200, sw_restart_cb, NULL);
 }
 
+#include "childend.h"     /* walpe_children_end: SIGTERM, SIGKILL, both waits with a limit */
+
 /* Child processes still alive at the end of main() (WebKit's network and
  * page processes: they normally die with their parent, which an exec is
  * not): end them, or every restart would leave a set behind. */
@@ -8813,24 +8815,19 @@ static void sw_end_children (void)
     }
     if (d)
         g_dir_close (d);
-    for (guint i = 0; i < kids->len; i++)
-        kill (g_array_index (kids, pid_t, i), SIGTERM);
-    for (int round = 0; round < 20 && kids->len; round++) {   /* up to 1 s, then SIGKILL */
-        for (guint i = 0; i < kids->len;) {
-            pid_t k = g_array_index (kids, pid_t, i);
-            pid_t r = waitpid (k, NULL, WNOHANG);
-            if (r == k || (r < 0 && errno != EINTR))
-                g_array_remove_index_fast (kids, i);
-            else
-                i++;
+    /* SIGTERM, up to 1 s, SIGKILL, up to 2 s more (daemon/childend.h): the
+     * wait after the kill had no limit, and one child that the kernel does
+     * not let go of held the restart for as long */
+    if (walpe_children_end (kids, WALPE_CHILD_TERM_MS, WALPE_CHILD_KILL_MS, NULL))
+        for (guint i = 0; i < kids->len; i++) {
+            const int k = (int) g_array_index (kids, pid_t, i);
+            char *comm = diag_comm (k);
+            g_warning ("restart: child process %d (%s) has not ended %.0f s after SIGKILL (it does "
+                       "not come back from a call into the kernel): the restart goes on without "
+                       "waiting for it; it stays a child of this process", k,
+                       comm && *comm ? walpe_log_strn (comm, 32) : "?", WALPE_CHILD_KILL_MS / 1000.0);
+            g_free (comm);
         }
-        if (kids->len)
-            g_usleep (50 * 1000);
-    }
-    for (guint i = 0; i < kids->len; i++) {
-        kill (g_array_index (kids, pid_t, i), SIGKILL);
-        waitpid (g_array_index (kids, pid_t, i), NULL, 0);
-    }
     g_array_free (kids, TRUE);
 }
 
