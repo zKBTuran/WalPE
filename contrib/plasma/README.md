@@ -13,7 +13,7 @@ With the add-on they are shown over the WalPE wallpaper, and they take clicks as
 
     ./install.sh install     # for this user: copy the wallpaper type to ~/.local/share
     ./install.sh select      # the wallpaper type "WalPE" on every desktop
-    ./install.sh status      # what is installed, selected, loaded in KWin
+    ./install.sh status      # what is installed and selected
 
 Instead of `select`: right-click the desktop, "Desktop and Wallpaper", wallpaper type
 **WalPE**, OK. The wallpaper itself is still chosen in WalPE (`walpe`, `walpe-ctl`, the
@@ -38,13 +38,15 @@ One Plasma package, `wallpaper/` (`io.github.walpe.plasma`), installed to
 |---|---|
 | `contents/ui/main.qml` | the wallpaper type: draws no wallpaper, makes Plasma's desktop window see-through, and fills it with a colour or a picture for as long as no surface of `walpe-daemon` lies under it |
 | `contents/code/below.js` | a KWin script: asks Plasma's shell which desktops have the type, tells KWin to keep those desktop windows right above the daemon's surface on the same screen (`workspace.constrain`, KWin 6.5), and tells the type whether such a surface is there |
-| `contents/ui/Script.qml` | loads that script into the running KWin over D-Bus while a desktop has the type, and takes it out with the last one. It is no KWin package and is not in KWin's list of scripts |
+| `contents/ui/Script.qml`, `contents/code/shared.js` | load that script into the running KWin over D-Bus while a desktop has the type, and take it out with the last one. It is no KWin package and is not in KWin's list of scripts; each Plasma shell loads it under a name of its own |
+| `contents/ui/Pointer.qml` | hands the pointer on to `walpe-daemon`; loaded only while a wallpaper there uses the pointer |
 | `contents/ui/config.qml`, `contents/config/main.xml` | the type's page in Plasma's dialog and its settings |
 
-`walpe-daemon` is not changed by the add-on and does not talk to it. It goes on doing
-all the drawing in its own surface on the layer shell's bottom layer; Plasma's shell
-repaints only when its icons or widgets change. Nothing in the add-on runs on a timer:
-the script acts when a desktop window or a surface of the daemon comes or goes.
+`walpe-daemon` goes on doing all the drawing in its own surface on the layer shell's
+bottom layer, and tells the add-on nothing; Plasma's shell repaints only when its icons
+or widgets change. Nothing in the add-on wakes up by itself: the script acts when a
+desktop window or a surface of the daemon comes or goes. The one thing that goes from the add-on
+to the daemon is the pointer (below), and only while the daemon asks for it.
 
 ## How the parts keep each other safe
 
@@ -74,17 +76,50 @@ in front of it), and a black desktop (a see-through desktop with nothing behind 
 | the type on one screen only | that screen: icons over the wallpaper; the others: the wallpaper in front |
 
 One case is left: somebody who takes the script out of KWin by hand
-(`org.kde.kwin.Scripting.unloadScript` on D-Bus; no dialog does that) and then quits the
-daemon has a black desktop behind the icons until Plasma's shell is restarted or the type
-is chosen again.
+(`org.kde.kwin.Scripting.unloadScript` on D-Bus with the name the shell gave it; no
+dialog does that) and then quits the daemon has a black desktop behind the icons until
+Plasma's shell is restarted or the type is chosen again.
+
+A shell that is killed leaves its copy of the script in KWin. That copy does nothing any
+more (it sees that the desktop is another process's); the next shell loads its own. It is
+gone when KWin is restarted, with the next login at the latest.
+
+## The pointer
+
+Plasma's desktop window is above the wallpaper, and KWin gives it every pointer event.
+`Pointer.qml` sits on top of everything in that window and only looks (Qt's pointer
+handlers with passive grabs): the icons, the widgets and the desktop's menu get every
+event as before. What it sees it sends to the daemon (`io.github.walpe.Pointer.Event` on
+the session bus):
+
+- the position, wherever the pointer is on the desktop, at most once per frame of the
+  screen, in the screen's logical pixels;
+- the left button and the wheel where the pointer is over the bare desktop. Over an icon
+  or a widget they are Plasma's alone. What counts as one: anything visible in the window
+  that is smaller than nine tenths of it both in width and in height (the desktop's own
+  layers are as wide or as high as the window);
+- that the pointer left the desktop (for a window, the panel, a menu).
+
+The right and the middle button are never sent: they open Plasma's menu and paste.
+
+It costs nothing while no wallpaper wants the pointer. The daemon takes the name
+`io.github.walpe.Pointer` only on KWin, with the add-on installed, while a wallpaper it
+shows uses the pointer (a web wallpaper, a scene that follows the pointer); the type
+watches for the name and loads `Pointer.qml` only while somebody has it and the daemon's
+surface is under the desktop. The daemon believes only the connection that has the name
+`org.kde.plasmashell`, and treats what comes like a pointer of its own: the same
+coordinates per output, the same button and wheel events.
 
 ## What it cannot do
 
-- **The pointer does not reach the wallpaper.** Plasma's desktop window is above it and
-  takes all pointer input, where there is an icon and where there is none. Scenes that
-  follow the pointer and web wallpapers that are clicked get nothing on a desktop with the
-  wallpaper type "WalPE". For those, use another wallpaper type on that screen (the icons
-  are then hidden and the wallpaper has the pointer).
+- **The right and the middle button do not reach the wallpaper, and the left one only
+  over the bare desktop.** See "The pointer" above. A press on the bare desktop also
+  takes the selection off Plasma's icons and a drag there draws Plasma's selection frame
+  over the wallpaper: Plasma cannot be told that the wallpaper has used the event. A web
+  wallpaper that needs more wants a desktop with another wallpaper type (the icons are
+  then hidden and the wallpaper has the pointer to itself).
+- If the add-on is installed while a wallpaper that uses the pointer is already shown,
+  the daemon notices when that wallpaper is opened again.
 - The Overview shows the desktop's icons without the wallpaper behind them (the small
   pictures of the virtual desktops show it).
 - The lock screen and the preview in Plasma's dialog show the colour or picture, never
@@ -97,8 +132,15 @@ package names it in its `metadata.json`). No code of another wallpaper plugin is
 It uses these interfaces of Plasma 6 and KWin 6: `WallpaperItem` (`org.kde.plasma.plasmoid`),
 the D-Bus types of `org.kde.plasma.workspace.dbus`, KWin's scripting API (`workspace`,
 `callDBus`, `QTimer`), `org.kde.PlasmaShell.evaluateScript`, `org.kde.kwin.Scripting`
-(`loadScript`, `unloadScript`) and the signal `org.kde.KWin.showingDesktopChanged`.
+(`loadScript`, `start`, `unloadScript`), the signal `org.kde.KWin.showingDesktopChanged`
+and Qt Quick's pointer handlers.
+
+The script is started with `org.kde.kwin.Scripting.start`, not with `run` on the object
+`/Scripting/Script<id>` of the id that `loadScript` answers: that id is the number of
+scripts KWin has loaded, so after another script was unloaded it is the id, and the
+object, of a script that is still there, and `run` reaches that one (seen on KWin 6.8.2).
 
 Run on a headless Plasma 6.8.2 (KWin 6.8.2, Qt 6.12) with Mesa's software renderer only,
-with one and two outputs: no real session, no GPU, no NVIDIA driver, no restart of KWin
-under the running shell, no activities.
+with one and two outputs and a virtual pointer: no real session, no GPU, no NVIDIA driver,
+no restart of KWin under the running shell, no activities, no touchpad or touch screen,
+and of the wallpapers that use the pointer a web page only.

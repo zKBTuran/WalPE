@@ -390,10 +390,26 @@ Plasma's shell, to be of the type "WalPE"; and such a desktop stays filled until
 script has told it that a surface of the daemon lies under it. How:
 [contrib/plasma/README.md](../contrib/plasma/README.md).
 
-What the add-on costs: **the wallpaper gets no pointer** on a desktop of the type
-"WalPE". Plasma's desktop window is above it and takes every pointer event. Scenes that
-follow the pointer stand still in that respect, and a web wallpaper cannot be clicked.
-For such a wallpaper choose another wallpaper type on that screen.
+**The pointer with the add-on.** Plasma's desktop window is above the wallpaper and
+KWin gives it every pointer event; the daemon's surface gets none there. The wallpaper
+type hands on what it sees of the pointer in that window, and only while a wallpaper of
+the daemon uses the pointer (the daemon then has the name `io.github.walpe.Pointer` on
+the session bus, and has no name there at any other time):
+
+| | |
+|---|---|
+| the position | everywhere on the desktop, also over icons and widgets; at most once per frame of the screen. Scenes that follow the pointer and pages get it as from a pointer of their own |
+| the left button, the wheel | over the bare desktop. Over an icon or a widget they are Plasma's alone |
+| the right and the middle button | never: they are Plasma's (the desktop's menu, paste) |
+| the pointer leaves the desktop (onto a window, the panel, a menu) | the wallpaper is told that it left |
+
+Plasma goes on getting everything as before: a click on the bare desktop also takes the
+selection off Plasma's icons, and a drag there also draws Plasma's selection frame over
+the wallpaper. A web wallpaper that needs the right button, or a drag without that
+frame, wants a desktop with another wallpaper type (it is then in front and has the
+pointer to itself). `wayland_pointer` = off switches this off with the rest of the
+pointer. If the add-on is installed while a wallpaper that uses the pointer is shown,
+the pointer arrives once that wallpaper is opened again.
 
 ### What the daemon says
 
@@ -407,10 +423,12 @@ brings them back. `walpe-ctl status` has
 | `wl_plasma_addon` | `not installed`, `installed, no desktop has the wallpaper type WalPE` or `in use: a desktop has the wallpaper type WalPE` |
 | `wl_plasma_icons` | `hidden behind the wallpaper` or `shown over the wallpaper where the wallpaper type is WalPE` |
 | `wl_plasma_hint` | only while the icons are hidden: the sentence of the log |
+| `wl_plasma_pointer` | only while a wallpaper uses the pointer and the add-on is installed: that the pointer is taken from the add-on, or why not |
 
-The daemon does not talk to the add-on. It reads this from the installed package and
-from the settings file of Plasma's desktops, which Plasma writes a few seconds after a
-change; the three `wl_plasma_*` members are there on KWin only.
+The daemon reads the first three from the installed package and from the settings file
+of Plasma's desktops, which Plasma writes a few seconds after a change; the
+`wl_plasma_*` members are there on KWin only. The pointer is the one thing the add-on
+tells the daemon; the daemon tells the add-on nothing.
 
 `WALPE_WL_LAYER=background` in the daemon's environment brings back the placement of
 0.14.0, `WALPE_WL_LAYER=bottom` asks for the bottom layer on any compositor
@@ -432,7 +450,12 @@ wallpaper; the add-on works there as on the bottom layer.
 > after leaving the type "Image", for Plasma's own "Plain Color" as well; OK applies).
 > In each of these the wallpaper was seen, or the colour of the type's page where the
 > daemon showed nothing, and never a black desktop; the icons and the desktop menu took
-> clicks. Not run: a real Plasma session, a GPU, NVIDIA's driver, a restart of KWin under
+> clicks. The pointer with the add-on: a web page that follows the pointer and shows
+> presses, releases and the wheel got the position in page coordinates, the left button
+> (press, drag, release) and the wheel over the bare desktop, and neither over an icon;
+> the right click opened Plasma's menu and did not reach the page. Not run: a scene that
+> uses the pointer with the add-on (it reads the same position), a touchpad, a touch
+> screen, a real mouse wheel. Not run at all: a real Plasma session, a GPU, NVIDIA's driver, a restart of KWin under
 > the running shell, activities, fractional scales with the add-on, Plasma versions
 > between 6.5 and 6.8.
 
