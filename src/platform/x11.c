@@ -2,7 +2,11 @@
  *
  * One override-redirect window per monitor at the bottom of the stacking
  * order, input shaped away; each window is the EGL surface its monitor's
- * render thread draws on. Around that: the monitor layout (Xinerama,
+ * render thread draws on. On a desktop with a desktop window of its own,
+ * and under a window manager that paints such a window above everything,
+ * the window is a child of that desktop window or a managed one of the
+ * desktop type instead (x11desk.h says when, docs/DESKTOPS.md what was
+ * run). Around that: the monitor layout (Xinerama,
  * RandR names and refresh rates), what makes a wallpaper pause (EWMH
  * properties for fullscreen / covered / focus, DPMS and the screensaver
  * extension for a sleeping display), and the pointer (XQueryPointer,

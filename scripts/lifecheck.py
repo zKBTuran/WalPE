@@ -3089,9 +3089,11 @@ def case_desktop(env, W):
         check(is_red(colour_is(env, A, is_red)) and is_red(colour_is(env, B, is_red)),
               "desktop: ... and the wallpaper is seen on both monitors (not the desktop window's black)",
               (rc.name_of(env.colour(A)), rc.name_of(env.colour(B))))
-        low = xc.lowest(2)
-        check(low[0] in ours and low[1] == d1, "desktop: ... the other wallpaper window is still the "
-              "lowest window of the root, the desktop window above it", (low, ours, d1))
+        # (other clients of the display may have windows on the root between the two)
+        low = xc.children(xc.root)
+        check(low[0] in ours and d1 in low and not any(w in ours for w in low[1:]),
+              "desktop: ... the other wallpaper window is still the lowest window of the root, the "
+              "desktop window above it", (low[:4], ours, d1))
         check("lies over this monitor and nothing is seen through it" in env.since(mark),
               "desktop: ... the log says where the wallpaper window went and why", env.since(mark)[-300:])
         st = env.state()
@@ -3144,7 +3146,7 @@ def case_desktop(env, W):
         check(is_red(colour_is(env, A, is_red)) and is_red(colour_is(env, B, is_red)),
               "desktop: ... the wallpaper is seen on both monitors",
               (rc.name_of(env.colour(A)), rc.name_of(env.colour(B))))
-        check(not any(w in ours for w in xc.lowest(3)),
+        check(not any(w in ours for w in xc.children(xc.root)),
               "desktop: ... no wallpaper window is a child of the root now", (xc.lowest(3), ours))
 
         # ---- the first desktop window is made smaller than its monitor: no desktop any more,
@@ -3228,9 +3230,13 @@ def case_desktop(env, W):
         loaded(env, W["red"])
         check(kind() == ("managed", "Mutter (Muffin)"),
               "desktop: Mutter (Muffin): status: the wallpaper windows are managed ones", kind())
-        ours = [w for w in xc.children(xc.root) if xc.override_redirect(w) is False and w not in xc.wins]
-        check(len(ours) == 2, "desktop: ... the X server: two windows of the daemon that are not "
-              "override-redirect", ours)
+        # (the daemon's: the windows of the desktop type that are on every workspace; other
+        # clients of the display have windows on the root as well)
+        ours = [w for w in xc.children(xc.root) if w not in xc.wins and
+                xc.has_prop(w, "_NET_WM_WINDOW_TYPE") and xc.has_prop(w, "_NET_WM_DESKTOP")]
+        check(len(ours) == 2 and flags() == [False, False],
+              "desktop: ... the X server: two windows of the daemon, of the desktop type and not "
+              "override-redirect", (ours, [xc.override_redirect(w) for w in ours]))
         check(is_red(colour_is(env, A, is_red)) and is_red(colour_is(env, B, is_red)),
               "desktop: ... the scene is on both monitors", (rc.name_of(env.colour(A)), rc.name_of(env.colour(B))))
         check("the wallpaper windows are managed windows of the desktop type" in env.since(mark),
