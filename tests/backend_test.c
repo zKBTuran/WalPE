@@ -236,6 +236,31 @@ static void test_output_names (void)
     CHECK (!walpe_output_name_same ("DP-0", "DP-1"));   /* another numbering stays another name */
     CHECK (!walpe_output_name_same ("HDMI-1", "DP-1"));
     CHECK (!walpe_output_name_same (NULL, "DP-1") && !walpe_output_name_same ("DP-1", NULL));
+
+    /* one name among several: the one spelled like it first. Two
+     * connectors of one machine can share the canonical form; asked for by
+     * its own name each finds itself (the pause signals of a window on the
+     * second monitor went to the first) */
+    static const char *const dvi[] = { "DVI-D-1", "DVI-I-1", "DP-1" };
+    CHECK (walpe_output_name_same ("DVI-D-1", "DVI-I-1"));    /* (why the order matters) */
+    CHECK (walpe_output_name_find (dvi, 3, "DVI-D-1") == 0);
+    CHECK (walpe_output_name_find (dvi, 3, "DVI-I-1") == 1);
+    CHECK (walpe_output_name_find (dvi, 3, "DP-1") == 2);
+    static const char *const hdmi[] = { "HDMI-A-1", "HDMI-B-1" };
+    CHECK (walpe_output_name_find (hdmi, 2, "HDMI-B-1") == 1);
+    CHECK (walpe_output_name_find (hdmi, 2, "HDMI-A-1") == 0);
+    /* no monitor is spelled like it: the same connector under its other
+     * spelling (an X11 name asked for among Wayland names), the first one */
+    CHECK (walpe_output_name_find (hdmi, 2, "HDMI-1") == 0);
+    CHECK (walpe_output_name_find (dvi, 3, "DisplayPort-1") == 2);
+    CHECK (walpe_output_name_find (dvi, 3, "DVI-1") == 0);
+    /* none, no name, holes in the list, an empty list */
+    CHECK (walpe_output_name_find (dvi, 3, "DP-2") == -1);
+    CHECK (walpe_output_name_find (dvi, 3, NULL) == -1);
+    static const char *const holes[] = { NULL, "eDP-1", NULL };
+    CHECK (walpe_output_name_find (holes, 3, "eDP1") == 1);
+    CHECK (walpe_output_name_find (holes, 3, "DP-1") == -1);
+    CHECK (walpe_output_name_find (NULL, 0, "DP-1") == -1);
 }
 
 int main (void)

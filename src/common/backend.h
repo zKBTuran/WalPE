@@ -262,3 +262,22 @@ static inline gboolean walpe_output_name_same (const char *a, const char *b)
     g_free (cb);
     return same;
 }
+
+/* Which of n output names is `name`? The one spelled like it; only where
+ * none is, the first that means the same connector by its canonical form.
+ * Two connectors of one machine can share that form ("DVI-D-1" and
+ * "DVI-I-1", "HDMI-A-1" and "HDMI-B-1"): asked for by the name the window
+ * system uses, each has to find itself and not its neighbour. Entries may
+ * be NULL. Returns the index, -1 = none. */
+static inline int walpe_output_name_find (const char *const *names, int n, const char *name)
+{
+    if (!name)
+        return -1;
+    for (int i = 0; i < n; i++)
+        if (names[i] && !strcmp (names[i], name))
+            return i;
+    for (int i = 0; i < n; i++)
+        if (walpe_output_name_same (names[i], name))
+            return i;
+    return -1;
+}

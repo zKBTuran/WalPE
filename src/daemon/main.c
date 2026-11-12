@@ -8560,12 +8560,23 @@ G_GNUC_UNUSED static guint32 sig_output_lookup (const char *name, gpointer user)
         }
         return 0;
     }
-    for (GList *l = D.mons; l; l = l->next) {
+    /* the monitor spelled like it before one that only shares its
+     * canonical form: "DVI-D-1" and "DVI-I-1" (or "HDMI-A-1" and
+     * "HDMI-B-1") of one machine are two monitors, and a window on the
+     * second was reported for the first */
+    guint n = g_list_length (D.mons), k = 0;
+    const char **names = g_new0 (const char *, n + 1);
+    guint32 *ids = g_new0 (guint32, n + 1);
+    for (GList *l = D.mons; l; l = l->next, k++) {
         Mon *m = l->data;
-        if (walpe_output_name_same (m->name, name))
-            return m->out_id;
+        names[k] = m->name;
+        ids[k] = m->out_id;
     }
-    return 0;
+    int at = walpe_output_name_find (names, (int) n, name);
+    guint32 id = at >= 0 ? ids[at] : 0;
+    g_free (names);
+    g_free (ids);
+    return id;
 }
 
 /* for the modules (walpe-web.so): WALPE_BACKEND_X11 / WALPE_BACKEND_WAYLAND,
