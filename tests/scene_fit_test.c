@@ -27,6 +27,10 @@
  *  5. A text layer that is hidden holds no texture; shown later (here by
  *     an "Adjust layers" override) it is rendered in that frame.
  *  6. An old-format scene's layer list is freed (seen by LeakSanitizer).
+ *     Its layers are where their "translation" says, in scene pixels from
+ *     the scene's top left corner: also the layers of a group, a layer
+ *     turned about its pivot, one moved by parallax, on an output of
+ *     another shape than the scene and under a camera zoom.
  *  7. What the effect code keeps per render thread is freed when the
  *     thread ends (seen by a build with LeakSanitizer: the checks run on a
  *     thread of their own).
@@ -677,6 +681,105 @@ static void legacy_checks (void)
     g_free (dir);
 }
 
+static guint8 v_lit (int x, int y) { (void) x; (void) y; return 255; }
+
+/* an old-format scene of 256 x 128 drawn at w x h with the pointer at
+ * (ptx, 0): the frame (RGBA, rows bottom up, PB wide; g_free) or NULL */
+static guint8 *legacy_frame (const char *object, int w, int h, float ptx)
+{
+    char *dir = g_dir_make_tmp ("walpe-scene-fit-XXXXXX", NULL);
+    if (!dir)
+        return NULL;
+    char *text = g_strdup_printf ("{\"object\":{\"width\":256,\"height\":128,%s}}", object);
+    put (dir, "scene.json", text);
+    g_free (text);
+    put (dir, "project.json", "{\"file\":\"scene.json\",\"title\":\"old format\",\"type\":\"scene\"}");
+    write_tex (dir, "bg.tex", 256, 128, v_dark);
+    write_tex (dir, "dot.tex", 16, 16, v_lit);
+    write_tex (dir, "bar.tex", 32, 8, v_lit);
+    GError *err = NULL;
+    WalpeLoadOpts opts = { .video_backend = "ffmpeg", .fps = 60, .origin_dir = dir };
+    WalpeContent *c = walpe_content_new (dir, &opts, &err);
+    guint8 *px = NULL;
+    if (c && c->gl_init (c, &err)) {
+        px = g_malloc0 ((gsize) PB * PB * 4);
+        glBindFramebuffer (GL_FRAMEBUFFER, 0);
+        glViewport (0, 0, PB, PB);
+        glClearColor (0, 0, 0, 1);
+        glClear (GL_COLOR_BUFFER_BIT);
+        glViewport (0, 0, w, h);
+        c->gl_render (c, w, h, ptx, 0.0f);
+        glFinish ();
+        glPixelStorei (GL_PACK_ALIGNMENT, 4);
+        glReadPixels (0, 0, PB, PB, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        c->gl_free (c);
+    } else {
+        printf ("old-format scene: %s\n", err ? err->message : "not loaded");
+    }
+    if (c)
+        c->free (c);
+    g_clear_error (&err);
+    rm_rf (dir);
+    g_free (dir);
+    return px;
+}
+
+/* Where the layers of an old-format scene are: the picture's top left
+ * corner at "translation", in scene pixels from the scene's top left
+ * corner, whatever the output. (They lay around the middle of the output
+ * with the translation counted in halves of it: 32 px to the right was 32
+ * half outputs to the right.) x, y below: scene pixels of a frame of h
+ * rows, y down. */
+static void legacy_place_checks (void)
+{
+#define LIT(px, x, y, h) ((px)[((gsize) ((h) - 1 - (y)) * PB + (x)) * 4] > 200)
+#define BG(px, x, y, h) ((px)[((gsize) ((h) - 1 - (y)) * PB + (x)) * 4] < 60 && \
+                         (px)[((gsize) ((h) - 1 - (y)) * PB + (x)) * 4 + 1] > 20)
+    /* layers are listed top first: a dot at 32 16, a dot in a group at
+     * 160 64 + 8 0, a bar of 32 x 8 at 100 90 turned by 90 degrees about
+     * its middle, a dot at 200 16 that moves with the pointer, and a
+     * background of the scene's size */
+    const char *layers =
+        "\"layers\":["
+        "{\"file\":\"dot.tex\",\"translation\":[32,16]},"
+        "{\"compose\":{\"layers\":[{\"file\":\"dot.tex\",\"translation\":[8,0]}]},\"translation\":[160,64]},"
+        "{\"file\":\"bar.tex\",\"pivot\":[0.5,0.5],\"angle\":90,\"translation\":[100,90]},"
+        "{\"file\":\"dot.tex\",\"translation\":[200,16],\"parallax\":{\"amount\":[1,1],\"depth\":100}},"
+        "{\"file\":\"bg.tex\"}]";
+    guint8 *px = legacy_frame (layers, 256, 128, 0.0f);
+    result (px && LIT (px, 34, 18, 128) && LIT (px, 45, 29, 128) && BG (px, 29, 24, 128) && BG (px, 50, 24, 128) &&
+            BG (px, 40, 13, 128) && BG (px, 40, 34, 128),
+            "old format: a layer's translation is in scene pixels, from the top left corner");
+    result (px && BG (px, 2, 2, 128) && BG (px, 253, 125, 128) && BG (px, 128, 64, 128),
+            "old format: a layer without a translation starts at the scene's corner (the background fills it)");
+    result (px && LIT (px, 170, 66, 128) && LIT (px, 181, 77, 128) && BG (px, 165, 72, 128) && BG (px, 186, 72, 128),
+            "old format: the layers of a group are placed in the group");
+    result (px && LIT (px, 116, 80, 128) && LIT (px, 116, 107, 128) && BG (px, 104, 94, 128) && BG (px, 128, 94, 128),
+            "old format: a layer turns about its pivot and keeps its shape");
+    result (px && LIT (px, 208, 24, 128) && BG (px, 238, 24, 128),
+            "old format: a layer with parallax is at its place while the pointer is in the middle");
+    g_free (px);
+    px = legacy_frame (layers, 256, 128, 0.5f);
+    result (px && LIT (px, 238, 24, 128) && BG (px, 204, 24, 128) && LIT (px, 40, 24, 128),
+            "old format: parallax moves a layer by scene pixels (30 of at most 60 for half the way)");
+    g_free (px);
+    /* an output of another shape shows the middle of the scene (its x 64 .. 191) */
+    px = legacy_frame (layers, 128, 128, 0.0f);
+    result (px && LIT (px, 176 - 64, 72, 128) && BG (px, 2, 2, 128) && BG (px, 125, 125, 128) &&
+            LIT (px, 116 - 64, 94, 128) && BG (px, 40, 24, 128),
+            "old format: an output of another shape than the scene shows the scene's middle (it was black)");
+    g_free (px);
+    /* a camera that zooms by 2 about the scene's middle: a dot there is twice as large and stays there */
+    px = legacy_frame ("\"camera\":{\"zoom\":2},\"layers\":[{\"file\":\"dot.tex\",\"translation\":[120,56]},"
+                       "{\"file\":\"bg.tex\"}]", 256, 128, 0.0f);
+    result (px && LIT (px, 114, 50, 128) && LIT (px, 141, 77, 128) && BG (px, 108, 64, 128) && BG (px, 148, 64, 128) &&
+            BG (px, 2, 2, 128),
+            "old format: the camera's zoom enlarges the scene about its middle (it was black)");
+    g_free (px);
+#undef LIT
+#undef BG
+}
+
 /* Everything runs on a thread of its own, as a monitor's render thread
  * does in the daemon: what the effect code keeps per render thread (its
  * target pool and two small tables) has to be gone when the thread ends -
@@ -728,6 +831,7 @@ static gpointer render_thread (gpointer unused)
     fit_checks ();
     text_checks ();
     legacy_checks ();
+    legacy_place_checks ();
     eglMakeCurrent (dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglDestroySurface (dpy, surf);
     eglDestroyContext (dpy, ctx);

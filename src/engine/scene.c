@@ -394,16 +394,14 @@ static void scene_schedule (SceneContent *s)
 
 /* --------------------------------------------------------------- render */
 
-/* per-layer local matrix: +-1 unit quad -> the layer's local px space,
- * transformed by pivot/rotation/scale/translation/parallax (call order =
- * point order, premultiplied helpers) */
-static void layer_local_matrix (SceneLayer *l, float parx, float pary, WalpeMat3 *m)
+/* Where a layer is: its own px space (x right, y down, the picture's top
+ * left corner at 0 0; a group: the px space its children live in) -> its
+ * PARENT's px space, by scale, rotation about the pivot (a fraction of the
+ * picture) and translation + parallax, both in the parent's px (call order
+ * = point order, premultiplied helpers) */
+static void layer_place_matrix (SceneLayer *l, float parx, float pary, WalpeMat3 *m)
 {
     walpe_mat3_identity (m);
-    walpe_mat3_scale (m, 0.5f, -0.5f);
-    walpe_mat3_translate (m, 0.5f, 0.5f);
-    if (!l->is_group) /* groups have no texture: children live in their px space */
-        walpe_mat3_scale (m, (float) l->tex_w, (float) l->tex_h);
     walpe_mat3_scale (m, l->scale, l->scale);
     walpe_mat3_translate (m, -l->pivot[0] * l->tex_w * l->scale,
                           -l->pivot[1] * l->tex_h * l->scale);
@@ -411,6 +409,15 @@ static void layer_local_matrix (SceneLayer *l, float parx, float pary, WalpeMat3
     walpe_mat3_translate (m, l->pivot[0] * l->tex_w * l->scale,
                           l->pivot[1] * l->tex_h * l->scale);
     walpe_mat3_translate (m, l->translation[0] + parx, l->translation[1] + pary);
+}
+
+/* The picture of a layer: the +-1 unit quad -> the layer's own px space */
+static void layer_quad_matrix (SceneLayer *l, WalpeMat3 *m)
+{
+    walpe_mat3_identity (m);
+    walpe_mat3_scale (m, 0.5f, -0.5f);
+    walpe_mat3_translate (m, 0.5f, 0.5f);
+    walpe_mat3_scale (m, (float) l->tex_w, (float) l->tex_h);
 }
 
 static void render_layers (GArray *layers, const WalpeMat3 *parent_clip,
@@ -427,13 +434,24 @@ static void render_layers (GArray *layers, const WalpeMat3 *parent_clip,
         float parx = px * l->par_amount[0] * (l->par_depth / 100.0f) * 60.0f;
         float pary = py * l->par_amount[1] * (l->par_depth / 100.0f) * 60.0f;
 
-        WalpeMat3 m = *parent_clip; /* parent local px -> clip */
-        WalpeMat3 local;
-        layer_local_matrix (l, parx, pary, &local);
-        walpe_mat3_mul (&m, &local, &m); /* m = local * parent_clip */
+        /* m: the layer's px -> clip. A point goes through the layer's own
+         * matrix first and through its parent's after it. (The two were
+         * multiplied the other way round: the parent's scene px -> clip
+         * came first, so that a layer lay around the middle of the output
+         * whatever the scene, its translation and parallax counted in
+         * halves of the output, a rotation about a pivot or a camera
+         * carried it off the screen, a scene of another shape than the
+         * output was black and a group's layers were never seen.) */
+        WalpeMat3 m, place;
+        layer_place_matrix (l, parx, pary, &place);
+        walpe_mat3_mul (&m, parent_clip, &place);
 
-        if (l->tex_ready)
-            walpe_glutil_draw_quad (l->tex, l->premult, l->opacity, m.m, l->blend);
+        if (l->tex_ready) {
+            WalpeMat3 quad, q;
+            layer_quad_matrix (l, &quad);
+            walpe_mat3_mul (&q, &m, &quad);
+            walpe_glutil_draw_quad (l->tex, l->premult, l->opacity, q.m, l->blend);
+        }
 
         if (l->parts) {
             if (depth == 0) {
@@ -462,13 +480,16 @@ static gboolean scene_gl_render (WalpeContent *c, int w, int h, float px, float 
     WalpeMat3 tail;
     walpe_mat3_identity (&tail);
     walpe_mat3_scale (&tail, k, k);
+    if (s->camera_zoom != 1.0f) {
+        /* zoom about the scene's middle: there, enlarge, back (the three
+         * steps stood in the reverse order, which enlarges about a point
+         * outside the scene: a scene with a camera zoom was black) */
+        walpe_mat3_translate (&tail, -s->scene_w * k / 2.0f, -s->scene_h * k / 2.0f);
+        walpe_mat3_scale (&tail, s->camera_zoom, s->camera_zoom);
+        walpe_mat3_translate (&tail, s->scene_w * k / 2.0f, s->scene_h * k / 2.0f);
+    }
     walpe_mat3_translate (&tail, -(s->scene_w * k - (float) w) / 2.0f,
                           -(s->scene_h * k - (float) h) / 2.0f);
-    if (s->camera_zoom != 1.0f) { /* zoom about the scene center */
-        walpe_mat3_translate (&tail, s->scene_w * k / 2.0f, s->scene_h * k / 2.0f);
-        walpe_mat3_scale (&tail, s->camera_zoom, s->camera_zoom);
-        walpe_mat3_translate (&tail, -s->scene_w * k / 2.0f, -s->scene_h * k / 2.0f);
-    }
     if (s->camera_shift[0] != 0.0f || s->camera_shift[1] != 0.0f)
         walpe_mat3_translate (&tail, s->camera_shift[0] * s->scene_w * k,
                               s->camera_shift[1] * s->scene_h * k);
