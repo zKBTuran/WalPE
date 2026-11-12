@@ -10,9 +10,18 @@
          outputs (HEADLESS-1, ...): created, given a mode / position / scale and removed
          over sway's IPC socket (what `swaymsg create_output` and `swaymsg output ...` do).
          Pictures are read with grim; the pointer is moved by a virtual pointer device.
+  labwc, wayfire, river
+         another wlroots compositor in sway's place, for scripts/waylandcheck.py (the other
+         checks ask sway for things by name). No command socket: outputs are set with
+         wlr-randr, windows and output power through the protocols these compositors
+         share (WlDesk below). They start with three headless outputs, of which the
+         unused ones are disabled: an output cannot be created while they run. river
+         means river up to 0.3 (river-classic); from 0.4 on it needs a window manager
+         program, named in WALPE_CHECK_RIVER_INIT. Wayfire does not run as root: started
+         by root it is given the user nobody.
 
 A check takes the kind from its --display option, else from WALPE_CHECK_DISPLAY, else xvfb
-(`x11` and `wayland` are accepted as other names of the two). Everything is started in a
+(`x11` and `wayland` are accepted as other names of xvfb and sway). Everything is started in a
 directory the caller owns and stopped by process id; nothing of the user's session is used:
 the compositor never sees the session's DISPLAY / WAYLAND_DISPLAY, and the clients get the
 private server's address only.
@@ -37,9 +46,11 @@ DRM render node; a container usually has none). The compositor's own messages go
 sway.log in the work directory."""
 import hashlib, json, mmap, os, shutil, signal, socket, struct, subprocess, sys, tempfile, time
 
-KINDS = {"xvfb": "xvfb", "x11": "xvfb", "sway": "sway", "wayland": "sway"}
-WINSYS = {"xvfb": "x11", "sway": "wayland"}
-NEEDS = {"xvfb": ("Xvfb",), "sway": ("sway", "grim")}
+KINDS = {"xvfb": "xvfb", "x11": "xvfb", "sway": "sway", "wayland": "sway",
+         "labwc": "labwc", "wayfire": "wayfire", "river": "river"}
+WINSYS = {"xvfb": "x11", "sway": "wayland", "labwc": "wayland", "wayfire": "wayland", "river": "wayland"}
+NEEDS = {"xvfb": ("Xvfb",), "sway": ("sway", "grim"), "labwc": ("labwc", "grim", "wlr-randr"),
+         "wayfire": ("wayfire", "grim", "wlr-randr"), "river": ("river", "grim", "wlr-randr")}
 # how the configured build header names the two window-system backends
 BUILD_DEFINES = {"x11": "HAVE_X11", "wayland": "HAVE_WAYLAND"}
 # exit status of a check that cannot run here: 77 (meson: skipped). WALPE_CHECK_STRICT=1
@@ -296,12 +307,9 @@ class XvfbDisplay:
             return False
 
 
-class WlPointer:
-    """A pointer device for the compositor's seat. Sway on the headless backend has no input
-    device, so its seat offers no pointer and clients never hear of one. This is a small
-    Wayland client (wire protocol over the socket, nothing to install) that asks for a
-    virtual pointer (wlr-virtual-pointer-unstable-v1) and keeps it for as long as it lives."""
-    MANAGER = "zwlr_virtual_pointer_manager_v1"
+class WlWire:
+    """A small Wayland client: the wire protocol over the compositor's socket, nothing to
+    install. A subclass says in _hello () what it binds and in _event () what it hears."""
 
     def __init__(self, path, timeout=5.0):
         self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -315,27 +323,43 @@ class WlPointer:
             self.close()
             raise
 
+    def close(self):
+        try:
+            self.s.close()
+        except OSError:
+            pass
+
     def _hello(self):
-        """find the virtual pointer manager among the globals, bind it, make the device"""
+        pass
+
+    def _event(self, obj, op, body):
+        """an event outside a roundtrip that has a listener of its own"""
+
+    def _globals(self):
+        """wl_display.get_registry -> (the registry, [(name, interface, version)])"""
         registry = self._new()
         self._send(1, 1, struct.pack("=I", registry))                     # wl_display.get_registry
-        found = {}
+        found = []
 
         def on_global(obj, op, body):
             if obj == registry and op == 0:                               # wl_registry.global
                 name, n = struct.unpack_from("=II", body)
                 iface = body[8:8 + n - 1].decode("ascii", "replace")
-                found[iface] = name
+                found.append((name, iface, struct.unpack_from("=I", body, 8 + n + (-n % 4))[0]))
         self._roundtrip(on_global)
-        if self.MANAGER not in found:
-            self.close()
-            raise OSError("the compositor offers no " + self.MANAGER)
-        manager = self._new()
-        self._send(registry, 0, struct.pack("=I", found[self.MANAGER]) + self._string(self.MANAGER) +
-                   struct.pack("=II", 1, manager))                        # wl_registry.bind, version 1
-        self.device = self._new()
-        self._send(manager, 0, struct.pack("=II", 0, self.device))        # create_virtual_pointer (default seat)
-        self._roundtrip()
+        return registry, found
+
+    def _bind(self, registry, name, iface, version):
+        obj = self._new()
+        self._send(registry, 0, struct.pack("=I", name) + self._string(iface) +
+                   struct.pack("=II", version, obj))                      # wl_registry.bind
+        return obj
+
+    @staticmethod
+    def _text(body, at=0):
+        """a string argument at an offset of an event's body"""
+        n = struct.unpack_from("=I", body, at)[0]
+        return body[at + 4:at + 4 + max(n - 1, 0)].decode("utf-8", "replace")
 
     def _new(self):
         self.last += 1
@@ -375,8 +399,27 @@ class WlPointer:
                 raise OSError("protocol error: " + body[12:12 + n - 1].decode("utf-8", "replace"))
             if obj == cb and op == 0:                                     # wl_callback.done
                 return
-            if on_event:
-                on_event(obj, op, body)
+            (on_event or self._event)(obj, op, body)
+
+
+class WlPointer(WlWire):
+    """A pointer device for the compositor's seat. Sway on the headless backend has no input
+    device, so its seat offers no pointer and clients never hear of one. This client asks
+    for a virtual pointer (wlr-virtual-pointer-unstable-v1) and keeps it for as long as it
+    lives."""
+    MANAGER = "zwlr_virtual_pointer_manager_v1"
+
+    def _hello(self):
+        """find the virtual pointer manager among the globals, bind it, make the device"""
+        registry, found = self._globals()
+        found = {iface: name for name, iface, _ in found}
+        if self.MANAGER not in found:
+            self.close()
+            raise OSError("the compositor offers no " + self.MANAGER)
+        manager = self._bind(registry, found[self.MANAGER], self.MANAGER, 1)
+        self.device = self._new()
+        self._send(manager, 0, struct.pack("=II", 0, self.device))        # create_virtual_pointer (default seat)
+        self._roundtrip()
 
     def move(self, x, y, width, height):
         """the pointer to (x, y) of a layout of width x height"""
@@ -393,11 +436,121 @@ class WlPointer:
         self._send(self.device, 4)                                        # frame
         self._roundtrip()
 
-    def close(self):
-        try:
-            self.s.close()
-        except OSError:
-            pass
+
+class WlDesk(WlWire):
+    """The compositor's window list and its outputs' power switches, for a compositor that
+    has no command socket of its own for them: wlr-foreign-toplevel-management (which
+    windows there are, whether they are fullscreen and have the focus; requests to make
+    one fullscreen on an output, to give it the focus, to close it) and
+    wlr-output-power-management (an output off and on)."""
+    TOPLEVELS, POWER = "zwlr_foreign_toplevel_manager_v1", "zwlr_output_power_manager_v1"
+    STATES = ("maximized", "minimized", "activated", "fullscreen")
+
+    def _hello(self):
+        self.manager = self.power_manager = self.seat = None
+        self.outs, self.wins = {}, {}        # wl_output object: name; window handle: what is known of it
+        self.out_globals = {}                # an output's name in the registry: its wl_output object
+        self.registry, found = self._globals()
+        for name, iface, version in found:
+            self._global(name, iface, version)
+        self._roundtrip()
+        self._roundtrip()                   # (the windows the first answer announced)
+
+    def _global(self, name, iface, version):
+        if iface == self.TOPLEVELS and self.manager is None:
+            self.manager = self._bind(self.registry, name, iface, min(version, 3))
+        elif iface == self.POWER and self.power_manager is None:
+            self.power_manager = self._bind(self.registry, name, iface, 1)
+        elif iface == "wl_seat" and self.seat is None:
+            self.seat = self._bind(self.registry, name, iface, 1)
+        elif iface == "wl_output" and version >= 4:                       # (version 4: the output's name)
+            self.out_globals[name] = self._bind(self.registry, name, iface, 4)
+            self.outs[self.out_globals[name]] = None
+
+    def _event(self, obj, op, body):
+        if obj == self.registry:
+            # outputs come and go while this client lives (an output that is disabled is
+            # gone for clients, enabled again it is a new one)
+            if op == 0:                                                   # global
+                name, n = struct.unpack_from("=II", body)
+                self._global(name, body[8:8 + n - 1].decode("ascii", "replace"),
+                             struct.unpack_from("=I", body, 8 + n + (-n % 4))[0])
+            elif op == 1:                                                 # global_remove
+                self.outs.pop(self.out_globals.pop(struct.unpack_from("=I", body)[0], None), None)
+        elif obj == self.manager:
+            if op == 0:                                                   # toplevel (new handle)
+                self.wins[struct.unpack_from("=I", body)[0]] = {"app_id": None, "title": None, "state": (),
+                                                                "outputs": set()}
+        elif obj in self.wins:
+            w = self.wins[obj]
+            if op in (0, 1):                                              # title, app_id
+                w["title" if op == 0 else "app_id"] = self._text(body)
+            elif op in (2, 3):                                            # output_enter, output_leave
+                out = struct.unpack_from("=I", body)[0]
+                (w["outputs"].add if op == 2 else w["outputs"].discard)(out)
+            elif op == 4:                                                 # state (an array of numbers)
+                n = struct.unpack_from("=I", body)[0] // 4
+                w["state"] = tuple(self.STATES[v] if v < len(self.STATES) else str(v)
+                                   for v in struct.unpack_from("=%dI" % n, body, 4))
+            elif op == 6:                                                 # closed
+                del self.wins[obj]
+                self._send(obj, 7)                                        # destroy
+        elif obj in self.outs and op == 4:                                # wl_output.name
+            self.outs[obj] = self._text(body)
+
+    def windows(self):
+        """[{id, pid (None: the protocol does not tell), app_id, title, fullscreen, focused,
+        maximized, outputs (names)}]"""
+        self._roundtrip()
+        return [{"id": h, "pid": None, "app_id": w["app_id"], "title": w["title"],
+                 "fullscreen": "fullscreen" in w["state"], "focused": "activated" in w["state"],
+                 "maximized": "maximized" in w["state"],
+                 "outputs": sorted(self.outs.get(o) or "?" for o in w["outputs"])}
+                for h, w in sorted(self.wins.items())]
+
+    def _output(self, name):
+        return next((o for o, n in self.outs.items() if n == name), 0)
+
+    def fullscreen(self, handle, on=True, output=None):
+        """ask for a window to be fullscreen (on that output), or not"""
+        if handle not in self.wins:
+            return False
+        self._roundtrip()
+        if on:
+            self._send(handle, 8, struct.pack("=I", self._output(output) if output else 0))   # set_fullscreen
+        else:
+            self._send(handle, 9)                                         # unset_fullscreen
+        self._roundtrip()
+        return True
+
+    def maximize(self, handle, on=True):
+        if handle not in self.wins:
+            return False
+        self._send(handle, 0 if on else 1)                                # set_maximized, unset_maximized
+        self._roundtrip()
+        return True
+
+    def focus(self, handle):
+        if handle not in self.wins or self.seat is None:
+            return False
+        self._send(handle, 4, struct.pack("=I", self.seat))               # activate
+        self._roundtrip()
+        return True
+
+    def power(self, name, on):
+        """an output off or on (what `wlopm` does)"""
+        self._roundtrip()
+        self._roundtrip()                   # (an output that has just appeared: its name)
+        out = self._output(name)
+        if not out or self.power_manager is None:
+            return False
+        ctl = self._new()
+        self._send(self.power_manager, 0, struct.pack("=II", ctl, out))   # get_output_power
+        self._send(ctl, 0, struct.pack("=I", 1 if on else 0))             # set_mode
+        self._roundtrip()
+        self._send(ctl, 1)                                                # destroy
+        self._roundtrip()
+        return True
 
 
 SWAY_CONFIG = """# written by scripts/displayenv.py: a headless session for the checks.
@@ -634,6 +787,39 @@ class SwayDisplay:
             todo += (node.get("nodes") or []) + (node.get("floating_nodes") or [])
         return out
 
+    def window_of(self, pid, app_id=None):
+        """the window of a process (a compositor that does not tell process ids: the one
+        with this application id) -> its entry of windows (), None while there is none"""
+        for w in self.windows():
+            if w["pid"] == pid or (w["pid"] is None and app_id and w["app_id"] == app_id):
+                return w
+        return None
+
+    def win_fullscreen(self, win, on=True, output=None):
+        """a window fullscreen (on that output, moved there first), or not any more"""
+        sel = "[pid=%d] " % win["pid"]
+        if on and output:
+            self.cmd(sel + "move container to output " + output)
+        return self.cmd(sel + "fullscreen " + ("enable" if on else "disable"))
+
+    def win_focus(self, win, output=None):
+        """the focus to a window (moved to that output first)"""
+        sel = "[pid=%d] " % win["pid"]
+        if output:
+            self.cmd(sel + "move container to output " + output)
+        return self.cmd(sel + "focus")
+
+    def focus_output(self, name):
+        """the focus away from every window, to an output's bare desktop; False = this
+        compositor has no way to ask for that"""
+        return self.cmd("focus output " + name)
+
+    def pointer_follows_focus(self, on):
+        """sway takes the pointer along when the focus changes output (mouse_warping
+        output, its default): off while a check moves the focus about, or the pointer
+        ends up in the pictures of the cases that follow"""
+        return self.cmd("mouse_warping " + ("output" if on else "none"))
+
     def layout_box(self):
         """the box around the enabled outputs in the layout: (x, y, width, height)"""
         outs = self.outputs()
@@ -762,7 +948,232 @@ class SwayDisplay:
             return False
 
 
+WAYFIRE_INI = """# written by scripts/displayenv.py: a headless session for the checks
+[core]
+plugins = foreign-toplevel place wm-actions
+xwayland = false
+"""
+# The other compositors: {kind: (command line, files of its configuration: {path below the
+# private XDG_CONFIG_HOME: text}, refuses to run as root)}. Each runs on wlroots' headless
+# backend like sway and is driven through the protocols wlroots compositors share instead
+# of a command socket: wlr-output-management (the program wlr-randr), wlr-screencopy (grim),
+# wlr-virtual-pointer, wlr-foreign-toplevel-management and wlr-output-power-management.
+COMPOSITORS = {
+    "labwc": (["labwc"], {}, False),
+    "wayfire": (["wayfire", "-c", "{cfg}/wayfire.ini"], {"wayfire.ini": WAYFIRE_INI}, True),
+    # river up to 0.3 ("river-classic"), which manages windows itself. From 0.4 on river
+    # shows nothing, a wallpaper included, until a window manager program is connected:
+    # WALPE_CHECK_RIVER_INIT is the command line river starts (its -c), for that program
+    "river": (["river", "-c", "{river_init}"], {}, False),
+}
+SPARE_OUTPUTS = 3       # a headless backend's outputs are made when it starts: the most a check uses
+
+
+class WlrDisplay(SwayDisplay):
+    """labwc, Wayfire or river in place of sway. What is different: outputs cannot be
+    created or unplugged while the compositor runs, so it starts with SPARE_OUTPUTS and an
+    output that "appears" is a disabled one enabled, one that is "unplugged" is disabled
+    (the client sees the same: the wl_output global comes and goes); and windows are known
+    by their application id, not by a process id."""
+    fake_monitors = False
+
+    def __init__(self, kind, tmp, patience=1.0):
+        SwayDisplay.__init__(self, tmp, patience)
+        self.kind = kind
+        self.log = os.path.join(tmp, kind + ".log")
+        self.desk = None
+
+    def start(self, width, height):
+        argv, files, no_root = COMPOSITORS[self.kind]
+        os.makedirs(self.rt, mode=0o700)
+        home = os.path.join(self.tmp, "wl-home")
+        cfg = os.path.join(home, "cfg")
+        os.makedirs(cfg, mode=0o700)
+        for name, text in files.items():
+            os.makedirs(os.path.dirname(os.path.join(cfg, name)), exist_ok=True)
+            with open(os.path.join(cfg, name), "w") as f:
+                f.write(text)
+        env = dict(os.environ)
+        for k in ("DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "SWAYSOCK", "I3SOCK", "WLR_DRM_DEVICES",
+                  "WLR_NO_HARDWARE_CURSORS"):
+            env.pop(k, None)
+        gles = os.environ.get("WALPE_CHECK_WL_RENDERER", "pixman") == "gles2"
+        env.update({"XDG_RUNTIME_DIR": self.rt, "HOME": home, "XDG_CONFIG_HOME": cfg,
+                    "WLR_BACKENDS": "headless", "WLR_LIBINPUT_NO_DEVICES": "1",
+                    "WLR_HEADLESS_OUTPUTS": str(SPARE_OUTPUTS),
+                    "WLR_RENDERER": "gles2" if gles else "pixman", "LIBGL_ALWAYS_SOFTWARE": "1"})
+        if gles:
+            env["WLR_RENDERER_ALLOW_SOFTWARE"] = "1"
+        argv = [a.format(cfg=cfg, river_init=os.environ.get("WALPE_CHECK_RIVER_INIT") or "true") for a in argv]
+        if no_root and os.geteuid() == 0:
+            # (Wayfire ends at once as root. A user of its own for the compositor; the
+            # checks' clients stay what they are and reach its socket by its full path)
+            uid = 65534
+            for d in (self.rt, home, cfg):
+                os.chown(d, uid, uid)
+            os.chmod(self.tmp, os.stat(self.tmp).st_mode | 0o011)
+            argv = ["setpriv", "--reuid", str(uid), "--regid", str(uid), "--clear-groups"] + argv
+        try:
+            with open(self.log, "ab") as log:
+                self.proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=log,
+                                             stderr=subprocess.STDOUT, cwd=self.rt)
+        except OSError:
+            return False
+        t0 = time.time()
+        outs = []
+        while time.time() - t0 < 20 * self.patience and self.proc.poll() is None:
+            wl = sorted(n for n in os.listdir(self.rt) if n.startswith("wayland-") and not n.endswith(".lock"))
+            if wl:
+                self.display = os.path.join(self.rt, wl[0])
+                outs = self.outputs(every=True)
+                if outs:
+                    break
+            time.sleep(0.1)
+        else:
+            return False
+        if not self.display or self.proc.poll() is not None:
+            return False
+        for o in outs[1:]:
+            self.output(o["name"], enable=False)
+        return self.output(outs[0]["name"], enable=True, mode=(width, height), pos=(0, 0), scale=1)
+
+    def stop(self):
+        if self.desk:
+            self.desk.close()
+            self.desk = None
+        SwayDisplay.stop(self)
+
+    # ------------------------------------------------- outputs: wlr-randr
+    def _randr(self, args, timeout=10):
+        env = dict(os.environ)
+        self.client_env(env)
+        env["XDG_RUNTIME_DIR"] = self.rt
+        try:
+            return subprocess.run(["wlr-randr"] + args, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, timeout=timeout * self.patience)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+    def cmd(self, text):
+        return False                        # (no command socket)
+
+    def outputs(self, every=False):
+        """the outputs as `wlr-randr --json` lists them, in the form of SwayDisplay.outputs ()"""
+        p = self._randr(["--json"])
+        try:
+            rep = json.loads(p.stdout.decode()) if p and p.returncode == 0 else []
+        except ValueError:
+            rep = []
+        out = []
+        for o in rep if isinstance(rep, list) else []:
+            on = bool(o.get("enabled"))
+            if not (on or every):
+                continue
+            mode = next((m for m in o.get("modes") or [] if m.get("current")), {})
+            pos, scale, turn = o.get("position") or {}, o.get("scale") or 1.0, o.get("transform") or "normal"
+            w, h = mode.get("width", 0), mode.get("height", 0)
+            if turn.replace("flipped-", "") in ("90", "270"):
+                w, h = h, w
+            out.append({"name": o.get("name"), "x": pos.get("x", 0), "y": pos.get("y", 0),
+                        "width": int(round(w / scale)), "height": int(round(h / scale)), "scale": scale,
+                        "mode": (mode.get("width", 0), mode.get("height", 0)),
+                        "refresh": mode.get("refresh", 0), "transform": turn, "active": on})
+        return sorted(out, key=lambda o: (not o["active"], o["x"], o["y"], o["name"] or ""))
+
+    def output(self, name, mode=None, pos=None, scale=None, hz=60, transform=None, enable=None):
+        args = ["--output", name]
+        if enable is not None:
+            args.append("--on" if enable else "--off")
+        if mode:
+            args += ["--custom-mode", "%dx%d@%gHz" % (mode[0], mode[1], hz)]
+        if pos:
+            args += ["--pos", "%d,%d" % pos]
+        if scale:
+            args += ["--scale", "%g" % scale]
+        if transform:
+            args += ["--transform", transform]
+        if len(args) == 2:
+            return True
+        p = self._randr(args)
+        return bool(p) and p.returncode == 0
+
+    def add_output(self, mode=None, pos=None, scale=1, hz=60):
+        """an output "appears": a disabled one is enabled -> its name, None when all are in use"""
+        spare = [o["name"] for o in self.outputs(every=True) if not o["active"]]
+        if not spare or not self.output(spare[0], enable=True, mode=mode, pos=pos, scale=scale, hz=hz):
+            return None
+        return spare[0]
+
+    def remove_output(self, name):
+        return self.output(name, enable=False)
+
+    def layers(self, name):
+        return None                         # (nothing lists them: the daemon's side of the wire does)
+
+    # ---------------------------------- windows and power: the protocols, WlDesk
+    def _desk(self):
+        if self.desk is None and self.display:
+            try:
+                self.desk = WlDesk(self.display, 5 * self.patience)
+            except (OSError, struct.error):
+                self.desk = False
+        return self.desk or None
+
+    def _ask(self, fn, default):
+        """a question to the window list; a connection that broke is made anew once"""
+        for _ in range(2):
+            d = self._desk()
+            if not d:
+                return default
+            try:
+                return fn(d)
+            except (OSError, struct.error):
+                d.close()
+                self.desk = None
+        return default
+
+    def windows(self):
+        return self._ask(lambda d: d.windows(), [])
+
+    def win_fullscreen(self, win, on=True, output=None):
+        return self._ask(lambda d: d.fullscreen(win["id"], on, output), False)
+
+    def win_focus(self, win, output=None):
+        return self._ask(lambda d: d.focus(win["id"]), False)
+
+    def focus_output(self, name):
+        return False
+
+    def pointer_follows_focus(self, on):
+        return True
+
+    def power(self, name, on):
+        """an output off or on (wlr-output-power-management); a headless output that was
+        off shows nothing new until it is committed once more, as with sway"""
+        if not self._ask(lambda d: d.power(name, on), False):
+            return False
+        scale = [o["scale"] for o in self.outputs() if o["name"] == name] if on else []
+        t0 = time.time()
+        while scale and time.time() - t0 < 20 * self.patience:
+            time.sleep(0.2)
+            self.output(name, scale=scale[0])
+            if self.shot(name, timeout=2.0):
+                break
+        return True
+
+    def can_point(self):
+        if self.ptr is None and self.display:
+            try:
+                self.ptr = WlPointer(self.display, 5 * self.patience)
+                self.pointer_how = "a virtual pointer device"
+            except (OSError, struct.error):
+                self.ptr = False
+        return bool(self.ptr)
+
+
 def make(kind, tmp, patience=1.0):
+    if kind in COMPOSITORS:
+        return WlrDisplay(kind, tmp, patience)
     return (SwayDisplay if kind == "sway" else XvfbDisplay)(tmp, patience)
 
 

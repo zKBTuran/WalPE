@@ -96,7 +96,11 @@ and `grim` (`weston` adds a compositor without layer shell); each is skipped whe
 programs are missing or the build has no backend for it. The headless compositor is sway
 on wlroots' headless backend with the pixman renderer and a configuration of its own;
 `scripts/displayenv.py` holds all of it and can be used by hand (`python3 -I
-scripts/displayenv.py run --display sway -- build/walpe-daemon`). `WALPE_CHECK_STRICT=1`
+scripts/displayenv.py run --display sway -- build/walpe-daemon`). `daemon-wayland` can be
+run against another wlroots compositor by hand, which the test suite does not do:
+`python3 -I scripts/waylandcheck.py --build build --display labwc` (or `wayfire`, or
+`river` up to 0.3; it needs `wlr-randr` as well). The other Wayland tests are written
+for sway. `WALPE_CHECK_STRICT=1`
 turns "cannot run here" into a failure.
 
 One test talks to a sound server: `audio-server` starts a PulseAudio of its own (`pulseaudio`

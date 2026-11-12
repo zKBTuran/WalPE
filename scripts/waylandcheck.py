@@ -2,8 +2,10 @@
 """End-to-end checks of the daemon on Wayland: outputs that come, go and change.
 
   python3 -I scripts/waylandcheck.py --build build [--daemon FILE] [--only a,b] [--keep] [--tmp DIR]
+                                     [--display sway|labwc|wayfire|river]
 
-A private headless compositor (sway on wlroots' headless backend, see
+A private headless compositor (sway on wlroots' headless backend unless
+--display or WALPE_CHECK_DISPLAY names another one, see
 scripts/displayenv.py), a private walpe-daemon and generated scenes; nothing of
 the user's is read or written. The pictures are screenshots of the
 compositor's outputs (grim), so what is checked is what the compositor shows,
@@ -54,7 +56,11 @@ not what the daemon believes it drew. Each case starts its own daemon:
             nothing pauses for it while the focus is elsewhere; `set
             fs_all=on` pauses both, as earlier versions did. Status names
             the output per monitor and has no note about every monitor
-            pausing (the compositor names the window's output).
+            pausing (the compositor names the window's output). On a
+            compositor other than sway: one output, the window made
+            fullscreen, not fullscreen and fullscreen again through the
+            compositor's window list (nothing there moves a window to
+            another output or takes the focus from every window).
   backend   (builds with both backends) with an X server and a Wayland
             compositor both in the environment: without a setting Wayland
             is taken, config.json "backend" picks the other, WALPE_BACKEND
@@ -74,8 +80,13 @@ not what the daemon believes it drew. Each case starts its own daemon:
             six times: the daemon's open files do not grow from the second
             round to the last.
 
-Exit code 0 = all passed, 1 = failures, 77 = skipped (sway or grim is not
-installed, or the build has no Wayland backend). WAYLANDCHECK_PATIENCE=N
+--display labwc|wayfire|river: that compositor in sway's place (it needs the
+program wlr-randr besides grim; river: up to 0.3, see scripts/displayenv.py).
+The cases are the same; what differs is said where it does (fullscreen above;
+an output that "appears" was a disabled one).
+
+Exit code 0 = all passed, 1 = failures, 77 = skipped (the compositor or grim is
+not installed, or the build has no Wayland backend). WAYLANDCHECK_PATIENCE=N
 multiplies every wait (a software renderer on a busy machine: 3 or more).
 --tmp DIR: work in DIR (must not exist; removed afterwards); sockets live
 below it and a socket path is limited to 107 bytes."""
@@ -93,6 +104,7 @@ CONFIG = {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": 
 # how a backend is asked for: a config.json member, and a variable that beats it
 BACKEND_KEY, BACKEND_ENV = "backend", "WALPE_BACKEND"
 QUAD = ["red", "green", "blue", "white"]     # top left, top right, bottom left, bottom right
+GUI_APP_ID = "io.github.walpe.ui"            # the library window's application id
 fails = 0
 checks = 0
 
@@ -594,12 +606,20 @@ def case_pointer(env, W):
     mark = env.mark()
     (a, *_), (b, *_) = env.mons
 
-    def colour(name, want):
-        box = [None]
+    def colour(name, want, at=None):
+        """at: where the pointer was just put. A compositor tells a surface of the pointer
+        when the pointer moves (docs/WAYLAND.md), and a movement that reaches it before
+        the wallpaper's request for pointer input does is one the wallpaper never hears
+        of (seen with river 0.3.17 on a busy machine): moved by one unit and back while
+        waiting."""
+        box, n = [None], [0]
 
         def ok():
             f = env.display.shot(name)
             box[0] = rc.name_of(displayenv.pixel_of(f, f[0] // 2, f[1] // 2)) if f else "none"
+            if box[0] != want and at:
+                n[0] += 1
+                env.display.pointer(at[0] + n[0] % 2, at[1])
             return box[0] == want
         wait_for(ok, 6, 0.2)
         return box[0]
@@ -607,7 +627,7 @@ def case_pointer(env, W):
     env.open(W["ptr"])
     lc.loaded(env, W["ptr"])
     check(env.display.pointer(4, 100), "pointer: the pointer moves to the left edge of the first output")
-    got = colour(a, "blue")
+    got = colour(a, "blue", (4, 100))
     check(got == "blue", "pointer: the scene on that output follows it there (blue)", got)
     check(env.display.pointer(636, 100), "pointer: ... and to its right edge")
     got = colour(a, "red")
@@ -627,11 +647,14 @@ def case_pointer(env, W):
     def red_at(name, x, y, want):
         """the pointer to (x, y) of the layout; -> the red the scene on `name` shows (0..255)"""
         env.display.pointer(x, y)
-        box = [(-1, -1, -1)]
+        box, n = [(-1, -1, -1)], [0]
 
         def ok():
             f = env.display.shot(name)
             box[0] = displayenv.pixel_of(f, f[0] // 2, f[1] // 2) if f else displayenv.NO_PICTURE
+            if abs(box[0][0] - want) > 16:       # (as in colour (): once more, a unit beside)
+                n[0] += 1
+                env.display.pointer(x + n[0] % 2, y)
             return abs(box[0][0] - want) <= 16
         wait_for(ok, 6, 0.2)
         return box[0][0]
@@ -707,12 +730,12 @@ def case_covered(env, W):
         p = subprocess.Popen([gui], env=genv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                              cwd=env.tmp)
     try:
-        if not wait_for(lambda: [w for w in env.display.windows() if w["pid"] == p.pid] or p.poll() is not None,
+        if not wait_for(lambda: env.display.window_of(p.pid, GUI_APP_ID) or p.poll() is not None,
                         60, 0.5) or p.poll() is not None:
             print("skip covered (the library window did not come up on the compositor)")
             return
-        env.display.cmd("[pid=%d] fullscreen enable" % p.pid)
-        full = wait_for(lambda: any(w["fullscreen"] for w in env.display.windows() if w["pid"] == p.pid), 15)
+        env.display.win_fullscreen(env.display.window_of(p.pid, GUI_APP_ID), True)
+        full = wait_for(lambda: (env.display.window_of(p.pid, GUI_APP_ID) or {}).get("fullscreen"), 15)
         check(bool(full), "covered: the compositor shows the library window fullscreen")
         check(bool(wait_for(hidden, 20, 0.3)), "covered: status says the monitor is covered",
               {k: mon().get(k) for k in ("hidden", "covered", "paused", "wait_timeouts")})
@@ -976,11 +999,91 @@ def case_cycles(env, W, rounds=6):
 
 
 # --------------------------------------------------------------- fullscreen
+def fullscreen_one(env, W, gui):
+    """The fullscreen rule on one output, for a compositor that is driven through the
+    window list (wlr-foreign-toplevel-management): that can make a window fullscreen and
+    give it the focus, but cannot move it to an output (labwc 0.20 overlooks the output
+    named in set_fullscreen) or take the focus from every window."""
+    if not start(env, [("A", 640, 360, 0, 0)], "fullscreen"):
+        return
+    mark = env.mark()
+    env.open(W["anim"])
+    lc.loaded(env, W["anim"])
+
+    def mon():
+        return (env.state().get("monitors") or [{}])[0]
+
+    def drawn(seconds=2.0):
+        n = mon().get("frames") or 0
+        time.sleep(seconds * PATIENCE)
+        return (mon().get("frames") or 0) - n
+
+    def is_state(full, what):
+        ok = wait_for(lambda: bool(mon().get("fullscreen")) == full and bool(mon().get("paused")) == full, 20, 0.2)
+        st = env.state()
+        check(bool(ok), "fullscreen: %s: fullscreen %s, paused %s" % (what, full, full),
+              {"fullscreen": mon().get("fullscreen"), "paused": mon().get("paused"),
+               "monitors_state": st.get("monitors_state"), "windows": env.display.windows()})
+        n = drawn()
+        check(n <= 2 if full else n > 3, "fullscreen: %s: the scene %s" % (what, "stops" if full else "draws"),
+              "%d frames in %.0f s" % (n, 2.0 * PATIENCE))
+        return st
+
+    wait_for(lambda: drawn(1.0) > 3, 20, 0.1)
+    st = is_state(False, "no window")
+    sig = st.get("pause_signals") or {}
+    if not check((sig.get("fullscreen") or {}).get("from") == "wl-fullscreen",
+                 "fullscreen: the compositor's window list reports fullscreen windows", sig.get("fullscreen")):
+        env.stop_daemon()
+        return
+    genv = dict(env.run_env)
+    genv.update({"GDK_BACKEND": "wayland", "GSK_RENDERER": "cairo", "GTK_A11Y": "none"})
+    with open(os.path.join(env.tmp, "gui.log"), "ab") as log:
+        p = subprocess.Popen([gui], env=genv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                             cwd=env.tmp)
+    try:
+        if not wait_for(lambda: env.display.window_of(p.pid, GUI_APP_ID) or p.poll() is not None,
+                        60, 0.5) or p.poll() is not None:
+            print("skip fullscreen (the library window did not come up on the compositor)")
+            return
+
+        def win():
+            return env.display.window_of(p.pid, GUI_APP_ID) or {}
+        env.display.win_focus(win())
+        is_state(False, "a window that is not fullscreen")
+        for again in ("", ", once more"):
+            env.display.win_fullscreen(win(), True)
+            env.display.win_focus(win())
+            check(bool(wait_for(lambda: win().get("fullscreen"), 15)),
+                  "fullscreen: the compositor shows the library window fullscreen" + again, win())
+            st = is_state(True, "the window fullscreen with the focus" + again)
+            check(st.get("fullscreen") is True and st.get("fullscreen_pause") is True,
+                  "fullscreen: the status of all monitors: a fullscreen window has the focus, the rule pauses",
+                  {k: st.get(k) for k in ("fullscreen", "fullscreen_pause")})
+            if not again:
+                env.display.win_fullscreen(win(), False)
+                is_state(False, "the window not fullscreen any more")
+    finally:
+        p.terminate()
+        try:
+            p.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+    is_state(False, "the window is gone")
+    healthy(env, mark, "fullscreen")
+    env.stop_daemon()
+
+
 def case_fullscreen(env, W):
     gui = os.path.join(env.build, "walpe")
     if not os.path.exists(gui):
         print("skip fullscreen (no library window program in the build)")
         return
+    if env.display.kind != "sway":
+        note("fullscreen: on %s the rule is looked at on one output (windows cannot be moved between "
+             "outputs through the window list)" % env.display.kind)
+        return fullscreen_one(env, W, gui)
     # (covered stays off, as in CONFIG: only the fullscreen rule may pause; each output
     # draws its own scene)
     if not start(env, [("A", 640, 360, 0, 0), ("B", 480, 270, 640, 0)], "fullscreen",
@@ -1037,28 +1140,28 @@ def case_fullscreen(env, W):
         p = subprocess.Popen([gui], env=genv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                              cwd=env.tmp)
     try:
-        if not wait_for(lambda: [w for w in env.display.windows() if w["pid"] == p.pid] or p.poll() is not None,
+        if not wait_for(lambda: env.display.window_of(p.pid, GUI_APP_ID) or p.poll() is not None,
                         60, 0.5) or p.poll() is not None:
             print("skip fullscreen (the library window did not come up on the compositor)")
             return
-        sel = "[pid=%d] " % p.pid
-        # the focus is moved between outputs below, and sway would take the pointer along
-        # (mouse_warping output, its default): a pointer left at an output's edge would be
-        # in the pictures of the cases that follow. The pointer stays where it is.
-        env.display.cmd("mouse_warping none")
+
+        def win():
+            return env.display.window_of(p.pid, GUI_APP_ID) or {}
+        # the focus is moved between outputs below, and sway would take the pointer along:
+        # a pointer left at an output's edge would be in the pictures of the cases that
+        # follow. The pointer stays where it is.
+        env.display.pointer_follows_focus(False)
 
         def put(out):
             """the window fullscreen on this output, with the focus"""
-            env.display.cmd(sel + "move container to output " + out)
-            env.display.cmd(sel + "fullscreen enable")
-            env.display.cmd(sel + "focus")
+            env.display.win_fullscreen(win(), True, out)
+            env.display.win_focus(win())
 
         # a plain window with the focus pauses nothing
-        env.display.cmd(sel + "move container to output " + a)
-        env.display.cmd(sel + "focus")
+        env.display.win_focus(win(), a)
         is_state([False, False], [False, False], "a window that is not fullscreen")
         put(a)
-        check(bool(wait_for(lambda: any(w["fullscreen"] for w in env.display.windows() if w["pid"] == p.pid), 15)),
+        check(bool(wait_for(lambda: win().get("fullscreen"), 15)),
               "fullscreen: the compositor shows the library window fullscreen")
         st = is_state([True, False], [True, False], "the window fullscreen on the first output")
         check(st.get("fullscreen") is True and st.get("fullscreen_pause") is True,
@@ -1075,11 +1178,11 @@ def case_fullscreen(env, W):
         env.ctl("set", "fs_all=off")
         is_state([False, True], [False, True], "pause_fullscreen_all off: the first output runs again")
         # the focus leaves the window (to the empty first output): the rule needs the focus
-        env.display.cmd("focus output " + a)
+        env.display.focus_output(a)
         st = is_state([False, False], [False, False], "the focus is on the other output")
         check(st.get("fullscreen") is False, "fullscreen: ... and no fullscreen window has the focus",
               st.get("fullscreen"))
-        env.display.cmd(sel + "focus")
+        env.display.win_focus(win())
         is_state([False, True], [False, True], "the focus is back on the fullscreen window")
     finally:
         p.terminate()
@@ -1088,8 +1191,8 @@ def case_fullscreen(env, W):
         except subprocess.TimeoutExpired:
             p.kill()
             p.wait()
-        env.display.cmd("focus output " + a)        # as the cases before left it
-        env.display.cmd("mouse_warping output")
+        env.display.focus_output(a)                 # as the cases before left it
+        env.display.pointer_follows_focus(True)
     is_state([False, False], [False, False], "the window is gone")
     healthy(env, mark, "fullscreen")
     env.stop_daemon()
@@ -1105,7 +1208,7 @@ CASES = [("start", case_start), ("layer", case_layer), ("two", case_two), ("mode
 
 def main():
     args = sys.argv[1:]
-    build, daemon, keep, tmp, only = "build", None, False, None, None
+    build, daemon, keep, tmp, only, display = "build", None, False, None, None, None
     while args:
         a = args.pop(0)
         if a == "--build" and args:
@@ -1118,10 +1221,20 @@ def main():
             tmp = args.pop(0)
         elif a == "--only" and args:
             only = args.pop(0).split(",")
+        elif a == "--display" and args:
+            display = args.pop(0)
         else:
             sys.stderr.write(__doc__)
             return 2
-    skip = displayenv.unusable("sway", build)
+    # the compositor: --display, else WALPE_CHECK_DISPLAY when it names one, else sway
+    kind = displayenv.pick(display)
+    if kind is None or (display and displayenv.WINSYS[kind] != "wayland"):
+        sys.stderr.write("waylandcheck: --display takes a Wayland compositor: %s\n"
+                         % ", ".join(sorted(k for k, w in displayenv.WINSYS.items() if w == "wayland")))
+        return 2
+    if displayenv.WINSYS[kind] != "wayland":
+        kind = "sway"
+    skip = displayenv.unusable(kind, build)
     if skip:
         print("waylandcheck: skipped (%s)" % skip[0])
         return skip[1]
@@ -1129,8 +1242,10 @@ def main():
         if not os.path.exists(b):
             print(f"waylandcheck: {b} not found")
             return 2
-    env = lc.Env(build, daemon, keep, tmp, "sway")
+    env = lc.Env(build, daemon, keep, tmp, kind)
     try:
+        if kind != "sway":
+            print("waylandcheck: the compositor is %s" % kind)
         longest = max(len(env.sock.encode()), len(os.path.join(env.display.rt, "sway-ipc.4294967295.4194304.sock")))
         if longest > 107:
             print(f"waylandcheck: {env.tmp} is too long for the sockets below it ({longest} > 107 bytes): "
