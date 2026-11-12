@@ -27,6 +27,10 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             it instead of being lost.
   stats     `walpe-ctl quality` gets the cost numbers of a scene that stands
             still, also when asked long after its load.
+  push      the state lines of a subscriber (the tray, the window): a
+            request that only reads (quality, layers, resolution without
+            a change, profile_result, status, props, mem) sends none; a
+            pause and a resume send one each.
   layout    the monitor layout changes while the daemon starts - after it
             read the layout, before it listens for changes, so no event
             tells it: it looks once more when it is up and follows.
@@ -87,7 +91,7 @@ runs another walpe-daemon binary with the tools of --build (a build without
 the fixes: the cases fail there). LIFECHECK_PATIENCE=N multiplies every
 wait (a software renderer on a busy machine: 3 or more). --tmp DIR: work in
 DIR (must not exist; removed afterwards)."""
-import json, os, re, shutil, signal, struct, subprocess, sys, threading, time
+import json, os, re, shutil, signal, socket, struct, subprocess, sys, threading, time
 
 sys.dont_write_bytecode = True   # no __pycache__ next to the scripts
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -698,6 +702,95 @@ def case_stats(env, W):
         return "stats" in m[0]
     has_stats()         # the first answer is given before the numbers can be there
     check(bool(wait_for(has_stats, 6, 0.5)), "stats: a still scene's numbers arrive after the first request")
+    env.stop_daemon()
+
+
+# --------------------------------------------------------------------- push
+class Subscriber:
+    """one connection that asked for the state lines, as the tray and the window do"""
+
+    def __init__(self, sock):
+        self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.s.settimeout(6.0 * PATIENCE)
+        self.s.connect(sock)
+        self.s.sendall(b'{"cmd":"subscribe"}\n')
+        self.buf = b""
+        first = self.line()
+        self.ok = bool(first and first.get("subscribed"))
+
+    def line(self, timeout=None):
+        """the next line -> dict, None when none came in time"""
+        self.s.settimeout(timeout if timeout is not None else 6.0 * PATIENCE)
+        try:
+            while b"\n" not in self.buf:
+                d = self.s.recv(65536)
+                if not d:
+                    return None
+                self.buf += d
+        except (socket.timeout, OSError):
+            return None
+        ln, self.buf = self.buf.split(b"\n", 1)
+        try:
+            return json.loads(ln.decode())
+        except ValueError:
+            return None
+
+    def lines(self, quiet=1.0):
+        """every line that arrives until nothing came for `quiet` seconds"""
+        out = []
+        while True:
+            ln = self.line(quiet * PATIENCE)
+            if ln is None:
+                return out
+            out.append(ln)
+
+    def close(self):
+        self.s.close()
+
+
+def case_push(env, W):
+    """A subscriber is sent the state when something may have changed it. A
+    request that only reads changes nothing: the line it used to cause (the
+    whole status, which always differs by its frame counters) went to every
+    subscriber - with the window's performance panel on screen, every 2 s."""
+    A = ("A", 640, 360, 0, 0)
+    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False})
+    if not check(env.start_daemon([A]), "push: daemon started"):
+        return
+    env.open(W["anim"])
+    loaded(env, W["anim"])
+    time.sleep(2.0)
+    sub = Subscriber(env.sock)
+    if not check(sub.ok, "push: subscribed"):
+        return
+    sub.lines(1.5)      # what the load still sends
+    reads = [{"cmd": "quality"}, {"cmd": "quality", "describe": True}, {"cmd": "layers"},
+             {"cmd": "resolution"}, {"cmd": "profile_result"}, {"cmd": "status"}, {"cmd": "props"},
+             {"cmd": "mem"}, {"cmd": "steam_libraries"}]
+    answered = 0
+    for _ in range(3):
+        for req in reads:
+            answered += 1 if env.ipc(req) is not None else 0
+    got = sub.lines(1.5)
+    check(answered == 3 * len(reads), "push: the requests that only read were answered",
+          f"{answered} of {3 * len(reads)}")
+    check(not got, "push: requests that only read send no state line to the subscriber",
+          f"{len(got)} lines, {sum(len(json.dumps(g)) for g in got)} bytes")
+    # what does change the state is still told
+    env.ipc({"cmd": "pause"})
+    got = sub.lines(1.5)
+    check(any((g.get("state") or {}).get("paused") is True for g in got),
+          "push: a pause is told to the subscriber", f"{len(got)} lines")
+    env.ipc({"cmd": "resume"})
+    got = sub.lines(1.5)
+    check(any((g.get("state") or {}).get("paused") is False for g in got),
+          "push: a resume is told to the subscriber", f"{len(got)} lines")
+    # a resolution request that changes something is one
+    env.ipc({"cmd": "resolution", "prompt": False})
+    got = sub.lines(1.5)
+    check(any((g.get("state") or {}).get("resolution_prompt") is False for g in got),
+          "push: a resolution request that changes a setting is told", f"{len(got)} lines")
+    sub.close()
     env.stop_daemon()
 
 
@@ -1574,7 +1667,7 @@ def case_fullscreen(env, W):
 
 
 CASES = [("pointer", case_pointer), ("reload", case_reload), ("restart", case_restart),
-         ("layout", case_layout), ("stats", case_stats), ("busy", case_busy), ("probe", case_probe),
+         ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("busy", case_busy), ("probe", case_probe),
          ("fullscreen", case_fullscreen), ("video", case_video), ("webunload", case_webunload)]
 
 

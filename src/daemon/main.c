@@ -7577,6 +7577,25 @@ static gboolean prof_env_start (gpointer user)
     return G_SOURCE_REMOVE;
 }
 
+/* a request that only reads: it changes nothing a subscriber is told
+ * about. "resolution" lists when it names nothing to change. */
+static gboolean ipc_request_reads (const char *cmd, JsonObject *o)
+{
+    static const char *const reads[] = { "status", "props", "subscribe", "steam_libraries", "mem",
+                                         "quality", "layers", "profile_result", NULL };
+    static const char *const res_changes[] = { "set", "monitor", "value", "texture_limit", "asked",
+                                               "forget", "prompt", NULL };
+    for (int i = 0; reads[i]; i++)
+        if (!g_strcmp0 (cmd, reads[i]))
+            return TRUE;
+    if (g_strcmp0 (cmd, "resolution"))
+        return FALSE;
+    for (int i = 0; res_changes[i]; i++)
+        if (json_object_has_member (o, res_changes[i]))
+            return FALSE;
+    return TRUE;
+}
+
 static char *ipc_handler (const char *req, gpointer user)
 {
     (void) user;
@@ -7935,10 +7954,14 @@ static char *ipc_handler (const char *req, gpointer user)
     g_object_unref (g);
     json_node_unref (rn);
     g_object_unref (b);
-    /* cmd lives in root: decide before it goes */
-    gboolean touch = g_strcmp0 (cmd, "status") && g_strcmp0 (cmd, "props") &&
-                     g_strcmp0 (cmd, "subscribe") && g_strcmp0 (cmd, "steam_libraries") &&
-                     g_strcmp0 (cmd, "mem");
+    /* cmd lives in root: decide before it goes. A request that only reads
+     * is no reason to send the state to the subscribers: the line carries
+     * the frame counters, so it always differs from the last one and is
+     * always sent - the window's performance panel asks for "quality"
+     * every 2 s while it shows, and each time the whole status went to the
+     * window and to the tray, which read their files and went through
+     * their menus for it. */
+    gboolean touch = !ipc_request_reads (cmd, o);
     json_node_unref (root);
     if (quit)
         g_main_loop_quit (D.loop);
