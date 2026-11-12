@@ -268,7 +268,11 @@ could do to the daemon. None of these was seen being used.
     for its attributes only: 22 requests to the X server per focus change with eight
     windows where it was 53. What it finds is the same;
   - Wayland: a window's new title no longer makes the daemon go through the window
-    list (a player or a browser changes its title all the time).
+    list (a player or a browser changes its title all the time);
+  - scenes: a layer that puts no pixel on the frame - parked outside the view, or scaled
+    to nothing - no longer keeps the whole scene drawing at the full frame rate for an
+    effect on it that follows the time. The picture is the same: such a layer drew
+    nothing before either.
 - X11: a wallpaper window that another program destroys (a script that tidies up
   windows, `xdotool windowclose` on the wrong id) is made again. The daemon did not
   notice: that monitor showed the root window for as long as the daemon ran. It now
