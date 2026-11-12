@@ -102,6 +102,14 @@ run.** One default changes: wallpaper sound is on, at half volume (under Sound).
   kept apart for every page. Off and mute are enforced by WebKit's own mute of the page,
   which no page script can undo; the volume in between is scaled by a script inside the
   page, which a page that fights it could defeat. [SOUND.md](docs/SOUND.md#web-wallpapers).
+- **Web wallpapers: a looping Ogg Vorbis sound goes on after its first pass.** With
+  WebKitGTK 2.52 and GStreamer 1.24 the jump back to the start of an `<audio loop>` or a
+  looping `Audio` object with an Ogg Vorbis file mostly never ended: the sound played
+  once and the page stayed silent (9 or 10 of 10 starts here; WAV, MP3 and Opus loops
+  were not affected; the same in a plain WebKitGTK window, and in 0.13.0 and 0.14.0
+  once a click had started the sound). A sound whose jump back has not ended after
+  0.3 s is loaded again and from then on started again each time it ends. That costs
+  one break of 0.6 to 1 s at the first repeat and about 0.1 s at each later one.
 
 ### Tray
 

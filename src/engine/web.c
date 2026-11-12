@@ -1461,8 +1461,9 @@ static GPtrArray *sound_pages;      /* main thread: the pages that have a view *
     "var ET=W.EventTarget.prototype,on=ET.addEventListener,fire=ET.dispatchEvent,Ev=W.Event,call=Reflect.apply;\n" \
     "function each(a,f){for(var i=a.length-1;i>=0;i--){var x=a[i].deref();if(x)f(x);else a.splice(i,1);}}\n" \
     "function ap(m){try{d.set.call(m,own.get(m)*(routed.has(m)?1:L));}catch(e){}}\n" \
+    "var watch=null;\n" \
     "function reg(m){if(!d||!(m instanceof H)||own.has(m))return;own.set(m,d.get.call(m));\n" \
-    " if(els.length>64)each(els,function(){});els.push(new WeakRef(m));ap(m);}\n" \
+    " if(els.length>64)each(els,function(){});els.push(new WeakRef(m));ap(m);if(watch)watch(m);}\n" \
     /* (sound alone, at level 0: not played into nothing, held until there is a level) */ \
     "function held(m){return L<=0&&!(V&&m instanceof V)&&!routed.has(m);}\n" \
     "function go(m){try{var p=pl.call(m);if(p&&p.catch)p.catch(function(){});}catch(e){}}\n" \
@@ -1478,6 +1479,32 @@ static GPtrArray *sound_pages;      /* main thread: the pages that have a view *
     " ['src','srcObject','autoplay'].forEach(function(n){var p=Object.getOwnPropertyDescriptor(M,n);\n" \
     "  if(p&&p.set&&p.configurable)Object.defineProperty(M,n,{configurable:true,enumerable:p.enumerable,get:p.get,\n" \
     "   set:function(v){reg(this);p.set.call(this,v);}});});\n" \
+    /* A looping Ogg Vorbis sound: the jump back to its start mostly never ends in \
+     * WebKitGTK 2.52 with GStreamer 1.24 - the element says "seeking" for ever, is \
+     * silent and asks the server for nothing; the same in a plain WebKitGTK window, \
+     * whatever a server answers (WAV, MP3, Opus loops are not affected). A sound \
+     * (not a video) whose jump to the start has not ended after 0.3 s is loaded \
+     * again, and from then on this script starts it again each time it ends, which \
+     * does not stick; the page still reads loop as true and sees no "ended". A \
+     * start that does not get going is loaded again as well, 0.6 s, 1.2 s ... 4.8 s \
+     * later. Nothing is started while the level is 0 or the wallpaper is paused: \
+     * such an element is left held, as play () of the page is. */ \
+    " var lo=Object.getOwnPropertyDescriptor(M,'loop'),st=W.setTimeout,ct=W.clearTimeout;\n" \
+    " if(ld&&lo&&lo.get&&lo.set&&lo.configurable&&st&&ct){\n" \
+    "  Object.defineProperty(M,'loop',{configurable:true,enumerable:lo.enumerable,\n" \
+    "   get:function(){return this.__walpeLoop?true:lo.get.call(this);},\n" \
+    "   set:function(v){if(this.__walpeLoop){if(!v)this.__walpeLoop=0;}else lo.set.call(this,v);}});\n" \
+    "  watch=function(m){if(V&&m instanceof V)return;var t=0;\n" \
+    "   function kick(n){call(ct,W,[t]);t=call(st,W,[function(){\n" \
+    "    if(S||L<=0||m.paused||m.currentTime>0.05)return;\n" \
+    "    if(!m.__walpeLoop){if(!m.seeking||!lo.get.call(m))return;lo.set.call(m,false);m.__walpeLoop=1;}\n" \
+    "    ld.call(m);go(m);kick(n<4?n+1:n);},300<<n]);}\n" \
+    "   call(on,m,['seeking',function(){if(!m.__walpeLoop)kick(0);}]);\n" \
+    "   call(on,m,['seeked',function(){if(!m.__walpeLoop)call(ct,W,[t]);}]);\n" \
+    "   call(on,m,['ended',function(e){if(!m.__walpeLoop)return;e.stopImmediatePropagation();\n" \
+    "    try{m.currentTime=0;}catch(x){}\n" \
+    "    if(S)m.__walpeResume=1;else if(held(m))m.__walpeHeld=1;else{go(m);kick(1);}},true]);};\n" \
+    " }\n" \
     " call(on,D,['loadstart',function(e){reg(e.target);},true]);\n" \
     /* (an element that starts by its autoplay attribute) */ \
     " call(on,D,['play',function(e){var m=e.target;reg(m);if(m instanceof H&&held(m)){m.__walpeHeld=1;pa.call(m);}},true]);\n" \
