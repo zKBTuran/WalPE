@@ -9639,8 +9639,8 @@ int main (int argc, char **argv)
         }
         /* An image that waited for its display to come back did not answer
          * the control socket in that time: walpe-ctl gives up after two
-         * seconds and says that the daemon is not running. What was sent
-         * then (a quit, another wallpaper) is not carried out now. */
+         * seconds and says that the daemon did not answer in time. What was
+         * sent then (a quit, another wallpaper) is not carried out now. */
         if (Bk.lost && Bk.ipc_fd >= 0 &&
             g_get_monotonic_time () - open_t0 >= 2 * G_USEC_PER_SEC) {
             int dropped = walpe_ipc_drop_queued ();

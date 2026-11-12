@@ -119,7 +119,7 @@ When the compositor goes away the daemon shuts down in order and exits with stat
 does when an X server goes away. `wayland_reconnect = <seconds>` in `gpu.conf`
 ([GPU-PRESENT.md](GPU-PRESENT.md)) makes it restart in place instead and wait that long for
 the compositor's socket to come back. While it waits, `walpe-ctl` reports that the daemon
-is not running, and what was sent to it in that time is not carried out when it is back.
+did not answer in time, and what was sent to it meanwhile is not carried out when it is back.
 A session started with a one-time socket (`WAYLAND_SOCKET` instead of
 `WAYLAND_DISPLAY`) cannot be reconnected to. Known gap: for the same reason the daemon
 cannot restart itself in place there. At the first change of a monitor that it would
@@ -305,8 +305,8 @@ XDG_CURRENT_DESKTOP`.
   - When the last output is gone, `walpe-ctl status` goes on listing the monitors the
     daemon had (`hidden: true`); the daemon restarts in place when one is back.
   - While the daemon waits for a compositor to come back (`wayland_reconnect`), its
-    control socket is there and nobody answers on it: `walpe-ctl` says that the daemon is
-    not running, and what was sent in that time is not carried out when it is back.
+    control socket is there and nobody answers on it: `walpe-ctl` says that the daemon
+    did not answer in time, and what was sent in that time is not carried out when it is back.
 - A session started with a one-time socket (`WAYLAND_SOCKET`) cannot be restarted in
   place: the daemon ends at the first change of a monitor it would follow that way (see
   "What is different from X11").

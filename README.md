@@ -626,9 +626,9 @@ a key), `--action=next|random|pause-toggle` runs a menu entry.
   drawn when "pause when covered" is off; a lock screen pauses through "pause when
   covered" only, unless the locker tells logind; with no monitor left `walpe-ctl status`
   still lists the monitors; while the daemon waits for a compositor to come back,
-  `walpe-ctl` says it is not running, and what it was sent is not carried out later; and
-  a session started with a one-time socket (`WAYLAND_SOCKET`) cannot be restarted in
-  place, so the daemon ends at the first change of a monitor there.
+  `walpe-ctl` says it did not answer in time, and what it was sent is not carried out
+  later; and a session started with a one-time socket (`WAYLAND_SOCKET`) cannot be
+  restarted in place, so the daemon ends at the first change of a monitor there.
   [WAYLAND.md](docs/WAYLAND.md#limits).
 - **AMD and Intel graphics, GPU choice, OpenGL ES: written, not run on hardware.** The
   list of graphics devices, render offload to another GPU (`gpu=integrated|discrete`),
