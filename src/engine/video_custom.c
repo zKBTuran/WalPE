@@ -2756,11 +2756,18 @@ static gboolean cv_decoder_open (CvSource *src, gboolean first, GError **err)
                            src->demux->height, cv_clip_fps (src->demux), nm->str);
                 g_string_free (nm, TRUE);
             } else if (first) {
-                g_message ("video: %dx%d %.2f fps, %d decode thread(s)%s", src->demux->width,
+                /* and that it is the CPU that decodes, with the reason: on
+                 * a laptop the difference is the fan, and nothing said it */
+                g_message ("video: %dx%d %.2f fps, software decoding on the CPU, %d decode thread(s)%s; "
+                           "hardware decoding %s", src->demux->width,
                            src->demux->height, cv_clip_fps (src->demux), src->dec->thread_count,
                            src->dec->skip_loop_filter == AVDISCARD_ALL ? ", deblocking SKIPPED"
                            : src->dec->skip_loop_filter == AVDISCARD_NONREF
-                               ? ", deblocking SKIPPED for non-reference pictures" : "");
+                               ? ", deblocking SKIPPED for non-reference pictures" : "",
+                           cv_hw_is_asked ()
+                               ? "was asked for and is not in use (the lines above, or status "
+                                 "\"video_decoder\", say why)"
+                               : "is off (walpe-ctl set hwdec=auto switches it on)");
             }
             opened = TRUE;
             g_atomic_int_inc (&cv_opened);   /* walpe-ctl mem */
