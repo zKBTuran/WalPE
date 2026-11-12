@@ -1,7 +1,7 @@
 option('video', type: 'combo', choices: ['auto', 'enabled', 'disabled'], value: 'auto',
   description: 'Build the video backend (libavcodec H.264 software decode)')
 option('web', type: 'combo', choices: ['auto', 'enabled', 'disabled'], value: 'auto',
-  description: 'Build the WebKitGTK web-wallpaper backend (heavy dependency)')
+  description: 'Build the WebKitGTK web-wallpaper backend (heavy dependency). Needs one page host: the X11 one (libX11, see x11) or the private one (wayland, wayland-server, GTK\'s Wayland backend)')
 option('audio', type: 'combo', choices: ['auto', 'enabled', 'disabled'], value: 'auto',
   description: 'Audio-reactive wallpapers: capture the default output monitor (libpulse-simple; PulseAudio or PipeWire-pulse)')
 option('scenescript', type: 'combo', choices: ['auto', 'enabled', 'disabled'], value: 'auto',
@@ -15,7 +15,7 @@ option('tray', type: 'combo', choices: ['auto', 'enabled', 'disabled'], value: '
 option('hardening', type: 'boolean', value: true,
   description: 'Build with stack protector, stack clash and control-flow protection, _FORTIFY_SOURCE, format-security errors, full RELRO + immediate binding (PIE is the b_pie default)')
 option('x11', type: 'feature', value: 'auto',
-  description: 'walpe-daemon: the X11 backend (libX11, libXext, libXinerama; libXi and libXrandr when found). At least one of x11 / wayland has to be built')
+  description: 'walpe-daemon: the X11 backend (libX11, libXext, libXinerama; libXi and libXrandr when found), and the web module\'s X11 page host (libX11, GTK\'s X11 backend). disabled: neither walpe-daemon nor walpe-web.so uses an X library. At least one of x11 / wayland has to be built')
 option('wayland', type: 'feature', value: 'auto',
   description: 'walpe-daemon: the Wayland backend (layer shell; wayland-client, wayland-egl, wayland-scanner). The daemon picks X11 or Wayland when it starts: walpe-ctl backend')
 option('tests', type: 'boolean', value: false,

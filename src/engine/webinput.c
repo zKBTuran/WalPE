@@ -50,7 +50,7 @@
 #include "webinput.h"
 #include <libsoup/soup.h>
 /* the X11 page host: GTK's X11 backend and Xlib in this build */
-#if defined (GDK_WINDOWING_X11) && !defined (WALPE_WEB_NO_X11)
+#if defined (GDK_WINDOWING_X11) && defined (HAVE_WEBHOST_X11)
 #define WI_HAVE_X11 1
 #include <gdk/x11/gdkx.h>
 #include <X11/Xlib.h>

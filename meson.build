@@ -206,8 +206,9 @@ fs = import('fs')
 x11_opt = get_option('x11')
 wayland_opt = get_option('wayland')
 
-# libX11 is looked for whatever -Dx11 says: the web module and the tray are
-# X11 clients of their own and keep their dependency on it
+# libX11 is looked for whatever -Dx11 says: the tray is an X11 client of its
+# own (XEmbed) where the library is there. -Dx11=disabled leaves X out of
+# walpe-daemon and of the web module (its X11 page host, see below).
 x11       = dependency('x11', required: x11_opt.enabled())
 xext      = dependency('xext', required: x11_opt.enabled())
 xinerama  = dependency('xinerama', required: x11_opt.enabled())
@@ -333,17 +334,52 @@ if web_opt != 'disabled'
     deps_web = [w, dependency('libsoup-3.0')]
   endif
 endif
-# the web module is an X11 client whatever the daemon draws on (GDK's X11
-# backend, Xlib): without libX11 it cannot be built
-if have_web and not x11.found()
-  if web_opt == 'enabled'
-    error('web=enabled needs libX11 (the web module uses GDK\'s X11 backend)')
+# Where the page of a web wallpaper lives while nobody sees its window
+# (src/engine/webhostsel.h). Each page host is a compile-time part of the
+# web module, built when what it needs is there:
+#   x11      an off-screen X window: libX11 and GTK's X11 backend
+#            (gtk4-x11). Part of -Dx11: -Dx11=disabled leaves it out, and
+#            then neither walpe-daemon nor walpe-web.so names an X library.
+#   private  the module's own Wayland display (src/engine/webhost_wl.c):
+#            libwayland-server and -client 1.20 or newer, wayland-scanner
+#            for the server side of xdg-shell, GTK's Wayland backend
+#            (gtk4-wayland). Only together with the Wayland backend: a
+#            daemon that can draw on X11 only always has an X display for
+#            the page's window, and its web module then links no Wayland
+#            library.
+# The module needs one of the two; which one a page gets is decided when
+# the first page is made (WALPE_WEB_HOST).
+# (1.20: the code names wl_output.name / description (wl_output 4) in its
+# listener and wl_surface.offset (wl_surface 5) in the page host's request
+# table; with an older libwayland those files would not compile, so the
+# Wayland parts are left out instead)
+wl_client_dep = dependency('wayland-client', version: '>= 1.20', required: false)
+wl_server_dep = dependency('wayland-server', version: '>= 1.20', required: false)
+wl_scanner_prog = find_program('wayland-scanner', native: true, required: false)
+have_wl_scan = wl_scanner_prog.found()
+have_webhost_x11 = false
+have_webhost_wl = false
+if have_web
+  gtk4_wayland_dep = dependency('gtk4-wayland', required: false)
+  have_webhost_wl = (have_wayland and have_wl_scan and wl_server_dep.found() and
+                     wl_client_dep.found() and gtk4_wayland_dep.found())
+  if not x11_opt.disabled() and x11.found()
+    have_webhost_x11 = dependency('gtk4-x11', required: false).found()
   endif
-  message('web wallpapers: libX11 not found; the web module is not built')
-  have_web = false
-  deps_web = []
+  if not have_webhost_x11 and not have_webhost_wl
+    web_why = ('no page host can be built: the X11 one needs libX11 and GTK\'s X11 backend ' +
+               '(gtk4-x11) and is left out by -Dx11=disabled; the private one needs the Wayland ' +
+               'backend (-Dwayland), wayland-server and wayland-client 1.20 or newer, ' +
+               'wayland-scanner and GTK\'s Wayland backend (gtk4-wayland)')
+    if web_opt == 'enabled'
+      error('web=enabled, but ' + web_why)
+    endif
+    message('web wallpapers: ' + web_why + '; the web module is not built')
+    have_web = false
+    deps_web = []
+  endif
 endif
-if have_web and not have_x11
+if have_webhost_x11 and not have_x11
   # (with the X11 backend these come with deps_core)
   deps_web += x11
   if xi.found()
@@ -448,6 +484,9 @@ conf.set('HAVE_XRANDR', xrandr.found())
 conf.set('HAVE_PULSE', have_pulse)
 conf.set('HAVE_FFMPEG', have_ffmpeg)
 conf.set('HAVE_WEB', have_web)
+# the web module's page hosts (src/engine/webhostsel.h)
+conf.set('HAVE_WEBHOST_X11', have_webhost_x11)
+conf.set('HAVE_WEBHOST_WL', have_webhost_wl)
 conf.set_quoted('WALPE_VERSION', meson.project_version())
 conf.set_quoted('WALPE_CODENAME', walpe_codename)
 # optional heavy backends are dlopen'd modules (src/engine/modules.h)
@@ -542,14 +581,8 @@ core_dep = declare_dependency(link_with: core, include_directories: inc,
 # the code (wl-<name>-protocol.c) and of the xdg-shell client header are
 # chosen not to meet the ones the drawing backend generates from the same
 # XML: a build directory holds each output name once.
-# 1.20: the code names wl_output.name / description (wl_output 4) in its
-# listener and wl_surface.offset (wl_surface 5) in the page host's request
-# table; with an older libwayland those files would not compile, so the
-# Wayland parts are left out instead (the X11 build is unaffected)
-wl_client_dep = dependency('wayland-client', version: '>= 1.20', required: false)
-wl_server_dep = dependency('wayland-server', version: '>= 1.20', required: false)
-wl_scanner_prog = find_program('wayland-scanner', native: true, required: false)
-have_wl_scan = wl_scanner_prog.found()
+# (wl_client_dep, wl_server_dep and wayland-scanner: looked for above, with
+# the web module's page hosts)
 wl_gen = {}
 if have_wl_scan
   foreach name : ['ext-idle-notify-v1', 'ext-foreign-toplevel-list-v1',
@@ -660,24 +693,12 @@ if have_web
   web_srcs = ['src/engine/web.c', 'src/engine/webinput.c']
   web_args = ['-fvisibility=hidden']
   web_deps = deps_core + deps_web + [gtk4]
-  # Where a page's window lives while nobody sees it (src/engine/webhostsel.h):
-  # an off-screen X window (needs libX11 + GTK's X11 backend), or the
-  # module's own private Wayland display (src/engine/webhost_wl.c: needs
-  # libwayland-server, wayland-scanner for the server side of xdg-shell and
-  # GTK's Wayland backend). A build holds whichever its libraries allow;
-  # the private display only together with the Wayland backend: a daemon
-  # that can draw on X11 only always has an X display for the page's
-  # window, and its web module then links no Wayland library.
-  gtk4_wayland_dep = dependency('gtk4-wayland', required: false)
-  have_webhost_wl = (have_wayland and have_wl_scan and wl_server_dep.found() and
-                     wl_client_dep.found() and gtk4_wayland_dep.found())
+  # the page hosts found above (HAVE_WEBHOST_X11 / HAVE_WEBHOST_WL in
+  # walpe-build-config.h): the X11 one is code in web.c and webinput.c, the
+  # private one brings its display with it
   if have_webhost_wl
     web_srcs += ['src/engine/webhost_wl.c', wl_gen['xdg-shell'][1], wl_gen['xdg-shell'][2]]
-    web_args += ['-DHAVE_WEBHOST_WL']
     web_deps += [wl_server_dep, wl_client_dep, gtk4_wayland_dep]
-  endif
-  if not x11.found()
-    web_args += ['-DWALPE_WEB_NO_X11']
   endif
   web_mod = shared_module('walpe-web', web_srcs,
     name_prefix: '',
@@ -742,12 +763,13 @@ if have_wayland
   daemon_src += wl_generated
   daemon_deps += deps_wayland
 endif
-# the selection guard for the web module (it defines XSetSelectionOwner):
-# with the X11 backend always, as before; without it only when the web
-# module is built, which then brings libX11 into the process
+# the selection guard for the web module's X11 page host (it defines
+# XSetSelectionOwner): with the X11 backend always, as before; without it
+# only when that page host is built, which then brings libX11 into the
+# process. A build with neither has no X call to guard.
 if have_x11
   daemon_src += files('src/daemon/selguard.c')
-elif have_web
+elif have_webhost_x11
   daemon_src += files('src/daemon/selguard.c')
   daemon_deps += x11
 endif
@@ -761,7 +783,9 @@ daemon = executable('walpe-daemon', daemon_src,
 if with_tests
 # what walpe-daemon and the web module make the dynamic loader load: a
 # build without the Wayland backend names no Wayland library and has no
-# wl_* symbol left, and no build's daemon names libpulse-simple (scene
+# wl_* symbol left, a build without the X11 backend and the X11 page host
+# (-Dx11=disabled, or no libX11 on the system) names no X library and has
+# no X function left, and no build's daemon names libpulse-simple (scene
 # sound loads it with its first stream). tests/linkage_test.sh reads the
 # two files with readelf and nm; skipped without them. No display, no daemon.
 linkage_deps = [daemon]
@@ -770,7 +794,8 @@ if have_web
 endif
 test('linkage', find_program('sh'),
   args: [files('tests/linkage_test.sh'), meson.current_build_dir(),
-         have_wayland ? 'wayland' : 'nowayland'],
+         have_wayland ? 'wayland' : 'nowayland',
+         have_x11 or have_webhost_x11 ? 'x11' : 'nox11'],
   depends: linkage_deps, timeout: 60)
 endif  # with_tests
 
@@ -1860,11 +1885,13 @@ test('importsec', executable('importsec-test', 'tests/importsec_test.c',
 if have_web and have_x11
   websec_selown = executable('websec-selown', 'tests/websec_selown.c',
     dependencies: [x11], install: false, build_by_default: false)
-  test('websec', find_program('sh'),
-    args: [files('tests/websec_test.sh'), meson.current_build_dir()],
-    env: ['WALPE_BACKEND=x11'],     # its own Xvfb, also inside a Wayland session
-    depends: [daemon, ctl, web_mod, websec_selown],
-    is_parallel: false, timeout: 300)
+  if have_webhost_x11
+    test('websec', find_program('sh'),
+      args: [files('tests/websec_test.sh'), meson.current_build_dir()],
+      env: ['WALPE_BACKEND=x11'],     # its own Xvfb, also inside a Wayland session
+      depends: [daemon, ctl, web_mod, websec_selown],
+      is_parallel: false, timeout: 300)
+  endif
   # the same hostile page with its window on the private page host
   # (WALPE_WEB_HOST=private; the daemon itself still draws on the test's
   # Xvfb): the page loads and is captured, clicks reach it, and the X
@@ -2048,6 +2075,10 @@ endif
 
 summary({'x11': have_x11, 'wayland': have_wayland},
   section: 'Display backends (walpe-daemon)', bool_yn: true)
+if have_web
+  summary({'x11': have_webhost_x11, 'private': have_webhost_wl},
+    section: 'Page hosts of web wallpapers (walpe-web.so)', bool_yn: true)
+endif
 
 # What ./build.sh builds: the installed programs and modules, nothing else.
 # (In a build directory with -Dtests=true a plain `ninja -C build` also

@@ -9,8 +9,11 @@
  *    Where that window lives is the "page host" (webhostsel.h): an
  *    override-redirect X window off screen (X11, and Wayland through
  *    Xwayland), or a Wayland display of the module's own
- *    (webhost_wl.c; taken where there is no X display, or by name:
- *    WALPE_WEB_HOST=private). GTK talks to exactly
+ *    (webhost_wl.c; taken where there is no X display or none that
+ *    works, or by name: WALPE_WEB_HOST=private). Each is in the module
+ *    only when the build found what it needs (HAVE_WEBHOST_X11,
+ *    HAVE_WEBHOST_WL): a module without the X11 one includes no X header
+ *    and calls no X function. GTK talks to exactly
  *    one of them for the life of the process. Nothing else in this
  *    file depends on which: the capture reads GTK's render node, never
  *    the window system.
@@ -68,7 +71,7 @@
 #include <webkit/webkit.h>
 #include <libsoup/soup.h>
 /* the X11 page host: GTK's X11 backend and Xlib in this build */
-#if defined (GDK_WINDOWING_X11) && !defined (WALPE_WEB_NO_X11)
+#if defined (GDK_WINDOWING_X11) && defined (HAVE_WEBHOST_X11)
 #define WEB_HAVE_X11 1
 #include <gdk/x11/gdkx.h>
 #include <X11/Xlib.h>
