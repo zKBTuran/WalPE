@@ -97,6 +97,14 @@ on wlroots' headless backend with the pixman renderer and a configuration of its
 scripts/displayenv.py run --display sway -- build/walpe-daemon`). `WALPE_CHECK_STRICT=1`
 turns "cannot run here" into a failure.
 
+One test talks to a sound server: `audio-server` starts a PulseAudio of its own (`pulseaudio`
+and `pactl` in a temporary directory, null sinks only, no session bus) and plays tones into
+it: which source the capture of audio-reactive wallpapers reads, that it is not moved to a
+microphone, that it follows the default output
+([AUDIO-REACTIVE.md](AUDIO-REACTIVE.md#where-the-sound-comes-from)). Nothing is heard and
+the session's sound server is not contacted; it is skipped where the two programs are
+missing. Every other sound test uses stand-ins or the null device.
+
 Sanitizer runs have test setups of their own:
 
 ```sh

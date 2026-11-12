@@ -15,8 +15,8 @@ Workshop and the tray icon. Building and installing is in [BUILDING.md](BUILDING
 | Puppet warp layers (`.mdl`) | yes | skinned 2D mesh, bones, keyframed bone animations |
 | Video textures (MP4 inside a `.tex`) | yes | one shared decoder per unique texture; a clip larger than it is shown is played from a converted copy of the size shown ([Video](#video)) |
 | SceneScript | subset | QuickJS: scripts on layer `text` / `visible` / `alpha` / `origin` / `scale` / `angles` / `color`, on effect visibility and material constants, media events, property animations, cursor events |
-| Media integration | yes | the "now playing" session of any MPRIS player: title, artist, album art with its colours, playback state, timeline; for scene scripts and web pages |
-| Audio-reactive wallpapers | yes | captures the default output monitor (PulseAudio or PipeWire's pipewire-pulse) while such a wallpaper is visible |
+| Media integration | yes | the "now playing" session of any MPRIS player: title, artist, album art with its colours, playback state, timeline; for scene scripts and web pages ([AUDIO-REACTIVE.md](AUDIO-REACTIVE.md#media-integration)) |
+| Audio-reactive wallpapers | yes | scenes (shader spectrum uniforms, SceneScript audio buffers, particle emitters) and web pages (audio listener) get the spectrum of what the default output plays - its monitor, never a microphone - through PulseAudio or PipeWire's pipewire-pulse, while such a wallpaper is shown and not paused ([AUDIO-REACTIVE.md](AUDIO-REACTIVE.md)) |
 | **Video** | yes | in-house MP4 demuxer + libavcodec H.264; other codecs and containers are converted once with ffmpeg ([Video](#video)) |
 | **Web** (`type: web`) | yes | WebKitGTK 6 off screen, pages served from a token-protected loopback server; `wallpaperPropertyListener`, media and audio listeners; real mouse input on the empty desktop |
 | GIF / still images | yes | images render once (no idle cost) |

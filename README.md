@@ -99,6 +99,8 @@ More: [docs/USAGE.md](docs/USAGE.md).
 - [RESOLUTION.md](docs/RESOLUTION.md): render resolution per monitor
 - [SCENE-FEATURES.md](docs/SCENE-FEATURES.md): parallax, bloom, camera shake, sprite sheets
 - [SOUND.md](docs/SOUND.md): wallpaper sound
+- [AUDIO-REACTIVE.md](docs/AUDIO-REACTIVE.md): wallpapers that react to sound or show what
+  is playing: what they get, where it comes from (never a microphone), what it costs
 - [VIDEO.md](docs/VIDEO.md): playback, import, hardware decoding
 - [SECURITY.md](docs/SECURITY.md): limits on wallpaper files, reporting a problem
 - [DEVELOPMENT.md](docs/DEVELOPMENT.md): architecture, tests, developer tools

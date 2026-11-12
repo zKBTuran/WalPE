@@ -195,7 +195,8 @@ The other way round, `WALPE_MEM_STATS=1` switches memory numbers by kind in
 | `WALPE_SS_PROFILE=1` | off | every 300 frames the log names the ten scripts that cost the most CPU |
 | `WALPE_TRACE_ANIM=1` / `WALPE_TRACE_CURSOR=1` | off | log property animation events / where cursor events land |
 | `WALPE_NO_MEDIA=1` | off | media integration off (scripts and pages see `enabled: false`) |
-| `WALPE_NO_AUDIO=1` / `WALPE_AUDIO_SOURCE=name` / `WALPE_AUDIO_HZ=n` | on / default output monitor / 60 | audio capture off / another Pulse source / spectra per second |
+| `WALPE_NO_AUDIO=1` / `WALPE_AUDIO_SOURCE=name` / `WALPE_AUDIO_HZ=n` | on / the default output's monitor / 30 | audio capture off, for scenes and web pages / this source instead, a microphone included (`pactl list short sources`) / spectra per second, 10..200 ([AUDIO-REACTIVE.md](AUDIO-REACTIVE.md)) |
+| `WALPE_AUDIO_REST=0` | rests | a scene in which only the audio spectrum moves keeps its frame clock while nothing plays |
 
 ## Video
 

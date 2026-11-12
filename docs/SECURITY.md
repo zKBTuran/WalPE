@@ -124,7 +124,9 @@ What it gets and what it does not, as the code is today:
   the selections of your session (X11: the daemon owns none unless `WALPE_WEB_SELECTIONS=1`
   is set; the private page host has no clipboard at all).
 - **What it can ask of the daemon**: three things, by a message of at most 64 KiB - the
-  audio spectrum, the "now playing" state, and that a pointer event arrived. A page that
+  audio spectrum (128 numbers 30 times a second, of what the default output plays and
+  never of a microphone: [AUDIO-REACTIVE.md](AUDIO-REACTIVE.md#where-the-sound-comes-from)),
+  the "now playing" state, and that a pointer event arrived. A page that
   sends megabytes, or more than 20000 messages in ten seconds, is stopped (status:
   `web_error`). A page whose process dies is loaded again, three times within a minute at
   most.

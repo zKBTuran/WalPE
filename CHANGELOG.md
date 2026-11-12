@@ -111,6 +111,48 @@ run.** One default changes: wallpaper sound is on, at half volume (under Sound).
   0.3 s is loaded again and from then on started again each time it ends. That costs
   one break of 0.6 to 1 s at the first repeat and about 0.1 s at each later one.
 
+### Audio-reactive wallpapers and media integration
+
+Measured against PulseAudio 16.1 and PipeWire 1.0.5 with null sinks and test tones, and a
+stand-in music player; no sound card and no microphone was there
+([AUDIO-REACTIVE.md](docs/AUDIO-REACTIVE.md), new, says what a wallpaper gets, where it
+comes from and what it costs).
+
+- **A wallpaper that reacts to sound could end up listening to a microphone.** WalPE
+  captures the monitor of the default output - what the computer plays. On PulseAudio,
+  on a machine without a microphone, plugging one in (a headset, a camera) made the sound
+  server move WalPE's capture onto it: the bars then followed the room, a web wallpaper's
+  audio listener was handed the room's spectrum, and `walpe-ctl status` went on saying
+  that the output was captured. The capture now stays on the output's monitor whatever the
+  server's defaults do, checks which source it is on before it analyses anything, and
+  refuses one that is not the monitor of an output. Status and log name the source. Only
+  `WALPE_AUDIO_SOURCE=<source>` makes it read something else.
+- After a switch of the default output (loudspeakers to headphones) with a microphone
+  present, the bars stood still on PulseAudio until the wallpaper was paused and resumed:
+  the capture stayed on the old output. It follows the default output now, and goes on
+  with the next one when its output disappears.
+- PipeWire: while an audio-reactive wallpaper was shown, the output device never
+  suspended - the capture kept it running and woke 40 times a second for silence. The
+  output now suspends when nothing plays, as without the wallpaper, and the capture does
+  not wake. `walpe-ctl status` says "waiting for ...: the stream starts when the output
+  plays" meanwhile.
+- A scene in which only the audio spectrum moves anything (a picture with audio bars)
+  no longer wakes 60 times a second while nothing plays: it rests until the first sound
+  (`WALPE_AUDIO_REST=0` in the daemon's environment keeps the old behaviour). With music
+  playing nothing changes.
+- `WALPE_NO_AUDIO=1` now stops the capture for web wallpapers too; it was looked at by
+  scenes only.
+- Media integration: a paused scene with a "now playing" widget no longer wakes once a
+  second, nor asks the music player for its position every 5 seconds, while something
+  plays (behind a fullscreen film, for example). What the player announces meanwhile -
+  another track, a pause - is still there when the wallpaper comes back.
+- Media integration: `contentType` is `music` (it was `audio`, a word Wallpaper Engine
+  never sends, so wallpapers that look at it took a song for neither music nor video).
+- Web wallpapers: `window.wallpaperMediaIntegration.playback.PLAYING` / `.PAUSED` /
+  `.STOPPED` exist next to `PLAYBACK_PLAYING` ...: Wallpaper Engine's documentation uses
+  both spellings, and a page written with the first one threw an error in its playback
+  listener.
+
 ### Tray
 
 - The menu on KDE Plasma, and on any panel that keeps the entries it has read: when the
