@@ -467,8 +467,69 @@ def case_monitors(env, W):
     env.stop_daemon()
 
 
+# ---------------------------------------------------------------- webunload
+def case_webunload(env, W):
+    """the restart in place that unloads the web module (web_unload) waits while a copy is being made"""
+    B = ("B", 640, 360, 640, 0)
+    said = "restarting in place to unload the web module"
+    web = os.path.join(env.tmp, "wallpapers", "page")
+    lc.gen_web(web)
+    rc.jdump(env.config, {"config_version": 4, "fps": 30, "pause_covered": False, "pause_dpms": False,
+                          "video_resolution": "auto", "current": W["red"]})
+    # (at the lowest priority: the conversion has to last)
+    if not check(env.start_daemon([A, B], extra={"WALPE_CONVERT_BACKGROUND": "1"}), "webunload: daemon started"):
+        return
+    st = env.state()
+    if "web_accel" not in st or "web_unload" not in st:
+        print("skip  webunload (no web module in this build)", flush=True)
+        return
+
+    def modules():
+        return env.state().get("modules", "")
+
+    def page_on_b():
+        env.open(web, 1)
+        return lc.loaded(env, web, 1, 120) and "web=loaded" in modules()
+
+    lc.loaded(env, W["red"])
+    if not page_on_b():
+        print("skip  webunload (no web wallpaper came up here)", flush=True)
+        return
+    pid = env.daemon.pid
+    mark = env.mark()
+    env.open(W["long"], 0)
+    lc.loaded(env, W["long"], 0)
+    kids = lc.wait_for(lambda: ffmpeg_children(pid, True), 60, 0.02)
+    # the last web wallpaper leaves while the copy is being made
+    env.open(W["red"], 1)
+    lc.loaded(env, W["red"], 1)
+    time.sleep(1.5)
+    if not kids or "for its scene made" in env.since(mark):
+        print("skip  webunload: the conversion of the long clip had ended", flush=True)
+    else:
+        check(said not in env.since(mark) and "web=loaded" in modules() and env.daemon.pid == pid,
+              "webunload: the last web wallpaper leaves while a copy is being made: no restart",
+              env.since(mark)[-300:])
+        check([k[0] for k in ffmpeg_children(pid, True)] == [k[0] for k in kids],
+              "webunload: ... and the same ffmpeg goes on converting", (kids, ffmpeg_children(pid, True)))
+    # no copy is being made: the same change restarts the daemon
+    env.open(W["red"], 0)
+    lc.loaded(env, W["red"], 0)
+    lc.wait_for(lambda: not ffmpeg_children(pid), 20, 0.1)
+    if not page_on_b():
+        print("skip  webunload: the web wallpaper did not come up again", flush=True)
+        return
+    mark = env.mark()
+    env.open(W["red"], 1)
+    ok = lc.wait_for(lambda: said in env.since(mark) and "web=not loaded" in modules(), 90, 0.3)
+    check(bool(ok) and env.daemon.poll() is None and env.daemon.pid == pid,
+          "webunload: with no copy being made the daemon restarts in place and the web module is gone",
+          (env.since(mark)[-300:], modules()))
+    env.stop_daemon()
+
+
 CASES = [("copy", case_copy), ("switch", case_switch), ("restart", case_restart), ("cancel", case_cancel),
-         ("small", case_small), ("monitors", case_monitors)]
+         ("small", case_small), ("monitors", case_monitors), ("webunload", case_webunload)]
 
 
 def main():

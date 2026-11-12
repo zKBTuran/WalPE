@@ -8801,7 +8801,8 @@ static gboolean web_accel_restart (gpointer user)
  *    that alternates between a page and a scene): the module then stays
  *    until a later change of wallpapers finds the time over;
  *  - while an import, a video conversion or a Workshop download runs (the
- *    restart would end it);
+ *    restart would end it), or the copy of a scene's video is being made
+ *    (sv_converting: it would be started again from nothing);
  *  - when the wallpapers of this change are previous ones opened again
  *    after a failed load (what failed is to stay in the status), or while a
  *    wallpaper is held back by the crash-loop guard (only this image knows);
@@ -8822,7 +8823,7 @@ static gboolean web_unload_cb (gpointer user)
     web_unload_pending = FALSE;
     if (D.restart)
         return G_SOURCE_REMOVE;     /* another restart got there first: it loads them */
-    if (Imp.active || Ws.active) {
+    if (Imp.active || Ws.active || sv_converting ()) {
         /* started by the same request, after the decision (a conversion
          * that followed the one just finished): no restart then, and the
          * wallpapers that were not loaded for it are loaded here */
@@ -8845,7 +8846,7 @@ static gboolean web_unload_due (gboolean changed)
     if (web_unload_pending)
         return TRUE;        /* (a second change before the restart's idle has run) */
     if (!changed || restore_apply || !D.cfg->web_unload || D.windowed || D.restart || !D.loop ||
-        !walpe_web_module (FALSE) || Imp.active || Ws.active ||
+        !walpe_web_module (FALSE) || Imp.active || Ws.active || sv_converting () ||
         (load_skip && g_hash_table_size (load_skip) > 0))
         return FALSE;
     for (GList *l = D.mons; l; l = l->next) {
