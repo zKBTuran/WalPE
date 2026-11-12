@@ -5323,6 +5323,7 @@ static CvViewer *cv_viewer_new (CvSource *src)
     vw->base.set_paused = cvv_set_paused;
     vw->base.set_volume = cvv_set_volume;
     vw->base.pos = -1;
+    vw->base.period = src->orig_fps > 0 ? src->orig_n / src->orig_fps : 0;
     vw->base.gl_free = cvv_gl_free;
     vw->base.free = cvv_free;
     vw->src = src;

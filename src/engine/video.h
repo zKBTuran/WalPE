@@ -37,6 +37,10 @@ struct WalpeVideo {
      * falls back where the clip starts again. -1 = no picture yet, or one
      * without a time stamp. What the sound track follows (video.c). */
     double pos;
+    /* set when the video is made (module ABI 14): how long one pass of the
+     * clip takes, in seconds - its pictures times their interval; 0 = not
+     * known */
+    double period;
 };
 
 /* Hardware video decoding (config "video_hwdec": off | auto | <api>, and

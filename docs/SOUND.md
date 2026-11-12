@@ -151,12 +151,20 @@ named after the wallpaper.
   without a sound track gets an empty file of that name, so nobody asks again. A changed
   video gets a new file; files nothing played for 90 days are removed.
 - **With sound off nothing of this happens**: no ffmpeg, no file, no thread, no stream.
-- The picture leads. The track is started again where the clip starts again, and told the
-  picture's place when it begins to be heard or when the two are more than 0.3 s apart
-  (a resume after the other monitor played on). So nothing adds up over the passes of a
-  loop; where the clip starts again there is a break of some hundredths of a second in
-  the sound. A track shorter than the clip is silent until the clip starts again, a longer
-  one is cut there.
+- **Where the clip starts again nothing is heard of it.** One pass of the track is one pass
+  of the clip, to the sample, and the track loops by itself in one stream: the file's first
+  sample follows the last one of the pass. Measured with a clip of 4 s whose track is a
+  660 Hz tone that fits its length: over five passes the recorded tone never falls below
+  90 % of its level and its phase never moves by more than 7 degrees in 5 ms - exactly what
+  the file's own samples give when they are put end to end (before this, 0.12 s of silence
+  at every pass). A track whose content does jump there (a tone that does not fit) keeps
+  its jump: it is the file's, and it is not smoothed.
+- A track shorter than the clip is followed by silence until the clip starts again. A
+  longer one is cut there: without more ado when it is longer by up to 50 ms (the padding
+  of an encoder's last frame - 10.7 ms in the test clip), with a fade of 5 ms otherwise.
+- The picture leads all the same: the track is told the picture's place when it begins to
+  be heard and when the two are more than 0.3 s apart (a resume after the other monitor
+  played on; after hours, the two clocks). That is a fade of 20 ms out and 10 ms in.
 - Paused wallpaper: silent, and it goes on where the picture goes on. The same video on
   two monitors sounds once.
 - **Videos imported before this version have no sound track** - the import dropped it.

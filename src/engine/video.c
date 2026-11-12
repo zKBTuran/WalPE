@@ -217,6 +217,7 @@ typedef struct {
     double snd_pos;         /* the picture's place when the track was last looked at, -1 = none */
     gboolean snd_heard;     /* the track was heard then */
     gint64 snd_set_us;      /* when the track was last told a place */
+    double snd_period;      /* the length of a pass the track loops with, 0 = none (started with every pass) */
 } VideoContent;
 
 /* ---------------------------------------------------------- the sound track
@@ -235,21 +236,30 @@ typedef struct {
  * the player's own thread when it is about to be heard for the first time
  * (walpe_sound_set_prepare); the picture never waits for it.
  *
- * The picture leads. Every frame that is drawn says where in the clip its
- * picture is (WalpeVideo.pos); the track is told that place
- * (walpe_sound_restart_at) when the clip starts again, when the track
- * begins to be heard (sound switched on, the volume raised, the other
- * monitor's instance fell silent), and when the two are more than
- * VC_SOUND_SLACK_S apart (a resume after another monitor played on, a
- * decoder that restarted somewhere else). Each pass of the clip thus
- * starts the track anew: what the two clocks differ by cannot add up over
- * the passes, and inside one pass they are the monotonic clock and the
- * sound device's, which differ by some ten milliseconds an hour. A track
- * that is shorter than the clip is silent until the clip starts again; one
- * that is longer is cut there. */
+ * One pass of the track is one pass of the clip, to the sample. The track
+ * loops by itself (walpe_sound_set_period: the clip's own length, which
+ * the module says, WalpeVideo.period), in one stream, the file's first
+ * sample after the last one of the pass: where the clip starts again
+ * nothing is stopped, faded or started, and what is heard there is what
+ * the file has there. A track that is shorter than the clip is followed by
+ * silence until the clip starts again, a longer one is cut there (the few
+ * milliseconds an encoder pads a track with are longer in this sense).
+ *
+ * The picture leads all the same. Every frame that is drawn says where in
+ * the clip its picture is (WalpeVideo.pos); the track is told that place
+ * (walpe_sound_restart_at: a short fade, the same stream) when it begins
+ * to be heard - the first picture, sound switched on, the volume raised,
+ * the other monitor's instance fell silent - and when the two are more
+ * than VC_SOUND_SLACK_S apart: a resume after another monitor played on, a
+ * decoder that restarted somewhere else, or, after hours, the difference
+ * between the monotonic clock and the sound device's. A clip whose length
+ * the module does not know has its track started again with every pass. */
 #define VC_SOUND_SLACK_S 0.30
 #define VC_SOUND_AGAIN_US (G_USEC_PER_SEC)   /* not told a place more often (the player's
                                               * answer to the last one is not in its place yet) */
+/* the player's place is what it handed to its stream, which holds up to a
+ * fifth of a second: on average it is this far ahead of what is heard */
+#define VC_SOUND_AHEAD_S 0.10
 
 /* the sound player's thread, once, before it opens the track's file */
 static void vc_sound_prepare (const char *media)
@@ -296,8 +306,12 @@ static void vc_sound_new (VideoContent *s, const char *origin)
     g_free (sw);
     g_free (vol);
     const char *files[1] = { file };
-    const WalpeSoundSpec spec = { files, 1, 1.0f, WALPE_SOUND_SINGLE, 0.0f, 0.0f, s->base.title };
+    const double period = s->v->period > 0.05 ? s->v->period : 0;
+    const WalpeSoundSpec spec = { files, 1, 1.0f, period > 0 ? WALPE_SOUND_LOOP : WALPE_SOUND_SINGLE,
+                                  0.0f, 0.0f, s->base.title };
     s->snd = walpe_sound_new (s->snd_group, &spec);
+    s->snd_period = period;
+    walpe_sound_set_period (s->snd, period);
     walpe_sound_set_prepare (s->snd, vc_sound_prepare, s->media);
     g_free (file);
 }
@@ -311,15 +325,19 @@ static void vc_sound_follow (VideoContent *s)
     const gboolean heard = walpe_sound_group_speaking (s->snd_group);
     const gint64 now = g_get_monotonic_time ();
     gboolean set = FALSE;
-    if (s->snd_pos < 0 || pos < s->snd_pos - VC_SOUND_SLACK_S) {
-        set = TRUE;                         /* the first picture, or the clip started again */
+    if (s->snd_pos < 0 || (s->snd_period <= 0 && pos < s->snd_pos - VC_SOUND_SLACK_S)) {
+        set = TRUE;                         /* the first picture (no length known: every pass) */
     } else if (heard && !s->snd_heard) {
         set = TRUE;                         /* it begins to be heard: from where the picture is */
     } else if (heard && now - s->snd_set_us > VC_SOUND_AGAIN_US && walpe_sound_is_playing (s->snd)) {
         WalpeSoundStats st;
         walpe_sound_stats (s->snd, &st);
-        if (st.running && st.rate > 0 && fabs ((double) st.pos / st.rate - pos) > VC_SOUND_SLACK_S)
-            set = TRUE;                     /* apart: a resume, a decoder that started over */
+        if (st.running && st.rate > 0) {
+            double d = (double) st.pos / st.rate - VC_SOUND_AHEAD_S - pos;
+            if (s->snd_period > 0)          /* (both are places in a pass: the nearer way round) */
+                d -= s->snd_period * round (d / s->snd_period);
+            set = fabs (d) > VC_SOUND_SLACK_S;  /* apart: a resume, a decoder that started over */
+        }
     }
     if (set) {
         walpe_sound_restart_at (s->snd, pos);

@@ -81,9 +81,10 @@ run.** One default changes: wallpaper sound is on, at half volume (under Sound).
   track of the wallpaper's file is taken out once with ffmpeg into the cache (FLAC), in
   the background and only when it is about to be heard, and played by what plays scene
   sound, under the same settings: `scene_sound` (or the wallpaper's `walpe_sound`),
-  `volume`, `mute`; silent while paused; the same video on two monitors sounds once. The
-  sound follows the picture: it starts again where the clip starts again. With sound off
-  nothing is started, opened or decoded. [SOUND.md](docs/SOUND.md#video-wallpapers).
+  `volume`, `mute`; silent while paused; the same video on two monitors sounds once. One
+  pass of the track is one pass of the clip, to the sample, in one stream: where the clip
+  starts again nothing is heard of it. With sound off nothing is started, opened or
+  decoded. [SOUND.md](docs/SOUND.md#video-wallpapers).
 - **An imported video keeps its sound track** (AAC in the MP4 the import writes). Up to
   0.14.0 the import dropped it: videos imported before have no sound and must be imported
   again from the original file. Workshop videos need nothing.
