@@ -8253,6 +8253,7 @@ static char *ipc_handler (const char *req, gpointer user)
     } else if (!g_strcmp0 (cmd, "quit")) {
         jb_bool (b, "ok", TRUE);
         quit = TRUE;
+        diag_quit_ipc ();   /* the log names the program that asked */
         /* The subscribers (the window, the tray) are told that the engine
          * leaves because it was asked to. To them the end of the connection
          * was all there was, the same as after a crash - so a window that
@@ -8881,11 +8882,15 @@ static void restart_exec (gboolean layout_stamp)
 #include <stdatomic.h>
 _Static_assert (ATOMIC_INT_LOCK_FREE == 2, "term_signal is stored from a signal handler");
 static atomic_int term_signal;   /* the signal that arrived (0 = none) */
+static atomic_int term_sender;   /* the process that sent it, as the kernel tells (0 = the
+                                  * kernel itself, or not told): for the log line only */
 static int term_fd = -1;         /* set before the handler is installed */
 
-static void term_handler (int sig)
+static void term_handler (int sig, siginfo_t *si, void *uctx)
 {
+    (void) uctx;
     int e = errno;
+    atomic_store (&term_sender, si && si->si_code <= 0 ? (int) si->si_pid : 0);
     atomic_store (&term_signal, sig);
     if (term_fd >= 0) {
         guint64 one = 1;
@@ -8899,7 +8904,7 @@ static gboolean quit_on_signal (gint fd, GIOCondition cond, gpointer user)
     (void) cond; (void) user;
     guint64 n;
     if (fd >= 0 && read (fd, &n, sizeof n) < 0) { /* only the wake-up mattered */ }
-    g_message ("signal: shutting down");
+    diag_quit_signal (atomic_load (&term_signal), atomic_load (&term_sender));
     g_main_loop_quit (D.loop);
     return G_SOURCE_CONTINUE;
 }
@@ -8924,8 +8929,8 @@ static void term_signals_init (void)
     g_unix_fd_add (term_fd, G_IO_IN, quit_on_signal, NULL);
     struct sigaction sa;
     memset (&sa, 0, sizeof sa);
-    sa.sa_handler = term_handler;
-    sa.sa_flags = SA_RESTART;
+    sa.sa_sigaction = term_handler;     /* (SA_SIGINFO: who sent it, for the log) */
+    sa.sa_flags = SA_RESTART | SA_SIGINFO;
     sigemptyset (&sa.sa_mask);
     for (guint i = 0; i < G_N_ELEMENTS (sigs); i++)
         sigaction (sigs[i], &sa, NULL);

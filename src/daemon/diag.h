@@ -14,6 +14,8 @@
  * there (diag_say), and `walpe-ctl diag` asks for it again at any time
  * ({"cmd":"diag"} -> {"ok":true,"text":...}).
  *
+ * diag_quit_ipc (), diag_quit_signal (): who asked the daemon to stop.
+ *
  * Everything is read from what the daemon holds anyway, on the main
  * thread, when it is asked or when the thing happens: no timer, no
  * thread, nothing on a frame's path. A wallpaper is named by the last part
@@ -167,4 +169,46 @@ static void diag_ipc (JsonBuilder *b)
     jb_bool (b, "ok", TRUE);
     jb_str (b, "text", t);
     g_free (t);
+}
+
+/* "quit" over the control socket: which program sent it (the socket tells
+ * the process id, /proc its name: walpe-ctl, walpe-tray, walpe = the
+ * window). Read once, when it happens. */
+static char *diag_comm (int pid)
+{
+    char *path = g_strdup_printf ("/proc/%d/comm", pid), *comm = NULL;
+    if (g_file_get_contents (path, &comm, NULL, NULL))
+        g_strchomp (comm);
+    g_free (path);
+    return comm;
+}
+
+static void diag_quit_ipc (void)
+{
+    int pid = walpe_ipc_current_pid ();
+    char *comm = pid > 0 ? diag_comm (pid) : NULL;
+    if (pid > 0)
+        g_message ("quit: asked for over the control socket by %s (pid %d): shutting down",
+                   comm && *comm ? walpe_log_strn (comm, 32) : "a process that is gone already", pid);
+    else
+        g_message ("quit: asked for over the control socket: shutting down");
+    g_free (comm);
+}
+
+/* A signal ended the daemon: which one, and the process that sent it where
+ * the kernel tells (sender 0 = the kernel itself: Ctrl+C, a terminal that
+ * was closed). sig 0 = not known (the fallback without a descriptor). */
+static void diag_quit_signal (int sig, int sender)
+{
+    const char *name = sig == SIGTERM ? "SIGTERM" : sig == SIGINT ? "SIGINT (Ctrl+C)"
+                       : sig == SIGHUP ? "SIGHUP (its terminal was closed)" : NULL;
+    char *comm = sender > 0 ? diag_comm (sender) : NULL;
+    if (!name)
+        g_message ("signal: shutting down");
+    else if (sender > 0)
+        g_message ("signal %s from %s (pid %d): shutting down", name,
+                   comm && *comm ? walpe_log_strn (comm, 32) : "a process that is gone already", sender);
+    else
+        g_message ("signal %s: shutting down", name);
+    g_free (comm);
 }

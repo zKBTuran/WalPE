@@ -311,6 +311,18 @@ guint walpe_ipc_subscribers (void)
     return n_subscribed;
 }
 
+int walpe_ipc_current_pid (void)
+{
+    if (!current || !current->conn)
+        return 0;
+    GCredentials *cr = g_socket_get_credentials (g_socket_connection_get_socket (current->conn), NULL);
+    if (!cr)
+        return 0;
+    pid_t pid = g_credentials_get_unix_pid (cr, NULL);
+    g_object_unref (cr);
+    return pid > 0 ? (int) pid : 0;
+}
+
 /* one line to every subscriber. Never blocks: a subscriber whose socket
  * buffer is full (it stopped reading) is dropped instead. */
 void walpe_ipc_broadcast (const char *line)

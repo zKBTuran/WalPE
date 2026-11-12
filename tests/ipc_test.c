@@ -6,8 +6,9 @@
  * runs (single-instance lock), a client that never reads does not hold
  * the server up for other clients and is dropped, requests sent in one go
  * are answered in order to a client that reads late, the place is free
- * again after walpe_ipc_release, and requests that queued up on a handed-over
- * socket can be dropped unanswered. */
+ * again after walpe_ipc_release, requests that queued up on a handed-over
+ * socket can be dropped unanswered, and a handler is told the process id of
+ * its client (walpe_ipc_current_pid: the daemon's log line for "quit"). */
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <errno.h>
@@ -43,6 +44,8 @@ static char *handler (const char *req, gpointer user)
         g_string_append (s, "\"}");
         return g_string_free (s, FALSE);
     }
+    if (strstr (req, "whoami"))
+        return g_strdup_printf ("{\"ok\":true,\"pid\":%d}", walpe_ipc_current_pid ());
     return g_strdup_printf ("{\"ok\":true,\"echo\":%u}", (guint) strlen (req));
 }
 
@@ -65,6 +68,15 @@ static gpointer client_thread (gpointer u)
     char *r = walpe_ipc_request (sock, "{\"cmd\":\"hello\"}", 3000);
     CHECK (r && strstr (r, "\"ok\":true"));
     g_free (r);
+
+    /* the handler knows who asks: this process (the client is a thread of it) */
+    {
+        char *want = g_strdup_printf ("\"pid\":%d}", (int) getpid ());
+        r = walpe_ipc_request (sock, "{\"cmd\":\"whoami\"}", 3000);
+        CHECK (r && strstr (r, want));
+        g_free (r);
+        g_free (want);
+    }
 
     /* a reply well above the old 64 KiB limit arrives whole */
     r = walpe_ipc_request (sock, "{\"big\":300000}", 5000);
@@ -252,6 +264,7 @@ int main (void)
     CHECK (!walpe_daemon_running (sock));           /* nothing there yet */
     CHECK (walpe_ipc_request (sock, "{}", 200) == NULL);
     mode_t old = umask (0);                         /* the mode must not depend on it */
+    CHECK (walpe_ipc_current_pid () == 0);          /* outside a handler: nobody */
     CHECK (walpe_ipc_serve (sock, handler, NULL));
     umask (old);
     GThread *t = g_thread_new ("client", client_thread, NULL);

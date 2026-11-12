@@ -34,6 +34,10 @@ int      walpe_ipc_drop_queued (void);
  * works on a request: that connection then stays a subscriber and gets
  * every walpe_ipc_broadcast() line (FALSE: no room / not in a handler). */
 gboolean walpe_ipc_subscribe_current (void);
+/* Inside a handler: the process id of the client whose request it is, as
+ * the socket tells it (SO_PEERCRED); 0 = not in a handler, or not told.
+ * For the log line of a request like "quit": asked once, when it happens. */
+int walpe_ipc_current_pid (void);
 guint walpe_ipc_subscribers (void);
 void walpe_ipc_broadcast (const char *line);
 
