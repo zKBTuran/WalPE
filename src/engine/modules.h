@@ -55,7 +55,8 @@
  * and, after them, `mem_stats`; WalpeContent ends with `mem_stats`
  * (`walpe-ctl mem`, memreport.h).
  * 14: WalpeWebModule ends with `web_sound` (the volume setting for the
- * sound of web pages, web.h walpe_web_sound).
+ * sound of web pages, web.h walpe_web_sound); WalpeVideo ends with `pos`
+ * (where in the clip the picture on screen is, for its sound track).
  *
  * NEVER UNLOADED. A module that was loaded stays loaded until the process
  * ends (modload.c closes a library only when it has no entry symbol). The

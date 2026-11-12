@@ -32,6 +32,11 @@ struct WalpeVideo {
      * 0 = the surface's size). Frames need not be kept larger than they
      * are shown at that size. */
     int render_w, render_h;
+    /* set by gl_render (module ABI 14): the place in the clip of the
+     * picture that is on this monitor - its own time stamp in seconds; it
+     * falls back where the clip starts again. -1 = no picture yet, or one
+     * without a time stamp. What the sound track follows (video.c). */
+    double pos;
 };
 
 /* Hardware video decoding (config "video_hwdec": off | auto | <api>, and

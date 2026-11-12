@@ -4962,15 +4962,19 @@ static void conv_cache_tidy (void)
     gint64 now = g_get_real_time () / G_USEC_PER_SEC;
     const char *n;
     while (d && (n = g_dir_read_name (d))) {
-        gboolean part = g_str_has_suffix (n, ".mp4.part");
-        if (!part && !g_str_has_suffix (n, ".mp4"))
+        /* (and the sound tracks taken out of video wallpapers, import.h
+         * walpe_video_sound_file, under the same two rules) */
+        gboolean part = g_str_has_suffix (n, ".mp4.part") || g_str_has_suffix (n, "-sound.flac.part");
+        if (!part && !g_str_has_suffix (n, ".mp4") && !g_str_has_suffix (n, "-sound.flac"))
             continue;
         char *p = g_build_filename (dir, n, NULL);
         GStatBuf st;
         if (g_lstat (p, &st) == 0 && S_ISREG (st.st_mode) &&
             (part || now - (gint64) st.st_mtime > (gint64) CONV_CACHE_DAYS * 86400)) {
-            g_message ("video: removing %s (%s)", p, part ? "unfinished conversion"
-                                                          : "converted copy not used for a long time");
+            g_message ("video: removing %s (%s)", p,
+                       part ? "unfinished conversion"
+                       : g_str_has_suffix (n, ".flac") ? "sound track not used for a long time"
+                       : "converted copy not used for a long time");
             g_remove (p);
         }
         g_free (p);

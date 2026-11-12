@@ -5127,9 +5127,10 @@ static gboolean cv_viewer_upload (CvViewer *vw, int *bw, int *bh, gint64 *next_u
         if (shown && f->seq <= (guint64) cv_md5_n ())
             cv_frame_md5 (f, "upload", src->path);
         g_mutex_lock (&src->lock);
-        if (shown)
+        if (shown) {
             vw->drawn_seq = f->seq;
-        else
+            vw->base.pos = f->raw;
+        } else
             vw->skip_seq = f->seq;
         vw->st_upload += c1 - c0;
         vw->st_bytes += bytes;
@@ -5321,6 +5322,7 @@ static CvViewer *cv_viewer_new (CvSource *src)
     vw->base.gl_render = cvv_gl_render;
     vw->base.set_paused = cvv_set_paused;
     vw->base.set_volume = cvv_set_volume;
+    vw->base.pos = -1;
     vw->base.gl_free = cvv_gl_free;
     vw->base.free = cvv_free;
     vw->src = src;

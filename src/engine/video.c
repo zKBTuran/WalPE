@@ -1,14 +1,18 @@
 /* video.c - video content wrapper. The mpv backend was removed (resource
  * decision: libmpv cost ~150MB extra RSS with no visual benefit); video
  * playback is the in-house MP4 demuxer + libavcodec H.264 software decode
- * (video_custom.c). Playback is silent: there is no audio path. */
+ * (video_custom.c). The player decodes pictures only; a video wallpaper's
+ * sound track is played by the scene sound player from a file of its own
+ * (see "the sound track" below). */
 #include "walpe-build-config.h" /* HAVE_FFMPEG */
 #include "video.h"
 #include "video_hwsel.h"   /* the words of the "video_hwdec" setting */
 #include "glutil.h"
 #include "common/config.h" /* IWYU pragma: keep */
-#include "common/import.h" /* walpe_video_cache_file */
+#include "common/import.h" /* walpe_video_cache_file, walpe_video_sound_file */
+#include "scenesound.h"    /* a video wallpaper's sound track */
 #include <glib/gstdio.h>
+#include <math.h>
 #include <string.h>
 #include <utime.h>
 
@@ -206,7 +210,117 @@ typedef struct {
     WalpeLoadOpts opts;
     char *media; /* actual media file */
     int fps;     /* the monitor's frame rate limit (load, set_fps); 0 = unknown */
+    /* the sound track (vc_sound_*; NULL = none: a program that plays no
+     * sound, or a video known to have no track) */
+    WalpeSoundGroup *snd_group;
+    WalpeSound *snd;
+    double snd_pos;         /* the picture's place when the track was last looked at, -1 = none */
+    gboolean snd_heard;     /* the track was heard then */
+    gint64 snd_set_us;      /* when the track was last told a place */
 } VideoContent;
+
+/* ---------------------------------------------------------- the sound track
+ * A video wallpaper's sound is not decoded by the video player. The first
+ * sound track of the wallpaper's file is taken out once into a FLAC file in
+ * the cache (common/import.h walpe_video_sound_extract: ffmpeg, the program
+ * imports and conversions already use) and played by the scene sound player
+ * (scenesound.h), as one "single" layer of a group of its own. So it obeys
+ * what scene sound obeys - the setting "scene_sound" or the wallpaper's own
+ * switch "walpe_sound", "volume", "mute", silent while the wallpaper is
+ * paused, heard once when two monitors show the same video - and costs
+ * what a silent scene layer costs while it is not heard: no thread, no
+ * stream, no file opened, ffmpeg never started. The track is taken out by
+ * the player's own thread when it is about to be heard for the first time
+ * (walpe_sound_set_prepare); the picture never waits for it.
+ *
+ * The picture leads. Every frame that is drawn says where in the clip its
+ * picture is (WalpeVideo.pos); the track is told that place
+ * (walpe_sound_restart_at) when the clip starts again, when the track
+ * begins to be heard (sound switched on, the volume raised, the other
+ * monitor's instance fell silent), and when the two are more than
+ * VC_SOUND_SLACK_S apart (a resume after another monitor played on, a
+ * decoder that restarted somewhere else). Each pass of the clip thus
+ * starts the track anew: what the two clocks differ by cannot add up over
+ * the passes, and inside one pass they are the monotonic clock and the
+ * sound device's, which differ by some ten milliseconds an hour. A track
+ * that is shorter than the clip is silent until the clip starts again; one
+ * that is longer is cut there. */
+#define VC_SOUND_SLACK_S 0.30
+#define VC_SOUND_AGAIN_US (G_USEC_PER_SEC)   /* not told a place more often (the player's
+                                              * answer to the last one is not in its place yet) */
+
+/* the sound player's thread, once, before it opens the track's file */
+static void vc_sound_prepare (const char *media)
+{
+    char *file = walpe_video_sound_file (media);
+    if (!file || g_file_test (file, G_FILE_TEST_EXISTS)) {
+        if (file)
+            g_utime (file, NULL);   /* in use: the daemon removes what nothing played for months */
+        g_free (file);
+        return;
+    }
+    char *err = NULL;
+    const gint64 t0 = g_get_monotonic_time ();
+    int r = walpe_video_sound_extract (media, file, &err);
+    if (r > 0)
+        g_message ("video: sound track of %s taken out into %s (%.1f s)", media, file,
+                   (g_get_monotonic_time () - t0) / 1e6);
+    else if (r == 0)
+        g_message ("video: %s has no sound track", media);
+    else
+        g_warning ("video: the sound track of %s could not be taken out (%s): the video stays silent",
+                   media, err ? err : "?");
+    g_free (err);
+    g_free (file);
+}
+
+static void vc_sound_new (VideoContent *s, const char *origin)
+{
+    s->snd_pos = -1;
+    if (!walpe_sound_allowed ())
+        return;
+    char *file = walpe_video_sound_file (s->media);
+    GStatBuf st;
+    if (!file || (g_stat (file, &st) == 0 && st.st_size == 0)) {
+        g_free (file);      /* (the empty file: this video has no sound track) */
+        return;
+    }
+    char *sw = walpe_config_get_prop (origin, "walpe_sound");
+    s->snd_group = walpe_sound_group_new (origin, walpe_sound_switch_parse (sw));
+    g_free (sw);
+    const char *files[1] = { file };
+    const WalpeSoundSpec spec = { files, 1, 1.0f, WALPE_SOUND_SINGLE, 0.0f, 0.0f, s->base.title };
+    s->snd = walpe_sound_new (s->snd_group, &spec);
+    walpe_sound_set_prepare (s->snd, vc_sound_prepare, s->media);
+    g_free (file);
+}
+
+/* render thread, after a frame was drawn: the track follows the picture */
+static void vc_sound_follow (VideoContent *s)
+{
+    const double pos = s->v->pos;
+    if (!s->snd || pos < 0)
+        return;
+    const gboolean heard = walpe_sound_group_speaking (s->snd_group);
+    const gint64 now = g_get_monotonic_time ();
+    gboolean set = FALSE;
+    if (s->snd_pos < 0 || pos < s->snd_pos - VC_SOUND_SLACK_S) {
+        set = TRUE;                         /* the first picture, or the clip started again */
+    } else if (heard && !s->snd_heard) {
+        set = TRUE;                         /* it begins to be heard: from where the picture is */
+    } else if (heard && now - s->snd_set_us > VC_SOUND_AGAIN_US && walpe_sound_is_playing (s->snd)) {
+        WalpeSoundStats st;
+        walpe_sound_stats (s->snd, &st);
+        if (st.running && st.rate > 0 && fabs ((double) st.pos / st.rate - pos) > VC_SOUND_SLACK_S)
+            set = TRUE;                     /* apart: a resume, a decoder that started over */
+    }
+    if (set) {
+        walpe_sound_restart_at (s->snd, pos);
+        s->snd_set_us = now;
+    }
+    s->snd_pos = pos;
+    s->snd_heard = heard;
+}
 
 static void hook_request_redraw (VideoContent *s)
 {
@@ -242,6 +356,7 @@ static gboolean vc_gl_render (WalpeContent *c, int w, int h, float px, float py)
     video_frame_limit = 0;
     c->next_frame_us = s->v->next_frame_us; /* presentation beat */
     c->first_frame_pending = s->v->no_frame;
+    vc_sound_follow (s);
     if (!ok) {
         g_warning ("video render: %s", err ? err->message : "?");
         return FALSE;
@@ -261,6 +376,8 @@ static void vc_set_paused (WalpeContent *c, gboolean p)
     VideoContent *s = (VideoContent *) c;
     if (s->v->set_paused)
         s->v->set_paused (s->v, p);
+    if (s->snd_group)       /* silent while paused; it goes on where it stopped */
+        walpe_sound_group_set_active (s->snd_group, !p);
 }
 
 /* render thread: the monitor's frame rate limit changed. A video keeps
@@ -281,6 +398,7 @@ static void vc_set_volume (WalpeContent *c, double v)
 static void vc_free (WalpeContent *c)
 {
     VideoContent *s = (VideoContent *) c;
+    g_clear_pointer (&s->snd_group, walpe_sound_group_free);    /* (its players with it) */
     if (s->v) {
         /* release GL resources with the context current, then the backend */
         if (s->v->gl_free)
@@ -339,6 +457,9 @@ WalpeContent *walpe_video_content_new (const char *path, const WalpeLoadOpts *op
         return NULL;
     }
     walpe_content_fit (opts ? opts->origin_dir : path, &s->v->fit);
+    vc_sound_new (s, opts && opts->origin_dir ? opts->origin_dir : path);
+    if (s->snd_group)       /* (the daemon says "paused" when it is: set_paused) */
+        walpe_sound_group_set_active (s->snd_group, TRUE);
     return &s->base;
 #else
     g_set_error (err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
