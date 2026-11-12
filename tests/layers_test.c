@@ -67,7 +67,8 @@ static void test_keys (void)
     CHECK (walpe_layer_key_parse ("-~2:n", &id, &nth, &name) && id == -1 && nth == 1);
     CHECK (walpe_layer_key_parse ("0:", &id, NULL, NULL) && id == 0);
     static const char *const bad[] = { "", "Cover", "123", ":x", "12a:x", "~2:x", "5~:x", "5~1:x",
-                                       "5~0:x", "-5:x", "1234567890:x", "5~x:y", " 5:x", NULL };
+                                       "5~0:x", "-5:x", "1234567890:x", "9999999999:x", "5~9999999999:x",
+                                       "5~x:y", " 5:x", NULL };
     for (int i = 0; bad[i]; i++)
         CHECK (!walpe_layer_key_parse (bad[i], NULL, NULL, NULL));
     CHECK (!walpe_layer_key_parse (NULL, NULL, NULL, NULL));

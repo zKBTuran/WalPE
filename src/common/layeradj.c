@@ -125,7 +125,8 @@ static int digits (const char **p)
     const char *s = *p;
     int n = 0, v = 0;
     while (g_ascii_isdigit (s[n]) && n < 10) {
-        v = v * 10 + (s[n] - '0');
+        if (n < 9)      /* (a tenth digit is counted, not added: 9999999999 is no int) */
+            v = v * 10 + (s[n] - '0');
         n++;
     }
     if (n < 1 || n > 9)
