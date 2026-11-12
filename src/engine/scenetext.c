@@ -117,8 +117,20 @@ void walpe_text_release (void)
     g_mutex_lock (&text_lock);
     if (text_users > 1 && text_map) {
         text_users--;
+        /* the font files of the wallpaper that left are no fonts of the
+         * ones that stay: they leave the configuration with it. (Each
+         * stayed registered, a pattern per face, until the last wallpaper
+         * with text went; and a later wallpaper whose font has the family
+         * and style of one of them was drawn with the file of the
+         * wallpaper that was gone.) A file that is still in use is
+         * registered again by the next render that names it
+         * (text_file_desc_locked); the textures that exist are not
+         * touched */
+        g_hash_table_remove_all (text_files);
+        if (text_fc)
+            FcConfigAppFontClear (text_fc);
         if (PANGO_IS_FC_FONT_MAP (text_map))
-            pango_fc_font_map_cache_clear (PANGO_FC_FONT_MAP (text_map));
+            pango_fc_font_map_config_changed (PANGO_FC_FONT_MAP (text_map));
         text_forget_unused_fonts ();
     } else if (text_users > 0 && --text_users == 0 && text_map) {
         /* the font map holds its own reference on the config

@@ -13,7 +13,9 @@
  * large (the point of it) and that WALPE_TEXT_PART=0 is not needed for
  * exactness. */
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <cairo.h>
+#include <fontconfig/fontconfig.h>
 #include <malloc.h>
 #include <stdio.h>
 #include <string.h>
@@ -130,6 +132,192 @@ static const char *const STRINGS[] = {
     "\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e",   /* CJK (a fallback font or boxes) */
     "12:34:56",
 };
+
+/* `from` written as `to`; with fam_from / fam_to (of one length) the copy
+ * calls itself fam_to: the strings of the name table are replaced where
+ * they stand, as bytes and as UTF-16 (no reader checks the table's sum) */
+static gboolean font_copy (const char *from, const char *to, const char *fam_from,
+                           const char *fam_to)
+{
+    char *d = NULL;
+    gsize n = 0;
+    if (!g_file_get_contents (from, &d, &n, NULL))
+        return FALSE;
+    const gsize l = fam_from ? strlen (fam_from) : 0;
+    for (gsize i = 0; l && i + 2 * l <= n; i++) {
+        if (!memcmp (d + i, fam_from, l)) {
+            memcpy (d + i, fam_to, l);
+            continue;
+        }
+        gsize k = 0;
+        while (k < l && d[i + 2 * k] == 0 && d[i + 2 * k + 1] == fam_from[k])
+            k++;
+        for (gsize j = 0; k == l && j < l; j++)
+            d[i + 2 * j + 1] = fam_to[j];
+    }
+    gboolean ok = g_file_set_contents (to, d, (gssize) n, NULL);
+    g_free (d);
+    return ok;
+}
+
+static gboolean tex_same (const Tex *a, const Tex *b)
+{
+    return a->px && b->px && a->ink.w == b->ink.w && a->ink.h == b->ink.h &&
+           !memcmp (a->px, b->px, (gsize) a->ink.w * a->ink.h * 4);
+}
+
+/* The font FILES of a wallpaper go with the wallpaper, also while another
+ * wallpaper with text stays up: they are not kept registered (a pattern
+ * per face of every file, for as long as any text was shown), a later
+ * wallpaper whose font has the family and style of one that left is drawn
+ * with its own file, and the text of the wallpaper that stays is drawn as
+ * before, byte for byte. Runs with this machine's TrueType files as the
+ * wallpapers' fonts and no system fonts (a system font of the same name
+ * would be taken instead of any wallpaper's file). */
+static void font_files_leave (void)
+{
+    enum { MAXF = 16 };
+    char *file[MAXF], *fam[MAXF];
+    int nf = 0, a = -1, b = -1, c = -1;
+    FcInit ();
+    FcPattern *any = FcPatternCreate ();
+    FcObjectSet *os = FcObjectSetBuild (FC_FILE, FC_FAMILY, FC_STYLE, FC_INDEX, NULL);
+    FcFontSet *all = any && os ? FcFontList (NULL, any, os) : NULL;
+    for (int i = 0; all && i < all->nfont && nf < MAXF; i++) {
+        FcChar8 *f = NULL, *fa = NULL, *sy = NULL;
+        int idx = 0;
+        GStatBuf sb;
+        if (FcPatternGetString (all->fonts[i], FC_FILE, 0, &f) != FcResultMatch ||
+            FcPatternGetString (all->fonts[i], FC_FAMILY, 0, &fa) != FcResultMatch ||
+            FcPatternGetString (all->fonts[i], FC_STYLE, 0, &sy) != FcResultMatch ||
+            strcmp ((const char *) sy, "Regular") ||
+            (FcPatternGetInteger (all->fonts[i], FC_INDEX, 0, &idx) == FcResultMatch && idx) ||
+            !g_str_has_suffix ((const char *) f, ".ttf") ||
+            g_stat ((const char *) f, &sb) || sb.st_size > 2 * 1024 * 1024)
+            continue;
+        gboolean have = FALSE;
+        for (int k = 0; k < nf; k++)
+            have |= !strcmp (fam[k], (const char *) fa);
+        if (have)
+            continue;
+        file[nf] = g_strdup ((const char *) f);
+        fam[nf++] = g_strdup ((const char *) fa);
+    }
+    if (all)
+        FcFontSetDestroy (all);
+    if (os)
+        FcObjectSetDestroy (os);
+    if (any)
+        FcPatternDestroy (any);
+    /* two families with names of one length (a and b), and a third font */
+    for (int i = 0; i < nf && a < 0; i++)
+        for (int k = i + 1; k < nf && a < 0; k++)
+            if (strlen (fam[i]) == strlen (fam[k])) {
+                a = i;
+                b = k;
+            }
+    for (int i = 0; i < nf && c < 0; i++)
+        if (i != a && i != b)
+            c = i;
+    char *dir = g_dir_make_tmp ("walpe-text-part-XXXXXX", NULL);
+    if (!dir || c < 0) {
+        printf ("text-part: font files of a wallpaper that left: not checked (%d usable TrueType "
+                "files here)\n", nf);
+        return;
+    }
+    char *conf = g_build_filename (dir, "fonts.conf", NULL);
+    char *stay = g_build_filename (dir, "stay.ttf", NULL);
+    char *one = g_build_filename (dir, "one.ttf", NULL);
+    char *two = g_build_filename (dir, "two.ttf", NULL);
+    char *left = g_build_filename (dir, "left.ttf", NULL);
+    char *old = g_strdup (g_getenv ("FONTCONFIG_FILE"));
+    g_file_set_contents (conf, "<?xml version=\"1.0\"?>\n<fontconfig></fontconfig>\n", -1, NULL);
+    g_setenv ("FONTCONFIG_FILE", conf, TRUE);
+    WalpeTextStyle kst = { 0 }, st1 = { 0 }, st2 = { 0 }, stl = { 0 };
+    kst.pointsize = 20;
+    kst.box_w = 900; kst.box_h = 300;
+    kst.halign = kst.valign = 1;
+    st1 = st2 = stl = kst;
+    st1.pointsize = st2.pointsize = stl.pointsize = 31;
+    kst.font_path = stay;
+    st1.font_path = one;
+    st2.font_path = two;
+    stl.font_path = left;
+    CHECK (font_copy (file[c], stay, NULL, NULL), "no copy of %s", file[c]);
+    static const char *const TXT = "Wallpaper 0123456789 agQ";
+    Tex kt = { 0 }, r1 = { 0 }, r2 = { 0 };
+    gboolean pair = a >= 0;
+    if (pair) {
+        /* what each of the two files draws when it is the only font there is */
+        CHECK (font_copy (file[a], one, NULL, NULL) && font_copy (file[b], two, fam[b], fam[a]),
+               "no copies of %s and %s", file[a], file[b]);
+        walpe_text_hold ();
+        tex_update (&r1, &st1, TXT, NULL);
+        walpe_text_release ();
+        walpe_text_hold ();
+        tex_update (&r2, &st2, TXT, NULL);
+        walpe_text_release ();
+        pair = !tex_same (&r1, &r2);
+    }
+    walpe_text_hold ();
+    tex_update (&kt, &kst, "12:34:56", NULL);
+    if (pair) {
+        walpe_text_hold ();
+        tex_matches_full (&r1, &st1, TXT, "the first wallpaper's font");
+        walpe_text_release ();
+        tex_matches_full (&kt, &kst, "12:34:56", "text of the wallpaper that stays");
+        walpe_text_hold ();
+        tex_matches_full (&r2, &st2, TXT, "a later wallpaper's font with the family and style of "
+                          "one that left");
+        walpe_text_release ();
+        printf ("text-part: a font named %s like the one of a wallpaper that left (%s) is drawn "
+                "from its own file\n", fam[a], fam[b]);
+    } else
+        printf ("text-part: a later font with the family of one that left: not checked (no two "
+                "families with names of one length here)\n");
+    gsize after2 = 0;
+    for (int cyc = 0; cyc < 26; cyc++) {
+        Tex t = { 0 };
+        font_copy (file[cyc % nf], left, NULL, NULL);
+        stl.pointsize = 24 + (float) cyc;
+        walpe_text_hold ();
+        tex_update (&t, &stl, TXT, NULL);
+        g_free (t.px);
+        walpe_text_release ();
+        g_unlink (left);
+        g_free (left);
+        left = g_strdup_printf ("%s/left-%d.ttf", dir, cyc);
+        stl.font_path = left;
+        tex_matches_full (&kt, &kst, "12:34:56", "text of the wallpaper that stays");
+        if (cyc == 1)
+            after2 = heap_in_use ();
+    }
+    gsize now = heap_in_use ();
+    gsize grown = now > after2 ? now - after2 : 0;
+    CHECK (grown <= 96 * 1024, "24 more wallpapers with a font file of their own, next to one with "
+           "text: %" G_GSIZE_FORMAT " bytes more on the heap", grown);
+    printf ("text-part: 24 wallpapers with a font file of their own, next to one with text, leave %"
+            G_GSIZE_FORMAT " bytes more on the heap\n", grown);
+    walpe_text_release ();
+    g_free (kt.px);
+    g_free (r1.px);
+    g_free (r2.px);
+    if (old)
+        g_setenv ("FONTCONFIG_FILE", old, TRUE);
+    else
+        g_unsetenv ("FONTCONFIG_FILE");
+    g_unlink (conf);
+    g_unlink (stay);
+    g_unlink (one);
+    g_unlink (two);
+    g_unlink (left);
+    g_rmdir (dir);
+    for (int i = 0; i < nf; i++) {
+        g_free (file[i]);
+        g_free (fam[i]);
+    }
+    g_free (conf); g_free (stay); g_free (one); g_free (two); g_free (left); g_free (old); g_free (dir);
+}
 
 int main (void)
 {
@@ -257,6 +445,7 @@ int main (void)
             walpe_text_release ();
         }
     }
+    font_files_leave ();
     printf ("text-part: %d steps (%d partial) compared with full renders, clock digit in a 1600x900 "
             "box: %" G_GSIZE_FORMAT " of %" G_GSIZE_FORMAT " pixels, %d failures\n", steps,
             partial_steps, big_part, big_whole, fails);
