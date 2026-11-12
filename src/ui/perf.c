@@ -20,6 +20,8 @@ typedef struct {
     gboolean mapped;            /* the panel is on screen (its window may be hidden) */
     WalpeQuality q;             /* the knobs shown */
     guint poll_id, scale_id, idle_id;
+    guint poll_secs;            /* interval of poll_id, 0 = no timer */
+    gboolean down;              /* the last request found no engine */
     GdkSurface *surface;        /* while mapped: the window's, for notify::state */
     gulong surface_state_id;
 } Perf;
@@ -41,6 +43,7 @@ static const char *const tex_items[] = { "Full", "Half", "Quarter", NULL };
 static const char *const tex_values[] = { "full", "half", "quarter" };
 
 static void perf_request (Perf *P);
+static void perf_poll_update (Perf *P);
 
 /* ---------------------------------------------------------------- sending */
 
@@ -367,10 +370,14 @@ static void perf_load (Perf *P, JsonObject *q)
 
 static void on_quality_reply (JsonObject *reply, const char *err, gpointer user)
 {
-    (void) err;
     GtkWidget *root = user;
     Perf *P = g_object_get_data (G_OBJECT (root), "walpe-perf");
     JsonObject *q = reply && ui_ipc_ok (reply) ? wpj_obj (reply, "quality") : NULL;
+    gboolean down = !reply && ui_ipc_err_is_down (err);
+    if (P && down != P->down) {
+        P->down = down;
+        perf_poll_update (P);
+    }
     if (P && q)
         perf_load (P, q);
     else if (P && !P->have)
@@ -408,12 +415,15 @@ static void perf_poll_update (Perf *P)
 {
     gboolean want = P->mapped && !walpe_surface_hidden (P->surface) &&
                     (!P->expander || gtk_expander_get_expanded (GTK_EXPANDER (P->expander)));
-    if (want && !P->poll_id) {
-        P->poll_id = g_timeout_add_seconds (2, perf_poll, P);
-    } else if (!want && P->poll_id) {
+    /* an engine that is not running is asked every 10 s (the first answer
+     * brings the 2 s back): there is nothing to count */
+    guint secs = want ? (P->down ? 10 : 2) : 0;
+    if (secs == P->poll_secs)
+        return;
+    if (P->poll_id)
         g_source_remove (P->poll_id);
-        P->poll_id = 0;
-    }
+    P->poll_secs = secs;
+    P->poll_id = secs ? g_timeout_add_seconds (secs, perf_poll, P) : 0;
 }
 
 /* the window went off the screen or came back: back, the numbers are old */
