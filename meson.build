@@ -2184,3 +2184,14 @@ alias_target('programs', programs)
 if with_tests or get_option('fuzz').enabled()
   subdir('tests/fuzz')
 endif  # with_tests or fuzz
+
+# a text layer of an old-format scene whose texture OpenGL refuses: no
+# texture name stays behind (src/engine/scene.c make_text_texture). OpenGL
+# is the stand-in of the fuzz harnesses, so no display.
+if with_tests
+test('scene-text-glerr', executable('scene-text-glerr-test', 'tests/scene_text_glerr_test.c',
+  include_directories: inc,
+  link_with: fakegl,
+  dependencies: [core_dep],
+  install: false, build_by_default: false), timeout: 60)
+endif  # with_tests

@@ -287,6 +287,11 @@ static void make_text_texture (SceneLayer *l, gint64 *left)
         l->tex_ready = TRUE;
         if (*left >= 0)
             *left -= (gint64) tw * th * 4;
+    } else {
+        /* the upload was refused (or an earlier call left an error): the
+         * layer is not drawn, and nothing else knows the name */
+        glBindTexture (GL_TEXTURE_2D, 0);
+        glDeleteTextures (1, &tex);
     }
 }
 
