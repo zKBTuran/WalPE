@@ -44,19 +44,30 @@ The details and the known limitations: [docs/LIMITATIONS.md](docs/LIMITATIONS.md
 Package names and what each part is needed for:
 [docs/BUILDING.md](docs/BUILDING.md#dependencies).
 
-## Build and install
+## Build and run
 
 ```sh
-./build.sh --prefix=$HOME/.local     # meson setup build, then ninja
-meson install -C build               # binaries to <prefix>/bin, modules to <prefix>/<libdir>/walpe
+./build.sh                       # the generic build: runs on any CPU of this architecture
+                                 # (--tuning=native: tuned for the CPU of this machine)
+./build.sh -Dwayland=disabled    # or X11 only (-Dx11=disabled: Wayland only)
+# or the maintainer's own line (alderlake tuning: Alder Lake-class Intel CPUs only):
+WALPE_JOBS=16 WALPE_LOAD=18 ./build.sh --tuning=alderlake -Dwayland=disabled
+
+./build/walpe-daemon &           # run from the build directory: nothing has to be installed
+./build/walpe                    # the library window
 ```
 
-Build options, CPU tuning, the X11-only and Wayland-only builds, cross-building for arm64
-and running from the build directory: [docs/BUILDING.md](docs/BUILDING.md).
+Each `./build.sh` line is a whole build (`meson setup build`, then ninja). The programs and
+the modules `walpe-video.so` / `walpe-web.so` are then in `build/` and run from there: the
+daemon loads the modules from its own directory. Installing is optional:
+`meson install -C build` after a build configured with `--prefix=...`
+([Install](docs/BUILDING.md#install)). Every build option, CPU tuning and cross-building
+for arm64: [docs/BUILDING.md](docs/BUILDING.md).
 
 ## First steps
 
 ```sh
+# not installed: the same programs in the build directory, ./build/walpe-daemon and so on
 walpe-daemon &          # one desktop window (X11) or layer surface (Wayland) per monitor
 walpe-tray &            # the tray icon
 walpe                   # the library window (starts the daemon if needed)
@@ -66,8 +77,9 @@ walpe-ctl set fps=60 preset=balanced
 walpe-ctl help          # every command
 ```
 
-Start `walpe-daemon` from your session: `~/.xinitrc`, the compositor's configuration or
-an XDG autostart entry ([how](docs/USAGE.md#starting-with-the-session)). The library is
+Start `walpe-daemon` (by its full path when it is not installed) from your session:
+`~/.xinitrc`, the compositor's configuration or an XDG autostart entry
+([how](docs/USAGE.md#starting-with-the-session)). The library is
 `~/.local/share/walpe/workshop/`, the settings are in `~/.config/walpe/config.json`.
 More: [docs/USAGE.md](docs/USAGE.md).
 
@@ -90,7 +102,9 @@ More: [docs/USAGE.md](docs/USAGE.md).
 - [DEVELOPMENT.md](docs/DEVELOPMENT.md): architecture, tests, developer tools
 
 The developer tools (harnesses and generators that are not needed to build, test or use
-WalPE) are kept outside this branch: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#developer-tools).
+WalPE) live on the separate branch `devtools`
+([docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#developer-tools)):
+`git fetch origin devtools:devtools && git worktree add ../walpe-devtools devtools`
 
 ## Licence
 

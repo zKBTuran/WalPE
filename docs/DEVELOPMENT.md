@@ -127,9 +127,9 @@ to the install.
 
 ## Developer tools
 
-Harnesses and generators that are not needed to build, test or use WalPE are kept outside
-this branch, in a tree of their own (directory `tools/dev/`), so a checkout of `main`
-holds WalPE only:
+Harnesses and generators that are not needed to build, test or use WalPE live on the
+separate branch **`devtools`** (directory `tools/dev/`), so a checkout of `main` holds
+WalPE only:
 
 | Tool | Does |
 |---|---|
@@ -142,9 +142,8 @@ holds WalPE only:
 | `fxkey.py` | prints the hash key of a shader statement, for the recogniser tables in `src/engine/fx_keys.h` |
 | `mock-mpris-player.py` | a stand-in media player on the session bus |
 
-With that tree checked out next to this one as `../walpe-devtools`:
-
 ```sh
+git fetch origin devtools:devtools && git worktree add ../walpe-devtools devtools
 python3 -I ../walpe-devtools/tools/dev/restorecheck.py --build build
 ```
 
