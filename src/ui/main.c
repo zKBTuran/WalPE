@@ -218,6 +218,7 @@ static struct {
     GtkWidget *settings;
     WalpeConfig *cfg;
     GFileMonitor *dirmon;
+    GFileMonitor *impmon;   /* <library>/imported */
     gboolean closing;           /* the main window was destroyed (on_win_destroy) */
     gboolean want_res_dialog;   /* started with --resolution: the dialog opens with the window */
 } U;
@@ -1111,6 +1112,7 @@ static void scan_job_free (gpointer p)
 }
 
 static void arrivals_settle (GList *entries);
+static void imported_watch (void);
 
 static void scan_done (GObject *src, GAsyncResult *res, gpointer u)
 {
@@ -1123,6 +1125,7 @@ static void scan_done (GObject *src, GAsyncResult *res, gpointer u)
     }
     guint n = g_list_length (entries);
     arrivals_settle (entries);
+    imported_watch ();      /* (it may be there only now: a library that is new) */
     if (U.first_scan_done && n == g_list_model_get_n_items (G_LIST_MODEL (U.model))) {
         /* nothing changed (the dir monitor fires for unrelated writes):
          * keep the model, the scroll position and the recycled tiles */
@@ -1315,18 +1318,97 @@ static void arrivals_settle (GList *entries)
     }
 }
 
+/* ---- <library>/imported
+ * Single files live in this one folder of the library: the videos the
+ * engine imports (`walpe-ctl add`, "Import…"), the GIFs and pictures the
+ * window copies. Only the library root is watched, and a folder that
+ * arrives only until it is listed, so a video added with `walpe-ctl add`
+ * while the window was open was in the folder and not in the window until
+ * F5 or the next start (the window's own import asks for a scan when it
+ * ends). The folder is watched as long as it exists, from the start of
+ * the window or from the first scan that finds it (on a new installation
+ * the library itself is made by the first import, and the watch on a
+ * library root that was not there reports the root, not what is in it).
+ * The file an import is still writing ("<name>.mp4.part") is no entry and
+ * asks for no scan; the name it gets at the end does. */
+static void on_imported_changed (GFileMonitor *m, GFile *f, GFile *o, GFileMonitorEvent ev, gpointer u)
+{
+    (void) m; (void) u;
+    if (!dir_event_counts (ev))
+        return;
+    GFile *named = ev == G_FILE_MONITOR_EVENT_RENAMED && o ? o : f;
+    char *base = named ? g_file_get_basename (named) : NULL;
+    gboolean part = base && g_str_has_suffix (base, ".part");
+    g_free (base);
+    if (!part)
+        schedule_rescan ();
+}
+
+static char *imported_dir (void)
+{
+    char *dir = walpe_expand_path (U.cfg->wallpapers_dir);
+    char *imp = g_build_filename (dir, "imported", NULL);
+    g_free (dir);
+    return imp;
+}
+
+static gboolean is_imported_dir (GFile *f)
+{
+    char *path = f ? g_file_get_path (f) : NULL, *imp = imported_dir ();
+    gboolean is = path && !strcmp (path, imp);
+    g_free (path);
+    g_free (imp);
+    return is;
+}
+
+static void imported_unwatch (void)
+{
+    if (U.impmon) {
+        g_file_monitor_cancel (U.impmon);
+        g_clear_object (&U.impmon);
+    }
+}
+
+static void imported_watch (void)
+{
+    char *imp = imported_dir ();
+    if (!U.impmon && g_file_test (imp, G_FILE_TEST_IS_DIR)) {
+        GFile *gf = g_file_new_for_path (imp);
+        U.impmon = g_file_monitor_directory (gf, G_FILE_MONITOR_WATCH_MOVES, NULL, NULL);
+        if (U.impmon)
+            g_signal_connect (U.impmon, "changed", G_CALLBACK (on_imported_changed), NULL);
+        g_object_unref (gf);
+    }
+    g_free (imp);
+}
+
 static void on_dir_changed (GFileMonitor *m, GFile *f, GFile *o, GFileMonitorEvent ev, gpointer u)
 {
     (void) m; (void) u;
     if (!dir_event_counts (ev))
         return;
-    if (ev == G_FILE_MONITOR_EVENT_CREATED || ev == G_FILE_MONITOR_EVENT_MOVED_IN)
-        arrival_watch (f);
-    else if (ev == G_FILE_MONITOR_EVENT_DELETED || ev == G_FILE_MONITOR_EVENT_MOVED_OUT)
-        arrival_drop (f);
-    else if (ev == G_FILE_MONITOR_EVENT_RENAMED) {
-        arrival_drop (f);
-        arrival_watch (o);
+    /* (the folder of single files has its own watch, for as long as it is
+     * there, and is no wallpaper that arrives) */
+    gboolean imp = is_imported_dir (f), imp_new = ev == G_FILE_MONITOR_EVENT_RENAMED && is_imported_dir (o);
+    if (ev == G_FILE_MONITOR_EVENT_CREATED || ev == G_FILE_MONITOR_EVENT_MOVED_IN) {
+        if (imp)
+            imported_watch ();
+        else
+            arrival_watch (f);
+    } else if (ev == G_FILE_MONITOR_EVENT_DELETED || ev == G_FILE_MONITOR_EVENT_MOVED_OUT) {
+        if (imp)
+            imported_unwatch ();
+        else
+            arrival_drop (f);
+    } else if (ev == G_FILE_MONITOR_EVENT_RENAMED) {
+        if (imp)
+            imported_unwatch ();
+        else
+            arrival_drop (f);
+        if (imp_new)
+            imported_watch ();
+        else
+            arrival_watch (o);
     }
     schedule_rescan ();
 }
@@ -3782,6 +3864,7 @@ static void on_win_destroy (GtkWidget *w, gpointer user)
         g_file_monitor_cancel (U.dirmon);
         g_clear_object (&U.dirmon);
     }
+    imported_unwatch ();
     g_clear_pointer (&arrivals, g_hash_table_unref);
     if (Sup.sub) {      /* the engine's state lines: no more of them */
         walpe_ipc_sub_free (Sup.sub);
@@ -3914,6 +3997,7 @@ static void activate (GtkApplication *app, gpointer user)
         g_signal_connect (U.dirmon, "changed", G_CALLBACK (on_dir_changed), NULL);
     g_object_unref (gf);
     g_free (dir);
+    imported_watch ();
 
     /* tray.ini start_with_gui: the tray comes up with the GUI (not
      * installed / already running: nothing to do) */
