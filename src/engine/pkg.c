@@ -827,13 +827,18 @@ char *walpe_pkg_extract_cached_opts (const char *pkg_path, const char *project_d
      * anew, not written over - files the new package no longer has used to
      * stay and were loaded as if they were its own. A copy a loaded
      * wallpaper still reads from is written over as before. */
-    if (!(pkg_live && g_hash_table_contains (pkg_live, cache)) &&
-        g_file_test (cache, G_FILE_TEST_IS_DIR) && !g_file_test (cache, G_FILE_TEST_IS_SYMLINK))
+    const gboolean live = pkg_live && g_hash_table_contains (pkg_live, cache);
+    if (!live && g_file_test (cache, G_FILE_TEST_IS_DIR) && !g_file_test (cache, G_FILE_TEST_IS_SYMLINK))
         pkg_tree_remove (cache, 0);
     GError *e = NULL;
     GString *left = g_string_new (NULL);
     char *listf = g_build_filename (cache, PKG_NOSOUND, NULL);
-    gboolean ok = pkg_extract_mode (pkg_path, cache, with_sound ? PKG_ALL : PKG_BUT_SOUND, left, &e);
+    /* A copy that is written over (a loaded wallpaper still reads from it)
+     * is written whole, as it always was. Left out, the sound files of the
+     * package before it stayed under their names: the next load's sound
+     * layers found them on disk, so nothing fetched the new ones, and
+     * sound switched on played the old package's files. */
+    gboolean ok = pkg_extract_mode (pkg_path, cache, with_sound || live ? PKG_ALL : PKG_BUT_SOUND, left, &e);
     /* What was left out is written down before the stamp says that the
      * copy is usable. Should the list not be writable, the copy is
      * completed instead: without a list it would pass for a whole copy of

@@ -331,7 +331,7 @@ static void test_refused (void)
 }
 
 /* ---- a copy is made without 256 sound files at most ---- */
-/* ---- the cache's own project.json ---- */
+/* ---- the cache's own project.json; a copy that is written over ---- */
 static void test_own_file (void)
 {
     const struct { const char *what; Ent e[2]; } t[] = {
@@ -369,6 +369,32 @@ static void test_own_file (void)
            "an entry named project.json: accepted, the wallpaper's own file is in the copy");
     if (c)
         drop_copy (c);
+
+    /* a whole copy that a loaded wallpaper holds; the package changes; the
+     * next load, with sound off, writes over it: the old package's sound
+     * file must not stay under its name */
+    make_item (0);
+    rm_rf (where);
+    char *held = cache_copy (TRUE);
+    CHECK (held && same_bytes (held, "sounds/one.wav", wav), "a whole copy, held");
+    const Ent n[] = {
+        { "scene.json", (const guint8 *) SCENE, strlen (SCENE) },
+        { "models/solid.json", (const guint8 *) SOLID, strlen (SOLID) },
+        { "sounds/one.wav", (const guint8 *) OGG, strlen (OGG) },     /* (same name, other bytes) */
+    };
+    write_pkg (pkg, n, G_N_ELEMENTS (n), 0);
+    char *over = cache_copy (FALSE);
+    char *list = over ? list_of (over) : NULL;
+    CHECK (held && over && !strcmp (held, over), "the changed package, sound off: the held copy is written over");
+    CHECK (over && same_text (over, "sounds/one.wav", OGG),
+           "... whole: the sound file under that name is the new package's, not the old one's");
+    CHECK (over && !list && walpe_pkg_fetch_sound (over), "... and nothing is outstanding");
+    g_free (list);
+    if (over)
+        walpe_pkg_cache_release (over);
+    g_free (over);
+    if (held)
+        drop_copy (held);
     g_free (where);
     make_item (0);
 }
