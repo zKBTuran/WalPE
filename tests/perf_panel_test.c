@@ -15,6 +15,7 @@
 #include "ui/perf.h"
 #include "ui/uiipc.h"
 #include "ui/winstate.h"
+#include "ui/statusline.h"
 
 static UiIpcDone last_cb;
 static gpointer last_user;
@@ -92,6 +93,19 @@ int main (void)
     if (!gtk_init_check ()) {
         g_print ("perf-panel-test: skipped (no display)\n");
         return 77;
+    }
+    /* (the window's status line, src/ui/statusline.h: here because this
+     * program has a display) */
+    {
+        GtkLabel *l = GTK_LABEL (g_object_ref_sink (gtk_label_new ("")));
+        walpe_status_line_show (l, "Could not set the wallpaper: no such file");
+        check (!g_strcmp0 (gtk_widget_get_tooltip_text (GTK_WIDGET (l)),
+                           "Could not set the wallpaper: no such file"),
+               "status line: its tool tip shows the line whole");
+        walpe_status_line_show (l, "");
+        check (!*gtk_label_get_text (l) && !gtk_widget_get_tooltip_text (GTK_WIDGET (l)),
+               "status line: taken away, it leaves no tool tip");
+        g_object_unref (l);
     }
     static const char path[] = "/nowhere/a wallpaper";
     static const char plain[] = "{\"ok\":true,\"quality\":{\"monitors\":[]}}";

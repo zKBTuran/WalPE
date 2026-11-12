@@ -34,6 +34,7 @@
 #include "monlist.h"     /* the outputs as GDK names them, while no engine runs */
 #include "suppoll.h"     /* how often the engine is asked for its status */
 #include "rescanpace.h"  /* when the library is scanned again after a change */
+#include "statusline.h"  /* the status line's text and its tool tip */
 #include "winstate.h"    /* is the window on screen at all */
 #ifdef WALPE_HAVE_WORKSHOP_PAGE
 #include "workshop_page.h"   /* GtkWidget *walpe_workshop_page_new (void); */
@@ -342,7 +343,7 @@ static gboolean status_clear (gpointer u)
 {
     (void) u;
     U.status_clear_id = 0;
-    gtk_label_set_text (U.status, "");
+    walpe_status_line_show (U.status, "");
     gtk_widget_remove_css_class (GTK_WIDGET (U.status), "error");
     return G_SOURCE_REMOVE;
 }
@@ -355,8 +356,7 @@ static void set_status (const char *msg, gboolean error)
     /* one line of bounded length, whatever a wallpaper, steamcmd or the
      * engine put into the message (uitext.h) */
     char *line = walpe_ui_text (msg, 400, WALPE_UITEXT_LINE);
-    gtk_label_set_text (U.status, line);
-    gtk_widget_set_tooltip_text (GTK_WIDGET (U.status), *line ? line : NULL);
+    walpe_status_line_show (U.status, line);
     g_free (line);
     if (error)
         gtk_widget_add_css_class (GTK_WIDGET (U.status), "error");
