@@ -88,3 +88,5 @@ void walpe_sig_wl_outputs_changed (void);       /* no-op without HAVE_WL_SIGNALS
  * a focused fullscreen window for every output instead of the one it is
  * on; NULL = it does not (static text) */
 const char *walpe_sig_wl_fullscreen_everywhere (void);
+/* how often the window list has been worked through (the tests count it) */
+guint walpe_sig_wl_passes (void);

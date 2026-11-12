@@ -492,6 +492,19 @@ static void s_win_set (gpointer p)
     zwlr_foreign_toplevel_handle_v1_send_done (w->handle);
 }
 
+/* what a client's new title makes a compositor send: the title and done */
+static void s_win_title (gpointer p)
+{
+    static int n;
+    SrvWin *w = &S.win[GPOINTER_TO_INT (p)];
+    if (!w->handle)
+        return;
+    char t[32];
+    g_snprintf (t, sizeof t, "title %d", ++n);
+    zwlr_foreign_toplevel_handle_v1_send_title (w->handle, t);
+    zwlr_foreign_toplevel_handle_v1_send_done (w->handle);
+}
+
 static void s_win_close (gpointer p)
 {
     SrvWin *w = &S.win[GPOINTER_TO_INT (p)];
@@ -720,6 +733,38 @@ static void scenario_a (void)
     win_set (1, A_ | F_, 1u << 1);
     EXPECT (WIN, WALPE_SIG_COVERED, 22, 1, "A: and back");
     EXPECT (FS, ON, 22, 1, "A: and back");
+
+    /* A title is none of the rules' business: 20 new titles of a window,
+     * and 5 times its state and outputs said again as they are, do not
+     * make the providers work through the window list (it was one pass
+     * per `done`). What does concern them still does. */
+    settle ();
+    {
+        guint before = walpe_sig_wl_passes ();
+        for (int i = 0; i < 25; i++) {
+            if (i < 20)
+                srv_run (s_win_title, GINT_TO_POINTER (1));
+            else
+                win_set (1, A_ | F_, 1u << 1);
+            /* each one reaches the providers by itself, as a title typed
+             * or counted up does */
+            gint64 end = g_get_monotonic_time () + 20000;
+            while (g_get_monotonic_time () < end)
+                if (!g_main_context_iteration (NULL, FALSE))
+                    g_usleep (1000);
+        }
+        settle ();
+        CHECK (walpe_sig_wl_passes () == before,
+               "A: 20 title changes and 5 repeated states: %u passes over the window list, want 0",
+               walpe_sig_wl_passes () - before);
+        CHECK (stub_value (FS, ON, 22) == 1 && stub_value (WIN, WALPE_SIG_COVERED, 22) == 1,
+               "A: ... and the values stand");
+        win_set (1, A_ | M_, 1u << 1);
+        EXPECT (FS, ON, 22, 0, "A: after them, a state that changes is followed");
+        CHECK (walpe_sig_wl_passes () > before, "A: ... by a pass");
+        win_set (1, A_ | F_, 1u << 1);
+        EXPECT (FS, ON, 22, 1, "A: and back to fullscreen");
+    }
 
     /* minimized, then closed */
     win_set (1, A_ | F_ | N_, 1u << 1);

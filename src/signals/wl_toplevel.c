@@ -38,6 +38,8 @@ typedef struct {
     guint pending;          /* as of the last state event */
     GPtrArray *outs;        /* struct wl_output * of the session (borrowed) */
     gboolean had_output;    /* the compositor has named an output for it at some time */
+    gboolean changed;       /* an event since its last done said something the rules
+                             * read: its outputs or its app id (its state: pending) */
     char *app_id;
 } Tl;
 
@@ -55,6 +57,7 @@ static struct {
                              * (WALPE_TL_WHERE_KNOWN = it is not) */
     gboolean names_outputs; /* this compositor has named an output for a window
                              * (output_enter) since the tracker came up */
+    guint passes;           /* tl_recompute runs (walpe_sig_wl_passes) */
 } W;
 
 static void tl_free (gpointer p)
@@ -167,6 +170,7 @@ static void tl_recompute (void)
     }
     if (!W.tls)
         return;
+    W.passes++;
     const char *see = walpe_sigprov_see_through ();
     walpe_signals_begin ();
     if (W.fs_on)
@@ -234,8 +238,11 @@ static void h_app_id (void *data, struct zwlr_foreign_toplevel_handle_v1 *h, con
 {
     (void) h;
     Tl *t = data;
+    if (!g_strcmp0 (t->app_id, app_id))
+        return;
     g_free (t->app_id);
     t->app_id = g_strdup (app_id);
+    t->changed = TRUE;
 }
 
 static void h_output_enter (void *data, struct zwlr_foreign_toplevel_handle_v1 *h,
@@ -244,6 +251,7 @@ static void h_output_enter (void *data, struct zwlr_foreign_toplevel_handle_v1 *
     (void) h;
     Tl *t = data;
     t->had_output = TRUE;
+    t->changed = TRUE;
     W.names_outputs = TRUE;
     /* NULL: an output this connection has already let go of */
     if (out && !g_ptr_array_find (t->outs, out, NULL))
@@ -255,6 +263,7 @@ static void h_output_leave (void *data, struct zwlr_foreign_toplevel_handle_v1 *
 {
     (void) h;
     Tl *t = data;
+    t->changed = TRUE;
     if (out)
         g_ptr_array_remove (t->outs, out);
 }
@@ -290,8 +299,20 @@ static void h_done (void *data, struct zwlr_foreign_toplevel_handle_v1 *h)
 {
     (void) h;
     Tl *t = data;
+    /* The list is worked through again when this window said something
+     * the rules read: its state, its outputs, its app id. A compositor
+     * sends `done` after a change of the title too - a terminal's prompt,
+     * a browser tab, a player's clock, several times a second - and each
+     * one used to cost a pass over every window and output (with its
+     * arrays made and freed) that could only find what the last one had.
+     * Everything else the rules read announces itself: the session's
+     * outputs (tl_outputs_changed), the settings (tl_recheck), a window
+     * that closes. */
+    const gboolean changed = t->changed || t->pending != t->state;
     t->state = t->pending;
-    tl_dirty ();
+    t->changed = FALSE;
+    if (changed)
+        tl_dirty ();
 }
 
 static void h_closed (void *data, struct zwlr_foreign_toplevel_handle_v1 *h)
@@ -327,6 +348,7 @@ static void m_toplevel (void *data, struct zwlr_foreign_toplevel_manager_v1 *m,
     (void) data; (void) m;
     Tl *t = g_new0 (Tl, 1);
     t->h = h;
+    t->changed = TRUE;      /* its first done: a window more */
     t->outs = g_ptr_array_new ();
     if (W.tls) {
         g_ptr_array_add (W.tls, t);
@@ -507,6 +529,11 @@ static void fs_stop (const WalpeSignalProvider *self)
  * window's output is not known, and - window or not - while this
  * connection has an output it could not match to one of the daemon's for
  * want of a name: a window on that one could be anywhere. */
+guint walpe_sig_wl_passes (void)
+{
+    return W.passes;
+}
+
 const char *walpe_sig_wl_fullscreen_everywhere (void)
 {
     if (!W.fs_on || !W.sess)
