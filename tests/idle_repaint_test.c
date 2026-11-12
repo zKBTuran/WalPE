@@ -19,6 +19,12 @@
  * on and off / reset; render_scale down and back up. Changes that reload
  * the wallpaper (option changes, texture_slack, tex_downscale) need
  * nothing: a load draws.
+ *
+ * And the other way round (parked_checks): a layer that puts no pixel on
+ * the frame - parked outside the view - draws nothing, so an effect on it
+ * that follows the time must not keep the frames coming, nor keep the still
+ * layers around it out of the static bake. Counted: frames drawn, and draw
+ * calls per frame.
  * Skipped (exit 77) without EGL surfaceless / GL 3.3.
  * `meson test -C build idle-repaint` */
 #include <glib.h>
@@ -314,6 +320,173 @@ static void idle_checks (const char *tmp)
     g_free (dir);
 }
 
+/* ---- a layer parked outside the view ---------------------------------- */
+
+static guint n_draw_calls;
+static __typeof__ (epoxy_glDrawArrays) real_draw_arrays;
+static void count_draw_arrays (GLenum mode, GLint first, GLsizei count)
+{
+    n_draw_calls++;
+    real_draw_arrays (mode, first, count);
+}
+
+/* an effect that follows the time: the layer's colour pulses */
+static void pulse_effect (const char *dir)
+{
+    put (dir, "shaders/effects/pulse.vert",
+         "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\n"
+         "attribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\n"
+         "void main() {\n    gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
+         "\tv_TexCoord = a_TexCoord;\n}\n");
+    put (dir, "shaders/effects/pulse.frag",
+         "varying vec2 v_TexCoord;\nuniform sampler2D g_Texture0;\nuniform float g_Time;\n"
+         "void main() {\n\tvec4 c = texSample2D(g_Texture0, v_TexCoord);\n"
+         "\tc.rgb *= 0.6 + 0.4 * sin(g_Time * 40.0);\n\tgl_FragColor = c;\n}\n");
+    put (dir, "materials/effects/pulse.json",
+         "{\"passes\":[{\"shader\":\"effects/pulse\",\"blending\":\"normal\",\"depthtest\":\"disabled\","
+         "\"depthwrite\":\"disabled\",\"cullmode\":\"nocull\"}]}");
+    put (dir, "effects/pulse/effect.json",
+         "{\"name\":\"pulse\",\"group\":\"t\",\"passes\":[{\"material\":\"materials/effects/pulse.json\"}]}");
+}
+
+static void fx_layer (GString *s, int id, const char *origin, const char *size, const char *color)
+{
+    g_string_append_printf (s,
+        ",{\"id\":%d,\"name\":\"l%d\",\"image\":\"models/solid.json\",\"origin\":\"%s\","
+        "\"size\":\"%s\",\"scale\":\"1 1 1\",\"angles\":\"0 0 0\",\"color\":\"%s\",\"alpha\":1.0,"
+        "\"visible\":true,\"effects\":[{\"file\":\"effects/pulse/effect.json\",\"id\":%d,"
+        "\"name\":\"pulse\",\"visible\":true,\"passes\":[{}]}]}", id, id, origin, size, color, 100 + id);
+}
+
+/* a background and two still layers, a pulsing layer far to the right of
+ * the 320 x 180 view, two more still layers; top = also a pulsing layer
+ * in the middle of the view, on top of them all */
+static char *make_parked_scene (const char *tmp, const char *name, gboolean top)
+{
+    char *dir = g_build_filename (tmp, name, NULL);
+    put (dir, "models/solid.json", "{\"solidlayer\":true}");
+    pulse_effect (dir);
+    GString *s = g_string_new (
+        "{\"camera\":{\"center\":\"0 0 -1\",\"eye\":\"0 0 0\",\"up\":\"0 1 0\"},"
+        "\"general\":{\"ambientcolor\":\"0.3 0.3 0.3\",\"bloom\":false,\"cameraparallax\":false,"
+        "\"clearcolor\":\"0.10 0.20 0.30\",\"orthogonalprojection\":{\"height\":180,\"width\":320},"
+        "\"skylightcolor\":\"0.3 0.3 0.3\"},\"objects\":[");
+    layer (s, 1, "160 90 0", "320 180", "0.2 0.5 0.3", 1.0);
+    layer (s, 2, "100 60 0", "120 80", "0.9 0.2 0.1", 1.0);
+    layer (s, 3, "200 110 0", "140 60", "0.1 0.3 0.9", 0.5);
+    fx_layer (s, 6, "700 90 0", "60 60", "0.9 0.9 0.9");
+    layer (s, 4, "150 130 0", "90 50", "1.0 0.9 0.2", 0.8);
+    layer (s, 5, "60 150 0", "70 30", "0.3 0.9 0.9", 0.7);
+    if (top)
+        fx_layer (s, 7, "160 90 0", "40 40", "0.8 0.8 0.8");
+    g_string_append (s, "]}");
+    put (dir, "scene.json", s->str);
+    g_string_free (s, TRUE);
+    put (dir, "project.json",
+         "{\"file\":\"scene.json\",\"title\":\"parked layer test\",\"type\":\"scene\","
+         "\"general\":{\"properties\":{}}}");
+    return dir;
+}
+
+static gboolean load_scene (const char *dir)
+{
+    GError *err = NULL;
+    WalpeLoadOpts opts = { .video_backend = "ffmpeg", .fps = 60, .origin_dir = dir };
+    C = walpe_content_new (dir, &opts, &err);
+    if (!C || (C->request_redraw = redraw_cb, !C->gl_init (C, &err))) {
+        printf ("load failed: %s\n", err ? err->message : "?");
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void unload_scene (void)
+{
+    if (C->gl_free)
+        C->gl_free (C);
+    C->free (C);
+    C = NULL;
+}
+
+static void parked_checks (const char *tmp)
+{
+    WalpeConfig *cfg = walpe_config_load ();
+    screen = g_malloc0 (NPX);
+    guint8 *idle = g_malloc (NPX);
+
+    /* 1. nothing but the parked layer moves: the scene goes idle */
+    char *dir = make_parked_scene (tmp, "parked", FALSE);
+    if (!load_scene (dir)) {
+        result (FALSE, "the scene with a parked layer loads");
+        return;
+    }
+    result (tick (), "parked layer: the first frame is drawn");
+    for (int i = 0; i < 4; i++)   /* (the frames in which the static layers settle) */
+        tick ();
+    memcpy (idle, screen, NPX);
+    int drawn = 0;
+    for (int i = 0; i < 8; i++)
+        drawn += tick ();
+    char *m = g_strdup_printf ("parked layer: its effect follows the time, no pixel of it is on the "
+                               "frame: 8 ticks draw nothing (%d drawn)", drawn);
+    result (drawn == 0, m);
+    g_free (m);
+
+    /* 2. moved into the view it pulses: frames come, with another picture */
+    adj (cfg, dir, "6:l6", -540, 0, 1, WALPE_LAYER_VIS_DEFAULT);
+    result (tick () && memcmp (screen, idle, NPX) != 0,
+            "parked layer moved into the view: a frame is drawn and shows it");
+    drawn = 0;
+    for (int i = 0; i < 6; i++)
+        drawn += tick ();
+    result (drawn == 6, "in the view: every tick draws (the effect follows the time)");
+
+    /* 3. and out again: one frame without it, the picture from before, idle */
+    walpe_layers_remove (cfg, dir, NULL);
+    gboolean back = tick ();
+    result (back && !memcmp (screen, idle, NPX),
+            "moved out again: one frame, the earlier picture byte for byte");
+    for (int i = 0; i < 4; i++)
+        tick ();
+    drawn = 0;
+    for (int i = 0; i < 6; i++)
+        drawn += tick ();
+    result (drawn == 0, "moved out again: idle");
+    unload_scene ();
+    g_free (dir);
+
+    /* 4. with a layer that does move on top of them all: the four still
+     * layers between the background and it come from the static bake
+     * although the parked layer stands among them - a frame is the copy of
+     * the bake, the moving layer's effect pass and its quad */
+    dir = make_parked_scene (tmp, "parked-top", TRUE);
+    if (!load_scene (dir)) {
+        result (FALSE, "the scene with a parked and a moving layer loads");
+        return;
+    }
+    for (int i = 0; i < 8; i++)
+        tick ();
+    void *addr = (void *) eglGetProcAddress ("glDrawArrays");
+    memcpy (&real_draw_arrays, &addr, sizeof (addr));
+    __typeof__ (epoxy_glDrawArrays) was = epoxy_glDrawArrays;
+    epoxy_glDrawArrays = count_draw_arrays;
+    n_draw_calls = 0;
+    drawn = 0;
+    for (int i = 0; i < 6; i++)
+        drawn += tick ();
+    epoxy_glDrawArrays = was;
+    m = g_strdup_printf ("a moving layer above a parked one: 6 ticks draw 6 frames with 2 draw "
+                         "calls each (%d frames, %u draw calls)", drawn, n_draw_calls);
+    result (drawn == 6 && n_draw_calls == 12, m);
+    g_free (m);
+    unload_scene ();
+    walpe_config_free (cfg);
+    g_free (dir);
+    g_free (idle);
+    g_free (screen);
+    screen = NULL;
+}
+
 int main (void)
 {
     setvbuf (stdout, NULL, _IONBF, 0);
@@ -365,6 +538,7 @@ int main (void)
     g_unsetenv ("WALPE_PROP_PROBE");
     g_unsetenv ("WALPE_SKIP_IDS");
     idle_checks (tmp);
+    parked_checks (tmp);
     eglMakeCurrent (dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglDestroySurface (dpy, surf);
     eglDestroyContext (dpy, ctx);

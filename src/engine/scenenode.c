@@ -5181,6 +5181,56 @@ static void scenenode_trim_heap (SceneNodeContent *s)
 #endif
 }
 
+/* The unit quad under m (clip space) puts no pixel on a w x h frame: it
+ * lies entirely outside the view (one pixel of slack), or its bounds hold
+ * no pixel centre (scaled to nothing, or thinner than a pixel between two
+ * columns / rows: the rasterizer fills a pixel only when its centre is
+ * inside). b = its bounds x0, y0, x1, y1. One function for the two places
+ * that ask (what a frame shows, and what it draws), so they cannot
+ * disagree. */
+static gboolean __attribute__ ((noinline)) node_quad_unseen (const WalpeMat3 *m, int w, int h, float b[4])
+{
+    float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+    for (int k = 0; k < 4; k++) {
+        float qx = (k & 1) ? 1.0f : -1.0f, qy = (k & 2) ? 1.0f : -1.0f;
+        float cx = m->m[0] * qx + m->m[3] * qy + m->m[6];
+        float cy = m->m[1] * qx + m->m[4] * qy + m->m[7];
+        x0 = fminf (x0, cx); x1 = fmaxf (x1, cx);
+        y0 = fminf (y0, cy); y1 = fmaxf (y1, cy);
+    }
+    b[0] = x0; b[1] = y0; b[2] = x1; b[3] = y1;
+    const float ex = 2.0f / (float) w, ey = 2.0f / (float) h;
+    gboolean unseen = x1 < -1.0f - ex || x0 > 1.0f + ex || y1 < -1.0f - ey || y0 > 1.0f + ey;
+    const float eps = 1e-3f;
+    float px0 = (x0 * 0.5f + 0.5f) * (float) w, px1 = (x1 * 0.5f + 0.5f) * (float) w;
+    float py0 = (y0 * 0.5f + 0.5f) * (float) h, py1 = (y1 * 0.5f + 0.5f) * (float) h;
+    if (floorf (px1 + eps - 0.5f) < ceilf (px0 - eps - 0.5f) ||
+        floorf (py1 + eps - 0.5f) < ceilf (py0 - eps - 0.5f))
+        unseen = TRUE;
+    return unseen;
+}
+
+/* A layer that is part of this frame (node_drawn) and yet draws nothing in
+ * it: an image or text layer whose quad puts no pixel on the frame - parked
+ * outside the view, or scaled to nothing. The draw loop skips its effect
+ * passes and its draw (see there); this is the same test, for the frame's
+ * signature. Only what the draw loop decides the same way and from the same
+ * numbers: not a layer whose texture is still to come (lazy, video), not
+ * one the loop draws whatever its quad says (particles, puppets, compose
+ * layers, effects that keep a picture or move the layer), and not the
+ * "Skip hidden areas" clip, which the static bake does not follow. */
+static gboolean node_parked (SceneNodeContent *s, const NodeObj *nv, const WalpeMat3 *tail, int w,
+                             int h)
+{
+    if (!nv->tex_ready || nv->tex_lazy || nv->compose || nv->puppet || nv->video >= 0 ||
+        nv->weparts || nv->parts || !(s->nofx || fx_cullable (nv->fxset)))
+        return FALSE;
+    WalpeMat3 m, quad;
+    float b[4];
+    node_clip_matrix (nv, tail, &m, &quad);
+    return node_quad_unseen (&m, w, h, b);
+}
+
 /* ---- frame signature ---------------------------------------------------
  * FNV-1a over the values a draw depends on. Two frames with the same
  * signature and no layer flagged volatile put the same pixels on screen. */
@@ -5816,7 +5866,23 @@ static gboolean scenenode_gl_render (WalpeContent *c, int w, int h, float px, fl
             continue;
         }
         gboolean vol = FALSE;
-        guint64 ns = node_signature (s, i, &vol);
+        guint64 ns;
+        /* A layer that puts no pixel on this frame shows the same - nothing -
+         * wherever it is and whatever its effects, its sprite sheet or a
+         * script do with it: one value for all of that, and never "moving".
+         * (An effect that follows the time on a layer parked outside the
+         * view counted as a moving layer: the frame was drawn and presented
+         * at the full frame rate although no pixel of it could change, and
+         * the still layers behind such a layer were never taken from the
+         * static bake.) */
+        const gboolean parked = node_parked (s, nv, &tail, w, h);
+        if (parked) {
+            ns = SIG_SEED;
+            SIG_ADD (ns, i);
+            ns = sig_mix (ns, "parked", 6);
+        } else {
+            ns = node_signature (s, i, &vol);
+        }
         if (vol || ns != nv->sig || nv->sig_vol)
             nv->stable = 0;
         else if (nv->stable < 1000000)
@@ -5828,7 +5894,7 @@ static gboolean scenenode_gl_render (WalpeContent *c, int w, int h, float px, fl
         if (run_open && !vol && nv->stable >= BAKE_STABLE) {
             SIG_ADD (run_sig, ns);
             run_end = i + 1;
-            run_draws += nv->tex_ready ? 1 : 0;
+            run_draws += nv->tex_ready && !parked ? 1 : 0;
             run_px += nv->cost_px;
         } else {
             run_open = FALSE;
@@ -6057,30 +6123,15 @@ static gboolean scenenode_gl_render (WalpeContent *c, int w, int h, float px, fl
         gboolean culled = FALSE;
         if (nv->tex_ready && !nv->compose && !nv->puppet &&
             (s->nofx || fx_cullable (nv->fxset))) {
-            float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
-            for (int k = 0; k < 4; k++) {
-                float qx = (k & 1) ? 1.0f : -1.0f, qy = (k & 2) ? 1.0f : -1.0f;
-                float cx = m.m[0] * qx + m.m[3] * qy + m.m[6];
-                float cy = m.m[1] * qx + m.m[4] * qy + m.m[7];
-                x0 = fminf (x0, cx); x1 = fmaxf (x1, cx);
-                y0 = fminf (y0, cy); y1 = fmaxf (y1, cy);
-            }
-            const float ex = 2.0f / (float) w, ey = 2.0f / (float) h;
-            culled = x1 < -1.0f - ex || x0 > 1.0f + ex || y1 < -1.0f - ey || y0 > 1.0f + ey;
-            /* Nor can a quad put a pixel on screen whose bounds hold no
-             * pixel centre (scaled to nothing, or thinner than a pixel
-             * between two columns / rows): the rasterizer fills a pixel
-             * only when its centre is inside. Its effect passes used to
-             * run at full working size all the same. */
-            const float eps = 1e-3f;
-            float px0 = (x0 * 0.5f + 0.5f) * (float) w, px1 = (x1 * 0.5f + 0.5f) * (float) w;
-            float py0 = (y0 * 0.5f + 0.5f) * (float) h, py1 = (y1 * 0.5f + 0.5f) * (float) h;
-            if (floorf (px1 + eps - 0.5f) < ceilf (px0 - eps - 0.5f) ||
-                floorf (py1 + eps - 0.5f) < ceilf (py0 - eps - 0.5f))
-                culled = TRUE;
+            /* (node_quad_unseen: outside the view, or no pixel centre in
+             * its bounds - scaled to nothing, thinner than a pixel between
+             * two columns / rows. The effect passes of such a quad used to
+             * run at full working size all the same.) */
+            float qb[4];
+            culled = node_quad_unseen (&m, w, h, qb);
             /* ... or entirely under other windows ("Skip hidden areas",
              * clip.h; always FALSE without a clip) */
-            culled = culled || !walpe_clip_hits (x0, y0, x1, y1);
+            culled = culled || !walpe_clip_hits (qb[0], qb[1], qb[2], qb[3]);
         }
         {
             /* what the layer's draw writes: its bounds within the view (a
