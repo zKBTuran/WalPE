@@ -6890,6 +6890,8 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
             D.cfg->web_accel = v;
             changed = TRUE;
             g_timeout_add (200, web_accel_restart, NULL);
+        } else {
+            live = TRUE;        /* the value it has: nothing to save, but not "nothing to set" */
         }
     }
 #endif

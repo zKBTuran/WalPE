@@ -892,6 +892,13 @@ def case_busy(env, W):
         print("skip busy (no web module in this build: no web_accel setting)")
         return
     pid = env.daemon.pid
+    # the value it has: answered like every other key set to its own value
+    # (it was "nothing to set", an error), and nothing restarts for it
+    mark = env.mark()
+    rep = env.ipc({"cmd": "set", "web_accel": bool(st.get("web_accel"))})
+    check(bool(rep and rep.get("ok")), "busy: web_accel set to the value it has is no error", rep)
+    time.sleep(1.0)     # (a restart would be announced 200 ms after the reply)
+    check("restarting to apply it" not in env.since(mark), "busy: and restarts nothing", env.since(mark)[-400:])
     rep = env.ipc({"cmd": "install", "id": "123456789"})
     if not check(bool(rep and rep.get("ok")), "busy: the download started", rep):
         return
