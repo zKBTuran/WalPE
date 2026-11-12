@@ -20,6 +20,22 @@
 #include <string.h>
 #include "common/media.h"
 
+/* The check of resident memory (part 2): not in a build with the address
+ * sanitizer. Its allocator keeps freed memory back for a while (the
+ * quarantine, 256 MiB by default), so what the daemon frees stays resident
+ * there and the number says nothing; a leak is LeakSanitizer's to report
+ * when the test ends. */
+#if defined (__SANITIZE_ADDRESS__)
+#  define RSS_SAYS_SOMETHING 0
+#elif defined (__has_feature)
+#  if __has_feature (address_sanitizer)
+#    define RSS_SAYS_SOMETHING 0
+#  endif
+#endif
+#ifndef RSS_SAYS_SOMETHING
+#  define RSS_SAYS_SOMETHING 1
+#endif
+
 #define NAME "org.mpris.MediaPlayer2.walpetest"
 #define PATH "/org/mpris/MediaPlayer2"
 #define IFACE "org.mpris.MediaPlayer2.Player"
@@ -160,8 +176,9 @@ int main (void)
     }
     long r1 = rss_kb ();
     if (r1 - r0 > 48 * 1024)
-        fprintf (stderr, "media-player: 40 messages with repeated keys: %ld MiB more memory\n", (r1 - r0) / 1024);
-    CHECK (r1 - r0 <= 48 * 1024);
+        fprintf (stderr, "media-player: 40 messages with repeated keys: %ld MiB more memory%s\n", (r1 - r0) / 1024,
+                 RSS_SAYS_SOMETHING ? "" : " (not checked: a sanitizer's allocator holds freed memory back)");
+    CHECK (!RSS_SAYS_SOMETHING || r1 - r0 <= 48 * 1024);
 
     /* 3. a title of a megabyte ("ä" is two bytes: the cut is between two) */
     {
