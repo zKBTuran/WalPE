@@ -1,0 +1,152 @@
+/* x11desk_test.c - a desktop's own desktop window and where the wallpaper
+ * window of a monitor goes because of it (platform/x11desk.h): into an
+ * opaque one that lies over the monitor, below a translucent one, on the
+ * root on a bare window manager. Made-up windows as the X server would
+ * describe them: no display, no daemon. The windows are those the desktops
+ * were found to make (docs/DESKTOPS.md). */
+#include <glib.h>
+#include "platform/x11desk.h"
+
+static int fails;
+#define CHECK(c) do { if (!(c)) { fails++; g_printerr ("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); } } while (0)
+
+#define M(x, y, w, h) (&(WalpeDeskRect) { (x), (y), (w), (h) })
+
+static void test_parse (void)
+{
+    WalpeX11DeskMode m = WALPE_X11_DESK_ROOT;
+    CHECK (walpe_x11_desk_parse (NULL, &m) == 0 && m == WALPE_X11_DESK_AUTO);
+    m = WALPE_X11_DESK_ROOT;
+    CHECK (walpe_x11_desk_parse ("", &m) == 0 && m == WALPE_X11_DESK_AUTO);
+    CHECK (walpe_x11_desk_parse ("auto", &m) == 1 && m == WALPE_X11_DESK_AUTO);
+    CHECK (walpe_x11_desk_parse ("root", &m) == 1 && m == WALPE_X11_DESK_ROOT);
+    CHECK (walpe_x11_desk_parse ("ROOT", &m) == 1 && m == WALPE_X11_DESK_ROOT);
+    CHECK (walpe_x11_desk_parse ("window", &m) == 1 && m == WALPE_X11_DESK_WINDOW);
+    m = WALPE_X11_DESK_ROOT;
+    CHECK (walpe_x11_desk_parse ("desktop", &m) == -1 && m == WALPE_X11_DESK_AUTO);
+    CHECK (walpe_x11_desk_parse ("1", &m) == -1 && m == WALPE_X11_DESK_AUTO);
+    CHECK (!g_strcmp0 (walpe_x11_desk_mode_name (WALPE_X11_DESK_AUTO), "auto"));
+    CHECK (!g_strcmp0 (walpe_x11_desk_mode_name (WALPE_X11_DESK_ROOT), "root"));
+    CHECK (!g_strcmp0 (walpe_x11_desk_mode_name (WALPE_X11_DESK_WINDOW), "window"));
+}
+
+/* a bare window manager: no desktop window at all */
+static void test_none (void)
+{
+    for (int cm = 0; cm < 2; cm++)
+        for (int mode = WALPE_X11_DESK_AUTO; mode <= WALPE_X11_DESK_WINDOW; mode++) {
+            CHECK (walpe_x11_desk_host ((WalpeX11DeskMode) mode, M (0, 0, 1920, 1080), NULL, 0, cm) == -1);
+            CHECK (walpe_x11_desk_hides (M (0, 0, 1920, 1080), NULL, 0, cm) == -1);
+        }
+    CHECK (!walpe_x11_desk_is_top (0x400001, NULL, 0));
+}
+
+/* xfdesktop under xfwm4: one 24-bit window over the whole screen (two
+ * monitors side by side), in a frame of the window manager; xfwm4
+ * composites */
+static void test_one_for_the_screen (void)
+{
+    const WalpeDeskWin xf[] = { { 0xe00028, 0x601cb7, { 0, 0, 3840, 1080 }, 24 } };
+    for (int cm = 0; cm < 2; cm++) {
+        CHECK (walpe_x11_desk_host (WALPE_X11_DESK_AUTO, M (0, 0, 1920, 1080), xf, 1, cm) == 0);
+        CHECK (walpe_x11_desk_host (WALPE_X11_DESK_AUTO, M (1920, 0, 1920, 1080), xf, 1, cm) == 0);
+        CHECK (walpe_x11_desk_host (WALPE_X11_DESK_WINDOW, M (1920, 0, 1920, 1080), xf, 1, cm) == 0);
+        CHECK (walpe_x11_desk_host (WALPE_X11_DESK_ROOT, M (0, 0, 1920, 1080), xf, 1, cm) == -1);
+        /* asked to stay on the root: the wallpaper is behind that window */
+        CHECK (walpe_x11_desk_hides (M (0, 0, 1920, 1080), xf, 1, cm) == 0);
+    }
+    /* a monitor the window does not reach (a third one switched on a
+     * moment ago, the file manager has not followed yet): the root */
+    CHECK (walpe_x11_desk_host (WALPE_X11_DESK_AUTO, M (3840, 0, 1920, 1080), xf, 1, FALSE) == -1);
+    CHECK (walpe_x11_desk_hides (M (3840, 0, 1920, 1080), xf, 1, FALSE) == -1);
+    /* ... and one it covers only in part */
+    CHECK (walpe_x11_desk_host (WALPE_X11_DESK_AUTO, M (1920, 0, 2560, 1440), xf, 1, FALSE) == -1);
+    /* the pointer over the frame is over the desktop */
+    CHECK (walpe_x11_desk_is_top (0x601cb7, xf, 1));
+    CHECK (walpe_x11_desk_is_top (0xe00028, xf, 1));
+    CHECK (!walpe_x11_desk_is_top (0x601d9c, xf, 1));
+    CHECK (!walpe_x11_desk_is_top (0, xf, 1));
+}
+
+/* pcmanfm --desktop / pcmanfm-qt --desktop: one window per monitor */
+static void test_one_per_monitor (void)
+{
+    const WalpeDeskWin pc[] = { { 0xa00003, 0x800186, { 0, 0, 1920, 1080 }, 24 },
+                                { 0xa00010, 0x800190, { 1920, 0, 2560, 1440 }, 24 } };
+    CHECK (walpe_x11_desk_host (WALPE_X11_DESK_AUTO, M (0, 0, 1920, 1080), pc, 2, FALSE) == 0);
+    CHECK (walpe_x11_desk_host (WALPE_X11_DESK_AUTO, M (1920, 0, 2560, 1440), pc, 2, FALSE) == 1);
+    CHECK (walpe_x11_desk_hides (M (1920, 0, 2560, 1440), pc, 2, FALSE) == 1);
+    /* only the first monitor has one */
+    CHECK (walpe_x11_desk_host (WALPE_X11_DESK_AUTO, M (1920, 0, 2560, 1440), pc, 1, FALSE) == -1);
+}
+
+/* nemo-desktop on Cinnamon, the icons window of GNOME: a 32-bit window */
+static void test_translucent (void)
+{
+    const WalpeDeskWin nemo[] = { { 0x1c00007, 0x1c00007, { 0, 0, 1920, 1080 }, 32 } };
+    /* under a compositing manager what is below it is seen between the
+     * icons: the wallpaper window stays on the root */
+    CHECK (walpe_x11_desk_translucent (&nemo[0], TRUE));
+    CHECK (walpe_x11_desk_host (WALPE_X11_DESK_AUTO, M (0, 0, 1920, 1080), nemo, 1, TRUE) == -1);
+    CHECK (walpe_x11_desk_hides (M (0, 0, 1920, 1080), nemo, 1, TRUE) == -1);
+    /* asked for by name: into it all the same */
+    CHECK (walpe_x11_desk_host (WALPE_X11_DESK_WINDOW, M (0, 0, 1920, 1080), nemo, 1, TRUE) == 0);
+    CHECK (walpe_x11_desk_host (WALPE_X11_DESK_ROOT, M (0, 0, 1920, 1080), nemo, 1, TRUE) == -1);
+    /* without a compositing manager a 32-bit window lets nothing through */
+    CHECK (!walpe_x11_desk_translucent (&nemo[0], FALSE));
+    CHECK (walpe_x11_desk_host (WALPE_X11_DESK_AUTO, M (0, 0, 1920, 1080), nemo, 1, FALSE) == 0);
+    CHECK (walpe_x11_desk_hides (M (0, 0, 1920, 1080), nemo, 1, FALSE) == 0);
+}
+
+/* desktop-type windows that are no file manager's desktop: a system
+ * monitor that asks for the type to stay below everything */
+static void test_small_ones (void)
+{
+    const WalpeDeskWin w[] = { { 0x2000001, 0x2000001, { 1500, 40, 380, 600 }, 32 },
+                               { 0x2200001, 0x2200001, { 0, 0, 1920, 1079 }, 24 },
+                               { 0xe00028, 0x601cb7, { 0, 0, 1920, 1080 }, 24 } };
+    CHECK (!walpe_x11_desk_covers (&w[0], M (0, 0, 1920, 1080)));
+    CHECK (!walpe_x11_desk_covers (&w[1], M (0, 0, 1920, 1080)));     /* one row short */
+    CHECK (walpe_x11_desk_covers (&w[2], M (0, 0, 1920, 1080)));
+    CHECK (walpe_x11_desk_host (WALPE_X11_DESK_AUTO, M (0, 0, 1920, 1080), w, 2, FALSE) == -1);
+    CHECK (walpe_x11_desk_host (WALPE_X11_DESK_WINDOW, M (0, 0, 1920, 1080), w, 2, TRUE) == -1);
+    /* the real one is found behind them in the list */
+    CHECK (walpe_x11_desk_host (WALPE_X11_DESK_AUTO, M (0, 0, 1920, 1080), w, 3, FALSE) == 2);
+    /* a monitor without a size (a made-up state) is covered by nothing */
+    CHECK (!walpe_x11_desk_covers (&w[2], M (0, 0, 0, 0)));
+    /* an entry without a window is none */
+    const WalpeDeskWin gone[] = { { 0, 0, { 0, 0, 1920, 1080 }, 24 } };
+    CHECK (walpe_x11_desk_host (WALPE_X11_DESK_AUTO, M (0, 0, 1920, 1080), gone, 1, FALSE) == -1);
+    CHECK (walpe_x11_desk_hides (M (0, 0, 1920, 1080), gone, 1, FALSE) == -1);
+}
+
+/* two that qualify: a translucent icons window and an opaque one. The
+ * first opaque one in the list is the host; the first one stays the
+ * choice when a second opaque one appears */
+static void test_several (void)
+{
+    const WalpeDeskWin w[] = { { 0x1c00007, 0x1c00007, { 0, 0, 1920, 1080 }, 32 },
+                               { 0xa00003, 0x800186, { 0, 0, 1920, 1080 }, 24 },
+                               { 0xb00003, 0x800200, { 0, 0, 1920, 1080 }, 24 } };
+    CHECK (walpe_x11_desk_host (WALPE_X11_DESK_AUTO, M (0, 0, 1920, 1080), w, 3, TRUE) == 1);
+    CHECK (walpe_x11_desk_host (WALPE_X11_DESK_AUTO, M (0, 0, 1920, 1080), w, 2, TRUE) == 1);
+    CHECK (walpe_x11_desk_host (WALPE_X11_DESK_AUTO, M (0, 0, 1920, 1080), w, 3, FALSE) == 0);
+    CHECK (walpe_x11_desk_host (WALPE_X11_DESK_WINDOW, M (0, 0, 1920, 1080), w, 3, TRUE) == 0);
+    CHECK (walpe_x11_desk_hides (M (0, 0, 1920, 1080), w, 3, TRUE) == 1);
+}
+
+int main (void)
+{
+    test_parse ();
+    test_none ();
+    test_one_for_the_screen ();
+    test_one_per_monitor ();
+    test_translucent ();
+    test_small_ones ();
+    test_several ();
+    if (fails)
+        g_printerr ("x11desk-test: %d check(s) failed\n", fails);
+    else
+        g_print ("x11desk-test: ok\n");
+    return fails ? 1 : 0;
+}

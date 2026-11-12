@@ -35,6 +35,7 @@
 
 #include "platform/impl.h"
 #include "platform/fsplace.h"
+#include "platform/x11desk.h"
 #include "common/config.h"
 #include "common/pace.h"
 
@@ -54,6 +55,9 @@ typedef struct {
     gboolean focus_app;      /* the focused window is an application's, on this monitor */
     gboolean fs_here;        /* the focused fullscreen window is on this monitor */
     gboolean destroyed;      /* another client destroyed the window (reported once) */
+    Window host;             /* the desktop window this window is a child of (x11desk.h);
+                              * None: it is a child of the root */
+    int host_x, host_y;      /* where in it */
 } X11Surface;
 
 static struct {
@@ -84,6 +88,11 @@ static struct {
     guint top_probe_wait;        /* scans left until the root's children are listed again */
     Atom cm_atom;            /* _NET_WM_CM_S<screen> (x11_present_log) */
     gboolean sleep_watching; /* sleep_watch_init ran */
+    WalpeX11DeskMode desk_mode;  /* WALPE_X11_DESKTOP */
+    WalpeDeskWin *desks;     /* the desktop windows the last scan of the clients found */
+    guint n_desks;
+    gboolean desk_tops_stale;    /* a window was reparented since their frames were asked for */
+    gboolean desk_hidden_said;   /* the line about a wallpaper behind a desktop window */
 } X;
 
 #define SURF(i) ((X11Surface *) g_ptr_array_index (X.surfs, (i)))
@@ -377,7 +386,7 @@ static gulong window_prop32 (Window w, Atom prop, Atom type, gulong max, guchar 
  * iconic (WM_STATE) or _NET_WM_STATE_HIDDEN windows. dwm keeps the windows
  * of other tags mapped but moves them off-screen, so the geometry test
  * already ignores them. */
-static Atom a_type, a_normal, a_dialog, a_state, a_hidden, a_wmstate;
+static Atom a_type, a_normal, a_dialog, a_desktop, a_state, a_hidden, a_wmstate;
 
 static void normal_visible_atoms (void)
 {
@@ -385,21 +394,27 @@ static void normal_visible_atoms (void)
         a_type = XInternAtom (X.xd, "_NET_WM_WINDOW_TYPE", False);
         a_normal = XInternAtom (X.xd, "_NET_WM_WINDOW_TYPE_NORMAL", False);
         a_dialog = XInternAtom (X.xd, "_NET_WM_WINDOW_TYPE_DIALOG", False);
+        a_desktop = XInternAtom (X.xd, "_NET_WM_WINDOW_TYPE_DESKTOP", False);
         a_state = XInternAtom (X.xd, "_NET_WM_STATE", False);
         a_hidden = XInternAtom (X.xd, "_NET_WM_STATE_HIDDEN", False);
         a_wmstate = XInternAtom (X.xd, "WM_STATE", False);
     }
 }
 
-static gboolean window_is_normal_visible (Window w)
+/* *desktop: the window's type is _NET_WM_WINDOW_TYPE_DESKTOP (a file
+ * manager's desktop, x11desk.h; known from the same read) */
+static gboolean window_is_normal_visible (Window w, gboolean *desktop)
 {
     normal_visible_atoms ();
     guchar *d = NULL;
     gulong n = window_prop32 (w, a_type, XA_ATOM, 16, &d);
+    *desktop = FALSE;
     if (d) {
         gboolean normal = FALSE;
-        for (gulong i = 0; i < n; i++)
+        for (gulong i = 0; i < n; i++) {
             normal |= ((Atom *) d)[i] == a_normal || ((Atom *) d)[i] == a_dialog;
+            *desktop |= ((Atom *) d)[i] == a_desktop;
+        }
         XFree (d);
         if (n > 0 && !normal)
             return FALSE;
@@ -532,6 +547,7 @@ typedef struct {
     gulong since;
     gboolean valid;
     gboolean normal;
+    gboolean desktop;       /* its type is _NET_WM_WINDOW_TYPE_DESKTOP */
 } ClientProps;
 
 static void client_props_event (const XPropertyEvent *e)
@@ -593,6 +609,131 @@ static gboolean client_is_watched (Window w)
 }
 
 static void fs_place_report (void);
+
+/* ------------------------------------- a desktop's own desktop window
+ * (x11desk.h: what it is, and why the wallpaper window goes into an
+ * opaque one). The scan of the clients below finds them - it reads every
+ * client's type anyway - so a session without one (a bare window manager)
+ * pays nothing for this: no request, no event, no timer. */
+
+/* the child of the root w is in: w itself, or the window manager's frame
+ * around it (None: the tree could not be asked, the window is going) */
+static Window window_top (Window w)
+{
+    for (int up = 0; up < 16; up++) {
+        Window r, parent = None, *kids = NULL;
+        guint n = 0;
+        if (!XQueryTree (X.xd, w, &r, &parent, &kids, &n))
+            return None;
+        if (kids)
+            XFree (kids);
+        if (parent == X.root)
+            return w;
+        if (parent == None)
+            return None;
+        w = parent;
+    }
+    return None;
+}
+
+/* WM_CLASS of a window, for a log line ("Xfdesktop"; g_free) */
+static char *window_class_name (Window w)
+{
+    XClassHint ch = { NULL, NULL };
+    char *name = NULL;
+    if (XGetClassHint (X.xd, w, &ch)) {
+        name = g_strdup (ch.res_class && *ch.res_class ? ch.res_class : ch.res_name);
+        if (ch.res_name)
+            XFree (ch.res_name);
+        if (ch.res_class)
+            XFree (ch.res_class);
+    }
+    return name ? name : g_strdup ("?");
+}
+
+/* Every wallpaper window is put where x11desk.h says: into the desktop
+ * window that lies over its monitor, or back at the bottom of the root.
+ * Called after a scan found the desktop windows; changes something only
+ * when one appeared, went or moved.
+ * As a child of another client's window the wallpaper window dies with
+ * it (the file manager is closed, or restarted): its own DestroyNotify
+ * is asked for while it is one, and the daemon makes its windows anew
+ * (surface_closed), in the next desktop window or on the root. */
+static void desk_apply (void)
+{
+    if (X.windowed || X.probe || !X.surfs)
+        return;
+    gboolean any = X.n_desks > 0;
+    for (guint i = 0; i < X.surfs->len && !any; i++)
+        any = SURF (i)->host != None;
+    if (!any)
+        return;         /* no desktop window, none left behind: a bare window manager */
+    const gboolean cm = X.n_desks > 0 && compositor_running ();
+    for (guint i = 0; i < X.surfs->len; i++) {
+        X11Surface *s = SURF (i);
+        if (s->kind != WALPE_SURFACE_WALLPAPER || s->xid == None || s->destroyed)
+            continue;
+        const WalpeDeskRect mon = { s->geom.x, s->geom.y, s->geom.width, s->geom.height };
+        const int k = walpe_x11_desk_host (X.desk_mode, &mon, X.desks, (int) X.n_desks, cm);
+        const Window host = k >= 0 ? (Window) X.desks[k].client : None;
+        const int hx = s->geom.x - (k >= 0 ? X.desks[k].r.x : 0);
+        const int hy = s->geom.y - (k >= 0 ? X.desks[k].r.y : 0);
+        if (host == s->host) {
+            if (host != None && (hx != s->host_x || hy != s->host_y)) {
+                XMoveWindow (X.xd, s->xid, hx, hy);     /* the desktop window was moved */
+                s->host_x = hx;
+                s->host_y = hy;
+            }
+        } else {
+            XSelectInput (X.xd, s->xid, ExposureMask | (host != None ? StructureNotifyMask : 0));
+            XReparentWindow (X.xd, s->xid, host != None ? host : X.root, hx, hy);
+            if (host != None) {
+                XRaiseWindow (X.xd, s->xid);    /* above what the file manager has in it */
+                char *cls = window_class_name (host);
+                g_message ("mon%d: the desktop's own desktop window 0x%lx (%s, %dx%d+%d+%d, %d-bit) "
+                           "lies over this monitor and nothing is seen through it: the wallpaper "
+                           "window is a child of it now - above the desktop's picture and icons, "
+                           "below every other window; clicks go through to the desktop. "
+                           "WALPE_X11_DESKTOP=root keeps it the lowest window of the root, behind "
+                           "that window", s->index, (unsigned long) host, cls, X.desks[k].r.width,
+                           X.desks[k].r.height, X.desks[k].r.x, X.desks[k].r.y, X.desks[k].depth);
+                g_free (cls);
+            } else {
+                XLowerWindow (X.xd, s->xid);
+                X.stack_dirty = TRUE;
+                g_message ("mon%d: the desktop window 0x%lx the wallpaper window was a child of is "
+                           "not over this monitor any more: the wallpaper window is the lowest "
+                           "window of the root again", s->index, (unsigned long) s->host);
+            }
+            s->host = host;
+            s->host_x = hx;
+            s->host_y = hy;
+        }
+        /* asked to stay on the root, behind a window nothing is seen
+         * through: said once (the wallpaper is drawn and not seen) */
+        const int hid = host == None ? walpe_x11_desk_hides (&mon, X.desks, (int) X.n_desks, cm) : -1;
+        if (hid >= 0 && !X.desk_hidden_said) {
+            X.desk_hidden_said = TRUE;
+            char *cls = window_class_name ((Window) X.desks[hid].client);
+            g_message ("mon%d: the desktop's own desktop window 0x%lx (%s) lies over this monitor "
+                       "and nothing is seen through it: the wallpaper is behind it "
+                       "(WALPE_X11_DESKTOP=root). Without that variable the wallpaper window is "
+                       "put into the desktop window", s->index, X.desks[hid].client, cls);
+            g_free (cls);
+        }
+    }
+    XFlush (X.xd);
+}
+
+/* the desktop windows of a scan (taken over; NULL / 0 = none) */
+static void desk_set (GArray *found)
+{
+    g_free (X.desks);
+    X.n_desks = found ? found->len : 0;
+    X.desks = found ? (WalpeDeskWin *) (gpointer) g_array_free (found, FALSE) : NULL;
+    X.desk_tops_stale = FALSE;
+    desk_apply ();
+}
 
 static void recompute_covered (void)
 {
@@ -662,6 +803,7 @@ static void recompute_covered (void)
     guint nw = 0;
     XRect focus = { 0, 0, 0, 0 };   /* the focused application window */
     gboolean have_focus = FALSE;
+    GArray *desks = NULL;           /* WalpeDeskWin: the desktop windows among them */
     gboolean cm = !X.cfg->cover_transparent && compositor_running ();
     for (guint i = 0; i < n; i++) {
         XWindowAttributes wa;
@@ -690,17 +832,18 @@ static void recompute_covered (void)
         }
         if (!on_any)
             continue;
-        gboolean normal;
+        gboolean normal, desktop = FALSE;
         ClientProps *cp = listed ? g_hash_table_lookup (X.client_props, GSIZE_TO_POINTER (clients[i]))
                                  : NULL;
         if (cp && cp->valid && (wa.your_event_mask & PropertyChangeMask)) {
             normal = cp->normal;
+            desktop = cp->desktop;
         } else {
             if (listed && !(wa.your_event_mask & PropertyChangeMask))
                 XSelectInput (X.xd, clients[i], PropertyChangeMask);   /* (not the window it was) */
             normal_visible_atoms ();
             const gulong since = NextRequest (X.xd);
-            normal = window_is_normal_visible (clients[i]);
+            normal = window_is_normal_visible (clients[i], &desktop);
             if (listed) {
                 if (!cp) {
                     cp = g_new0 (ClientProps, 1);
@@ -709,7 +852,24 @@ static void recompute_covered (void)
                 cp->since = since;
                 cp->valid = TRUE;
                 cp->normal = normal;
+                cp->desktop = desktop;
             }
+        }
+        if (desktop) {
+            /* a desktop's own desktop window (x11desk.h). The child of the
+             * root it is in is asked for once (and again after a window
+             * was reparented: a window manager came or went) */
+            WalpeDeskWin dw = { clients[i], 0, { ox, oy, wa.width, wa.height }, wa.depth };
+            if (all_top || (top && g_hash_table_contains (top, GSIZE_TO_POINTER (clients[i]))))
+                dw.top = clients[i];
+            for (guint k = 0; !dw.top && !X.desk_tops_stale && k < X.n_desks; k++)
+                if (X.desks[k].client == clients[i])
+                    dw.top = X.desks[k].top;
+            if (!dw.top)
+                dw.top = window_top (clients[i]);
+            if (!desks)
+                desks = g_array_new (FALSE, FALSE, sizeof (WalpeDeskWin));
+            g_array_append_val (desks, dw);
         }
         if (!normal)
             continue;
@@ -758,6 +918,7 @@ static void recompute_covered (void)
         XFree (data);
     if (tree_clients)
         XFree (tree_clients);
+    desk_set (desks);   /* the wallpaper windows follow the desktop windows found */
     /* the focused fullscreen window may have been moved to another monitor
      * (the scan runs after every change of a window's place) */
     if (X.fs_active)
@@ -871,7 +1032,7 @@ static Window create_desktop_window (const XRect *g, gboolean or_mode)
 /* keep the wallpaper window at the bottom of the stack; re-assert often */
 static void sink_desktop_window (X11Surface *m)
 {
-    if (m->xid == None)
+    if (m->xid == None || m->host != None)  /* (in a desktop window: nothing to lower) */
         return;
     shape_away_input (m->xid);
     XLowerWindow (X.xd, m->xid);
@@ -882,7 +1043,12 @@ static void sink_desktop_window (X11Surface *m)
 static gboolean wallpapers_at_bottom (void)
 {
     Window r, p, *kids = NULL;
-    guint n = 0, nm = X.surfs->len;
+    guint n = 0, nm = 0;
+    /* (those that are children of a desktop window are not on the root) */
+    for (guint i = 0; i < X.surfs->len; i++)
+        nm += SURF (i)->host == None ? 1 : 0;
+    if (nm == 0)
+        return TRUE;
     if (!XQueryTree (X.xd, X.root, &r, &p, &kids, &n))
         return FALSE;
     gboolean ok = n >= nm;
@@ -1061,7 +1227,11 @@ static void update_active_window (void)
             XSelectInput (X.xd, active, PropertyChangeMask);
         X.watched_win = active;
     }
+    /* (a desktop's own desktop window has the focus after a click on the
+     * desktop; whatever state it carries, it is no fullscreen application) */
     gboolean fs = window_is_fullscreen (active);
+    for (guint k = 0; fs && k < X.n_desks; k++)
+        fs = X.desks[k].client != active;
     /* one batch: the daemon hears of the window and of its monitor at once */
     walpe_signals_begin ();
     if (fs != X.fs_active) {
@@ -1164,7 +1334,12 @@ static gboolean xdata_ready (gint fd, GIOCondition cond, gpointer user)
              * its undefined frames. The surface is reported closed, as a
              * Wayland compositor's layer surface is: the daemon restarts in
              * place and makes its windows anew. */
-            if (e.type == DestroyNotify && e.xdestroywindow.event == X.root)
+            /* (a wallpaper window that is a child of a desktop window is
+             * not the root's: its own DestroyNotify was asked for, and it
+             * goes when the file manager's window does) */
+            if (e.type == DestroyNotify &&
+                (e.xdestroywindow.event == X.root ||
+                 e.xdestroywindow.event == e.xdestroywindow.window))
                 for (guint k = 0; k < X.surfs->len; k++)
                     if (SURF (k)->xid == e.xdestroywindow.window && !SURF (k)->destroyed) {
                         SURF (k)->destroyed = TRUE;
@@ -1172,6 +1347,10 @@ static gboolean xdata_ready (gint fd, GIOCondition cond, gpointer user)
                             X.ev->surface_closed (SURF (k)->user, X.user);
                         break;
                     }
+            /* a window manager put a frame around a window, or took it
+             * away: which child of the root a desktop window is in */
+            if (e.type == ReparentNotify && !window_is_wallpaper (e.xreparent.window))
+                X.desk_tops_stale = TRUE;
             if (e.type == ConfigureNotify && e.xconfigure.event == X.root)
                 stack_event (e.xconfigure.window, e.xconfigure.above);
             else if (e.type == CirculateNotify &&
@@ -1244,7 +1423,11 @@ static void x_event_source_add (void)
  * windows are input-shaped away, so the bare desktop gives None); desktop
  * icon windows (_NET_WM_WINDOW_TYPE_DESKTOP: pcmanfm, xfdesktop, ...)
  * count as desktop. Like WE: clicks on the desktop reach the wallpaper,
- * clicks on windows (and on bars/panels) do not. */
+ * clicks on windows (and on bars/panels) do not.
+ * A window manager that puts a frame around every client (xfwm4, openbox,
+ * kwin) reports that frame as the child, and a frame has no type: the
+ * desktop windows the scan of the clients found are known with the child
+ * of the root they are in (x11desk.h). */
 static gboolean pointer_on_desktop (Window child)
 {
     if (child == None || child == X.root)
@@ -1252,6 +1435,8 @@ static gboolean pointer_on_desktop (Window child)
     for (guint i = 0; i < X.surfs->len; i++)
         if (SURF (i)->xid == child)
             return TRUE;
+    if (walpe_x11_desk_is_top (child, X.desks, (int) X.n_desks))
+        return TRUE;
     static Window last_w = None;
     static gboolean last_r = FALSE;
     if (child == last_w)
@@ -1817,6 +2002,14 @@ static gboolean x11_open (const WalpePlatformOpts *o, char **err)
     X.egl_xd = g_getenv ("WALPE_ONE_XCONN") ? NULL : XOpenDisplay (NULL);
     if (!X.egl_xd)
         X.egl_xd = X.xd;
+    /* where the wallpaper windows go on a desktop with a desktop window of
+     * its own (x11desk.h) */
+    const char *desk = g_getenv ("WALPE_X11_DESKTOP");
+    if (walpe_x11_desk_parse (desk, &X.desk_mode) < 0)
+        g_warning ("x11: WALPE_X11_DESKTOP=%s: not a word this program knows (auto, root, "
+                   "window); taken as auto", desk);
+    else if (X.desk_mode != WALPE_X11_DESK_AUTO)
+        g_message ("x11: WALPE_X11_DESKTOP=%s", walpe_x11_desk_mode_name (X.desk_mode));
     int shape_ev, shape_err;
     have_shape = XShapeQueryExtension (X.xd, &shape_ev, &shape_err);
     Atom wmcheck = XInternAtom (X.xd, "_NET_SUPPORTING_WM_CHECK", True);
@@ -1833,9 +2026,30 @@ static gboolean x11_open (const WalpePlatformOpts *o, char **err)
     return TRUE;
 }
 
+/* "wm=yes"; on a desktop with a desktop window of its own (x11desk.h) also
+ * that window and where the wallpaper windows are because of it - the
+ * line of a bug report ("walpe-ctl diag") that says why the icons are
+ * gone, or why no wallpaper is seen */
 static char *x11_describe (void)
 {
-    return g_strdup_printf ("wm=%s", X.has_wm ? "yes" : "no");
+    GString *s = g_string_new (NULL);
+    g_string_append_printf (s, "wm=%s", X.has_wm ? "yes" : "no");
+    for (guint i = 0; i < X.n_desks; i++) {
+        char *cls = window_class_name ((Window) X.desks[i].client);
+        guint in = 0, n = 0;
+        for (guint k = 0; X.surfs && k < X.surfs->len; k++) {
+            n += SURF (k)->kind == WALPE_SURFACE_WALLPAPER ? 1 : 0;
+            in += SURF (k)->host == (Window) X.desks[i].client ? 1 : 0;
+        }
+        g_string_append_printf (s, "; desktop window 0x%lx (%s, %dx%d+%d+%d, %d-bit): %u of %u "
+                                "wallpaper window(s) in it", X.desks[i].client, cls,
+                                X.desks[i].r.width, X.desks[i].r.height, X.desks[i].r.x,
+                                X.desks[i].r.y, X.desks[i].depth, in, n);
+        g_free (cls);
+    }
+    if (X.n_desks || X.desk_mode != WALPE_X11_DESK_AUTO)
+        g_string_append_printf (s, " [WALPE_X11_DESKTOP: %s]", walpe_x11_desk_mode_name (X.desk_mode));
+    return g_string_free (s, FALSE);
 }
 
 static void x11_start (gboolean layout_events, const WalpeSignalSink *sink, gpointer sink_user)
@@ -1893,6 +2107,8 @@ static void x11_close (void)
     X.surfs = NULL;
     g_clear_pointer (&X.layout, g_free);
     X.n_layout = 0;
+    g_clear_pointer (&X.desks, g_free);
+    X.n_desks = 0;
 }
 
 /* requests the main thread has sent to the X server since start (its own
@@ -1901,6 +2117,33 @@ static void x11_status (JsonBuilder *b)
 {
     json_builder_set_member_name (b, "x_requests");
     json_builder_add_int_value (b, (gint64) NextRequest (X.xd) - 1);
+    /* a desktop's own desktop window (x11desk.h): the setting, the windows
+     * of that kind the last scan found, and per wallpaper window the
+     * window it is a child of ("root", or the desktop window's id) */
+    json_builder_set_member_name (b, "x11_desktop");
+    json_builder_add_string_value (b, walpe_x11_desk_mode_name (X.desk_mode));
+    json_builder_set_member_name (b, "x11_desktop_windows");
+    json_builder_begin_array (b);
+    for (guint i = 0; i < X.n_desks; i++) {
+        char *d = g_strdup_printf ("0x%lx %dx%d+%d+%d depth %d", X.desks[i].client,
+                                   X.desks[i].r.width, X.desks[i].r.height, X.desks[i].r.x,
+                                   X.desks[i].r.y, X.desks[i].depth);
+        json_builder_add_string_value (b, d);
+        g_free (d);
+    }
+    json_builder_end_array (b);
+    json_builder_set_member_name (b, "x11_wallpaper_parent");
+    json_builder_begin_array (b);
+    for (guint i = 0; X.surfs && i < X.surfs->len; i++) {
+        if (SURF (i)->host == None) {
+            json_builder_add_string_value (b, "root");
+        } else {
+            char *d = g_strdup_printf ("0x%lx", (unsigned long) SURF (i)->host);
+            json_builder_add_string_value (b, d);
+            g_free (d);
+        }
+    }
+    json_builder_end_array (b);
 }
 
 /* -------------------------------------------------------- pause signals

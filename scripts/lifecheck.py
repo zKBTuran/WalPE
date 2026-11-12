@@ -112,6 +112,20 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             (X11): the daemon says so and restarts in place - same process -
             and every monitor shows its wallpaper again, also the monitor
             that followed the destroyed window's frames (shared rendering).
+  desktop   a desktop's own desktop window (X11): the check plays a file
+            manager and a window manager - a window of the type
+            _NET_WM_WINDOW_TYPE_DESKTOP over a monitor, listed in
+            _NET_CLIENT_LIST, as xfdesktop, pcmanfm, pcmanfm-qt and caja make
+            one. The wallpaper window of that monitor becomes a child of it
+            and is seen (it was behind it); the other monitor's stays the
+            lowest window of the root. The desktop window pauses nothing,
+            focused and marked fullscreen neither; a window over the monitor
+            still does. A small desktop-type window is no desktop; one inside
+            a window manager's frame is. The desktop window moved off the
+            monitor, and back; destroyed with the wallpaper window in it: the
+            daemon restarts in place and shows the wallpaper again. With
+            WALPE_X11_DESKTOP=root the wallpaper window stays on the root,
+            behind the desktop window, and the log says so.
   convert   a video wallpaper the player cannot read: one whose conversion
             cannot start is refused with the reason, one that is being
             converted can be cancelled (and started again); the wallpaper on
@@ -2142,6 +2156,22 @@ class XClient:
             self.x.XFree(kids)
         return out
 
+    def children(self, win):
+        """the children of a window, bottom first"""
+        c = self.c
+        root, parent, count = c.c_ulong(), c.c_ulong(), c.c_uint()
+        kids = c.POINTER(c.c_ulong)()
+        if not self.x.XQueryTree(self.d, win, c.byref(root), c.byref(parent), c.byref(kids), c.byref(count)):
+            return []
+        out = [kids[k] for k in range(count.value)]
+        if count.value:
+            self.x.XFree(kids)
+        return out
+
+    def wtype(self, win, name):
+        """the window's type, as its toolkit sets it (_NET_WM_WINDOW_TYPE_DESKTOP: a file manager's desktop)"""
+        self.prop(win, "_NET_WM_WINDOW_TYPE", self.XA_ATOM, [self.atom(name)])
+
     def fullscreen(self, win, on):
         self.prop(win, "_NET_WM_STATE", self.XA_ATOM, [self.atom("_NET_WM_STATE_FULLSCREEN")] if on else [])
 
@@ -2892,6 +2922,191 @@ def case_winlost(env, W):
     env.stop_daemon()
 
 
+def case_desktop(env, W):
+    """A desktop's own desktop window (platform/x11desk.h): the wallpaper window goes into it
+    and is seen, and that window pauses nothing."""
+    A, B = ("A", 640, 360, 0, 0), ("B", 640, 360, 640, 0)
+    if env.display.winsys != "x11":
+        print("skip desktop (a file manager's desktop window is an X window: X11 only)")
+        return
+    try:
+        xc = XClient(env.env["DISPLAY"])
+    except OSError:
+        print("skip desktop (no libX11 for ctypes: cannot make a window)")
+        return
+    DESKTOP = "_NET_WM_WINDOW_TYPE_DESKTOP"
+
+    def is_red(c):
+        return rc.name_of(c) == "red"
+
+    def is_black(c):
+        return rc.name_of(c) == "black"
+
+    def parents():
+        return env.state().get("x11_wallpaper_parent")
+
+    def paused():
+        return [bool(m.get("paused")) for m in (env.state().get("monitors") or [])]
+
+    def parents_are(want, what, timeout=10):
+        ok = wait_for(lambda: parents() == want, timeout, 0.1)
+        check(bool(ok), "desktop: %s: the wallpaper windows are children of %s" % (what, want), parents())
+        return bool(ok)
+
+    # ("pause while covered" and "pause for fullscreen apps" are on, as in a new installation)
+    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_dpms": False, "render_shared": False})
+    try:
+        if not check(env.start_daemon([A, B]), "desktop: daemon started on two monitors"):
+            return
+        pid = env.daemon.pid
+        env.open(W["red"])
+        loaded(env, W["red"])
+        check(is_red(colour_is(env, A, is_red)) and is_red(colour_is(env, B, is_red)),
+              "desktop: the scene is on both monitors", (env.colour(A), env.colour(B)))
+        st = env.state()
+        check((st.get("x11_desktop"), st.get("x11_desktop_windows"), st.get("x11_wallpaper_parent")) ==
+              ("auto", [], ["root", "root"]),
+              "desktop: no desktop window: status says auto, none, both wallpaper windows on the root",
+              {k: st.get(k) for k in ("x11_desktop", "x11_desktop_windows", "x11_wallpaper_parent")})
+        ours = xc.lowest(2)     # the wallpaper windows are the lowest children of the root
+        if not check(len(ours) == 2, "desktop: the daemon has two windows", ours):
+            return
+
+        # ---- a file manager's desktop window over the first monitor (black, as large as the
+        # monitor), listed by a window manager that puts no frame around it (marco with caja)
+        mark = env.mark()
+        d1 = xc.window(0, 0, 640, 360)
+        xc.wtype(d1, DESKTOP)
+        xc.clients([d1])
+        parents_are(["0x%x" % d1, "root"], "a desktop window over the first monitor")
+        kids = xc.children(d1)
+        check(len(kids) == 1 and kids[0] in ours, "desktop: ... the X server says so too: it is the "
+              "desktop window's only child", (kids, ours))
+        check(is_red(colour_is(env, A, is_red)) and is_red(colour_is(env, B, is_red)),
+              "desktop: ... and the wallpaper is seen on both monitors (not the desktop window's black)",
+              (rc.name_of(env.colour(A)), rc.name_of(env.colour(B))))
+        low = xc.lowest(2)
+        check(low[0] in ours and low[1] == d1, "desktop: ... the other wallpaper window is still the "
+              "lowest window of the root, the desktop window above it", (low, ours, d1))
+        check("lies over this monitor and nothing is seen through it" in env.since(mark),
+              "desktop: ... the log says where the wallpaper window went and why", env.since(mark)[-300:])
+        st = env.state()
+        check(len(st.get("x11_desktop_windows") or []) == 1 and
+              (st.get("x11_desktop_windows") or [""])[0].startswith("0x%x 640x360+0+0" % d1),
+              "desktop: ... status lists the desktop window", st.get("x11_desktop_windows"))
+        text = (env.ipc({"cmd": "diag"}) or {}).get("text") or ""
+        check(("desktop window 0x%x" % d1) in text and "1 of 2 wallpaper window(s) in it" in text,
+              "desktop: ... walpe-ctl diag names it", text[:600])
+
+        # ---- the desktop window pauses nothing: it lies over the whole monitor ("covered"), a
+        # click on the desktop gives it the focus, and one that says it is fullscreen is still
+        # no fullscreen application
+        time.sleep(1.0 * PATIENCE)
+        check(paused() == [False, False], "desktop: the desktop window over the monitor pauses nothing", paused())
+        xc.focus(d1)
+        xc.fullscreen(d1, True)
+        time.sleep(1.0 * PATIENCE)
+        st = env.state()
+        check(paused() == [False, False] and not st.get("fullscreen"),
+              "desktop: ... focused and marked fullscreen neither",
+              (paused(), st.get("fullscreen"), st.get("monitors_state")))
+        xc.fullscreen(d1, False)
+        # a window over the whole monitor does
+        w1 = xc.window(0, 0, 640, 360)
+        xc.clients([d1, w1])
+        ok = wait_for(lambda: paused() == [True, False], 10, 0.1)
+        check(bool(ok), "desktop: a window over the monitor still pauses it (covered)",
+              (paused(), env.state().get("monitors_state")))
+        xc.destroy(w1)
+        xc.clients([d1])
+        ok = wait_for(lambda: paused() == [False, False], 10, 0.1)
+        check(bool(ok), "desktop: ... and it runs again when the window is gone", paused())
+
+        # ---- a small window of the desktop type (a system monitor that asks to be kept below
+        # everything) is no desktop
+        small = xc.window(700, 40, 120, 90)
+        xc.wtype(small, DESKTOP)
+        xc.clients([d1, small])
+        time.sleep(1.0 * PATIENCE)
+        parents_are(["0x%x" % d1, "root"], "a small desktop-type window on the second monitor")
+
+        # ---- a window manager that puts a frame around every client (xfwm4, openbox): the
+        # desktop window of the second monitor is a child of a frame
+        frame = xc.window(640, 0, 640, 360)
+        d2 = xc.window(0, 0, 640, 360, parent=frame)
+        xc.wtype(d2, DESKTOP)
+        xc.clients([d1, small, d2])
+        parents_are(["0x%x" % d1, "0x%x" % d2], "a desktop window in a frame over the second monitor")
+        check(is_red(colour_is(env, A, is_red)) and is_red(colour_is(env, B, is_red)),
+              "desktop: ... the wallpaper is seen on both monitors",
+              (rc.name_of(env.colour(A)), rc.name_of(env.colour(B))))
+        check(not any(w in ours for w in xc.lowest(3)),
+              "desktop: ... no wallpaper window is a child of the root now", (xc.lowest(3), ours))
+
+        # ---- the first desktop window is made smaller than its monitor: no desktop any more,
+        # the wallpaper window is the lowest window of the root again; and back
+        xc.move(d1, 0, 0, 200, 360)
+        parents_are(["root", "0x%x" % d2], "the first desktop window made smaller than the monitor")
+        check(xc.lowest(1)[0] in ours, "desktop: ... it is the lowest window of the root again",
+              (xc.lowest(1), ours))
+        check(is_red(colour_is(env, A, is_red)), "desktop: ... and seen beside that window",
+              rc.name_of(env.colour(A)))
+        xc.move(d1, 0, 0, 640, 360)
+        parents_are(["0x%x" % d1, "0x%x" % d2], "the first desktop window as large as the monitor again")
+        check(is_red(colour_is(env, A, is_red)), "desktop: ... the wallpaper is seen", rc.name_of(env.colour(A)))
+        check(env.daemon.poll() is None and "restarts in place" not in env.since(mark),
+              "desktop: all of that without a restart", env.since(mark)[-300:])
+
+        # ---- the file manager ends: its window goes, and the wallpaper window in it with it.
+        # The daemon makes its windows anew (a restart in place)
+        mark = env.mark()
+        xc.destroy(d1)
+        xc.clients([small, d2])
+        check(bool(wait_for(lambda: "took its surface away" in env.since(mark), 10, 0.1)),
+              "desktop: the desktop window destroyed: the daemon says that it lost the surface",
+              env.since(mark)[-300:])
+        check(bool(wait_for(lambda: "restarts in place" in env.since(mark), 40, 0.2)),
+              "desktop: ... it restarts in place", env.since(mark)[-300:])
+        check(bool(wait_for(lambda: loaded(env, W["red"], timeout=2), 60, 0.2)),
+              "desktop: ... the wallpaper is loaded again", rc.brief(env.monitors()))
+        parents_are(["root", "0x%x" % d2], "after that restart", 20)
+        check(is_red(colour_is(env, A, is_red, 20)) and is_red(colour_is(env, B, is_red, 20)),
+              "desktop: ... both monitors show the wallpaper",
+              (rc.name_of(env.colour(A)), rc.name_of(env.colour(B))))
+        check(env.daemon.poll() is None and os.path.exists(f"/proc/{pid}"), "desktop: same process")
+        env.stop_daemon()
+        xc.destroy(d2)
+        xc.destroy(frame)
+        xc.destroy(small)
+        xc.clients([])
+
+        # ---- WALPE_X11_DESKTOP=root: the lowest window of the root, whatever lies over it
+        d3 = xc.window(0, 0, 640, 360)
+        xc.wtype(d3, DESKTOP)
+        xc.clients([d3])
+        mark = env.mark()
+        if not check(env.start_daemon([A, B], extra={"WALPE_X11_DESKTOP": "root"}),
+                     "desktop: daemon started with WALPE_X11_DESKTOP=root"):
+            return
+        env.open(W["red"])
+        loaded(env, W["red"])
+        check(is_red(colour_is(env, B, is_red)), "desktop: root: the scene is on the second monitor",
+              rc.name_of(env.colour(B)))
+        st = env.state()
+        check((st.get("x11_desktop"), st.get("x11_wallpaper_parent")) == ("root", ["root", "root"]),
+              "desktop: root: status says so, both wallpaper windows are on the root",
+              (st.get("x11_desktop"), st.get("x11_wallpaper_parent")))
+        check(is_black(env.colour(A)), "desktop: root: the first monitor shows the desktop window",
+              rc.name_of(env.colour(A)))
+        check(env.since(mark).count("the wallpaper is behind it (WALPE_X11_DESKTOP=root)") == 1,
+              "desktop: root: the log says once that the wallpaper is behind the desktop window",
+              env.since(mark)[-300:])
+        check(paused() == [False, False], "desktop: root: nothing is paused for it", paused())
+    finally:
+        xc.close()
+    env.stop_daemon()
+
+
 def case_logcap(env, W):
     """The daemon's log file does not grow without limit, whoever started the
     daemon: a file that is over the limit when the daemon starts is cut back
@@ -3234,7 +3449,7 @@ def case_scan(env, W):
 CASES = [("logcap", case_logcap), ("settings", case_settings), ("diag", case_diag), ("pointer", case_pointer), ("reload", case_reload), ("restart", case_restart),
          ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("scan", case_scan), ("tray", case_tray), ("traymenu", case_traymenu), ("trayreg", case_trayreg), ("window", case_window), ("panel", case_panel), ("busy", case_busy), ("probe", case_probe),
          ("fullscreen", case_fullscreen), ("video", case_video), ("webunload", case_webunload),
-         ("winlost", case_winlost), ("convert", case_convert),
+         ("winlost", case_winlost), ("desktop", case_desktop), ("convert", case_convert),
          ("swaplost", case_swaplost), ("norestart", case_norestart),
          ("quitload", case_quitload)]
 

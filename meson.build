@@ -1448,6 +1448,16 @@ test('fsplace', executable('fsplace-test', 'tests/fsplace_test.c',
   dependencies: [glib],
   install: false, build_by_default: false))
 
+# a desktop's own desktop window (platform/x11desk.h: xfdesktop, pcmanfm,
+# pcmanfm-qt, caja, nemo-desktop) and where the wallpaper window of a
+# monitor goes because of it: into an opaque one that lies over the
+# monitor, below a translucent one, the root on a bare window manager;
+# WALPE_X11_DESKTOP. Made-up windows: no display.
+test('x11desk', executable('x11desk-test', 'tests/x11desk_test.c',
+  include_directories: inc,
+  dependencies: [glib],
+  install: false, build_by_default: false))
+
 # render resolution per output (common/resolution.c, config.json format 4):
 # values read and refused, sizes by the output's shape, the texture limit of
 # a wallpaper on several monitors, the video box (1080p = the limit that was
