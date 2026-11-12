@@ -123,7 +123,10 @@ software renderer only ([Known limitations](#known-limitations)).
   against a PulseAudio null sink and against PipeWire's `pipewire-pulse` by recording the
   sink; no loudspeaker, no sound card. Quitting or restarting the daemon cuts a playing sound without a
   fade. A video wallpaper's sound track and a web page's own sound follow the same
-  settings (measured against the PulseAudio null sink; web pages with WebKitGTK 2.52);
+  settings (measured against the PulseAudio null sink; web pages with WebKitGTK 2.52,
+  their level and mute also against PipeWire 1.0.5 with WirePlumber 0.4.17, not with
+  WirePlumber 0.5; a build without GStreamer's headers leaves both to the sound server,
+  where a muted page can stay muted and other programs' streams are changed);
   videos imported with 0.14.0 or earlier have no sound track and must be imported again,
   and a video layer inside a scene is silent. Audio-reactive wallpapers react to wallpaper
   sound too.

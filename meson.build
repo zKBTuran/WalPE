@@ -769,7 +769,8 @@ test('webhost-select', executable('webhost-select-test', 'tests/webhost_select_t
 # then never are the stream's in the sound server). With a GStreamer
 # registry of its own in the build directory (the first run scans the
 # system's plugins); no sound server, no display. Skipped where GStreamer
-# has no pulsesink.
+# has no pulsesink. The same with WebKit and a real PipeWire or PulseAudio:
+# tests/websound_rig.sh, run by hand.
 if have_web_sound_sink
   test('websink', executable('websink-test', 'tests/websink_test.c',
     dependencies: [gst_dep],

@@ -244,4 +244,10 @@ the application name `WebKit` in the desktop's mixer. The same three settings de
 
 State of testing: WebKitGTK 2.52 with GStreamer 1.24 against a PulseAudio null sink (WAV,
 Ogg Vorbis, WebM with VP8 and Vorbis, an oscillator), by recording the sink's monitor.
-Nobody has heard it.
+The sequences that went wrong in the sound server - mute and unmute, a start while muted,
+a quit while muted and the next start, volume 0 and 0.5, sound off and on, a page that
+fights the level, Web Audio, each followed by a look at the page's stream, at what the
+server stored and at another program's stream of the same role - are
+`tests/websound_rig.sh <build> [pipewire|pulse]`, run by hand against a private PipeWire
+1.0.5 with WirePlumber 0.4.17 and a private PulseAudio 16.1 with module-stream-restore
+(null sinks). WirePlumber 0.5 was not run. Nobody has heard it.

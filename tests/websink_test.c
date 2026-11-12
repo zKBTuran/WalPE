@@ -17,7 +17,8 @@
  * No state is changed, so no sound server is contacted; no display. A
  * registry of its own (GST_REGISTRY_1_0, meson.build): the user's is not
  * touched. Exit 77 (skipped) where GStreamer has no pulsesink, volume or
- * audioconvert. */
+ * audioconvert. End to end, with WebKit and a sound server:
+ * tests/websound_rig.sh (by hand). */
 #include <gst/gst.h>
 #include <stdio.h>
 #include <string.h>
