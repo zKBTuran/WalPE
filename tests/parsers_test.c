@@ -429,6 +429,68 @@ static void test_json (void)
     }
 }
 
+/* -------------------------------------------------------------------- log */
+
+/* strings of a wallpaper as arguments of log lines (util.h walpe_log_str):
+ * the helper itself, then what a scene file's names put into the log */
+static void test_log (void)
+{
+    const char *plain = "materials/Rainy Day \xe2\x98\x94.json";
+    CHECK (walpe_log_str ("plain name") != NULL && !strcmp (walpe_log_str ("plain name"), "plain name"));
+    CHECK (!strcmp (walpe_log_str (plain), plain));         /* text beyond ASCII stays */
+    CHECK (!strcmp (walpe_log_str (NULL), "?"));
+    CHECK (!strcmp (walpe_log_str (""), ""));
+    CHECK (!strcmp (walpe_log_str ("a\nb\rc\td\x1b[31me\x7f"), "a\\x0ab\\x0dc\\x09d\\x1b[31me\\x7f"));
+    CHECK (!strcmp (walpe_log_str ("c1 \xc2\x85 \xc2\x9b"), "c1 \\x85 \\x9b"));   /* NEL, CSI */
+    CHECK (!strcmp (walpe_log_str ("bad \xff\xfe utf8 \xc3"), "bad \\xff\\xfe utf8 \\xc3"));
+    /* cut between two characters, marked */
+    CHECK (!strcmp (walpe_log_strn ("abcdef", 3), "abc [...]"));
+    CHECK (!strcmp (walpe_log_strn ("ab\xe2\x98\x94z", 4), "ab [...]"));
+    CHECK (!strcmp (walpe_log_strn ("abc", 3), "abc"));
+    {
+        char *big = g_strnfill (100000, 'W');
+        const char *cut = walpe_log_str (big);
+        CHECK (strlen (cut) == 2048 + strlen (" [...]"));
+        g_free (big);
+    }
+    /* eight results of one thread are valid together (one log line's arguments) */
+    {
+        const char *r[8];
+        char in[8][8];
+        gboolean all = TRUE;
+        for (int i = 0; i < 8; i++) {
+            g_snprintf (in[i], sizeof in[i], "n%d\n", i);
+            r[i] = walpe_log_str (in[i]);
+        }
+        for (int i = 0; i < 8; i++) {
+            char want[16];
+            g_snprintf (want, sizeof want, "n%d\\x0a", i);
+            all = all && !strcmp (r[i], want);
+        }
+        CHECK (all);
+    }
+    /* a scene whose model and layer names carry a line break and an escape
+     * sequence: the log has them as text. Before, the part behind the line
+     * break stood in the log as a line of the scene's own wording. */
+    mkfile ("log/scene/project.json", "{\"file\":\"scene.json\",\"type\":\"scene\"}", -1);
+    mkfile ("log/scene/scene.json",
+            "{\"general\":{\"orthogonalprojection\":{\"width\":64,\"height\":36}},\"objects\":["
+            "{\"id\":1,\"name\":\"n\\nFORGED-NAME\",\"image\":\"models/x\\nFORGED-MODEL \\u001b[2J.json\","
+            "\"origin\":\"1 1 0\",\"size\":\"2 2\"}]}", -1);
+    char *wp = P ("log/scene");
+    GError *err = NULL;
+    g_string_truncate (logged, 0);
+    WalpeContent *c = walpe_content_new (wp, NULL, &err);
+    CHECK (c != NULL);
+    CHECK (strstr (logged->str, "FORGED-MODEL") != NULL);                  /* the line was written */
+    CHECK (strstr (logged->str, "\nFORGED") == NULL && strchr (logged->str, 0x1b) == NULL);
+    CHECK (strstr (logged->str, "models/x\\x0aFORGED-MODEL \\x1b[2J.json") != NULL);
+    if (c)
+        c->free (c);
+    g_clear_error (&err);
+    g_free (wp);
+}
+
 /* ------------------------------------------------------------------ links */
 
 static void test_links (void)
@@ -2810,6 +2872,8 @@ int main (int argc, char **argv)
     const char *only = argc > 1 ? argv[1] : NULL;
     if (!only || !strcmp (only, "json"))
         test_json ();
+    if (!only || !strcmp (only, "log"))
+        test_log ();
     if (!only || !strcmp (only, "links"))
         test_links ();
     if (!only || !strcmp (only, "tex"))

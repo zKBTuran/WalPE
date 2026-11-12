@@ -31,6 +31,19 @@ static inline int walpe_d2i (double v)
 }
 char  *walpe_json_escape (const char *s);               /* escape "\ for inline JSON, g_free() */
 
+/* A string of a wallpaper (a name or text from its JSON, a file name, what
+ * a script logs) as an argument of a log line: the control characters -
+ * line feed, carriage return, tab and ESC among them, DEL and the C1
+ * range - and bytes that are not UTF-8 come out as visible text
+ * (backslash, x, two hex digits), so that such a string cannot start a
+ * log line of its own wording or steer the terminal the log is read in.
+ * At most `max` bytes of s are taken (walpe_log_str: 2048), cut between
+ * two characters and marked " [...]". NULL reads "?".
+ * The result belongs to the calling thread and stays valid until that
+ * thread has asked eight more times: for use as an argument, not to keep. */
+const char *walpe_log_strn (const char *s, gsize max);
+const char *walpe_log_str (const char *s);
+
 /* dir is a directory of this user that nobody else can create files in:
  * owned by us, no write permission for group or others. What is found in
  * it by name (the control socket, its lock, a module) is then ours or

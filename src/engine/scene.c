@@ -118,7 +118,7 @@ static void parse_layer (SceneLayer *l, JsonObject *o, const char *dir, SceneCon
                 continue;
             const char *name = wpj_str (e, "file", wpj_str (e, "id", "?"));
             if (i == 0 && nfx == 1)
-                g_debug ("scene: layer has effect %s (tier-2: not applied yet)", name);
+                g_debug ("scene: layer has effect %s (tier-2: not applied yet)", walpe_log_str (name));
         }
     }
 

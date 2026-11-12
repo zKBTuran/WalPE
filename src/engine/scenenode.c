@@ -568,7 +568,7 @@ static gboolean attach_video (SceneNodeContent *s, NodeObj *nv, const char *path
     WalpeVideoTex *v = walpe_video_tex_new_copy (path, off, len, copy.state ? &copy : NULL, &err);
     g_free (copy_path);
     if (!v) {
-        g_warning ("scenenode: video texture %s: %s", path, err ? err->message : "?");
+        g_warning ("scenenode: video texture %s: %s", walpe_log_str (path), err ? err->message : "?");
         g_clear_error (&err);
         g_free (id);
         return FALSE;
@@ -577,7 +577,7 @@ static gboolean attach_video (SceneNodeContent *s, NodeObj *nv, const char *path
                       .off = off, .len = len, .id = id };
     g_array_append_val (s->videos, sv);
     nv->video = (int) s->videos->len - 1;
-    g_message ("scenenode: video texture %s (%dx%d)", path, w, h);
+    g_message ("scenenode: video texture %s (%dx%d)", walpe_log_str (path), w, h);
 ok:
     nv->tex_w = nv->tex_full_w = w > 0 ? w : 16;
     nv->tex_h = nv->tex_full_h = h > 0 ? h : 16;
@@ -727,9 +727,9 @@ static char *user_texture_file (SceneNodeContent *s, const char *upid)
                 up = walpe_asset_path (roots[r], ufile);
     }
     if (up)
-        g_message ("scenenode: user texture %s = %s", upid, up);
+        g_message ("scenenode: user texture %s = %s", walpe_log_str (upid), walpe_log_str (up));
     else
-        g_warning ("scenenode: user texture %s = %s not found", upid, ufile ? ufile : "?");
+        g_warning ("scenenode: user texture %s = %s not found", walpe_log_str (upid), walpe_log_str (ufile ? ufile : "?"));
     g_free (own);
     return up;
 }
@@ -1238,7 +1238,7 @@ static void sprite_attach (SceneNodeContent *s, NodeObj *nv, WalpeTexFrame *fram
         !nv->tex_lazy && nv->video < 0 && nv->tex_ti.nframes > 0) {
         if (nv->puppet) {
             g_message ("scenenode: layer %s: a puppet with an animated texture: the picture is "
-                       "shown as a whole", nv->name ? nv->name : "?");
+                       "shown as a whole", walpe_log_str (nv->name ? nv->name : "?"));
         } else {
             char *why = NULL;
             /* a table that does not fit into the scene's total is not
@@ -1254,19 +1254,19 @@ static void sprite_attach (SceneNodeContent *s, NodeObj *nv, WalpeTexFrame *fram
                     g_warning ("scenenode: layer %s: sprite sheet %s is not played: the animations "
                                "of this scene have more than %d frames together. It shows %s, and "
                                "so does every further layer whose table does not fit (not said "
-                               "again)", nv->name ? nv->name : "?", nv->tex_src, SPRITE_SCENE_FRAMES,
+                               "again)", walpe_log_str (nv->name ? nv->name : "?"), nv->tex_src, SPRITE_SCENE_FRAMES,
                                sp ? "its first frame as a still" : "the picture as a whole");
                 s->sprite_over = TRUE;
             } else if (sp && sp->refused)
                 g_warning ("scenenode: layer %s: sprite sheet %s refused (%s): its first frame is "
-                           "shown as a still", nv->name ? nv->name : "?", nv->tex_src, why);
+                           "shown as a still", walpe_log_str (nv->name ? nv->name : "?"), nv->tex_src, why);
             else if (!sp)
                 g_warning ("scenenode: layer %s: sprite sheet %s refused (%s): the picture is "
-                           "shown as a whole", nv->name ? nv->name : "?", nv->tex_src,
+                           "shown as a whole", walpe_log_str (nv->name ? nv->name : "?"), nv->tex_src,
                            why ? why : "no usable frame");
             else
                 g_message ("scenenode: layer %s plays a sprite sheet: %d frames of %dx%d on %dx%d, "
-                           "%.2f s%s%s", nv->name ? nv->name : "?", sp->n, sp->fw, sp->fh,
+                           "%.2f s%s%s", walpe_log_str (nv->name ? nv->name : "?"), sp->n, sp->fw, sp->fh,
                            nv->tex_w, nv->tex_h, sp->duration, why ? "; " : "", why ? why : "");
             g_free (why);
             nv->sp_frame = 0;
@@ -1374,13 +1374,13 @@ static gboolean load_image_object (SceneNodeContent *s, NodeObj *nv, const char 
     char *mpath = resolve_model_ref (s->dir, model_ref);
     if (!mpath) {
         if (walpe_first_n (&warned_missing, 1)) {
-            g_warning ("scenenode: model %s not found (further misses silent)", model_ref);
+            g_warning ("scenenode: model %s not found (further misses silent)", walpe_log_str (model_ref));
         }
         return FALSE;
     }
     JsonNode *mj = wpj_parse_file (mpath);
     if (!mj) {
-        g_warning ("scenenode: model %s unparseable", model_ref);
+        g_warning ("scenenode: model %s unparseable", walpe_log_str (model_ref));
         g_free (mpath);
         return FALSE;
         return FALSE;
@@ -1399,7 +1399,7 @@ static gboolean load_image_object (SceneNodeContent *s, NodeObj *nv, const char 
                 g_free (utex);
                 return TRUE;
             }
-            g_warning ("scenenode: user texture %s cannot be decoded", utex);
+            g_warning ("scenenode: user texture %s cannot be decoded", walpe_log_str (utex));
             g_free (utex);
         }
         glGenTextures (1, &nv->tex);
@@ -1443,7 +1443,7 @@ static gboolean load_image_object (SceneNodeContent *s, NodeObj *nv, const char 
         if (ppath)
             nv->puppet = walpe_puppet_load (ppath);
         else
-            g_message ("scenenode: puppet %s not found (flat layer)", pup);
+            g_message ("scenenode: puppet %s not found (flat layer)", walpe_log_str (pup));
         g_free (ppath);
     }
     json_node_unref (mj);
@@ -1454,7 +1454,7 @@ static gboolean load_image_object (SceneNodeContent *s, NodeObj *nv, const char 
     }
     char *matpath = resolve_model_ref (s->dir, matref);
     if (!matpath) {
-        g_warning ("scenenode: material %s not found", matref);
+        g_warning ("scenenode: material %s not found", walpe_log_str (matref));
         g_free (matref);
         return FALSE;
     }
@@ -1462,7 +1462,7 @@ static gboolean load_image_object (SceneNodeContent *s, NodeObj *nv, const char 
     char *matdir = g_path_get_dirname (matpath);
     g_free (matpath);
     if (!matj) {
-        g_warning ("scenenode: material %s unparseable", matref);
+        g_warning ("scenenode: material %s unparseable", walpe_log_str (matref));
         g_free (matref);
         g_free (matdir);
         return FALSE;
@@ -2416,7 +2416,7 @@ static void parse_node (NodeObj *nv, JsonObject *o, const char *dir, SceneNodeCo
             nv->fx_skip = TRUE;
             g_message ("scenenode: layer \"%s\" (id %d) not drawn: %d of its effects could not "
                        "be built and a %s layer has no picture of its own",
-                       nv->name ? nv->name : "?", nv->id, fx_failed_count (nv->fxset),
+                       walpe_log_str (nv->name ? nv->name : "?"), nv->id, fx_failed_count (nv->fxset),
                        nv->canvas ? "solid" : "compose");
         }
         if (nv->puppet)
@@ -2521,7 +2521,7 @@ static void parse_node (NodeObj *nv, JsonObject *o, const char *dir, SceneNodeCo
             gsize tl = text_clamp_len (nv->text_value);
             if (nv->text_value[tl]) {
                 g_message ("scenenode: text of layer %s cut to %" G_GSIZE_FORMAT " bytes",
-                           nv->name ? nv->name : "?", tl);
+                           walpe_log_str (nv->name ? nv->name : "?"), tl);
                 nv->text_value[tl] = 0;
             }
         }
@@ -2533,7 +2533,7 @@ static void parse_node (NodeObj *nv, JsonObject *o, const char *dir, SceneNodeCo
             if (!ts->font_path && walpe_we_assets_dir ())
                 ts->font_path = resolve_asset (walpe_we_assets_dir (), font);
             if (!ts->font_path)
-                g_message ("scenenode: text font %s not found (system font used)", font);
+                g_message ("scenenode: text font %s not found (system font used)", walpe_log_str (font));
         }
         ts->pointsize = (float) prop_num (o, "pointsize", 32.0);
         ts->box_w = nv->size[0];
@@ -2965,7 +2965,7 @@ static void ss_fx_set (gpointer u, int idx, int e, int p, const char *key, Walpe
             s->fx_miss_logged = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
         char *mk = g_strdup_printf ("%d/%d/%d/%s", idx, e, p, key);
         if (g_hash_table_add (s->fx_miss_logged, mk))
-            g_debug ("scenescript: no effect constant %s (node %d effect %d pass %d)", key, idx,
+            g_debug ("scenescript: no effect constant %s (node %d effect %d pass %d)", walpe_log_str (key), idx,
                      e, p);
     }
 }
@@ -3196,7 +3196,7 @@ static void refresh_text (SceneNodeContent *s, NodeObj *nv)
         s->text_over_said = TRUE;
         g_warning ("scenenode: text layer %s (%.0f x %.0f pixels) is not drawn: the text layers of "
                    "this scene hold %.0f MiB of textures, the limit is %.0f MiB (WALPE_TEX_BUDGET_MB)",
-                   nv->name ? nv->name : "?", text_refused[0], text_refused[1],
+                   walpe_log_str (nv->name ? nv->name : "?"), text_refused[0], text_refused[1],
                    s->text_bytes / 1048576.0, s->tex_budget / 1048576.0);
     }
     fx_invalidate (nv->fxset);   /* new pixels, maybe under the same name */
@@ -3304,7 +3304,7 @@ static void media_event (SceneNodeContent *s, const char *kind, JsonBuilder *b)
     json_node_unref (root);
     g_object_unref (b);
     if (s->probe)
-        g_message ("scenenode: %s %.200s", kind, js);
+        g_message ("scenenode: %s %.200s", kind, walpe_log_str (js));
     walpe_ss_media_event (s->ss, kind, js);
     g_free (js);
 }
@@ -4007,8 +4007,8 @@ static void node_tex_failed (NodeObj *nv)
 {
     if (tex_announce)
         return;
-    g_warning ("scenenode: layer %s: texture %s cannot be loaded", nv->name ? nv->name : "?",
-               nv->tex_src ? nv->tex_src : "?");
+    g_warning ("scenenode: layer %s: texture %s cannot be loaded", walpe_log_str (nv->name ? nv->name : "?"),
+               walpe_log_str (nv->tex_src ? nv->tex_src : "?"));
     node_tex_job_done (nv);
     nv->tex_lazy = FALSE;
     nv->tex_ready = FALSE;
@@ -4043,7 +4043,7 @@ static void node_tex_fit (SceneNodeContent *s, NodeObj *nv, guint i, const Walpe
             node_chain_build (nv);
             SCENE_PICTURE_CHANGED (s);
             g_debug ("scenenode: layer %s texture %dx%d drawn at %.0fx%.0f: mip chain built",
-                     nv->name ? nv->name : "?", nv->phys_w, nv->phys_h, pw, ph);
+                     walpe_log_str (nv->name ? nv->name : "?"), nv->phys_w, nv->phys_h, pw, ph);
             nv->ds_state = 2;
         }
         return;
@@ -4061,7 +4061,7 @@ static void node_tex_fit (SceneNodeContent *s, NodeObj *nv, guint i, const Walpe
                 fx_invalidate (nv->fxset);
                 SCENE_PICTURE_CHANGED (s);
                 g_message ("scenenode: layer %s drawn at %.0fx%.0f now: texture back at %dx%d",
-                           nv->name ? nv->name : "?", pw, ph, nv->phys_w, nv->phys_h);
+                           walpe_log_str (nv->name ? nv->name : "?"), pw, ph, nv->phys_w, nv->phys_h);
                 s->trim_heap = TRUE;
             }
             if (nv->tex_lod <= nv->tex_min_lod)
@@ -4078,7 +4078,7 @@ static void node_tex_fit (SceneNodeContent *s, NodeObj *nv, guint i, const Walpe
     if ((gint64) nv->tex_w * nv->tex_h >= 1 << 20)    /* a compose layer's size is the scene file's */
         g_debug ("scenenode: tex_fit %s %dx%d on screen %.0fx%.0f: src %d rgba %d dxt %d video %d "
                  "systex %d compose %d puppet %d kind %d fx %d scripted %d",
-                 nv->name ? nv->name : "?", nv->tex_w, nv->tex_h, pw, ph, nv->tex_src != NULL,
+                 walpe_log_str (nv->name ? nv->name : "?"), nv->tex_w, nv->tex_h, pw, ph, nv->tex_src != NULL,
                  nv->tex_rgba, nv->tex_dxt, nv->video >= 0, nv->systex, nv->compose,
                  nv->puppet != NULL, nv->kind, fx_has_effects (nv->fxset), node_scripted (s, i));
     /* drawn straight from its file texture (no effect chain in between) */
@@ -4121,7 +4121,7 @@ static void node_tex_fit (SceneNodeContent *s, NodeObj *nv, guint i, const Walpe
     gint64 saved = full - nv->tex_bytes;
     s->ds_saved += saved;
     g_message ("scenenode: layer %s texture %dx%d drawn at %.0fx%.0f -> stored %dx%d%s "
-               "(%.1f MiB less; %.1f MiB in this scene)", nv->name ? nv->name : "?", W, H, pw,
+               "(%.1f MiB less; %.1f MiB in this scene)", walpe_log_str (nv->name ? nv->name : "?"), W, H, pw,
                ph, nv->phys_w, nv->phys_h, nv->tex_comp ? " compressed" : "",
                saved / 1048576.0, s->ds_saved / 1048576.0);
     nv->ds_state = 1;
@@ -4323,7 +4323,7 @@ static int node_fx_level (SceneNodeContent *s, NodeObj *nv, guint i, float fk, f
                              "coordinates over %.0f %% of the frame (reduced, %.2f %% of the frame "
                              "would be off): the %dx%d texture stays at full "
                              "size as the effects' input (%.1f MiB instead of %.1f)",
-                             nv->name ? nv->name : "?",
+                             walpe_log_str (nv->name ? nv->name : "?"),
                              (double) (fx_input_displaced (nv->fxset) * share * 100.0f),
                              (double) (nv->fx_soft_cost * share * 100.0f), nv->tex_w,
                              nv->tex_h, node_tex_estimate (nv, 0) / 1048576.0,
@@ -4335,7 +4335,7 @@ static int node_fx_level (SceneNodeContent *s, NodeObj *nv, guint i, float fk, f
                 g_debug ("scenenode: layer %s: its first effect reads the texture at displaced "
                          "coordinates over %.0f %% of the frame, but reduced only %.2f %% of the "
                          "frame would be off: the %dx%d texture is stored reduced",
-                         nv->name ? nv->name : "?",
+                         walpe_log_str (nv->name ? nv->name : "?"),
                          (double) (fx_input_displaced (nv->fxset) * share * 100.0f),
                          (double) (nv->fx_soft_cost * share * 100.0f), nv->tex_w, nv->tex_h);
             }
@@ -4379,7 +4379,7 @@ static void node_fx_input_fit (SceneNodeContent *s, NodeObj *nv, guint i, float 
             fx_invalidate (nv->fxset);
             SCENE_PICTURE_CHANGED (s);
             g_message ("scenenode: layer %s is drawn larger now (effects at %.3f of its "
-                       "texture): texture back at %dx%d", nv->name ? nv->name : "?", (double) fk,
+                       "texture): texture back at %dx%d", walpe_log_str (nv->name ? nv->name : "?"), (double) fk,
                        nv->phys_w, nv->phys_h);
             s->trim_heap = TRUE;
         }
@@ -4416,7 +4416,7 @@ static void node_fx_input_fit (SceneNodeContent *s, NodeObj *nv, guint i, float 
     gint64 saved = full - nv->tex_bytes;
     s->ds_saved += saved;
     g_debug ("scenenode: layer %s texture %dx%d is the input of effects run at %.3f of it -> "
-             "stored %dx%d%s (%.1f MiB less; %.1f MiB in this scene)", nv->name ? nv->name : "?",
+             "stored %dx%d%s (%.1f MiB less; %.1f MiB in this scene)", walpe_log_str (nv->name ? nv->name : "?"),
              nv->tex_w, nv->tex_h, (double) fk, nv->phys_w, nv->phys_h,
              nv->tex_comp ? " compressed" : "", saved / 1048576.0, s->ds_saved / 1048576.0);
     nv->fxin_state = 1;
@@ -7143,12 +7143,12 @@ WalpeContent *walpe_scenenode_new_from_root (JsonNode *root, const char *project
         if (pn && walpe_puppet_attachment (pn->puppet, nv->attach, 0.0, af)) {
             nv->scripted = TRUE;
             g_debug ("scenenode: layer %s follows the attachment point \"%s\" of %s",
-                     nv->name ? nv->name : "?", nv->attach, pn->name ? pn->name : "?");
+                     walpe_log_str (nv->name ? nv->name : "?"), nv->attach, walpe_log_str (pn->name ? pn->name : "?"));
         } else {
             g_message ("scenenode: layer %s names the attachment point \"%s\", which its parent "
                        "%s does not have: placed relative to the parent itself",
-                       nv->name ? nv->name : "?", nv->attach,
-                       pn ? (pn->name ? pn->name : "?") : "(none)");
+                       walpe_log_str (nv->name ? nv->name : "?"), nv->attach,
+                       walpe_log_str (pn ? (pn->name ? pn->name : "?") : "(none)"));
         }
     }
 

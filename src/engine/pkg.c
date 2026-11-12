@@ -200,14 +200,14 @@ gboolean walpe_pkg_extract (const char *pkg_path, const char *dest_dir, GError *
             if (!safe_rel_path (path) || base > len || foff > len - base ||
                 fsz > len - base - foff) {
                 if (!writing)
-                    g_debug ("pkg: skipping entry %s", path);
+                    g_debug ("pkg: skipping entry %s", walpe_log_str (path));
                 continue;
             }
             /* the cache's own bookkeeping files are not the package's to
              * write */
             if (pkg_reserved_path (path)) {
                 if (!writing)
-                    g_debug ("pkg: skipping entry %s (reserved name)", path);
+                    g_debug ("pkg: skipping entry %s (reserved name)", walpe_log_str (path));
                 continue;
             }
             if (!writing) {
@@ -380,7 +380,7 @@ static void pkg_cache_trim_locked (const char *root, const char *keep)
         g_free (stamp);
         g_free (srcf);
         if (!live && (!stamped || gone)) {
-            g_message ("pkg: removing cached copy %s (%s)", c.dir,
+            g_message ("pkg: removing cached copy %s (%s)", walpe_log_str (c.dir),
                        gone ? "its package is gone" : "incomplete");
             pkg_tree_remove (c.dir, 0);
             g_free (src);

@@ -156,6 +156,72 @@ char *walpe_asset_path (const char *root, const char *name)
     return NULL;
 }
 
+/* ------------------------------------------------------------- log text */
+
+#define LOG_STR_RING 8
+
+typedef struct { char *s[LOG_STR_RING]; guint next; } LogStrRing;
+
+static void log_str_ring_free (gpointer p)
+{
+    LogStrRing *r = p;
+    for (guint i = 0; i < LOG_STR_RING; i++)
+        g_free (r->s[i]);
+    g_free (r);
+}
+
+static GPrivate log_str_ring = G_PRIVATE_INIT (log_str_ring_free);
+
+const char *walpe_log_strn (const char *s, gsize max)
+{
+    if (!s)
+        return "?";
+    gsize n = strnlen (s, max + 1);
+    const gboolean cut = n > max;
+    if (cut) {
+        n = max;
+        while (n > 0 && ((guchar) s[n] & 0xc0) == 0x80)
+            n--;
+    }
+    /* nothing to do for most strings: no copy, the caller's own */
+    gboolean plain = !cut;
+    for (gsize i = 0; plain && i < n; i++)
+        plain = (guchar) s[i] >= 0x20 && (guchar) s[i] < 0x7f;
+    if (plain)
+        return s;
+    GString *o = g_string_sized_new (n + 16);
+    for (const char *p = s, *end = s + n; p < end;) {
+        gunichar c = g_utf8_get_char_validated (p, end - p);
+        if (c == (gunichar) -1 || c == (gunichar) -2 || c == 0) {
+            g_string_append_printf (o, "\\x%02x", (guint) (guchar) *p);
+            p++;
+            continue;
+        }
+        const char *nx = g_utf8_next_char (p);
+        if (c < 0x20 || (c >= 0x7f && c < 0xa0))
+            g_string_append_printf (o, "\\x%02x", (guint) c);
+        else
+            g_string_append_len (o, p, nx - p);
+        p = nx;
+    }
+    if (cut)
+        g_string_append (o, " [...]");
+    LogStrRing *r = g_private_get (&log_str_ring);
+    if (!r) {
+        r = g_new0 (LogStrRing, 1);
+        g_private_set (&log_str_ring, r);
+    }
+    g_free (r->s[r->next]);
+    char *out = r->s[r->next] = g_string_free (o, FALSE);
+    r->next = (r->next + 1) % LOG_STR_RING;
+    return out;
+}
+
+const char *walpe_log_str (const char *s)
+{
+    return walpe_log_strn (s, 2048);
+}
+
 gboolean walpe_dir_is_private (const char *dir)
 {
     GStatBuf st;

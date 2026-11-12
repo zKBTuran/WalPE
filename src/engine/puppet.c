@@ -228,7 +228,7 @@ WalpePuppet *walpe_puppet_load (const char *path)
      * a file of gigabytes named as a puppet was gigabytes of memory) */
     GStatBuf st;
     if (g_stat (path, &st) != 0 || !S_ISREG (st.st_mode) || st.st_size > PUPPET_MAX_FILE_BYTES) {
-        g_message ("puppet: %s: not a model file of at most %d MiB", path,
+        g_message ("puppet: %s: not a model file of at most %d MiB", walpe_log_str (path),
                    (int) (PUPPET_MAX_FILE_BYTES >> 20));
         return NULL;
     }
@@ -238,7 +238,7 @@ WalpePuppet *walpe_puppet_load (const char *path)
     WalpePuppet *p = NULL;
     Rd r = { b, n, 0, FALSE };
     if (n < 64 || memcmp (b, "MDLV", 4)) {
-        g_message ("puppet: %s: not an MDLV model", path);
+        g_message ("puppet: %s: not an MDLV model", walpe_log_str (path));
         goto out;
     }
     r.p = 9;
@@ -266,7 +266,7 @@ WalpePuppet *walpe_puppet_load (const char *path)
         break;
     }
     if (!vstart) {
-        g_debug ("puppet: %s: no skinned mesh (flat layer)", path);
+        g_debug ("puppet: %s: no skinned mesh (flat layer)", walpe_log_str (path));
         goto out;
     }
     p = g_new0 (WalpePuppet, 1);
@@ -454,7 +454,7 @@ WalpePuppet *walpe_puppet_load (const char *path)
     if (!p->nbones)
         p->natt = 0;   /* (the bone table was dropped as unreadable) */
     g_debug ("puppet: %s: %d vertices, %d triangles, %d bones, %d animations, %d attachment "
-             "points", path, p->nverts, p->nidx / 3, p->nbones, p->nanims, p->natt);
+             "points", walpe_log_str (path), p->nverts, p->nidx / 3, p->nbones, p->nanims, p->natt);
 out:
     g_free (data);
     return p;

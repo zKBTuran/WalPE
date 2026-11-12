@@ -1000,7 +1000,7 @@ static void parse_material (WeSys *s, const char *dir, const char *we, const cha
             if (!path)
                 path = resolve_asset2 (dir, we, tn);
             if (!path)
-                g_message ("weparticles: texture %s not found (%s)", tn,
+                g_message ("weparticles: texture %s not found (%s)", walpe_log_str (tn),
                            we ? "not in the project or the WE assets" : "no WE assets dir: soft dot");
             if (ti == 0)
                 s->tex_path = path;
@@ -1252,7 +1252,7 @@ static void parse_children (WeSys *s, JsonArray *ch, const char *dir, const char
         for (int k = 0; pp && k < cx->nchain; k++)
             cycle |= !strcmp (cx->chain[k], pp);
         if (cycle) {
-            g_debug ("weparticles: child %s is its own ancestor, skipped", name);
+            g_debug ("weparticles: child %s is its own ancestor, skipped", walpe_log_str (name));
             g_free (pp);
             continue;
         }
@@ -4831,7 +4831,7 @@ static void sys_free (WeSys *s)
                    "off screen per draw, %.4f screen areas per draw, quad %.4f x %.4f of the view; "
                    "detail x %.3f/%.3f y %.3f/%.3f edge %.3f%s; reduced layer: %u draws, last "
                    "predicted error %.2f/255, last saving %.2f",
-                   base, rd[CLAMP (s->renderer, 0, 4)],
+                   walpe_log_str (base), rd[CLAMP (s->renderer, 0, 4)],
                    s->blend == WALPE_BLEND_ADDITIVE ? " additive" : "", s->refract ? " refract" : "",
                    s->persp ? " perspective" : "", s->tex_w, s->tex_h, s->nframes, s->st_draws,
                    s->st_drawn / n, s->st_culled / n, s->st_area / n, s->st_w / q, s->st_h / q,

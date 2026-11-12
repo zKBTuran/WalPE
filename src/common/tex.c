@@ -378,7 +378,7 @@ static void tex_parse_frames (WalpeTex *t, const guint8 *d, gsize len, int ver,
 {
     gsize p = tex_images_end (d, len, ver);
     if (!p || p + 13 > len || memcmp (d + p, "TEXS000", 7) != 0) {
-        g_debug ("tex %s: animated flag but no TEXS table", path);
+        g_debug ("tex %s: animated flag but no TEXS table", walpe_log_str (path));
         return;
     }
     int sver = d[p + 7] - '0';
@@ -394,7 +394,7 @@ static void tex_parse_frames (WalpeTex *t, const guint8 *d, gsize len, int ver,
         p += 8;
     }
     if (n == 0 || n > 65536 || n > (len - p) / 32) {
-        g_debug ("tex %s: TEXS%d frame count %u does not fit", path, sver, n);
+        g_debug ("tex %s: TEXS%d frame count %u does not fit", walpe_log_str (path), sver, n);
         return;
     }
     t->frames = g_new0 (WalpeTexFrame, n);
@@ -417,7 +417,7 @@ static void tex_parse_frames (WalpeTex *t, const guint8 *d, gsize len, int ver,
     }
     t->frame_w = fw > 0 ? fw : t->width;
     t->frame_h = fh > 0 ? fh : t->height;
-    g_debug ("tex %s: TEXS%d %d frames %dx%d", path, sver, t->nframes, t->frame_w, t->frame_h);
+    g_debug ("tex %s: TEXS%d %d frames %dx%d", walpe_log_str (path), sver, t->nframes, t->frame_w, t->frame_h);
 }
 
 /* mip 0 of image 0: dims + payload range */
@@ -540,7 +540,7 @@ gboolean walpe_tex_video_range (const char *path, guint64 *off, guint64 *len,
     if ((guint64) doff + comp > (guint64) flen || comp < 64)
         return FALSE;
     if (!(rd32le (d + OFF_FLAGS) & 0x20))
-        g_debug ("tex %s: MP4 payload without the video flag", path);
+        g_debug ("tex %s: MP4 payload without the video flag", walpe_log_str (path));
     *off = doff;
     *len = comp;
     if (w)
@@ -605,7 +605,7 @@ WalpeTex *walpe_tex_load_level (const char *path, guint flags, int level)
     if (walpe_tex_video_range (path, &voff, &vlen, NULL, NULL)) {
         /* never read a (possibly 4K, 100 MB) video into memory here: the
          * scene renderer streams these through the shared video decoder */
-        g_debug ("tex %s: video texture (MP4 at %" G_GUINT64_FORMAT ")", path, voff);
+        g_debug ("tex %s: video texture (MP4 at %" G_GUINT64_FORMAT ")", walpe_log_str (path), voff);
         return NULL;
     }
     /* mapped, not read: a 4K texture file is 35-45 MB with its mip levels,
@@ -679,7 +679,7 @@ static WalpeTex *tex_load_mem (const guint8 *d, gsize len, const char *path, gui
     /* the header's full width/height (offsets 26/30) are not used: they
      * read garbage on some writers; mip0 dims are the padded size */
     if (len < OFF_CONTAINER + 16) {
-        g_debug ("tex %s: too short (%zu)", path, len);
+        g_debug ("tex %s: too short (%zu)", walpe_log_str (path), len);
         return NULL;
     }
     guint32 type = rd32le (d + OFF_TYPE);
@@ -687,7 +687,7 @@ static WalpeTex *tex_load_mem (const guint8 *d, gsize len, const char *path, gui
     guint32 ih = rd32le (d + OFF_IH);
     if (iw == 0 || ih == 0 || iw > 16384 || ih > 16384) {
         /* implausible: try embedded raster fallback */
-        g_debug ("tex %s: implausible image dims %ux%u (type %u)", path, iw, ih, type);
+        g_debug ("tex %s: implausible image dims %ux%u (type %u)", walpe_log_str (path), iw, ih, type);
         WalpeTex *t = level ? NULL : try_embedded_image (d, len);
         return t;
     }
@@ -701,7 +701,7 @@ static WalpeTex *tex_load_mem (const guint8 *d, gsize len, const char *path, gui
     gboolean b4 = memcmp (container, "TEXB0004", 8) == 0;
     int ver = b3 ? 3 : b2 ? 2 : b1 ? 1 : b4 ? 4 : 0;
     if (ver == 0) {
-        g_debug ("tex %s: unknown container %.8s", path, container);
+        g_debug ("tex %s: unknown container %.8s", walpe_log_str (path), container);
         WalpeTex *t = level ? NULL : try_embedded_image (d, len);
         return t;
     }
@@ -712,13 +712,13 @@ static WalpeTex *tex_load_mem (const guint8 *d, gsize len, const char *path, gui
      * (observed 0) — verified against file-size-exact samples */
     p += (ver == 3 || ver == 4) ? (ver == 3 ? 8 : 12) : 4;
     if (p + 4 > len) {
-        g_debug ("tex %s: truncated before mips", path);
+        g_debug ("tex %s: truncated before mips", walpe_log_str (path));
         return NULL;
     }
     guint32 mips = rd32le (d + p);
     p += 4;
     if (mips == 0 || mips > 16) {
-        g_debug ("tex %s: bad mip count %u", path, mips);
+        g_debug ("tex %s: bad mip count %u", walpe_log_str (path), mips);
         return NULL;
     }
 
@@ -726,7 +726,7 @@ static WalpeTex *tex_load_mem (const guint8 *d, gsize len, const char *path, gui
      * [w][h][compression][unc size][comp size] */
     gsize ent = ver == 1 ? 12 : 20;
     if (p + ent > len) {
-        g_debug ("tex %s: truncated mip header", path);
+        g_debug ("tex %s: truncated mip header", walpe_log_str (path));
         return NULL;
     }
     guint32 mw = rd32le (d + p);
@@ -746,22 +746,22 @@ static WalpeTex *tex_load_mem (const guint8 *d, gsize len, const char *path, gui
     }
     p += ent;
     g_debug ("tex %s: ver=%d type=%u %ux%u mip0=%ux%u compressed=%u unc=%u comp=%u",
-             path, ver, type, iw, ih, mw, mh, compressed, unc, comp);
+             walpe_log_str (path), ver, type, iw, ih, mw, mh, compressed, unc, comp);
     /* mip0 = padded texture size: validate before any size math (crafted
      * u32s must not drive allocations or the LZ4 capacity) */
     if (mw == 0 || mh == 0 || mw > 16384 || mh > 16384) {
-        g_debug ("tex %s: implausible mip0 dims %ux%u", path, mw, mh);
+        g_debug ("tex %s: implausible mip0 dims %ux%u", walpe_log_str (path), mw, mh);
         return NULL;
     }
     if (!tex_size_ok (mw, mh)) {
         g_warning ("texture %s: %u x %u pixels is not loaded (the limit is 8192 x 8192 pixels "
-                   "in all)", path, mw, mh);
+                   "in all)", walpe_log_str (path), mw, mh);
         return NULL;
     }
     if (mw < iw || mh < ih) {
         /* image larger than its own texture: corrupt header; never let the
          * upload read past the pixel buffer */
-        g_debug ("tex %s: image %ux%u exceeds mip0 %ux%u, clamping", path, iw, ih, mw, mh);
+        g_debug ("tex %s: image %ux%u exceeds mip0 %ux%u, clamping", walpe_log_str (path), iw, ih, mw, mh);
         iw = MIN (iw, mw);
         ih = MIN (ih, mh);
         if (level)
@@ -807,7 +807,7 @@ static WalpeTex *tex_load_mem (const guint8 *d, gsize len, const char *path, gui
         ih = MAX (1u, ih >> level);
         if (iw > mw || ih > mh)
             return NULL;
-        g_debug ("tex %s: level %d: %ux%u in %ux%u compressed=%u unc=%u comp=%u", path, level,
+        g_debug ("tex %s: level %d: %ux%u in %ux%u compressed=%u unc=%u comp=%u", walpe_log_str (path), level,
                  iw, ih, mw, mh, compressed, unc, comp);
     }
 
@@ -880,7 +880,7 @@ static WalpeTex *tex_load_mem (const guint8 *d, gsize len, const char *path, gui
     gsize srclen = comp ? comp : unc;
     if (p + srclen > len) {
         g_debug ("tex %s: mip data overruns file (need %zu, have %zu)",
-                 path, p + srclen, len);
+                 walpe_log_str (path), p + srclen, len);
         g_free (t);
         return NULL;
     }
@@ -909,7 +909,7 @@ static WalpeTex *tex_load_mem (const guint8 *d, gsize len, const char *path, gui
             e->tex_flags = rd32le (d + OFF_FLAGS);
             return e;
         }
-        g_debug ("tex %s: payload starts like a picture but is none; reading it as pixels", path);
+        g_debug ("tex %s: payload starts like a picture but is none; reading it as pixels", walpe_log_str (path));
     }
 
     if (compressed) {
@@ -926,7 +926,7 @@ static WalpeTex *tex_load_mem (const guint8 *d, gsize len, const char *path, gui
                                                  (int) srclen, (int) need, (int) need);
 #endif
         if (bytes != (int) need) {
-            g_debug ("tex %s: lz4 decode short (%d of %zu)", path, bytes, need);
+            g_debug ("tex %s: lz4 decode short (%d of %zu)", walpe_log_str (path), bytes, need);
             g_free (t->data);
             g_free (t);
             return NULL;
@@ -934,7 +934,7 @@ static WalpeTex *tex_load_mem (const guint8 *d, gsize len, const char *path, gui
         t->len = need;
     } else {
         if (srclen < expect) {
-            g_debug ("tex %s: raw mip short (got %zu of %zu)", path, srclen, expect);
+            g_debug ("tex %s: raw mip short (got %zu of %zu)", walpe_log_str (path), srclen, expect);
             g_free (t);
             return NULL;
         }

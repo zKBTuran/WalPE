@@ -52,7 +52,7 @@ static void node_sound_load (SceneNodeContent *s, NodeObj *nv, JsonObject *o)
     guint n = sa ? json_array_get_length (sa) : 1;
     if (n > WALPE_SOUND_MAX_FILES) {
         g_message ("scenenode: sound layer %s names %u files: the first %d are used",
-                   nv->name ? nv->name : "?", n, WALPE_SOUND_MAX_FILES);
+                   walpe_log_str (nv->name ? nv->name : "?"), n, WALPE_SOUND_MAX_FILES);
         n = WALPE_SOUND_MAX_FILES;
     }
     GPtrArray *files = g_ptr_array_new_with_free_func (g_free);
@@ -80,7 +80,7 @@ static void node_sound_load (SceneNodeContent *s, NodeObj *nv, JsonObject *o)
              * break in it started a log line of the scene's own wording) */
             char *head = g_strndup (f, 120), *shown = g_strescape (head, NULL);
             g_message ("scenenode: sound layer %s: no file \"%s\" inside the wallpaper: left out",
-                       nv->name ? nv->name : "?", shown);
+                       walpe_log_str (nv->name ? nv->name : "?"), shown);
             g_free (shown);
             g_free (head);
         }
@@ -99,7 +99,7 @@ static void node_sound_load (SceneNodeContent *s, NodeObj *nv, JsonObject *o)
         if (!nv->sound && !s->sound_full) {
             s->sound_full = TRUE;
             g_message ("scenenode: more than %d sound layers: layer %s and those after it stay silent",
-                       WALPE_SOUND_MAX_LAYERS, nv->name ? nv->name : "?");
+                       WALPE_SOUND_MAX_LAYERS, walpe_log_str (nv->name ? nv->name : "?"));
         }
     }
     g_ptr_array_free (files, TRUE);

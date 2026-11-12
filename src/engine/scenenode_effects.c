@@ -134,7 +134,7 @@ static char *fx_read_shader (const char *path)
     if (g_stat (path, &st) != 0 || !S_ISREG (st.st_mode))
         return NULL;
     if (st.st_size > FX_MAX_SHADER_FILE) {
-        g_warning ("fx: shader file %s has %" G_GINT64_FORMAT " bytes (limit %d): not read", path,
+        g_warning ("fx: shader file %s has %" G_GINT64_FORMAT " bytes (limit %d): not read", walpe_log_str (path),
                    (gint64) st.st_size, FX_MAX_SHADER_FILE);
         return NULL;
     }
@@ -1078,10 +1078,10 @@ static GLuint fx_compile (char **srcp, GLenum type, const char *name)
         }
         if (round > 0)
             g_message ("fx: shader %s compiled after %d error-driven repair round(s) "
-                       "(not visible to the source inspection)", name, round);
+                       "(not visible to the source inspection)", walpe_log_str (name), round);
         return sh;
     }
-    g_warning ("fx: shader %s compile failed: %.400s", name, log);
+    g_warning ("fx: shader %s compile failed: %.400s", walpe_log_str (name), log);
     const char *dump = g_getenv ("WALPE_FX_DUMP");
     if (dump && *dump) {
         static int dn;
@@ -1966,7 +1966,7 @@ static GLuint fx_load_texture (const char *dir, const char *ref, int res[4], int
         return 0;
     char *path = fx_tex_path (dir, ref);
     if (!path) {
-        g_debug ("fx: texture %s not found", ref);
+        g_debug ("fx: texture %s not found", walpe_log_str (ref));
         return 0;
     }
     /* straight texels, as the shaders sample them: masks, normal maps,
@@ -2320,12 +2320,12 @@ static GLuint fx_build_program (char **vsrc, char **fsrc, const char *shader,
     gint64 vst = 0, fst = 0;
     if (!fx_expansion_sizes_once (*vsrc, &vst) || !fx_expansion_sizes_once (*fsrc, &fst)) {
         g_warning ("fx: shader %s (%s): its macros expand to more than %d tokens, not compiled",
-                   shader, dbgname, FX_MAX_EXPANSION);
+                   walpe_log_str (shader), walpe_log_str (dbgname), FX_MAX_EXPANSION);
         return 0;
     }
     if (MAX (vst, fst) > FX_MAX_STATEMENT) {
         g_warning ("fx: shader %s (%s): a statement of %" G_GINT64_FORMAT " tokens (more than %d), not compiled",
-                   shader, dbgname, MAX (vst, fst), FX_MAX_STATEMENT);
+                   walpe_log_str (shader), walpe_log_str (dbgname), MAX (vst, fst), FX_MAX_STATEMENT);
         return 0;
     }
     for (int round = 0; round < 2; round++) {
@@ -2369,7 +2369,7 @@ static GLuint fx_build_program (char **vsrc, char **fsrc, const char *shader,
          * the narrower side of every varying declared with two widths
          * and link once more */
         if (round > 0 || !fx_varying_repair (vsrc, fsrc, TRUE)) {
-            g_warning ("fx: %s link failed: %.400s", dbgname, log);
+            g_warning ("fx: %s link failed: %.400s", walpe_log_str (dbgname), log);
             break;
         }
     }
@@ -2649,13 +2649,13 @@ static gboolean fx_build_pass (EffPass *pass, JsonObject *matobj, const char *di
     }
     if (!vp || !fp) {
         g_warning ("fx: %s: shader %s not found (project, effect dir, WE assets %s)",
-                   dbgname, shader, walpe_we_assets_dir () ? "searched" : "not found");
+                   walpe_log_str (dbgname), walpe_log_str (shader), walpe_we_assets_dir () ? "searched" : "not found");
         g_free (vp);
         g_free (fp);
         return FALSE;
     }
     if (fx_zcompat (shader, &vp, &fp))
-        g_message ("fx: %s: using WE zcompat replacement %s", dbgname, fp);
+        g_message ("fx: %s: using WE zcompat replacement %s", walpe_log_str (dbgname), walpe_log_str (fp));
     char *vraw = fx_read_shader (vp), *fraw = fx_read_shader (fp);
     /* includes resolve against the shader's dir: take it BEFORE freeing
      * fp (the old order read freed memory - ASan heap-use-after-free) */
@@ -2711,7 +2711,7 @@ static gboolean fx_build_pass (EffPass *pass, JsonObject *matobj, const char *di
             /* engine-provided textures of WE's lighting (_alias_lightCookie,
              * the shadow atlas): not files, not rendered here - the slot
              * stays empty instead of a "texture not found" warning */
-            g_debug ("fx: %s slot %d <- %s (engine texture, not provided)", dbgname, u, ref);
+            g_debug ("fx: %s slot %d <- %s (engine texture, not provided)", walpe_log_str (dbgname), u, walpe_log_str (ref));
             g_free (dref);
             continue;
         }
@@ -2723,18 +2723,18 @@ static gboolean fx_build_pass (EffPass *pass, JsonObject *matobj, const char *di
              * layers), else the effect input */
             pass->slot[u].rt = !strncmp (ref, "_rt_FullFrameBuffer", 19) ? FX_RT_FULLFRAME
                                                                        : FX_RT_INPUT;
-            g_debug ("fx: %s slot %d <- %s (render target)", dbgname, u, ref);
+            g_debug ("fx: %s slot %d <- %s (render target)", walpe_log_str (dbgname), u, walpe_log_str (ref));
             g_free (dref);
             continue;
         }
         if (ref) {
             pass->slot[u].tex = fx_load_texture (dir, ref, pass->slot[u].res, &slot_fmt[u]);
             if (pass->slot[u].tex)
-                g_debug ("fx: %s slot %d <- %s (%dx%d img, %dx%d padded)", dbgname, u, ref,
+                g_debug ("fx: %s slot %d <- %s (%dx%d img, %dx%d padded)", walpe_log_str (dbgname), u, walpe_log_str (ref),
                          pass->slot[u].res[2], pass->slot[u].res[3],
                          pass->slot[u].res[0], pass->slot[u].res[1]);
             else
-                g_warning ("fx: %s: texture %s (slot %d) not found", dbgname, ref, u);
+                g_warning ("fx: %s: texture %s (slot %d) not found", walpe_log_str (dbgname), walpe_log_str (ref), u);
         }
         g_free (dref);
     }
@@ -2750,7 +2750,7 @@ static gboolean fx_build_pass (EffPass *pass, JsonObject *matobj, const char *di
         else if (!g_strcmp0 (un, "$mediaPreviousThumbnail"))
             pass->sys[u] = FX_SYS_PREV;
         if (pass->sys[u])
-            g_debug ("fx: %s slot %u <- system texture %s", dbgname, u, un);
+            g_debug ("fx: %s slot %u <- system texture %s", walpe_log_str (dbgname), u, un);
     }
 
     /* combos: shader [COMBO] defaults < material < instance; texture
@@ -2857,7 +2857,7 @@ static EffectChain *fx_chain_build_parsed (const char *dir, JsonObject *instance
     JsonArray *passes = wpj_arr (eo, "passes");
     guint npass = wpj_arr_len (passes);
     if (npass == 0 || npass > FX_MAX_PASSES) {
-        g_warning ("fx: %s: %s has %u passes (supported: 1..%d)", dbgname, file, npass,
+        g_warning ("fx: %s: %s has %u passes (supported: 1..%d)", walpe_log_str (dbgname), walpe_log_str (file), npass,
                    FX_MAX_PASSES);
         json_node_unref (ej);
         return NULL;
@@ -2902,8 +2902,8 @@ static EffectChain *fx_chain_build_parsed (const char *dir, JsonObject *instance
         char *matref = g_strdup (wpj_str (passdef, "material", NULL));
         char *mpath = matref ? fx_resolve (dir, matref) : NULL;
         if (!mpath)
-            g_warning ("fx: %s: %s pass %u material %s not found", dbgname, file, i,
-                       matref ? matref : "(none)");
+            g_warning ("fx: %s: %s pass %u material %s not found", walpe_log_str (dbgname), walpe_log_str (file), i,
+                       walpe_log_str (matref ? matref : "(none)"));
         g_free (matref);
         if (!mpath) {
             fx_chain_free (ch);
@@ -3012,7 +3012,7 @@ static EffectChain *fx_chain_build (const char *dir, JsonObject *instance,
         return NULL;
     char *epath = fx_resolve (dir, file);
     if (!epath) {
-        g_warning ("fx: %s: %s not found (not in the project; WE assets %s)", dbgname, file,
+        g_warning ("fx: %s: %s not found (not in the project; WE assets %s)", walpe_log_str (dbgname), walpe_log_str (file),
                    walpe_we_assets_dir () ? walpe_we_assets_dir () : "not found");
         return NULL;
     }
@@ -3022,7 +3022,7 @@ static EffectChain *fx_chain_build (const char *dir, JsonObject *instance,
     char *effroot = g_path_get_dirname (epath);
     g_free (epath);
     if (!ej) {
-        g_warning ("fx: %s effect.json unparseable", file);
+        g_warning ("fx: %s effect.json unparseable", walpe_log_str (file));
         g_free (effroot);
         return NULL;
     }
@@ -5126,7 +5126,7 @@ gpointer fx_build_for_object (const char *dir, JsonArray *effects, const char *d
                 g_strfreev (parts);
             }
             if (forced)
-                g_warning ("fx: %s: effect %s made to fail (WALPE_FX_FAIL)", dbgname, f);
+                g_warning ("fx: %s: effect %s made to fail (WALPE_FX_FAIL)", walpe_log_str (dbgname), walpe_log_str (f));
             else
                 ch = fx_chain_build (dir, inst, dbgname);
         }
@@ -5147,7 +5147,7 @@ gpointer fx_build_for_object (const char *dir, JsonArray *effects, const char *d
         set->chains[built++] = ch; /* NULLs kept: order matters */
         g_atomic_int_inc (ch ? &fx_stat_ok : &fx_stat_fail);
         if (!ch)
-            g_message ("fx: %s: effect %s FAILED", dbgname, wpj_str (inst, "file", "?"));
+            g_message ("fx: %s: effect %s FAILED", walpe_log_str (dbgname), walpe_log_str (wpj_str (inst, "file", "?")));
     }
     fx_user_props = NULL;
     set->n = built;

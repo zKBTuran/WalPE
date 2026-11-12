@@ -16,6 +16,7 @@
 #include "walpe-build-config.h"
 #include "scenesound.h"
 #include "modules.h"
+#include "common/util.h"   /* walpe_log_str */
 #include <math.h>
 #include <string.h>
 #ifdef HAVE_PULSE
@@ -422,7 +423,7 @@ static gboolean stream_take (const char *name)
             if (g_atomic_int_compare_and_exchange (&cap_said, 0, 1))
                 g_message ("sound: %d layers have an output at the same time, which is the limit: layer %s (and "
                            "any further one) waits until one of them falls silent - said once",
-                           WALPE_SOUND_MAX_STREAMS, name);
+                           WALPE_SOUND_MAX_STREAMS, walpe_log_str (name));
             return FALSE;
         }
         if (g_atomic_int_compare_and_exchange (&n_streams, n, n + 1))
@@ -613,7 +614,7 @@ static gboolean out_connect (Out *o, const char *name)
     if (o->pa) {
         g_atomic_int_inc (&n_real);
         if (o->said)
-            g_message ("sound: %s: the sound server is there, heard from now on", name);
+            g_message ("sound: %s: the sound server is there, heard from now on", walpe_log_str (name));
         o->said = FALSE;
         return TRUE;
     }
@@ -623,10 +624,10 @@ static gboolean out_connect (Out *o, const char *name)
         server_error_set (why);
     if (!o->said && busy)
         g_message ("sound: %s: no audio output yet (%s): playing into nothing until it is this layer's turn",
-                   name, why);
+                   walpe_log_str (name), why);
     else if (!o->said)
         g_message ("sound: %s: no audio output (%s): playing into nothing, asking again every %d s",
-                   name, why, (int) (SERVER_RETRY_US / G_USEC_PER_SEC));
+                   walpe_log_str (name), why, (int) (SERVER_RETRY_US / G_USEC_PER_SEC));
     o->said = TRUE;
     o->retry_us = g_get_monotonic_time () + (busy ? CONNECT_TURN_US : SERVER_RETRY_US);
     return FALSE;
@@ -730,7 +731,7 @@ static void out_write (Out *o, const gint16 *buf, int frames, const char *name)
         int e = 0;
         if (Pas.write (o->pa, buf, (size_t) frames * (size_t) o->channels * 2, &e) == 0)
             return;
-        g_message ("sound: %s: output lost (%s): playing into nothing, asking again every %d s", name,
+        g_message ("sound: %s: output lost (%s): playing into nothing, asking again every %d s", walpe_log_str (name),
                    pa_strerror (e), (int) (SERVER_RETRY_US / G_USEC_PER_SEC));
         server_error_set (pa_strerror (e));
         Pas.free_stream (o->pa);
@@ -836,7 +837,7 @@ static int next_action (WalpeSound *s, gboolean out_is_open)
 static gboolean file_failed (WalpeSound *s, int idx, const char *msg, guint64 *bad)
 {
     char *bn = g_path_get_basename (s->files[idx]);
-    g_message ("sound: layer %s: %s is not played: %s", s->name, bn, msg ? msg : "?");
+    g_message ("sound: layer %s: %s is not played: %s", s->name, walpe_log_str (bn), msg ? msg : "?");
     g_free (bn);
     *bad |= G_GUINT64_CONSTANT (1) << idx;
     gboolean all = TRUE;

@@ -2380,7 +2380,7 @@ static GLuint tex_make (const char *path, guint load_flags, GLint wrap, gboolean
         if (prep.level != want || prep.premultiply != premultiply ||
             prep.layer_swizzle != u.layer_swizzle ||
             prep.round_up != ((load_flags & WALPE_GL_TEX_CEIL) != 0) || over) {
-            g_debug ("gl: %s was reduced ahead for another request: decoded again", path);
+            g_debug ("gl: %s was reduced ahead for another request: decoded again", walpe_log_str (path));
             walpe_tex_free (t);
             memset (&prep, 0, sizeof prep);
             t = walpe_tex_load_ex (path, lf);
@@ -2429,7 +2429,7 @@ static GLuint tex_make (const char *path, guint load_flags, GLint wrap, gboolean
         }
         if (got > want && n > 0)
             g_warning ("gl: texture budget (%.1f MiB) reached: %s stored at 1/%d of its size",
-                       tc_scope_budget / 1048576.0, path, 1 << got);
+                       tc_scope_budget / 1048576.0, walpe_log_str (path), 1 << got);
     }
     if (t->format == WALPE_TEX_RGBA8 && t->nframes == 0 && !prep.valid) {
         /* larger than the driver's largest texture: halved until it fits */
@@ -2441,7 +2441,7 @@ static GLuint tex_make (const char *path, guint load_flags, GLint wrap, gboolean
         }
         if (n > 0)
             g_warning ("gl: %s is larger than this driver's largest texture (%d texels a side): "
-                       "stored at 1/%d of its size", path, lim, 1 << got);
+                       "stored at 1/%d of its size", walpe_log_str (path), lim, 1 << got);
     }
     int halvings = t->format == WALPE_TEX_RGBA8 ? MAX (0, want - got) : 0;
     if (ckey && hit && tex_dedupe_on ()) {
@@ -2576,7 +2576,7 @@ static GLuint tex_cached (const char *path, guint load_flags, GLint wrap, gboole
         }
         if (same) {
             /* these pixels are on the GPU already under another name */
-            g_debug ("gl: texture %s holds the pixels of %s: shared", path, same->key);
+            g_debug ("gl: texture %s holds the pixels of %s: shared", walpe_log_str (path), same->key);
             e = same;
             if (!e->alias)
                 e->alias = g_ptr_array_new_with_free_func (g_free);
@@ -2929,7 +2929,7 @@ WalpeGlTex walpe_gl_tex_from_file (const char *path)
         }
         if (halved)
             g_warning ("gl: texture budget (%.1f MiB) reached: %s stored at 1/%d of its size",
-                       tc_scope_budget / 1048576.0, path, 1 << halved);
+                       tc_scope_budget / 1048576.0, walpe_log_str (path), 1 << halved);
         {
             /* larger than the driver's largest texture: halved until it fits */
             int lim = tex_side_limit (), n = 0;
@@ -2940,7 +2940,7 @@ WalpeGlTex walpe_gl_tex_from_file (const char *path)
             }
             if (n)
                 g_warning ("gl: %s is larger than this driver's largest texture (%d texels a "
-                           "side): stored at %d x %d", path, lim, t->width, t->height);
+                           "side): stored at %d x %d", walpe_log_str (path), lim, t->width, t->height);
         }
         out.tex = walpe_gl_tex_from_walpetex (t, &out.premult);
         if (out.tex && tc_scope)
@@ -2968,21 +2968,21 @@ WalpeGlTex walpe_gl_tex_from_file (const char *path)
     if (kind && !strcmp (kind, "png") && !tex_file_png_whole (path))
         kind = NULL;
     if (!kind || !tex_file_size (path, kind, &iw, &ih) || iw <= 0 || ih <= 0) {
-        g_debug ("texture %s: not a picture format a wallpaper texture can have", path);
+        g_debug ("texture %s: not a picture format a wallpaper texture can have", walpe_log_str (path));
         return out;
     }
     /* a GIF (its first frame is the texture): only with every frame inside
      * the picture its header declares (gifcheck.h); the loader above refuses
      * the same file by the same rule and must not be gone around here */
     if (!walpe_gif_file_layout_ok (path, &err)) {
-        g_debug ("texture %s: %s", path, err ? err->message : "not loaded");
+        g_debug ("texture %s: %s", walpe_log_str (path), err ? err->message : "not loaded");
         g_clear_error (&err);
         return out;
     }
     if (iw > max_side || ih > max_side || (gint64) iw * ih > max_px) {
         gboolean jpeg = !strcmp (kind, "jpeg");
         if (!jpeg && (gint64) iw * ih > max_side * max_side) {
-            g_warning ("texture %s: %d x %d pixels is too large to load", path, iw, ih);
+            g_warning ("texture %s: %d x %d pixels is too large to load", walpe_log_str (path), iw, ih);
             return out;
         }
         /* "JPEG scales while it decodes" holds for a file that is decoded
@@ -2996,19 +2996,19 @@ WalpeGlTex walpe_gl_tex_from_file (const char *path)
          * is. */
         if (jpeg && walpe_jpeg_store_bytes_file (path) > WALPE_JPEG_STORE_MAX) {
             g_warning ("texture %s: a JPEG of %d x %d pixels that has to be held whole to be "
-                       "decoded is too large to load", path, iw, ih);
+                       "decoded is too large to load", walpe_log_str (path), iw, ih);
             return out;
         }
         double k = MIN (MIN ((double) max_side / iw, (double) max_side / ih),
                         sqrt ((double) max_px / ((double) iw * ih)));
         int tw = MAX (1, (int) (iw * k)), th = MAX (1, (int) (ih * k));
-        g_message ("texture %s: %d x %d pixels, loaded at %d x %d", path, iw, ih, tw, th);
+        g_message ("texture %s: %d x %d pixels, loaded at %d x %d", walpe_log_str (path), iw, ih, tw, th);
         pb = tex_file_decode (path, kind, tw, th, &err);
     } else {
         pb = tex_file_decode (path, kind, 0, 0, &err);
     }
     if (err || !pb) {
-        g_debug ("texture %s: %s", path, err ? err->message : "not loaded");
+        g_debug ("texture %s: %s", walpe_log_str (path), err ? err->message : "not loaded");
         g_clear_error (&err);
         g_clear_object (&pb);
         return out;
@@ -3025,7 +3025,7 @@ WalpeGlTex walpe_gl_tex_from_file (const char *path)
      * header announced) */
     if (out.width < 1 || out.height < 1 || out.width > max_side || out.height > max_side ||
         (gint64) out.width * out.height > max_px) {
-        g_warning ("texture %s: decoded to %d x %d pixels, not loaded", path, out.width, out.height);
+        g_warning ("texture %s: decoded to %d x %d pixels, not loaded", walpe_log_str (path), out.width, out.height);
         g_object_unref (pb);
         out.width = out.height = 0;
         return out;
@@ -3045,12 +3045,12 @@ WalpeGlTex walpe_gl_tex_from_file (const char *path)
         GdkPixbuf *small = gdk_pixbuf_scale_simple (pb, sw, sh, GDK_INTERP_BILINEAR);
         if (small && !by_budget) {
             g_warning ("gl: %s is larger than this driver's largest texture (%d texels a side): "
-                       "stored at %d x %d", path, tex_side_limit (), sw, sh);
+                       "stored at %d x %d", walpe_log_str (path), tex_side_limit (), sw, sh);
             g_object_unref (pb);
             pb = small;
         } else if (small) {
             g_warning ("gl: texture budget (%.1f MiB) reached: %s stored at %d x %d",
-                       tc_scope_budget / 1048576.0, path, sw, sh);
+                       tc_scope_budget / 1048576.0, walpe_log_str (path), sw, sh);
             g_object_unref (pb);
             pb = small;
         } else {

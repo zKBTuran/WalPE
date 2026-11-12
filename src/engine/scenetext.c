@@ -264,7 +264,7 @@ static gboolean text_font_file_ok (const char *path)
         close (fd);
     if (!ok)
         g_message ("scenetext: %s is not handed to the font library (not a TrueType / OpenType "
-                   "font, or more than %d faces and named instances)", path, TEXT_FONT_MAX_FACES);
+                   "font, or more than %d faces and named instances)", walpe_log_str (path), TEXT_FONT_MAX_FACES);
     return ok;
 }
 
@@ -291,10 +291,10 @@ static PangoFontDescription *text_file_desc_locked (const char *path)
             pango_fc_font_map_config_changed (PANGO_FC_FONT_MAP (text_map));
     }
     if (!fd)
-        g_message ("scenetext: font %s not usable, falling back to a system font", path);
+        g_message ("scenetext: font %s not usable, falling back to a system font", walpe_log_str (path));
     else {
         char *desc = pango_font_description_to_string (fd);
-        g_debug ("scenetext: font %s -> %s", path, desc);
+        g_debug ("scenetext: font %s -> %s", walpe_log_str (path), walpe_log_str (desc));
         g_free (desc);
     }
     g_hash_table_insert (text_files, g_strdup (path), fd);

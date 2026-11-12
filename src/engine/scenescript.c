@@ -10,6 +10,7 @@
 #include "walpe-build-config.h"
 #include "scenescript.h"
 #include "propprobe.h"
+#include "common/util.h"   /* walpe_log_str */
 #include <string.h>
 #include <math.h>
 
@@ -1003,18 +1004,9 @@ static gboolean ss_clamp (double *v, int n, double max)
 }
 
 /* a script's log line: at most SS_LOG_MAX bytes of it, cut between two
- * characters (a script could log megabytes per line) */
+ * characters (a script could log megabytes per line), with its control
+ * characters made visible: walpe_log_strn (util.h) */
 #define SS_LOG_MAX 1024
-static int ss_log_len (const char *s)
-{
-    gsize n = strlen (s);
-    if (n <= SS_LOG_MAX)
-        return (int) n;
-    n = SS_LOG_MAX;
-    while (n > 0 && ((guchar) s[n] & 0xc0) == 0x80)
-        n--;
-    return (int) n;
-}
 
 static JSValue h_find (JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv)
 {
@@ -1176,8 +1168,9 @@ static JSValue h_log (JSContext *ctx, JSValueConst t, int argc, JSValueConst *ar
     if (s) {
         ss_host_enter ();
         if (ss_log_allowed (ss) || g_getenv ("WALPE_TRACE_ANIM")) {
-            int n = ss_log_len (s);
-            g_message ("scenescript: %.*s%s", n, s, s[n] ? " [...]" : "");
+            /* (the script's text: its control characters - a line break
+             * above all - made visible, util.h) */
+            g_message ("scenescript: %s", walpe_log_strn (s, SS_LOG_MAX));
         }
         ss_host_leave ();
         JS_FreeCString (ctx, s);
@@ -1891,8 +1884,7 @@ static void ss_log_exception (WalpeSceneScript *ss, JSContext *ctx, const char *
         JS_FreeValue (ctx, JS_GetException (ctx));   /* ... which threw in turn */
     ss_host_enter ();
     if (ss_log_allowed (ss)) {
-        int n = m ? ss_log_len (m) : 1;
-        g_message ("scenescript: %s: %.*s%s", what, n, m ? m : "?", m && m[n] ? " [...]" : "");
+        g_message ("scenescript: %s: %s", walpe_log_str (what), walpe_log_strn (m, SS_LOG_MAX));
     }
     ss_host_leave ();
     if (m)
@@ -1943,7 +1935,8 @@ static gboolean ss_json (WalpeSceneScript *ss, const char *what, const char *tex
     }
     JS_FreeValue (ss->ctx, JS_GetException (ss->ctx));
     if (ss_log_allowed (ss))
-        g_message ("scenescript: %s: %s is not JSON the script engine reads", what, name);
+        g_message ("scenescript: %s: %s is not JSON the script engine reads", walpe_log_str (what),
+                   walpe_log_str (name));
     *out = JS_UNDEFINED;
     return FALSE;
 }
@@ -2032,7 +2025,7 @@ static gboolean ss_run (WalpeSceneScript *ss, const char *what, JSValueConst fn,
         g_warning ("scenescript: %s: a script did not come back from a built-in function "
                    "(a regular expression that backtracks without end?) within %.1f s of CPU "
                    "time. All scripts of this wallpaper are stopped; the wallpaper keeps running",
-                   what, SS_HARD_NS / 1e9);
+                   walpe_log_str (what), SS_HARD_NS / 1e9);
         return FALSE;
     }
     ss_wd_set (SS_HARD_NS, SS_HARD_RETRY_NS);
@@ -2537,7 +2530,7 @@ static gboolean ss_add_common (WalpeSceneScript *ss, int idx, int effect, int pa
     gboolean ok = ss_run (ss, prop, JS_UNDEFINED, 0, NULL, code, "<scenescript>", &a[2]);
     g_free (code);
     if (ok && !JS_IsFunction (ss->ctx, a[2])) {
-        g_message ("scenescript: %s: the script is not one module", prop);
+        g_message ("scenescript: %s: the script is not one module", walpe_log_str (prop));
         ok = FALSE;
     }
     if (ok) {

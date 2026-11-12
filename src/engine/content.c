@@ -155,7 +155,7 @@ static WalpeType detect_type_at (const char *path, char **media_path, int depth)
             if (depth < WALPE_PRESET_MAX_DEPTH)
                 bt = detect_type_at (base, media_path, depth + 1);
             else
-                g_debug ("content: preset chain at %s is too deep (a dependency cycle?)", path);
+                g_debug ("content: preset chain at %s is too deep (a dependency cycle?)", walpe_log_str (path));
             g_free (base);
             return bt;
         }
@@ -193,7 +193,7 @@ static WalpeType detect_type_at (const char *path, char **media_path, int depth)
                            g_str_has_prefix (file_c, "../") || strstr (file_c, "/../") ||
                            g_str_has_suffix (file_c, "/.."))) {
                 g_warning ("%s: project.json names a file outside the wallpaper folder (%s); "
-                           "not loaded", abs, file_c);
+                           "not loaded", walpe_log_str (abs), walpe_log_str (file_c));
                 t = WALPE_TYPE_UNSUPPORTED;
             } else if (media_path && file_c) {
                 /* second check on the built path (by its text and, when it
@@ -204,7 +204,7 @@ static WalpeType detect_type_at (const char *path, char **media_path, int depth)
                     *media_path = mp;
                 else {
                     g_debug ("content: %s: \"file\" %s points outside the wallpaper, ignored",
-                             abs, file_c);
+                             walpe_log_str (abs), walpe_log_str (file_c));
                     g_free (mp);
                 }
             }
@@ -524,7 +524,7 @@ WalpeContent *walpe_content_new (const char *path, const WalpeLoadOpts *opts, GE
             JsonObject *pv = pr ? wpj_obj (json_node_get_object (pr), "preset") : NULL;
             o2.preset = pv ? pv : NULL;
             o2.preset_dir = abs;
-            g_message ("content: preset %s -> base %s (%u values)", abs, base,
+            g_message ("content: preset %s -> base %s (%u values)", walpe_log_str (abs), walpe_log_str (base),
                        pv ? json_object_get_size (pv) : 0);
             preset_depth++;
             c = walpe_content_new (base, &o2, err);
@@ -553,7 +553,7 @@ WalpeContent *walpe_content_new (const char *path, const WalpeLoadOpts *opts, GE
                 g_propagate_error (err, pe);
                 break;
             }
-            g_message ("content: pkg extracted -> %s", cache);
+            g_message ("content: pkg extracted -> %s", walpe_log_str (cache));
             char *sfile = media ? g_path_get_basename (media) : NULL;
             c = walpe_scene_new (cache, sfile, opts, err);
             if (c)

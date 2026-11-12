@@ -255,12 +255,14 @@ static const char *COUNT_JS =
 
 /* ---- 13: lines a script wrote with console.log that reached the log */
 static int log_lines;
+static char log_last[512];      /* the last of those lines, as it was handed to the log */
 static GLogWriterOutput count_writer (GLogLevelFlags level, const GLogField *fields, gsize n, gpointer u)
 {
     for (gsize i = 0; i < n; i++)
         if (!strcmp (fields[i].key, "MESSAGE") && fields[i].value &&
             strstr ((const char *) fields[i].value, "LOGLINE")) {
             log_lines++;
+            g_strlcpy (log_last, fields[i].value, sizeof log_last);
             return G_LOG_WRITER_HANDLED;
         }
     return g_log_writer_default (level, fields, n, u);
@@ -633,6 +635,29 @@ int main (void)
         CHECK (at_load == 40 && log_lines == 40,
                "console.log: 40 lines of a scene reach the log (%d of 300 at load, %d after 200 more)", at_load,
                log_lines);
+        walpe_ss_free (ls);
+    }
+
+    /* 13b. what a script logs, and the text of an error it throws, reach
+     * the log with their control characters as visible text: a line break
+     * in it began a log line of the script's own wording, an escape
+     * sequence went to whatever shows the log */
+    {
+        WalpeSceneScript *ls = make ();
+        add (ls, 0, "'use strict';\nconsole.log('LOGLINE one\\nFORGED: two\\x1b[2J\\ttab\\r');\n"
+                    "export function update(v) { return v; }\n");
+        start (ls);
+        CHECK (strstr (log_last, "LOGLINE one\\x0aFORGED: two\\x1b[2J\\x09tab\\x0d") != NULL &&
+               !strchr (log_last, '\n') && !strchr (log_last, 0x1b) && !strchr (log_last, '\t'),
+               "console.log: control characters of a script's text are visible in the log (%s)", log_last);
+        walpe_ss_free (ls);
+        log_last[0] = 0;
+        ls = make ();
+        add (ls, 0, "'use strict';\nexport function update(v) { throw new Error('LOGLINE thrown\\nFORGED: too'); }\n");
+        start (ls);
+        tick (ls, 1);
+        CHECK (strstr (log_last, "LOGLINE thrown\\x0aFORGED: too") != NULL && !strchr (log_last, '\n'),
+               "an error's text: its line break is visible in the log (%s)", log_last);
         walpe_ss_free (ls);
     }
 
