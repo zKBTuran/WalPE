@@ -17,7 +17,9 @@ everything up to 0.14.0:
 
 What the daemon does now is decided by what it finds, never by a setting a bare window
 manager would notice: no window of the desktop type and a window manager of another name
-mean exactly the window of 0.14.0, and not one request more to the X server after start-up.
+mean exactly the window of 0.14.0. Measured under dwm: two requests to the X server more
+than before when the daemon starts (the window manager's name), the same number while it
+idles, one more in all when a window was opened and closed.
 
 | It finds | The wallpaper window is |
 |---|---|
@@ -85,6 +87,10 @@ the window Cinnamon gets; that was not tried on them.
   shows the wallpaper on the root, or in the new desktop window when one appears.
 - "Skip hidden areas" (`skip_hidden`, off by default) counts everything as visible while a
   wallpaper window is inside a desktop window: nothing is skipped there.
+- KWin without Plasma's desktop (kwin_x11 alone, or with another desktop's panel and no
+  desktop window): the wallpaper is a managed window in a frame of KWin's, and a click on
+  the desktop is taken for a click on a window, so a wallpaper that reacts to clicks does
+  not get it. Not run; it follows from how the pointer's window is found.
 - `meson install` with the default prefix puts the autostart entries into
   `/usr/local/etc/xdg/autostart`, where no session looks. Configure with
   `--sysconfdir=/etc`, or copy `walpe-autostart.desktop` and `walpe-tray.desktop` to
