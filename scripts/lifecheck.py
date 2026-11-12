@@ -85,6 +85,12 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             (X11): the daemon says so and restarts in place - same process -
             and every monitor shows its wallpaper again, also the monitor
             that followed the destroyed window's frames (shared rendering).
+  convert   a video wallpaper the player cannot read: one whose conversion
+            cannot start is refused with the reason, one that is being
+            converted can be cancelled (and started again); the wallpaper on
+            screen stays through all of it, and a daemon built to look for
+            leaks ends with status 0 afterwards. Needs the ffmpeg program;
+            skipped without it.
   video     a video's load ends with its first picture: a clip the decoder
             cannot do anything with (its container reads well) is a failed
             load with a reason in status, and the wallpaper from before
@@ -1922,6 +1928,75 @@ def case_fullscreen(env, W):
     env.stop_daemon()
 
 
+# ------------------------------------------------------------------ convert
+def case_convert(env, W):
+    """A video the player cannot read is converted once with ffmpeg. The
+    path of its media file used to be handed to the conversion as a copy
+    that only the conversion's own report freed: one that could not start,
+    or was cancelled, left the copy behind every time."""
+    A = ("A", 640, 360, 0, 0)
+    if not shutil.which("ffmpeg") or not os.path.exists(os.path.join(env.build, "walpe-video.so")):
+        print("skip convert (needs the ffmpeg program and the video module)")
+        return
+    wp = os.path.dirname(W["red"])
+    # "clip.mkv" is a directory: there is nothing to convert
+    nothing = os.path.join(wp, "novideo")
+    os.makedirs(os.path.join(nothing, "clip.mkv"), exist_ok=True)
+    rc.jdump(os.path.join(nothing, "project.json"), {"file": "clip.mkv", "title": "novideo", "type": "video"})
+    # MPEG-4 part 2 in Matroska: plays only as a converted copy, and the
+    # conversion takes long enough to be cancelled
+    odd = os.path.join(wp, "odd")
+    os.makedirs(odd, exist_ok=True)
+    try:
+        p = subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30",
+                            "-t", "30", "-c:v", "mpeg4", "-q:v", "6", os.path.join(odd, "clip.mkv")],
+                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           timeout=300 * PATIENCE)
+        made = p.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        made = False
+    if not made:
+        print("skip convert (the ffmpeg program here writes no MPEG-4 clip)")
+        return
+    rc.jdump(os.path.join(odd, "project.json"), {"file": "clip.mkv", "title": "odd", "type": "video"})
+    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False})
+    if not check(env.start_daemon([A]), "convert: daemon started"):
+        return
+    env.open(W["red"])
+    loaded(env, W["red"])
+
+    def shown():
+        m = (env.monitors() or [{}])[0]
+        return m.get("current") == W["red"] and m.get("type") == "scene" and not m.get("load_error")
+
+    reps = [env.ipc({"cmd": "open", "path": nothing}) or {} for _ in range(3)]
+    check(all(r.get("ok") is False and r.get("error") for r in reps),
+          "convert: a video whose conversion cannot start is refused with the reason", reps[-1])
+    check(not env.state().get("import_active") and shown(),
+          "convert: ... nothing runs and the wallpaper stays", rc.brief(env.monitors()))
+    for n in range(2):
+        rep = env.ipc({"cmd": "open", "path": odd}) or {}
+        check(rep.get("ok") is True and rep.get("converting") is True,
+              f"convert: round {n + 1}: a clip the player cannot read is converted", rep)
+        check(bool(wait_for(lambda: env.state().get("import_active"), 10, 0.1)),
+              f"convert: round {n + 1}: status shows the conversion")
+        time.sleep(0.5 * PATIENCE)
+        rep = env.ipc({"cmd": "import_cancel"}) or {}
+        check(rep.get("ok") is True and bool(wait_for(lambda: not env.state().get("import_active"), 10, 0.1)),
+              f"convert: round {n + 1}: it is cancelled", rep)
+        check(shown(), f"convert: round {n + 1}: the wallpaper on screen stayed", rc.brief(env.monitors()))
+    # (a build with the leak sanitizer ends with another status when something was left allocated)
+    env.ipc({"cmd": "quit"})
+    try:
+        st = env.daemon.wait(timeout=20 * PATIENCE)
+    except subprocess.TimeoutExpired:
+        st = None
+    if st is not None:
+        env.daemon = None
+    check(st == 0, "convert: the daemon ends with status 0", st)
+    env.stop_daemon()
+
+
 # ------------------------------------------------------------------ winlost
 def case_winlost(env, W):
     """Another X client destroys a wallpaper window. The daemon drew into a
@@ -1985,7 +2060,7 @@ def case_winlost(env, W):
 CASES = [("pointer", case_pointer), ("reload", case_reload), ("restart", case_restart),
          ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("tray", case_tray), ("window", case_window), ("busy", case_busy), ("probe", case_probe),
          ("fullscreen", case_fullscreen), ("video", case_video), ("webunload", case_webunload),
-         ("winlost", case_winlost)]
+         ("winlost", case_winlost), ("convert", case_convert)]
 
 
 

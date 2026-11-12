@@ -4534,6 +4534,11 @@ static struct {
     char *wallpaper;    /* shown when the copy is ready (as opened), NULL = nothing waits */
     char *mon;          /* output it was opened on, NULL = every monitor */
     gboolean commit;    /* an `open` waits (config is set then); FALSE = reload only */
+    char *src;          /* the media file of the conversion that runs (NULL = none). It
+                         * used to travel as the job's callback pointer, a copy only
+                         * the callback freed: a conversion that could not start, or
+                         * was cancelled (the callback is not called then), left it
+                         * behind every time */
 } Conv;
 static GHashTable *conv_failed;     /* media files whose conversion failed in this run */
 
@@ -4594,15 +4599,17 @@ static gboolean video_playable (const char *abs, const WalpeVideoBox *box, char 
 static void convert_done (WalpeImport *job, gboolean ok, const char *dst, const char *error,
                           gpointer user)
 {
+    (void) user;
     if (job != Imp.job)
         return;
-    char *src = user;       /* owned: the media file */
+    char *src = g_steal_pointer (&Conv.src);    /* the media file */
     import_done (job, ok, dst, error, NULL);
     char *wp = g_steal_pointer (&Conv.wallpaper), *mon = g_steal_pointer (&Conv.mon);
     if (!ok) {
         if (!conv_failed)
             conv_failed = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
-        g_hash_table_add (conv_failed, g_strdup (src));
+        if (src)
+            g_hash_table_add (conv_failed, g_strdup (src));
     } else if (wp) {
         Mon *tm = NULL;
         for (GList *l = D.mons; mon && l; l = l->next)
@@ -4632,8 +4639,7 @@ static GError *convert_start (const char *src, const char *wp, const char *mon, 
                             Imp.label ? Imp.label : "a video");
     char *dst = walpe_video_cache_file (src, box);
     GError *err = NULL;
-    WalpeImport *job = dst ? walpe_import_start_to (src, dst, NULL, box, convert_done,
-                                                    g_strdup (src), &err)
+    WalpeImport *job = dst ? walpe_import_start_to (src, dst, NULL, box, convert_done, NULL, &err)
                            : NULL;
     g_free (dst);
     if (!job)
@@ -4653,6 +4659,8 @@ static GError *convert_start (const char *src, const char *wp, const char *mon, 
     Conv.wallpaper = g_strdup (wp);
     Conv.mon = g_strdup (mon);
     Conv.commit = commit;
+    g_free (Conv.src);
+    Conv.src = g_strdup (src);
     sv_yield ();
     if (conv_failed)
         g_hash_table_remove (conv_failed, src);
@@ -7830,6 +7838,7 @@ static char *ipc_handler (const char *req, gpointer user)
             Imp.error = g_strdup ("cancelled");
             g_clear_pointer (&Conv.wallpaper, g_free);
             g_clear_pointer (&Conv.mon, g_free);
+            g_clear_pointer (&Conv.src, g_free);
             sv_start_next ();   /* (a copy for a scene that gave way to it) */
         }
         jb_bool (b, "ok", TRUE);

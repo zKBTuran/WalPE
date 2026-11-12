@@ -1646,7 +1646,8 @@ test('restore', executable('restore-test', 'tests/restore_test.c',
 # that reload scenes, the restart in place, quality numbers of a still scene,
 # "Pause for fullscreen apps" per monitor (two monitors, a window with the
 # EWMH properties of a focused fullscreen one),
-# a wallpaper window that another X client destroys,
+# a wallpaper window that another X client destroys, a video conversion
+# that cannot start or is cancelled,
 # a video the decoder refuses (the clip is made with the ffmpeg program:
 # that case is skipped where there is none).
 # Skipped (77) without Xvfb. `meson test -C build daemon-life`
