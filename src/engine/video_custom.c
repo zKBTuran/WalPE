@@ -366,6 +366,17 @@ struct _CvSource {
     WalpeVLag lag;
     int raise_to;
     double raise_at;            /* when that was decided */
+    /* fewer threads for a decoder that is idle with those it has
+     * (video_threads.h; only with WALPE_VIDEO_THREADS_LOWER=1: nothing is
+     * measured or judged otherwise). idle_reset (src->lock): playback was
+     * paused meanwhile, the window starts over; idle, lower_late0 (decode
+     * thread): the window, and the late frames counted when one thread
+     * less was decided (one more before the change takes the decision
+     * back) */
+    gboolean idle_reset;
+    WalpeVIdle idle;
+    guint lower_late0;
+    gboolean lower_watch;       /* decode thread: the pending change is the rule's own */
     /* src->lock: frames queued, and those queued after their presentation
      * time (cv_push_frame) */
     guint lag_frames, lag_late;
@@ -1519,6 +1530,43 @@ static void cv_threads_learn (const char *key, int n)
     g_mutex_unlock (&learned_lock);
 }
 
+/* ... and a clip that was found idle with the threads it started with
+ * starts with the smaller count next time (WALPE_VIDEO_THREADS_LOWER=1) */
+static GHashTable *lowered;     /* learned_lock */
+
+static int cv_threads_lowered (const char *key)
+{
+    g_mutex_lock (&learned_lock);
+    int n = lowered && key ? GPOINTER_TO_INT (g_hash_table_lookup (lowered, key)) : 0;
+    g_mutex_unlock (&learned_lock);
+    return n;
+}
+
+static void cv_threads_lowered_set (const char *key, int n)
+{
+    if (!key)
+        return;
+    g_mutex_lock (&learned_lock);
+    if (!lowered)
+        lowered = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+    g_hash_table_replace (lowered, g_strdup (key), GINT_TO_POINTER (n));
+    g_mutex_unlock (&learned_lock);
+}
+
+/* WALPE_VIDEO_THREADS_LOWER=1: a decoder that is idle with the threads it
+ * has gives one back (video_threads.h). Off unless asked for. */
+static gboolean cv_lower_on (void)
+{
+    static WalpeLazy cell = WALPE_LAZY_UNSET;
+    int on = walpe_lazy_get (&cell);
+    if (on < 0) {
+        const char *e = g_getenv ("WALPE_VIDEO_THREADS_LOWER");
+        on = walpe_lazy_set (&cell, e && *e && g_ascii_strcasecmp (e, "0") && g_ascii_strcasecmp (e, "off") &&
+                                    g_ascii_strcasecmp (e, "no") ? 1 : 0);
+    }
+    return on != 0;
+}
+
 /* Decode threads for the clip (video_threads.h): *max = the most it may
  * get, sized by the picture as in version 0.12; returned = what it starts
  * with, sized by the work per second instead. A 1080p60 clip then
@@ -1550,6 +1598,9 @@ static int cv_threads_for (const CvSource *src, int *max)
     const char *ts = g_getenv ("WALPE_VIDEO_THREADS_START");
     if (ts && atoi (ts) > 0)
         n = atoi (ts);
+    int low = cv_threads_lowered (cv_learn_key (src));
+    if (low > 0 && low < n)
+        n = low;
     n = MAX (n, cv_threads_learned (cv_learn_key (src)));
     return CLAMP (n, 1, *max);
 }
@@ -2696,6 +2747,7 @@ static gboolean cv_decoder_open (CvSource *src, gboolean first, GError **err)
         g_atomic_int_set (&src->hw_refused, 0);
         src->hw_errors = 0;
         walpe_vlag_restart (&src->lag, cv_now ());   /* the start is not the steady state */
+        walpe_vidle_restart (&src->idle, cv_now ());
         if (avcodec_open2 (src->dec, codec, NULL) >= 0) {
             if (t && first) {
                 GString *nm = g_string_new (NULL);
@@ -3041,6 +3093,67 @@ static void cv_threads_raise (CvSource *src)
                src->threads, to, src->path);
 }
 
+/* The other direction, only with WALPE_VIDEO_THREADS_LOWER=1: the decoder
+ * has frame threads it does not need (video_threads.h: by the CPU time it
+ * used, this thread's and the frame threads' - those of every decoder of
+ * the process, so that two clips at once are judged with more work than
+ * each has, never less) - one thread less from where the next sequence
+ * starts, by the same change-over as above. Not for a count that was fixed
+ * (WALPE_VIDEO_THREADS), not for a clip that once had to be given more
+ * threads, and taken back when a frame is late before the change-over. */
+static void cv_threads_lower (CvSource *src)
+{
+    if (!cv_lower_on () || src->hw_on || !src->dec)
+        return;
+    g_mutex_lock (&src->lock);
+    const guint frames = src->lag_frames, late = src->lag_late;
+    const gboolean reset = src->idle_reset;
+    src->idle_reset = FALSE;
+    g_mutex_unlock (&src->lock);
+    if (src->raise_to > 0) {
+        if (src->raise_to < src->threads && src->lower_watch && late != src->lower_late0) {
+            g_debug ("video: a late frame: the decoder keeps its %d threads (%s)", src->threads, src->path);
+            src->raise_to = 0;
+            walpe_vidle_restart (&src->idle, cv_now ());
+        }
+        return;
+    }
+    const double now = cv_now ();
+    if (reset) {
+        walpe_vidle_restart (&src->idle, now);
+        return;
+    }
+    const char *te = g_getenv ("WALPE_VIDEO_THREADS");
+    double busy = -1;
+    int to = 0;
+    if (src->threads > 1 && !(te && atoi (te) > 0) && walpe_vidle_wants (&src->idle, now, frames, src->threads) &&
+        cv_threads_learned (cv_learn_key (src)) == 0) {
+        struct timespec ts;
+        int workers = 0;
+        clock_gettime (CLOCK_THREAD_CPUTIME_ID, &ts);
+        const double cpu = (double) ts.tv_sec + (double) ts.tv_nsec / 1e9 + cv_workers_cpu (&workers);
+        to = walpe_vidle_step (&src->idle, now, cpu, frames, late, src->threads, &busy);
+    }
+    gboolean own = TRUE;
+#ifdef CV_TEST_THREADS_TO
+    {
+        /* tests: the count to go to now, whatever the rule says */
+        int asked = CV_TEST_THREADS_TO (src, to);
+        own = asked == to;
+        to = asked;
+    }
+#endif
+    if (to <= 0 || to == src->threads)
+        return;
+    src->raise_to = to;
+    src->raise_at = now;
+    src->lower_late0 = late;
+    src->lower_watch = own;
+    if (to < src->threads)
+        g_message ("video: the decoder uses %.2f of a CPU with %d threads: %d from the next keyframe on "
+                   "(%s)", busy >= 0 ? busy : 0.0, src->threads, to, src->path);
+}
+
 /* more threads are wanted: can the decoder be replaced before the sample
  * that is read next? Yes at the loop point and in front of an IDR picture
  * (nothing after it refers to anything before it, and everything before
@@ -3066,7 +3179,10 @@ static gboolean cv_raise_now (CvSource *src)
 {
     int to = src->raise_to;
     src->raise_to = 0;
-    cv_threads_learn (cv_learn_key (src), to);
+    if (to > src->threads)
+        cv_threads_learn (cv_learn_key (src), to);
+    else
+        cv_threads_lowered_set (cv_learn_key (src), to);
     src->threads = to;
     if (!src->dec)
         return TRUE;        /* parked meanwhile: cv_unpark opens it with the new count */
@@ -3079,7 +3195,7 @@ static gboolean cv_raise_now (CvSource *src)
         return FALSE;
     }
     src->sent_sps = FALSE;  /* the new decoder's first packet carries SPS / PPS */
-    g_debug ("video: %d decode threads from sample %u on (%s)", to, src->demux->cursor, src->path);
+    g_debug ("video: %d decode thread(s) from sample %u on (%s)", to, src->demux->cursor, src->path);
     return TRUE;
 }
 
@@ -3389,6 +3505,7 @@ static gpointer cv_decode_thread (gpointer data)
             cv_note_decoder (src);
         cv_log_to = src->hw_on ? src->hw_log : NULL;
         cv_threads_raise (src);
+        cv_threads_lower (src);
         /* more threads from here on: the decoder is told that its input
          * ended, the frames it still holds come out below as always, and
          * the new decoder takes the next sample */
@@ -3889,6 +4006,8 @@ static void cv_recompute_paused (CvSource *src)
     }
     /* the presentation clock stops with the last viewer and continues
      * where it stopped */
+    if (all != src->paused_all)
+        src->idle_reset = TRUE;     /* (fewer threads for an idle decoder: its window starts over) */
     if (all && !src->paused_all) {
         src->pause_at = cv_now ();
         src->no_park = FALSE;

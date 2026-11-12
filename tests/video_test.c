@@ -31,6 +31,14 @@
  * 5. With a GL context (EGL device or Mesa surfaceless; skipped without):
  *    the plane textures hold exactly the queued frame after an upload, and a
  *    scene-like viewer polled at 30 Hz is measured as such.
+ * 7. Another thread count while the clip plays (the decoder falls behind
+ *    and gets more; WALPE_VIDEO_THREADS_LOWER=1 and it is idle: fewer):
+ *    with a 1344x768 clip started on two threads, the decoder is told to
+ *    go to one and back to two. Each change happens at a keyframe or the
+ *    loop point; every picture is queued once, in order, identical to the
+ *    plain decode, one frame interval after the one before it, and the
+ *    status line names the count in use. (The rule that decides is run
+ *    against a model of the queue in tests/video_threads_test.c.)
  * 6. A scene's clip played from a converted copy (videotex.h; `video-test
  *    --copy` runs this part alone): a half-size copy of the clip is made
  *    here the way the daemon makes one. A clip that is playing changes
@@ -63,6 +71,10 @@ static void test_pushed (void *src, const void *frame);
 #define CV_TEST_HWFAKE 1
 static int test_hw_receive (void *src, int rc);
 #define CV_TEST_HW_RECEIVE(src, rc) test_hw_receive (src, rc)
+/* the thread count the decoder is told to go to at its next question
+ * (test_threads_change), instead of what the idle rule says */
+static int test_threads_to (void *src, int to);
+#define CV_TEST_THREADS_TO(src, to) test_threads_to (src, to)
 #include "../src/engine/video_custom.c"
 
 static int fails;
@@ -1068,6 +1080,137 @@ out:
     g_free (cut);
 }
 
+/* ------------------------------ 7. another thread count while playing */
+
+static gint threads_to;         /* the next answer, 0 = the rule's own */
+
+static int test_threads_to (void *src, int to)
+{
+    (void) src;
+    /* (the answer is taken once) */
+    int t = g_atomic_int_get (&threads_to);
+    if (t > 0 && g_atomic_int_compare_and_exchange (&threads_to, t, 0))
+        return t;
+    return to;
+}
+
+static gboolean wait_note (const char *what)
+{
+    gint64 until = g_get_monotonic_time () + (gint64) 60 * slow * G_USEC_PER_SEC;
+    while (g_get_monotonic_time () < until) {
+        char *n = walpe_video_decoder_note ();
+        gboolean hit = n && strstr (n, what);
+        g_free (n);
+        if (hit)
+            return TRUE;
+        g_usleep (10000);
+    }
+    return FALSE;
+}
+
+static void test_threads_change (const char *dir)
+{
+    char *ff = g_find_program_in_path ("ffmpeg");
+    char *clip = g_build_filename (dir, "wide.mp4", NULL);
+    const char *argv[] = { ff, "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                           "testsrc2=size=1344x768:rate=60", "-t", "1", "-c:v", "libx264", "-preset",
+                           "veryfast", "-pix_fmt", "yuv420p", "-g", "30", "-bf", "3", "-x264-params",
+                           "b-pyramid=0:b-adapt=0:scenecut=0", "-an", "-y", clip, NULL };
+    int status = -1;
+    gboolean made = ff && g_spawn_sync (NULL, (char **) argv, NULL,
+                                        G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL, NULL, NULL,
+                                        NULL, NULL, &status, NULL) && status == 0;
+    g_free (ff);
+    /* the plain decode of this clip, in place of the first clip's */
+    GArray *keep = refs;
+    const guint keep_ts = ref_timescale;
+    const int keep_w = ref_w, keep_h = ref_h, keep_nonref = ref_nonref;
+    refs = g_array_new (FALSE, TRUE, sizeof (Ref));
+    ref_nonref = 0;
+    GError *err = NULL;
+    CvViewer *vw = NULL;
+    if (!made || !ref_decode (clip)) {
+        CHECK (FALSE, "threads: the 1344x768 clip could not be made or decoded");
+        goto out;
+    }
+    const guint npic = refs->len;
+    recs_clear ();
+    g_setenv ("WALPE_VIDEO_THREADS_START", "2", TRUE);
+    vw = cv_attach (clip, 0, 0, NULL, &err);
+    g_unsetenv ("WALPE_VIDEO_THREADS_START");
+    if (!vw) {
+        CHECK (FALSE, "threads: %s", err ? err->message : "no viewer");
+        g_clear_error (&err);
+        goto out;
+    }
+    CvSource *src = vw->src;
+    if (src->threads_max < 2) {
+        printf ("threads: this machine gives a 1344x768 clip one decoder thread at most: the change of the "
+                "count is SKIPPED\n");
+        goto out;
+    }
+    const double iv = src->clip_iv;
+    CHECK (wait_note ("software, 2 threads"), "threads: the clip does not start with two threads");
+    CHECK (wait_rec (0, 0, npic + npic / 3) >= 0, "threads: the clip does not play");
+    g_atomic_int_set (&threads_to, 1);
+    CHECK (wait_note ("software, 1 thread"), "threads: the decoder did not go to one thread");
+    guint at1 = recs_len ();
+    CHECK (wait_rec (0, 0, at1 + npic + npic / 2) >= 0, "threads: the clip does not play on one thread");
+    g_atomic_int_set (&threads_to, 2);
+    CHECK (wait_note ("software, 2 threads"), "threads: the decoder did not go back to two threads");
+    guint at2 = recs_len ();
+    CHECK (wait_rec (0, 0, at2 + npic + npic / 2) >= 0, "threads: the clip does not play on two threads again");
+    cvv_free (&vw->base);
+    vw = NULL;
+    CHECK (cv_threads_lowered (clip) == 1 && cv_threads_learned (clip) == 2,
+           "threads: the counts are remembered for the clip (enough: %d, needed: %d)", cv_threads_lowered (clip),
+           cv_threads_learned (clip));
+
+    g_mutex_lock (&rec_lock);
+    guint n = recs->len, same = 0, order = 0, beat = 0;
+    int first = -1;
+    for (guint i = 0; i < n; i++) {
+        const Rec *r = &g_array_index (recs, Rec, i);
+        int idx = -1;
+        for (guint k = 0; k < refs->len && idx < 0; k++)
+            if (g_array_index (refs, Ref, k).ticks == r->ticks)
+                idx = (int) k;
+        if (idx >= 0 && !strcmp (g_array_index (refs, Ref, idx).md5[r->kind == CV_NV ? V_NV_FULL : V_FULL], r->md5))
+            same++;
+        if (i == 0)
+            first = idx;
+        /* the clip's pictures in display order, pass after pass */
+        if (idx >= 0 && first >= 0 && (guint) idx == ((guint) first + i) % npic)
+            order++;
+        if (i > 0 && fabs (r->play - g_array_index (recs, Rec, i - 1).play - iv) < 1e-4)
+            beat++;
+    }
+    g_mutex_unlock (&rec_lock);
+    CHECK (n >= at2 + npic, "threads: %u frames queued", n);
+    CHECK (same == n, "threads: %u of %u queued frames are byte-identical to the plain decode", same, n);
+    CHECK (order == n, "threads: %u of %u frames are the next picture of the clip (none twice, none left out)",
+           order, n);
+    CHECK (n > 0 && beat == n - 1, "threads: %u of %u frames follow the one before after one frame interval",
+           beat, n ? n - 1 : 0);
+    printf ("threads: 2 -> 1 -> 2 decoder threads while playing: %u frames queued, %u identical to the plain "
+            "decode, %u in order, %u on the beat; the changes after frames %u and %u\n", n, same, order, beat, at1,
+            at2);
+out:
+    if (vw)
+        cvv_free (&vw->base);
+    for (guint i = 0; i < refs->len; i++)
+        for (int v = 0; v < V_N; v++)
+            g_free (g_array_index (refs, Ref, i).md5[v]);
+    g_array_free (refs, TRUE);
+    refs = keep;
+    ref_timescale = keep_ts;
+    ref_w = keep_w;
+    ref_h = keep_h;
+    ref_nonref = keep_nonref;
+    g_remove (clip);
+    g_free (clip);
+}
+
 /* ----------------------------------------------------------- 5. GL part */
 
 static const char *gl_clip;
@@ -1388,6 +1531,11 @@ int main (int argc, char **argv)
     g_unsetenv ("WALPE_VIDEO_SIMD");
     g_unsetenv ("WALPE_VIDEO_UPLOAD");
     g_unsetenv ("WALPE_FPS_LOG");
+    g_unsetenv ("WALPE_VIDEO_THREADS");
+    g_unsetenv ("WALPE_VIDEO_THREADS_START");
+    /* fewer threads for an idle decoder: on, so that part 7 can ask for it (the clip of the
+     * other parts decodes on one thread, where there is nothing to give back) */
+    g_setenv ("WALPE_VIDEO_THREADS_LOWER", "1", TRUE);
     gboolean nv = g_getenv ("WALPE_VIDEO_TEST_NV12") != NULL;
     refs = g_array_new (FALSE, TRUE, sizeof (Ref));
     recs = g_array_new (FALSE, TRUE, sizeof (Rec));
@@ -1437,6 +1585,7 @@ int main (int argc, char **argv)
             test_hw_fake (clip);
             test_copy (clip, dir);
             test_gl (clip);
+            test_threads_change (dir);
         }
     }
     if (clip && !own)

@@ -107,6 +107,94 @@ static inline int walpe_vlag_step (WalpeVLag *l, double now, guint frames, guint
     return want >= max ? max : want > threads + 1 ? (int) want : threads + 1;
 }
 
+/* ---- the other direction (asked for with WALPE_VIDEO_THREADS_LOWER=1; off
+ * otherwise, and then nothing below is ever called).
+ *
+ * The count a clip starts with is sized for a slow core (above). On a
+ * faster one the decoder then runs with frame threads it does not need:
+ * each holds a picture pool of its own (measured: 20 to 47 MB for
+ * 3840x2160, 10 to 22 for 2560x1440, 5 to 13 for 1920x1080) and costs
+ * thread wake-ups for every picture, while the CPU time per picture stays
+ * the same.
+ *
+ * What tells is the CPU time the decoder really used: the decode thread's
+ * own and that of libavcodec's frame threads, over a window of ten seconds
+ * in which no frame was late. (How long the decode thread waits for a free
+ * queue slot does NOT tell: with frame threads it waits while the threads
+ * still work.) When that work would keep each of threads - 1 threads busy
+ * no more than half of the time, one thread goes - where the next sequence
+ * starts, exactly as threads are added - and the decoder is asked again
+ * with the smaller count. A clip that falls behind afterwards gets its
+ * threads back by the rule above and keeps them (video_custom.c: such a
+ * clip is not asked again). */
+#define WALPE_VIDLE_WINDOW_S 10.0
+#define WALPE_VIDLE_MIN_FRAMES 120
+/* the share of its time each of the remaining threads may be busy, at most */
+#define WALPE_VIDLE_BUSY_MAX 0.5
+/* windows judged after the decoder was opened; then the answer stands
+ * (a clip does not change) */
+#define WALPE_VIDLE_WINDOWS 6
+
+typedef struct {
+    double from;                /* the window's start; before it nothing is judged */
+    gboolean armed;             /* the totals below are those at `from` */
+    double cpu0;
+    guint frames0, late0;
+    int windows;                /* judged so far */
+} WalpeVIdle;
+
+/* the decoder was (re)opened, or playback continues after a pause, at `now` */
+static inline void walpe_vidle_restart (WalpeVIdle *l, double now)
+{
+    l->from = now + WALPE_VLAG_GRACE_S;
+    l->armed = FALSE;
+    l->cpu0 = 0;
+    l->frames0 = l->late0 = 0;
+    l->windows = 0;
+}
+
+/* Asked now and then (every packet), with the frames queued so far: is the
+ * CPU time wanted now - to open a window or to judge one? (Reading it
+ * costs a look at every thread of the process: only then.) */
+static inline gboolean walpe_vidle_wants (const WalpeVIdle *l, double now, guint frames, int threads)
+{
+    if (threads <= 1 || l->windows >= WALPE_VIDLE_WINDOWS || now < l->from)
+        return FALSE;
+    return !l->armed || (now - l->from >= WALPE_VIDLE_WINDOW_S &&
+                         frames - l->frames0 >= WALPE_VIDLE_MIN_FRAMES);
+}
+
+/* ... and when it is: cpu = CPU seconds the decoder has used in total,
+ * frames / late = frames queued, and those queued after their presentation
+ * time. Returns threads - 1 when the decoder would keep up with one thread
+ * less, else 0. *busy (may be NULL): the cores of work in the window that
+ * was just judged (CPU seconds per second), -1 = none was judged. */
+static inline int walpe_vidle_step (WalpeVIdle *l, double now, double cpu, guint frames, guint late,
+                                    int threads, double *busy)
+{
+    if (busy)
+        *busy = -1;
+    if (!walpe_vidle_wants (l, now, frames, threads))
+        return 0;
+    const gboolean judge = l->armed && cpu >= l->cpu0;  /* (less than before: threads of another
+                                                         * decoder ended meanwhile - no answer) */
+    const double dt = now - l->from, work = judge ? (cpu - l->cpu0) / dt : 0;
+    const guint nl = late - l->late0;
+    l->armed = TRUE;
+    l->from = now;              /* the next window starts here */
+    l->cpu0 = cpu;
+    l->frames0 = frames;
+    l->late0 = late;
+    if (!judge)
+        return 0;
+    l->windows++;
+    if (busy)
+        *busy = work;
+    if (nl > 0 || work > WALPE_VIDLE_BUSY_MAX * (threads - 1))
+        return 0;
+    return threads - 1;
+}
+
 /* the earlier build's rule, kept for the test that shows what it missed: `slipped`
  * = seconds the presentation clock was moved back in total; TRUE = one
  * more thread */

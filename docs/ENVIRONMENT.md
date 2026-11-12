@@ -205,6 +205,7 @@ The other way round, `WALPE_MEM_STATS=1` switches memory numbers by kind in
 | `WALPE_CONVERT_BACKGROUND=0` | lowest priority | (testing) the ffmpeg that makes such a copy runs at the daemon's priority instead of nice 19 / `SCHED_IDLE` / idle I/O: on a machine that is never idle it would not finish |
 | `WALPE_VIDEO_UPLOAD=mode` | config `video_upload` (legacy) | how frames reach their textures: `legacy`, `pbo`, `pbodata`, `persist`, `direct`, each also `+pingpong` |
 | `WALPE_VIDEO_THREADS=n` | by need, at most 1 up to 720p, 2 up to 1080p, 3 up to 1440p, 4 above | fixed number of decoder threads |
+| `WALPE_VIDEO_THREADS_LOWER=1` | off | a software decoder whose measured CPU time shows frame threads it does not need gives one back at the next keyframe, down to the count at which each thread is busy half of the time at most (each frame thread holds a picture pool: 20-47 MB for 3840x2160, 5-13 MB for 1920x1080); a clip that falls behind afterwards gets its threads back and keeps them |
 | `WALPE_VIDEO_SKIP_DEBLOCK=1` / `=nonref` | filter on | leave the H.264 deblocking filter out for all pictures (blocky) / only for pictures nothing is predicted from |
 | `WALPE_VIDEO_FULLRES=1` | off | never decode at half size |
 | `WALPE_VIDEO_SIMD=c\|sse2` | AVX2 when the CPU has it, else SSE2 | kernel of the half-size reduction (same bytes; for comparisons) |

@@ -144,6 +144,22 @@ thread(s): 3 from the next keyframe on`). `WALPE_VIDEO_THREADS=n` fixes the
 count; `WALPE_VIDEO_THREADS_START=n` (testing) sets only what a clip starts
 with.
 
+The count a clip starts with is sized for a slow CPU, and it only ever goes
+up. `WALPE_VIDEO_THREADS_LOWER=1` (off by default) adds the other direction:
+the CPU time the decoder really uses - its own thread's and that of
+libavcodec's frame threads - is read once in ten seconds. When that work
+would keep each of the remaining threads busy no more than half of the time
+with one thread less, and no frame was late in those ten seconds, the
+decoder gives one frame thread back where the next keyframe or the loop
+point comes (log: `video: the decoder uses 0.31 of a CPU with 2 threads: 1
+from the next keyframe on`), and is asked again with the smaller count. A
+frame thread costs no CPU time by itself but holds a picture pool of its
+own - 20 to 47 MB for a 3840x2160 clip, 10 to 22 MB for 2560x1440, 5 to
+13 MB for 1920x1080 - and thread wake-ups for every picture. A clip that
+falls behind afterwards gets its threads back by the rule above and is not
+asked again while the engine runs; a count fixed with `WALPE_VIDEO_THREADS`
+is never changed.
+
 ## What it costs and the switches for it
 
 | what | how | default |
