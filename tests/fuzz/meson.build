@@ -8,7 +8,10 @@
 #       tests/fuzz/regress/<target>. Every input that once crashed a parser
 #       is kept in regress/ and must come back; under a sanitizer build the
 #       sanitizer is the judge. Any compiler; only with -Dtests=true, like
-#       every test.
+#       every test. An input that is a danger as a file (a JPEG no decoder
+#       comes back from, in a folder a file manager makes thumbnails of) is
+#       kept as its hex dump, <name>.hex, which standalone.c reads as the
+#       bytes it stands for.
 #   fuzz-<target>           the libFuzzer programs, only with -Dfuzz=enabled:
 #       CC=clang meson setup bf -Dfuzz=enabled -Db_sanitize=address,undefined \
 #           -Db_lundef=false -Dscenescript=disabled

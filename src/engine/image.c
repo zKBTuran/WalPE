@@ -95,9 +95,15 @@ static gboolean picture_dims_ok (int w, int h, GError **err)
 }
 
 /* a "BM" file goes to gdk-pixbuf (also for its size alone) only with the
- * header sizes of a BMP file (util.h, walpe_bmp_header_ok) */
+ * header sizes of a BMP file (util.h, walpe_bmp_header_ok), and a JPEG -
+ * by its bytes, whatever the file is called - only when it is not
+ * arithmetic-coded (walpe_jpeg_coding_ok) */
 static gboolean picture_bmp_ok (const char *path, GError **err)
 {
+    if (!walpe_jpeg_file_coding_ok (path)) {
+        g_set_error (err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, "%s: " WALPE_JPEG_ARITH_MSG, path);
+        return FALSE;
+    }
     if (walpe_bmp_file_header_ok (path))
         return TRUE;
     g_set_error (err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,

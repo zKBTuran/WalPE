@@ -183,6 +183,16 @@ could do to the daemon. None of these was seen being used.
     wherever a BMP can come from: a texture, a layer picture, a picture wallpaper, a
     preview, cover art. A BMP that fails is not shown; a BMP as the format defines it
     passes. Found by fuzzing;
+  - JPEG: a file of 106 bytes - an arithmetic-coded JPEG that ends inside its first
+    scan - kept the system's JPEG library (seen with libjpeg-turbo 2.1.5) decoding for
+    ever: the thread that loaded the picture never came back and kept one CPU core
+    busy. An arithmetic-coded JPEG is not given to the decoder any more, wherever a
+    JPEG can come from and whatever the file is called: a texture, a layer picture, a
+    picture wallpaper, a preview, cover art. It is not shown, and the log says "an
+    arithmetic-coded JPEG is not supported". Browsers, Windows and most other programs
+    cannot open such files, so pictures as they are made everywhere (Huffman-coded,
+    baseline or progressive) are not affected. A complete arithmetic-coded JPEG, which
+    did load here, is refused as well. Found by fuzzing;
   - layer pictures of the old scene format are read by the decoder of their own format
     only: a file of another kind under a picture's name (SVG, XPM, PNM, a Windows icon
     ...) no longer reaches that kind's loader. Damaged files are taken as before, with

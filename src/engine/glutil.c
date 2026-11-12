@@ -2965,6 +2965,12 @@ WalpeGlTex walpe_gl_tex_from_file (const char *path)
      * loader above for what its decoder would reserve, not read here either) */
     const char *kind = walpe_bmp_file_header_ok (path) ? tex_file_kind (path) : NULL;
     const gint64 max_side = 16384, max_px = (gint64) 8192 * 8192;
+    /* (and a JPEG, under whatever name, that is arithmetic-coded: its decoder
+     * may never come back - util.h) */
+    if (kind && !walpe_jpeg_file_coding_ok (path)) {
+        g_warning ("texture %s: " WALPE_JPEG_ARITH_MSG, walpe_log_str (path));
+        return out;
+    }
     if (kind && !strcmp (kind, "png") && !tex_file_png_whole (path))
         kind = NULL;
     if (!kind || !tex_file_size (path, kind, &iw, &ih) || iw <= 0 || ih <= 0) {

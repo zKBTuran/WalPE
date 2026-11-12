@@ -679,6 +679,174 @@ static void test_tex (void)
         CHECK (walpe_bmp_header_ok ((const guint8 *) "\x89PNG....", 10, 10));   /* not a BMP: not this check's */
     }
 
+    /* An arithmetic-coded JPEG is not given to the decoder. The 106 bytes
+     * below (found by tests/fuzz, target jpegstore; tests/fuzz/regress has
+     * the same bytes as hex dumps) are a progressive arithmetic-coded frame
+     * of 24 x 16 pixels and the header of one scan, then the file ends:
+     * libjpeg-turbo 2.1.5's arithmetic decoder never returns from them, so
+     * before the check this test did not end. What the check must not do is
+     * take a frame marker inside another segment for a frame, or lose the
+     * frame behind something libjpeg reads across; where it cannot follow
+     * a header it refuses. */
+    {
+        static const guint8 cut[106] = {
+            0xFF, 0xD8, 0xFF, 0xDB, 0x00, 0x43, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x32,
+            0x32, 0x32, 0xFF, 0xCA, 0x32, 0x32, 0x32, 0xFF, 0xCA, 0x00, 0x11, 0x08, 0x00, 0x10, 0x00, 0x18,
+            0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x2E, 0x00, 0x00, 0x00, 0x00, 0x03, 0x11,
+            0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x00, 0x02 };
+        static const char *const jpeg_only[] = { "jpeg", NULL };
+        CHECK (!walpe_jpeg_coding_ok (cut, sizeof cut));
+        /* (its quantisation table holds FF CA: not there that the answer comes from) */
+        CHECK (walpe_jpeg_coding_ok (cut, 71));
+        for (gsize n = 0; n < 73; n++)          /* cut before the frame's marker: not this check's */
+            CHECK (walpe_jpeg_coding_ok (cut, n));
+        for (gsize n = 73; n <= sizeof cut; n++)
+            CHECK (!walpe_jpeg_coding_ok (cut, n));
+        GError *e = NULL;
+        CHECK (walpe_picture_decode (cut, sizeof cut, jpeg_only, NULL, NULL, &e) == NULL);
+        CHECK (e && strstr (e->message, "arithmetic"));
+        g_clear_error (&e);
+        /* as a file under three names: the bytes decide */
+        static const char *const names[] = { "tex/arith.jpg", "tex/arith.png", "tex/arith" };
+        for (guint i = 0; i < G_N_ELEMENTS (names); i++) {
+            mkfile (names[i], cut, sizeof cut);
+            f = P (names[i]);
+            CHECK (!walpe_jpeg_file_coding_ok (f));
+            CHECK (walpe_picture_decode_file (f, jpeg_only, NULL, NULL, &e) == NULL);
+            CHECK (e && strstr (e->message, "arithmetic"));
+            g_clear_error (&e);
+            t = walpe_tex_load (f);             /* a picture file as a texture */
+            CHECK (t == NULL);
+            walpe_tex_free (t);
+            CHECK (!walpe_picture_size_ok (f, &e));     /* a picture or GIF wallpaper */
+            CHECK (e && strstr (e->message, "arithmetic"));
+            g_clear_error (&e);
+            g_free (f);
+        }
+        {   /* ... and inside a texture container, as a wallpaper's textures have their pictures */
+            GByteArray *c = tex_container (cut, sizeof cut);
+            mkfile ("tex/arith-inside.tex", c->data, c->len);
+            f = P ("tex/arith-inside.tex");
+            t = walpe_tex_load (f);
+            CHECK (t == NULL);
+            walpe_tex_free (t);
+            g_free (f);
+            g_byte_array_unref (c);
+        }
+        CHECK (walpe_jpeg_file_coding_ok ("/nonexistent/picture.jpg"));
+        CHECK (walpe_jpeg_coding_ok (NULL, 0));
+        CHECK (walpe_jpeg_coding_ok ((const guint8 *) "\x89PNG\r\n\x1a\n....", 12));
+        CHECK (walpe_jpeg_coding_ok ((const guint8 *) "\xff", 1));
+
+        /* headers put together from segments: SOI, then `mid`, then a frame of
+         * type `sof` (one component), then a scan header */
+        static const guint8 soi[] = { 0xFF, 0xD8 };
+        static const guint8 sos[] = { 0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00 };
+        static const guint8 com[] = { 0xFF, 0xFE, 0x00, 0x06, 0xFF, 0xCA, 0xFF, 0xC9 };  /* a comment: FF CA FF C9 */
+        static const guint8 exif[] = { 0xFF, 0xE1, 0x00, 0x15, 'E', 'x', 'i', 'f', 0, 0,  /* with a thumbnail that */
+                                       0xFF, 0xD8, 0xFF, 0xCA, 0x00, 0x0B, 0x08, 0, 1, 0, 1, 1, 0xFF };  /* is one */
+        static const guint8 icc[] = { 0xFF, 0xE2, 0x00, 0x12, 'I', 'C', 'C', '_', 'P', 'R', 'O', 'F', 'I', 'L', 'E', 0,
+                                      1, 1, 0xFF, 0xC9 };
+        static const guint8 adobe[] = { 0xFF, 0xEE, 0x00, 0x0E, 'A', 'd', 'o', 'b', 'e', 0, 100, 0, 0, 0, 0, 2 };
+        static const guint8 fill[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xD0, 0xFF, 0x01, 0x12, 0x34, 0xFF, 0x00 };
+        static const guint8 dri[] = { 0xFF, 0xDD, 0x00, 0x04, 0xFF, 0xCA };     /* a restart interval of FFCA */
+        static const guint8 dnl[] = { 0xFF, 0xDC, 0x00, 0x04, 0xFF, 0xC9 };
+        static const guint8 com0[] = { 0xFF, 0xFE, 0x00, 0x00 };        /* a length libjpeg reads across */
+        static const guint8 app1[] = { 0xFF, 0xE5, 0x00, 0x01 };
+        static const guint8 dqt0[] = { 0xFF, 0xDB, 0x00, 0x00 };        /* one it gives up on */
+        static const guint8 dht1[] = { 0xFF, 0xC4, 0x00, 0x01 };
+        static const guint8 jpg[] = { 0xFF, 0xC8, 0x00, 0x02 };         /* a marker it does not take */
+        static const guint8 eoi[] = { 0xFF, 0xD9 };
+        static const guint8 frame0[] = { 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x10, 0x00, 0x18, 0x01, 0x01, 0x11, 0x00 };
+        static const guint8 frame10[] = { 0xFF, 0xCA, 0x00, 0x0B, 0x08, 0x00, 0x10, 0x00, 0x18, 0x01, 0x01, 0x11, 0x00 };
+        static const guint8 stray[] = { 0x00, 0x00, 0x00, 0x00, 0x03, 0x11 };
+        static const guint8 exif0[] = { 0xFF, 0xE1, 0x00, 0x1F, 'E', 'x', 'i', 'f', 0, 0,   /* thumbnail: SOI, SOF0, SOS, EOI */
+                                        0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0, 1, 0, 1, 1, 1, 0x11, 0,
+                                        0xFF, 0xDA, 0x00, 0x02, 0xFF, 0xD9, 0x00, 0x00 };
+#define SEG(x) { x, sizeof x }
+        static const struct { const guint8 *d; gsize n; } all[] = { SEG (com), SEG (exif), SEG (icc), SEG (adobe),
+                                                                    SEG (fill), SEG (dri), SEG (dnl) };
+        static const struct { struct { const guint8 *d; gsize n; } mid[3]; guint8 sof; gboolean ok; } hdr[] = {
+            /* a frame that follows what libjpeg reads across is the frame */
+            { { SEG (com0) }, 0xCA, FALSE }, { { SEG (app1) }, 0xC9, FALSE }, { { SEG (com0), SEG (app1) }, 0xCB, FALSE },
+            /* ... also behind what libjpeg gives up on (a table with no length): the walk reads on */
+            { { SEG (dqt0) }, 0xCA, FALSE }, { { SEG (dht1) }, 0xCA, FALSE }, { { SEG (dqt0) }, 0xC0, TRUE },
+            /* ... behind bytes that are no marker, as the six in the file above are */
+            { { SEG (stray) }, 0xCA, FALSE }, { { SEG (stray) }, 0xC2, TRUE },
+            /* ... and behind an Exif thumbnail that is a Huffman-coded JPEG with a frame of its own */
+            { { SEG (exif0) }, 0xCA, FALSE }, { { SEG (exif0), SEG (com) }, 0xC0, TRUE },
+            /* a marker the walk does not know is not followed, whatever comes then */
+            { { SEG (jpg) }, 0xCA, FALSE }, { { SEG (jpg) }, 0xC0, FALSE }, { { SEG (soi) }, 0xC0, FALSE },
+            /* a scan or the end of the picture before any frame: there is nothing to decode */
+            { { SEG (eoi) }, 0xCA, TRUE }, { { SEG (sos) }, 0xCA, TRUE },
+            /* the first frame says how the file is coded */
+            { { SEG (frame0) }, 0xCA, TRUE }, { { SEG (frame10) }, 0xC0, FALSE },
+        };
+#undef SEG
+        static const guint8 sofs[] = { 0xC0, 0xC1, 0xC2, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF };
+        for (guint i = 0; i < G_N_ELEMENTS (sofs) + G_N_ELEMENTS (hdr); i++) {
+            gboolean plain = i < G_N_ELEMENTS (sofs);
+            guint8 sof = plain ? sofs[i] : hdr[i - G_N_ELEMENTS (sofs)].sof;
+            gboolean want = plain ? sof <= 0xC2 : hdr[i - G_N_ELEMENTS (sofs)].ok;
+            GByteArray *a = g_byte_array_new ();
+            g_byte_array_append (a, soi, sizeof soi);
+            if (plain)      /* every kind of segment that may hold the two bytes of a frame marker */
+                for (guint k = 0; k < G_N_ELEMENTS (all); k++)
+                    g_byte_array_append (a, all[k].d, (guint) all[k].n);
+            else
+                for (guint k = 0; k < 3 && hdr[i - G_N_ELEMENTS (sofs)].mid[k].d; k++)
+                    g_byte_array_append (a, hdr[i - G_N_ELEMENTS (sofs)].mid[k].d,
+                                         (guint) hdr[i - G_N_ELEMENTS (sofs)].mid[k].n);
+            const guint8 frame[] = { 0xFF, sof, 0x00, 0x0B, 0x08, 0x00, 0x10, 0x00, 0x18, 0x01, 0x01, 0x11, 0x00 };
+            g_byte_array_append (a, frame, sizeof frame);
+            g_byte_array_append (a, sos, sizeof sos);
+            CHECK (walpe_jpeg_coding_ok (a->data, a->len) == want);
+            /* bytes before the start of the picture: no JPEG for libjpeg, not this check's */
+            g_byte_array_prepend (a, (const guint8 *) "x", 1);
+            CHECK (walpe_jpeg_coding_ok (a->data, a->len));
+            g_byte_array_unref (a);
+        }
+
+        /* a JPEG as every encoder writes it still decodes: this gdk-pixbuf's own, with a comment that
+         * holds an arithmetic frame's marker put in front of its first segment */
+        GdkPixbuf *src = gdk_pixbuf_new (GDK_COLORSPACE_RGB, FALSE, 8, 24, 16);
+        gdk_pixbuf_fill (src, 0x336699ff);
+        gchar *jd = NULL;
+        gsize jn = 0;
+        if (gdk_pixbuf_save_to_buffer (src, &jd, &jn, "jpeg", NULL, NULL)) {
+            GByteArray *a = g_byte_array_new ();
+            g_byte_array_append (a, (const guint8 *) jd, 2);
+            g_byte_array_append (a, com, sizeof com);
+            g_byte_array_append (a, (const guint8 *) jd + 2, (guint) (jn - 2));
+            CHECK (walpe_jpeg_coding_ok (a->data, a->len));
+            GdkPixbuf *pb = walpe_picture_decode (a->data, a->len, jpeg_only, NULL, NULL, NULL);
+            CHECK (pb && gdk_pixbuf_get_width (pb) == 24 && gdk_pixbuf_get_height (pb) == 16);
+            g_clear_object (&pb);
+            mkfile ("tex/plain.jpg", a->data, a->len);
+            f = P ("tex/plain.jpg");
+            CHECK (walpe_jpeg_file_coding_ok (f));
+            t = walpe_tex_load (f);
+            CHECK (t && t->width == 24 && t->height == 16);
+            walpe_tex_free (t);
+            CHECK (walpe_picture_size_ok (f, NULL));
+            g_free (f);
+            GByteArray *c = tex_container (a->data, a->len);
+            mkfile ("tex/plain-inside.tex", c->data, c->len);
+            f = P ("tex/plain-inside.tex");
+            t = walpe_tex_load (f);
+            CHECK (t && t->width == 24 && t->height == 16);
+            walpe_tex_free (t);
+            g_free (f);
+            g_byte_array_unref (c);
+            g_byte_array_unref (a);
+            g_free (jd);
+        }
+        g_object_unref (src);
+    }
+
     /* 600 JPEG starts, each in the comment segment of the one before, then
      * 4 MiB of zeros: every start was a decode attempt that read to the end
      * of the file (17 s of CPU for this one; the time grew with the file).

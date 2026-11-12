@@ -80,6 +80,35 @@ guint64 walpe_jpeg_store_bytes_file (const char *path);
  * picture of another format costs decoded (8192 x 8192, 4 bytes a pixel) */
 #define WALPE_JPEG_STORE_MAX ((guint64) 256 << 20)
 
+/* A JPEG before it reaches libjpeg (through gdk-pixbuf, by whatever name
+ * the file goes). An arithmetic-coded one is not decoded: 106 bytes of a
+ * progressive arithmetic-coded JPEG that end inside their first scan keep
+ * libjpeg-turbo 2.1.5's arithmetic decoder in a loop that never ends
+ * (the thread that decodes never comes back, at full CPU). Browsers, the
+ * codecs of Windows and stb_image do not decode arithmetic coding at all,
+ * so pictures made for use anywhere are Huffman-coded and are not touched
+ * by this; a complete arithmetic-coded JPEG, which this libjpeg decodes,
+ * is refused with the cut one.
+ * FALSE: the bytes start as a JPEG (FF D8) and the first frame header
+ * libjpeg would come to is an arithmetic one (SOF9, 10, 11, 13, 14, 15),
+ * or there is a marker before it that the walk does not know (libjpeg
+ * does not decode such a file either). The bytes are walked the way
+ * libjpeg's marker reader walks them, reading on wherever it might: other
+ * bytes up to an FF, any number of FF, segments by their length (a frame
+ * marker inside a comment, an Exif thumbnail, a colour profile or a table
+ * is not a frame, and a Huffman frame in there does not hide the
+ * picture's own), up to the first frame header, a scan or the end of the
+ * picture. TRUE for everything else, also for bytes that are no JPEG and
+ * for a header that is cut short before its frame (nothing of it can be
+ * decoded): not this check's. */
+gboolean walpe_jpeg_coding_ok (const guint8 *d, gsize len);
+/* the same for a file (its head is read, at most 32 MiB of it; a JPEG
+ * whose frame header is not within that is not accepted either). TRUE
+ * for what is no regular file or cannot be read. */
+gboolean walpe_jpeg_file_coding_ok (const char *path);
+/* what a caller says about a refused one */
+#define WALPE_JPEG_ARITH_MSG "an arithmetic-coded JPEG is not supported (or a JPEG whose header cannot be followed)"
+
 /* Pictures that are not a wallpaper's own textures (previews).
  * gdk-pixbuf asked to choose (gdk_pixbuf_loader_new, gdk_pixbuf_new_from_file,
  * gdk_pixbuf_get_file_info) hands the bytes to whichever of its loaders

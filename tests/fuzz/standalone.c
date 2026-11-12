@@ -1,7 +1,16 @@
 /* standalone.c - main () for a fuzz harness without libFuzzer: every file
  * named on the command line (every file of a named directory) is given to
  * LLVMFuzzerTestOneInput () once. This is how the regression inputs under
- * tests/fuzz/regress run in the normal test suite, with any compiler. */
+ * tests/fuzz/regress run in the normal test suite, with any compiler.
+ *
+ * A file whose name ends in ".hex" is the hex dump of an input: two digits
+ * a byte, white space wherever one likes, nothing else. The bytes it stands
+ * for are what the harness gets; they are in memory only. An input is kept
+ * that way when the file itself is a danger to a program that merely looks
+ * into a folder of the sources: a JPEG that libjpeg never finishes makes a
+ * file manager's thumbnailer spin for as long as the folder is shown.
+ * `xxd -r -p x.hex x` writes the bytes out for a run of the libFuzzer
+ * program. */
 #include "fuzz_common.h"
 #include <glib/gstdio.h>
 #include <stdio.h>
@@ -25,12 +34,40 @@ static int by_name (gconstpointer a, gconstpointer b)
     return strcmp (*(const char *const *) a, *(const char *const *) b);
 }
 
+/* the bytes of a hex dump, in its place; FALSE: something that is neither
+ * a hex digit nor white space, or half a byte */
+static gboolean unhex (char *d, gsize *n)
+{
+    gsize out = 0;
+    int high = -1;
+    for (gsize i = 0; i < *n; i++) {
+        int v = g_ascii_xdigit_value (d[i]);
+        if (v < 0) {
+            if (!g_ascii_isspace (d[i]))
+                return FALSE;
+            continue;
+        }
+        if (high < 0) {
+            high = v;
+        } else {
+            d[out++] = (char) (high << 4 | v);
+            high = -1;
+        }
+    }
+    *n = out;
+    return high < 0;
+}
+
 static void one (const char *path)
 {
     char *d = NULL;
     gsize n = 0;
     if (!g_file_get_contents (path, &d, &n, NULL)) {
         fprintf (stderr, "cannot read %s\n", path);
+        exit (1);
+    }
+    if (g_str_has_suffix (path, ".hex") && !unhex (d, &n)) {
+        fprintf (stderr, "%s is not a hex dump\n", path);
         exit (1);
     }
     printf ("%s (%zu bytes)\n", path, n);

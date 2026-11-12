@@ -404,6 +404,93 @@ guint64 walpe_jpeg_store_bytes (const guint8 *d, gsize len)
     return total;
 }
 
+/* 0: the JPEG's frame is Huffman-coded, or there is none to decode;
+ * 1: it is arithmetic-coded, or the walk meets something it does not know;
+ * 2: the bytes end before either can be said.
+ * The walk is libjpeg's marker reader (jdmarker.c: first_marker,
+ * next_marker, read_markers) with every doubt resolved towards reading on:
+ * bytes that are no marker are passed over, as are runs of FF and FF 00;
+ * TEM and RSTn have no segment; a table, application, comment or DNL
+ * segment is skipped by its length, and one with a length below 2 is taken
+ * as empty (libjpeg does that for application, comment and DNL segments and
+ * gives up on a table; reading on covers both). It ends at the first frame
+ * header - that is how the file is coded, libjpeg takes no second one -
+ * or at a scan or the end of the picture, before which libjpeg has to
+ * have had its frame. A marker of any other kind (libjpeg: "unsupported
+ * marker type", the file is not decoded) is not followed: 1. */
+static int jpeg_coding (const guint8 *d, gsize len)
+{
+    if (!d || len < 2)
+        return d && len == 1 && d[0] == 0xFF ? 2 : 0;
+    if (d[0] != 0xFF || d[1] != 0xD8)
+        return 0;
+    gsize i = 2;
+    for (;;) {
+        guint8 m;
+        for (;;) {
+            while (i < len && d[i] != 0xFF)
+                i++;
+            while (i < len && d[i] == 0xFF)
+                i++;
+            if (i >= len)
+                return 2;
+            m = d[i++];
+            if (m)
+                break;          /* (FF 00 is no marker) */
+        }
+        if (m == 0x01 || (m >= 0xD0 && m <= 0xD7))
+            continue;           /* TEM, RSTn: no segment follows */
+        if (m == 0xDA || m == 0xD9)
+            return 0;           /* a scan or the end before any frame: nothing to decode */
+        if (m >= 0xC0 && m <= 0xCF && m != 0xC4 && m != 0xC8 && m != 0xCC)
+            return m > 0xC8;    /* the frame header: SOF9, 10, 11, 13, 14, 15 are the arithmetic ones */
+        if (m != 0xC4 && m != 0xCC && m != 0xDB && m != 0xDD && m != 0xDC && m != 0xFE &&
+            !(m >= 0xE0 && m <= 0xEF))
+            return 1;           /* not DHT, DAC, DQT, DRI, DNL, COM or APPn */
+        if (len - i < 2)
+            return 2;
+        gsize seg = ((gsize) d[i] << 8) | d[i + 1];
+        if (seg < 2)
+            seg = 2;
+        if (seg > len - i)
+            return 2;
+        i += seg;
+    }
+}
+
+gboolean walpe_jpeg_coding_ok (const guint8 *d, gsize len)
+{
+    return jpeg_coding (d, len) != 1;
+}
+
+gboolean walpe_jpeg_file_coding_ok (const char *path)
+{
+    const gsize head_max = (gsize) 32 << 20;
+    GStatBuf st;
+    FILE *f = path && g_stat (path, &st) == 0 && S_ISREG (st.st_mode) ? fopen (path, "rb") : NULL;
+    if (!f)
+        return TRUE;
+    GByteArray *buf = g_byte_array_new ();
+    int r = 2;
+    gboolean whole = FALSE;
+    gsize want = 64 * 1024;
+    for (;;) {
+        gsize old = buf->len;
+        g_byte_array_set_size (buf, (guint) want);
+        gsize got = fread (buf->data + old, 1, want - old, f);
+        g_byte_array_set_size (buf, (guint) (old + got));
+        whole = got < want - old;
+        r = jpeg_coding (buf->data, buf->len);
+        if (r != 2 || whole || want >= head_max)
+            break;
+        want *= 2;
+    }
+    g_byte_array_unref (buf);
+    fclose (f);
+    /* (a header that goes on beyond 32 MiB: what comes then is not known) */
+    return r == 0 || (r == 2 && whole);
+}
+
 guint64 walpe_jpeg_store_bytes_file (const char *path)
 {
     /* the first scan comes after the tables and the application segments
@@ -569,8 +656,12 @@ static GdkPixbuf *picture_finish (GdkPixbufLoader *ld, PictureLoad *pl, gboolean
     return pb;
 }
 
-static gboolean picture_jpeg_ok (const PictureLoad *pl, guint64 store, GError **err)
+static gboolean picture_jpeg_ok (const PictureLoad *pl, gboolean coding_ok, guint64 store, GError **err)
 {
+    if (!coding_ok) {       /* (by the bytes, whatever the kind: util.h) */
+        g_set_error_literal (err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, WALPE_JPEG_ARITH_MSG);
+        return FALSE;
+    }
     if (strcmp (pl->kind, "jpeg") || store <= WALPE_JPEG_STORE_MAX)
         return TRUE;
     g_set_error_literal (err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
@@ -585,7 +676,8 @@ GdkPixbuf *walpe_picture_decode (const guint8 *d, gsize len, const char *const *
     GdkPixbufLoader *ld = picture_loader (d, len, len, kinds, &pl, err);
     if (!ld)
         return NULL;
-    if (!picture_jpeg_ok (&pl, !strcmp (pl.kind, "jpeg") ? walpe_jpeg_store_bytes (d, len) : 0, err)) {
+    if (!picture_jpeg_ok (&pl, walpe_jpeg_coding_ok (d, len),
+                          !strcmp (pl.kind, "jpeg") ? walpe_jpeg_store_bytes (d, len) : 0, err)) {
         gdk_pixbuf_loader_close (ld, NULL);
         g_object_unref (ld);
         return NULL;
@@ -620,8 +712,8 @@ GdkPixbuf *walpe_picture_decode_file (const char *path, const char *const *kinds
     gsize n = fread (buf, 1, 65536, f);
     PictureLoad pl = { NULL, size, user, FALSE };
     GdkPixbufLoader *ld = picture_loader (buf, n, (guint64) st.st_size, kinds, &pl, err);
-    if (ld && !picture_jpeg_ok (&pl, !strcmp (pl.kind, "jpeg") ? walpe_jpeg_store_bytes_file (path) : 0,
-                                err)) {
+    if (ld && !picture_jpeg_ok (&pl, walpe_jpeg_file_coding_ok (path),
+                                !strcmp (pl.kind, "jpeg") ? walpe_jpeg_store_bytes_file (path) : 0, err)) {
         gdk_pixbuf_loader_close (ld, NULL);
         g_clear_object (&ld);
     }

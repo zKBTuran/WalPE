@@ -98,6 +98,21 @@ int LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
         look (p1, &c1);
     if (p2)
         look (p2, &c2);
+    /* a JPEG is walked for how it is coded before its decoder gets it: the walk on the bytes and the one
+     * on the file agree, and an arithmetic-coded one is never decoded */
+    gboolean coding = walpe_jpeg_coding_ok (data, size);
+    FUZZ_CHECK (coding == walpe_jpeg_file_coding_ok (fuzz_file (0, data, size)));
+    FUZZ_CHECK (coding || (!p1 && !p2));
+    if (g_getenv ("WALPE_FUZZ_LOG"))    /* one line an input: the walk's answer, and what was decoded */
+        g_printerr ("fuzz_picture: coding %s, %s %d x %d sum %08x\n", coding ? "ok" : "refused",
+                    p1 ? "decoded" : "not decoded", p1 ? gdk_pixbuf_get_width (p1) : 0,
+                    p1 ? gdk_pixbuf_get_height (p1) : 0,
+                    p1 ? fuzz_touch (gdk_pixbuf_read_pixels (p1), (size_t) gdk_pixbuf_get_rowstride (p1) *
+                                     ((size_t) gdk_pixbuf_get_height (p1) - 1) +
+                                     (size_t) gdk_pixbuf_get_width (p1) * (size_t) gdk_pixbuf_get_n_channels (p1))
+                       : 0);
+    for (size_t cut = size > 64 ? size - 64 : 0; cut < size; cut++)     /* (every shorter header as well) */
+        walpe_jpeg_coding_ok (data, cut);
     g_clear_object (&p1);
     g_clear_object (&p2);
     g_clear_error (&e1);

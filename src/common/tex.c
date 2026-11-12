@@ -88,6 +88,17 @@ static void tex_size_prepared (GdkPixbufLoader *ld, int w, int h, gpointer user)
     }
 }
 
+/* a JPEG goes to its decoder only when it is not arithmetic-coded (util.h) */
+static gboolean tex_jpeg_ok (const guint8 *d, gsize len)
+{
+    if (walpe_jpeg_coding_ok (d, len))
+        return TRUE;
+    static gint told;       /* said once: a scene asks for a texture's size and then for the texture */
+    if (g_atomic_int_compare_and_exchange (&told, 0, 1))
+        g_message ("texture: " WALPE_JPEG_ARITH_MSG "; such pictures are not loaded");
+    return FALSE;
+}
+
 /* gdk_pixbuf_new_from_stream on a memory buffer (same 64 KiB writes, first
  * frame of an animation), with the size check above. The loader is made
  * for the one format the caller found by its signature ("png", "jpeg",
@@ -98,6 +109,8 @@ static void tex_size_prepared (GdkPixbufLoader *ld, int w, int h, gpointer user)
 static GdkPixbuf *tex_pixbuf_from_data (const guint8 *d, gsize len, const char *type)
 {
     gboolean too_big = FALSE, ok = TRUE;
+    if (!tex_jpeg_ok (d, len))      /* (util.h: a JPEG whose decoder would not come back) */
+        return NULL;
     GdkPixbufLoader *ld = gdk_pixbuf_loader_new_with_type (type, NULL);
     if (!ld) {
         /* said once per format: with PNG or JPEG missing most textures stay empty */
@@ -161,6 +174,8 @@ static gboolean tex_picture_size_from_data (const guint8 *d, gsize len, const ch
 {
     TexSizeOnly so = { 0, 0, FALSE };
     gboolean ok = TRUE;
+    if (!tex_jpeg_ok (d, len))
+        return FALSE;
     GdkPixbufLoader *ld = gdk_pixbuf_loader_new_with_type (type, NULL);
     if (!ld)
         return FALSE;

@@ -89,6 +89,7 @@ int LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
     FUZZ_CHECK (pb || err);
     if (pb) {
         FUZZ_CHECK (store <= WALPE_JPEG_STORE_MAX);     /* nothing refused was decoded */
+        FUZZ_CHECK (walpe_jpeg_coding_ok (data, size)); /* (nor an arithmetic-coded one) */
         FUZZ_CHECK (gdk_pixbuf_get_width (pb) <= SIDE_MAX && gdk_pixbuf_get_height (pb) <= SIDE_MAX);
         g_object_unref (pb);
     }

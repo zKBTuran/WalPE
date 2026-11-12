@@ -26,8 +26,8 @@ What to include:
 | File | Limit |
 |---|---|
 | texture / picture | 16384 px per side and 8192 x 8192 px; all textures of a scene 1024 MiB (`WALPE_TEX_BUDGET_MB=<MiB>`, 0 = none), the largest are stored smaller beyond that |
-| picture inside a `.tex`, layer picture of the old scene format | PNG, JPEG, WebP (plain picture files also GIF, BMP, TIFF; old-format layers also TGA, AVIF, JXL), each read by its own decoder only, also when only its size is asked for; a JPEG above the texture size is decoded smaller, and one that its decoder has to hold whole (progressive) is not decoded beyond 256 MiB of that store |
-| picture or GIF wallpaper (a picture file chosen as the wallpaper) | shown only when gdk-pixbuf takes the file for a PNG, JPEG, GIF, BMP, TIFF, WebP, TGA, AVIF or JPEG XL picture, whatever its name says: a file it takes for anything else (an SVG document, XPM text, a Windows icon ...) is refused and not decoded as a picture; that loader has read the file's header by then, which is how the format is found out |
+| picture inside a `.tex`, layer picture of the old scene format | PNG, JPEG, WebP (plain picture files also GIF, BMP, TIFF; old-format layers also TGA, AVIF, JXL), each read by its own decoder only, also when only its size is asked for; a JPEG above the texture size is decoded smaller, and one that its decoder has to hold whole (progressive) is not decoded beyond 256 MiB of that store; an arithmetic-coded JPEG is not decoded at all, under whatever name (a short one could keep the JPEG library decoding for ever), nor is one whose frame header is not within the file's first 32 MiB |
+| picture or GIF wallpaper (a picture file chosen as the wallpaper) | shown only when gdk-pixbuf takes the file for a PNG, JPEG, GIF, BMP, TIFF, WebP, TGA, AVIF or JPEG XL picture, whatever its name says: a file it takes for anything else (an SVG document, XPM text, a Windows icon ...) is refused and not decoded as a picture; that loader has read the file's header by then, which is how the format is found out; a file that starts as a JPEG and is arithmetic-coded is refused before that |
 | GIF (wallpaper, preview, cover art) | checked before any of it is decoded: the picture and every frame at least 1 x 1 pixel, every frame inside the picture; a GIF that fails is refused like a damaged picture |
 | `.json` | 32 MiB, 512 levels of nesting |
 | `scene.pkg` | a regular file inside the wallpaper's folder (no pipe, no link that leads out); entries stay inside the cache copy, at most 32 path components, 32768 files + directories, 4 x the package's size + 16 MiB written; the cache holds 1 GiB (`WALPE_PKG_CACHE_MB`) |
@@ -229,7 +229,7 @@ player that writes its next cover over the same name cannot end the daemon), of 
 body at most 16 MiB are read, counted after unpacking for a compressed one, within 10
 seconds; a picture of more than 8192 pixels per side is refused before any
 pixel exists, a JPEG that its decoder has to hold whole is not decoded beyond 256 MiB of
-that store, and a GIF is checked as in the table above. The cover goes to a decoder only
+that store, an arithmetic-coded JPEG is not decoded, and a GIF is checked as in the table above. The cover goes to a decoder only
 when its first bytes are those of a JPEG, PNG, GIF, WebP or BMP file, and then to the
 decoder of that one format: gdk-pixbuf is not left to pick one of its other loaders (SVG,
 XPM, PNM, TGA, ICO, TIFF ...) for bytes a music player or a server chose. A cover in any
@@ -298,7 +298,8 @@ for calls that carry the Web API key), preview pictures go to a decoder only whe
 bytes are those of a JPEG, PNG, GIF or WebP file (library previews also BMP and AVIF) and then
 to the decoder of that one format (gdk-pixbuf is never left to pick one of its other loaders -
 SVG, XPM, PNM, TGA, ICO ... - for them), a JPEG that its decoder has to hold whole (progressive,
-or a scan per component) is not decoded beyond 256 MiB of that store, and titles, tags, names
+or a scan per component) is not decoded beyond 256 MiB of that store, an arithmetic-coded JPEG
+is not decoded at all, and titles, tags, names
 and descriptions are cut to sane lengths and cleaned of control and text-direction characters
 before they are shown. `walpe-ctl` writes the texts it takes from a reply (a Workshop title, the
 layer and effect names of a scene, a text layer's text, the file names in a memory report) with
