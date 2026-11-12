@@ -561,7 +561,8 @@ static inline double wl_refresh_hz_from_ns (guint32 refresh_ns)
  * Plasma's desktop whatever is clicked, below every ordinary window. What
  * that costs: Plasma's desktop icons and widgets are behind the wallpaper
  * and cannot be seen. No layer puts a surface between Plasma's wallpaper
- * and its icons - they are one window.
+ * and its icons - they are one window. The add-on for Plasma (below)
+ * shows them again, with the surface where it is.
  *
  * KWin is told by a global only it announces; these two are offered to
  * every client by 5.27 and by 6.8 (wayland_server.cpp). */
@@ -614,6 +615,105 @@ static inline WlLayer wl_layer_choose (const char *asked, gboolean kwin, WlLayer
 static inline const char *wl_layer_name (WlLayer l)
 {
     return l == WL_LAYER_BOTTOM ? "bottom" : "background";
+}
+
+/* ---------------------------------------------- the add-on for KDE Plasma
+ * On the bottom layer the wallpaper covers Plasma's desktop icons. The
+ * add-on in contrib/plasma (installed by the user, never by the build)
+ * brings them back, and needs nothing from the daemon: a wallpaper type
+ * "WalPE" for Plasma that makes Plasma's desktop window see-through, and
+ * with it a KWin script that tells KWin to keep that window right above
+ * the daemon's surface (workspace.constrain, KWin 6.5: KWin applies such
+ * a rule after it has sorted the windows by layer, so it holds across
+ * the two layers). The surface stays on the bottom layer in both cases:
+ * an opaque desktop window can then never be in front of it, whatever
+ * part of the add-on is missing, stopped or started late.
+ *
+ * What the daemon does with the add-on is tell the user about it: the
+ * start-up log and status say whether the icons are hidden and what
+ * brings them back. It learns that from two files and not from a D-Bus
+ * conversation, which would cost every Plasma user a bus connection for
+ * a sentence: the installed package, and the settings of Plasma's
+ * desktops (does one have the wallpaper type). The files say what is
+ * set up, not what is on screen this moment (Plasma writes its settings
+ * a few seconds after a change). */
+#define WL_PLASMA_TYPE_ID "io.github.walpe.plasma"
+
+typedef enum {
+    WL_PLASMA_ADDON_NONE = 0,     /* not installed */
+    WL_PLASMA_ADDON_UNSELECTED,   /* installed, no desktop has the wallpaper type */
+    WL_PLASMA_ADDON_SELECTED,     /* a desktop has the wallpaper type "WalPE" */
+} WlPlasmaAddon;
+
+/* Does a KDE settings file hold the line KEY=VALUE, in the group GROUP
+ * (the text between the outer brackets of its header, e.g. "Plugins")
+ * or, with GROUP NULL, in any group? */
+static inline gboolean wl_kconfig_has (const char *text, const char *group, const char *key,
+                                       const char *value)
+{
+    gboolean in_group = group == NULL;
+    gsize klen = strlen (key), vlen = strlen (value);
+    for (const char *p = text; p && *p;) {
+        const char *end = strchr (p, '\n');
+        gsize len = end ? (gsize) (end - p) : strlen (p);
+        while (len && (p[len - 1] == '\r' || p[len - 1] == ' ' || p[len - 1] == '\t'))
+            len--;
+        if (len && p[0] == '[') {
+            if (group)
+                in_group = len == strlen (group) + 2 && p[len - 1] == ']' &&
+                           !strncmp (p + 1, group, len - 2);
+        } else if (in_group && len == klen + 1 + vlen && !strncmp (p, key, klen) && p[klen] == '=' &&
+                   !strncmp (p + klen + 1, value, vlen)) {
+            return TRUE;
+        }
+        if (!end)
+            break;
+        p = end + 1;
+    }
+    return FALSE;
+}
+
+/* appletsrc: the settings of Plasma's desktops
+ * (plasma-org.kde.plasma.desktop-appletsrc); NULL = no such file */
+static inline WlPlasmaAddon wl_plasma_addon_state (gboolean installed, const char *appletsrc)
+{
+    if (!installed)
+        return WL_PLASMA_ADDON_NONE;
+    if (!wl_kconfig_has (appletsrc, NULL, "wallpaperplugin", WL_PLASMA_TYPE_ID))
+        return WL_PLASMA_ADDON_UNSELECTED;
+    return WL_PLASMA_ADDON_SELECTED;
+}
+
+static inline const char *wl_plasma_addon_name (WlPlasmaAddon a)
+{
+    switch (a) {
+    case WL_PLASMA_ADDON_UNSELECTED:
+        return "installed, no desktop has the wallpaper type WalPE";
+    case WL_PLASMA_ADDON_SELECTED:
+        return "in use: a desktop has the wallpaper type WalPE";
+    default:
+        return "not installed";
+    }
+}
+
+/* The one line for the user, or NULL when there is nothing to do: on
+ * KWin the icons are hidden unless the add-on is in use. With the
+ * layer "background" asked for, the add-on works the same way, and
+ * without it the log has said what happens to the wallpaper. */
+static inline const char *wl_plasma_hint (gboolean kwin, WlPlasmaAddon a)
+{
+    if (!kwin || a == WL_PLASMA_ADDON_SELECTED)
+        return NULL;
+    if (a == WL_PLASMA_ADDON_UNSELECTED)
+        return "Plasma's desktop icons and widgets are hidden behind the wallpaper. The WalPE add-on "
+               "for Plasma is installed: choose the wallpaper type \"WalPE\" in Plasma's \"Desktop "
+               "and Wallpaper\" settings, or run `contrib/plasma/install.sh select`, to see them "
+               "over the wallpaper (docs/WAYLAND.md, \"KDE Plasma\")";
+    return "Plasma's desktop icons and widgets are hidden behind the wallpaper. To see them over "
+           "the wallpaper (Plasma 6.5 or newer), install the WalPE add-on for Plasma from "
+           "WalPE's source tree: `contrib/plasma/install.sh install`, then choose the wallpaper "
+           "type \"WalPE\" in Plasma's \"Desktop and Wallpaper\" settings "
+           "(docs/WAYLAND.md, \"KDE Plasma\")";
 }
 
 /* ------------------------------------------------- layer surface life cycle

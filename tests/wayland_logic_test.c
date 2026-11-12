@@ -936,6 +936,55 @@ static void test_layer_choice (void)
     CHECK (!strcmp (wl_layer_name (WL_LAYER_BOTTOM), "bottom"));
 }
 
+/* The add-on for KDE Plasma: what the files say, and the one line for
+ * the user. The daemon's layer does not depend on any of it. */
+static void test_plasma_addon (void)
+{
+    static const char applets_sel[] = "[Containments][1]\nactivityId=a\nlastScreen=0\n"
+                                      "plugin=org.kde.plasma.folder\n"
+                                      "wallpaperplugin=io.github.walpe.plasma\r\n\n"
+                                      "[Containments][1][Wallpaper][io.github.walpe.plasma][General]\n"
+                                      "Under=true\n";
+    /* the type was selected once: its settings group is still there */
+    static const char applets_not[] = "[Containments][1]\nwallpaperplugin=org.kde.image\n\n"
+                                      "[Containments][1][Wallpaper][io.github.walpe.plasma][General]\n"
+                                      "Previous=org.kde.image\n";
+    /* the key as a prefix of another key, with another value, after text */
+    static const char applets_else[] = "[Containments][1]\nwallpaperplugin=io.github.walpe.plasma2\n"
+                                       "wallpaperpluginX=io.github.walpe.plasma\n"
+                                       "xwallpaperplugin=io.github.walpe.plasma\n";
+
+    CHECK (wl_kconfig_has (applets_sel, NULL, "wallpaperplugin", "io.github.walpe.plasma"));
+    CHECK (wl_kconfig_has (applets_sel, "Containments][1", "wallpaperplugin", "io.github.walpe.plasma"));
+    CHECK (!wl_kconfig_has (applets_sel, "Containments][2", "wallpaperplugin", "io.github.walpe.plasma"));
+    CHECK (!wl_kconfig_has (applets_sel, "Containments", "wallpaperplugin", "io.github.walpe.plasma"));
+    CHECK (!wl_kconfig_has (applets_else, NULL, "wallpaperplugin", "io.github.walpe.plasma"));
+    CHECK (!wl_kconfig_has (NULL, "Plugins", "a", "b") && !wl_kconfig_has ("", NULL, "a", "b"));
+    CHECK (wl_kconfig_has ("a=b", NULL, "a", "b") && wl_kconfig_has ("[g]\na=b  \n", "g", "a", "b"));
+    CHECK (!wl_kconfig_has ("a=b\n[g]\n", "g", "a", "b") && !wl_kconfig_has ("[h]\na=b\n[g]\n", "g", "a", "b"));
+
+    CHECK (wl_plasma_addon_state (FALSE, applets_sel) == WL_PLASMA_ADDON_NONE);
+    CHECK (wl_plasma_addon_state (FALSE, NULL) == WL_PLASMA_ADDON_NONE);
+    CHECK (wl_plasma_addon_state (TRUE, NULL) == WL_PLASMA_ADDON_UNSELECTED);
+    CHECK (wl_plasma_addon_state (TRUE, applets_not) == WL_PLASMA_ADDON_UNSELECTED);
+    CHECK (wl_plasma_addon_state (TRUE, applets_else) == WL_PLASMA_ADDON_UNSELECTED);
+    CHECK (wl_plasma_addon_state (TRUE, applets_sel) == WL_PLASMA_ADDON_SELECTED);
+
+    /* a line for the user on KWin unless the add-on is in use; never elsewhere */
+    for (int a = WL_PLASMA_ADDON_NONE; a <= WL_PLASMA_ADDON_SELECTED; a++) {
+        const char *hint = wl_plasma_hint (TRUE, (WlPlasmaAddon) a);
+        CHECK (!wl_plasma_hint (FALSE, (WlPlasmaAddon) a));
+        CHECK ((hint == NULL) == (a == WL_PLASMA_ADDON_SELECTED));
+        CHECK (!hint || (strstr (hint, "hidden") && strstr (hint, "contrib/plasma/install.sh") &&
+                         strstr (hint, "docs/WAYLAND.md")));
+        CHECK (*wl_plasma_addon_name ((WlPlasmaAddon) a));
+    }
+    CHECK (strstr (wl_plasma_hint (TRUE, WL_PLASMA_ADDON_NONE), "install.sh install"));
+    CHECK (strstr (wl_plasma_hint (TRUE, WL_PLASMA_ADDON_UNSELECTED), "install.sh select"));
+    /* the id is the package's (contrib/plasma/wallpaper/metadata.json) */
+    CHECK (!strcmp (WL_PLASMA_TYPE_ID, "io.github.walpe.plasma"));
+}
+
 int main (void)
 {
     test_scale ();
@@ -948,6 +997,7 @@ int main (void)
     test_frames ();
     test_layer ();
     test_layer_choice ();
+    test_plasma_addon ();
     test_limits ();
     if (fails) {
         g_printerr ("wayland-logic-test: %d check(s) failed\n", fails);

@@ -232,6 +232,7 @@ static struct {
     gboolean layer_shell_gone;
     WlLayer layer;              /* of every wallpaper surface; set in open (), then only read */
     WlLayerWhy layer_why;
+    gboolean kwin;              /* the compositor is KWin; set in open (), then only read */
     struct zxdg_output_manager_v1 *xdg_output_mgr;
     guint32 xdg_output_version;
     struct wp_viewporter *viewporter;
@@ -2755,6 +2756,42 @@ static const char *wl_no_layer_shell_text (void)
           "labwc, Wayfire, niri, KDE Plasma, COSMIC) or an X11 session";
 }
 
+/* The add-on for KDE Plasma (wayland_logic.h), as the files say. Main
+ * thread (open, status). The tray asks for status again and again:
+ * the settings of Plasma's desktops are read only when the file was
+ * written since the last time. */
+static WlPlasmaAddon wl_plasma_addon (void)
+{
+    static WlPlasmaAddon state;
+    static gint64 seen = -2;
+    const char *const *sys = g_get_system_data_dirs ();
+    gboolean installed = FALSE;
+    for (int i = -1; !installed && (i < 0 || sys[i]); i++) {
+        char *f = g_build_filename (i < 0 ? g_get_user_data_dir () : sys[i], "plasma", "wallpapers",
+                                    WL_PLASMA_TYPE_ID, "metadata.json", NULL);
+        installed = g_file_test (f, G_FILE_TEST_EXISTS);
+        g_free (f);
+    }
+    if (!installed) {
+        seen = -2;
+        return state = WL_PLASMA_ADDON_NONE;
+    }
+    char *file = g_build_filename (g_get_user_config_dir (), "plasma-org.kde.plasma.desktop-appletsrc",
+                                   NULL);
+    struct stat st;
+    gint64 now = stat (file, &st) == 0
+                     ? (gint64) st.st_mtim.tv_sec * 1000000 + st.st_mtim.tv_nsec / 1000 : -1;
+    if (now != seen) {
+        char *text = NULL;
+        g_file_get_contents (file, &text, NULL, NULL);
+        state = wl_plasma_addon_state (installed, text);
+        seen = now;
+        g_free (text);
+    }
+    g_free (file);
+    return state;
+}
+
 /* Which layer the wallpaper surfaces go on (wayland_logic.h says why KWin
  * gets another one), said once in the log: on KDE Plasma it decides what
  * the user sees of Plasma's own desktop. */
@@ -2766,6 +2803,7 @@ static void wl_layer_decide (gboolean say)
         kwin = wl_global_is_kwin (((WlGlobal *) g_ptr_array_index (W.globals, i))->interface);
     WlLayer named = WL_LAYER_BACKGROUND;
     W.layer = wl_layer_choose (asked, kwin, &W.layer_why);
+    W.kwin = kwin;
     if (!say)
         return;
     if (wl_layer_parse (asked, &named) < 0)
@@ -2776,19 +2814,26 @@ static void wl_layer_decide (gboolean say)
                    wl_layer_name (W.layer));
     if (!kwin)
         return;
+    WlPlasmaAddon addon = wl_plasma_addon ();
+    const char *hint = wl_plasma_hint (kwin, addon);
     if (W.layer == WL_LAYER_BOTTOM)
-        g_message ("wayland: KDE Plasma (KWin): the wallpaper surfaces go on the layer \"bottom\"%s. "
-                   "Plasma's own desktop is a window on the background layer, and KWin puts it in "
-                   "front of every other background surface when it is clicked; on \"bottom\" the "
-                   "wallpaper stays in front of it. Plasma's desktop icons and widgets are behind "
-                   "the wallpaper and cannot be seen (docs/WAYLAND.md, \"KDE Plasma\")",
-                   W.layer_why == WL_LAYER_WHY_KWIN ? ", not \"background\"" : "");
+        g_message ("wayland: KDE Plasma (KWin): the wallpaper surfaces go on the layer \"bottom\"%s: "
+                   "in front of Plasma's own desktop window, which is opaque and which KWin would "
+                   "put in front of a surface on \"background\" at the first click. WalPE add-on "
+                   "for Plasma: %s%s",
+                   W.layer_why == WL_LAYER_WHY_KWIN ? ", not \"background\"" : "",
+                   wl_plasma_addon_name (addon),
+                   hint ? "" : ". Where the wallpaper type is \"WalPE\", Plasma's desktop is "
+                               "see-through and its icons and widgets are shown over the wallpaper");
     else
         g_message ("wayland: KDE Plasma (KWin): on the layer \"background\" the wallpaper shares a "
-                   "stacking layer with Plasma's own desktop window. It is shown in front of "
+                   "stacking layer with Plasma's own desktop window. Where the desktop's wallpaper "
+                   "type is not \"WalPE\" (the add-on for Plasma: %s) it is shown in front of "
                    "Plasma's desktop or hidden behind it, depending on which window was active "
                    "when the daemon started, and a click on the desktop hides it "
-                   "(docs/WAYLAND.md, \"KDE Plasma\")");
+                   "(docs/WAYLAND.md, \"KDE Plasma\")", wl_plasma_addon_name (addon));
+    if (hint)
+        g_message ("wayland: KDE Plasma: %s", hint);
 }
 
 /* the connection the probe had to keep (WAYLAND_SOCKET can be used once) */
@@ -3061,6 +3106,21 @@ static void wl_status (JsonBuilder *b)
                                       : W.layer_why == WL_LAYER_WHY_KWIN
                                             ? "the compositor is KWin (KDE Plasma)"
                                             : "default");
+    if (W.kwin) {
+        /* what the user sees of Plasma's desktop: wayland_logic.h, the add-on for KDE Plasma */
+        WlPlasmaAddon addon = wl_plasma_addon ();
+        const char *hint = wl_plasma_hint (W.kwin, addon);
+        json_builder_set_member_name (b, "wl_plasma_addon");
+        json_builder_add_string_value (b, wl_plasma_addon_name (addon));
+        json_builder_set_member_name (b, "wl_plasma_icons");
+        json_builder_add_string_value (b, hint ? "hidden behind the wallpaper"
+                                               : "shown over the wallpaper where the wallpaper "
+                                                 "type is WalPE");
+        if (hint) {
+            json_builder_set_member_name (b, "wl_plasma_hint");
+            json_builder_add_string_value (b, hint);
+        }
+    }
     json_builder_set_member_name (b, "wl_threading");
     json_builder_add_string_value (b, "queue-per-surface");
     json_builder_set_member_name (b, "wl_seat_pointer");

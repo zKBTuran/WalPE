@@ -346,6 +346,36 @@ def case_layer(env, W):
           (ls, st.get("wl_layer"), st.get("wl_layer_why")))
     check("WALPE_WL_LAYER=overlay: not a layer this program uses" in env.since(begun), "layer: and the log says so")
     env.stop_daemon()
+    # The add-on for KDE Plasma (contrib/plasma) is the business of KWin and of Plasma's shell.
+    # Its files in this user's directories, saying "installed and selected", change nothing
+    # where the compositor is not KWin: the background layer, and no word about Plasma.
+    data = env.run_env.get("XDG_DATA_HOME") or os.path.join(env.run_env["HOME"], ".local", "share")
+    conf = env.run_env.get("XDG_CONFIG_HOME") or os.path.join(env.run_env["HOME"], ".config")
+    pkg = os.path.join(data, "plasma", "wallpapers", "io.github.walpe.plasma")
+    applets = os.path.join(conf, "plasma-org.kde.plasma.desktop-appletsrc")
+    os.makedirs(pkg, exist_ok=True)
+    os.makedirs(conf, exist_ok=True)
+    with open(os.path.join(pkg, "metadata.json"), "w") as f:
+        f.write('{"KPlugin": {"Id": "io.github.walpe.plasma"}}\n')
+    with open(applets, "w") as f:
+        f.write("[Containments][1]\nwallpaperplugin=io.github.walpe.plasma\n")
+    begun = env.mark()
+    try:
+        if not start(env, [("A", 640, 360, 0, 0)], "layer", extra=extra):
+            return
+        st = env.state()
+        ls = env.display.layers(name) if listed else wire_layers(env.since(begun))
+        check(len(ls) == 1 and ls[0]["layer"] == "background" and
+              (st.get("wl_layer"), st.get("wl_layer_why")) == ("background", "default"),
+              "layer: the Plasma add-on's files in the user's directories: still the background layer here",
+              (ls, st.get("wl_layer"), st.get("wl_layer_why")))
+        plasma = sorted(k for k in st if k.startswith("wl_plasma"))
+        check(not plasma and "KDE Plasma" not in env.since(begun),
+              "layer: and neither status nor the log speaks of Plasma on another compositor", plasma)
+        env.stop_daemon()
+    finally:
+        os.remove(applets)
+        shutil.rmtree(os.path.join(data, "plasma"), ignore_errors=True)
 
 
 # ---------------------------------------------------------------------- two
