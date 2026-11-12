@@ -37,4 +37,18 @@ typedef enum {
  * ends in "…"), cleaned as the mode says. NULL gives "". g_free. */
 char *walpe_ui_text (const char *s, glong max_chars, WalpeUiTextMode mode);
 
+/* The text as the library's search compares it: the title on one side,
+ * what was typed on the other, a match where the second is part of the
+ * first. Letters meet whatever their case and whatever accent they carry:
+ * compatibility-decomposed (NFKD), the combining diacritical marks taken
+ * away (U+0300-036F and the other "combining diacritical" blocks: é = e,
+ * ü = u, ç = c, İ = I), case-folded (ß = ss), and the dotless ı counted as
+ * i - so "istanbul", "ISTANBUL", "İstanbul" and "ıstanbul" are one word,
+ * which plain case folding does not give (it leaves the dot of İ behind as
+ * a mark and ı as a letter of its own). Marks of other scripts stay (the
+ * voicing marks of kana, vowel signs, points): there they make another
+ * letter. Text of ASCII letters folds exactly as it did with case folding
+ * alone. Not valid UTF-8 is made valid first. NULL gives "". g_free. */
+char *walpe_ui_search_fold (const char *s);
+
 G_END_DECLS

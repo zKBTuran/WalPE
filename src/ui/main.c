@@ -1049,9 +1049,10 @@ static void on_search_changed (GtkSearchEntry *e, gpointer u)
     (void) u;
     g_free (U.search_text);
     const char *t = gtk_editable_get_text (GTK_EDITABLE (e));
-    char *n = g_utf8_normalize (t, -1, G_NORMALIZE_ALL);
-    U.search_text = *t ? g_utf8_casefold (n ? n : t, -1) : NULL;
-    g_free (n);
+    /* folded as the titles are (store.c): case and accents do not count */
+    U.search_text = *t ? walpe_ui_search_fold (t) : NULL;
+    if (U.search_text && !*U.search_text)
+        g_clear_pointer (&U.search_text, g_free);   /* (only marks were typed) */
     refilter ();
 }
 

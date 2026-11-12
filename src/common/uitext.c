@@ -57,3 +57,36 @@ char *walpe_ui_text (const char *s, glong max_chars, WalpeUiTextMode mode)
     }
     return g_string_free (o, FALSE);
 }
+
+/* a combining diacritical mark: what turns a Latin, Greek or Cyrillic
+ * letter into its accented form after decomposition */
+static gboolean is_diacritic (gunichar c)
+{
+    return (c >= 0x0300 && c <= 0x036f) || (c >= 0x1ab0 && c <= 0x1aff) ||
+           (c >= 0x1dc0 && c <= 0x1dff) || (c >= 0x20d0 && c <= 0x20ff) ||
+           (c >= 0xfe20 && c <= 0xfe2f);
+}
+
+char *walpe_ui_search_fold (const char *s)
+{
+    if (!s)
+        return g_strdup ("");
+    char *valid = g_utf8_validate (s, -1, NULL) ? NULL : g_utf8_make_valid (s, -1);
+    char *n = g_utf8_normalize (valid ? valid : s, -1, G_NORMALIZE_ALL);
+    GString *o = g_string_sized_new (n ? strlen (n) : 0);
+    for (const char *p = n ? n : ""; *p; p = g_utf8_next_char (p)) {
+        gunichar c = g_utf8_get_char (p);
+        if (!is_diacritic (c))
+            g_string_append_unichar (o, c);
+    }
+    g_free (n);
+    g_free (valid);
+    char *f = g_utf8_casefold (o->str, (gssize) o->len);
+    g_string_truncate (o, 0);
+    for (const char *p = f; *p; p = g_utf8_next_char (p)) {
+        gunichar c = g_utf8_get_char (p);
+        g_string_append_unichar (o, c == 0x0131 ? 'i' : c);     /* dotless i */
+    }
+    g_free (f);
+    return g_string_free (o, FALSE);
+}

@@ -51,15 +51,13 @@ static WalpeEntry *entry_new (const char *path, const char *title, const char *t
     return e;
 }
 
-/* casefolded haystack for the library search box */
+/* the haystack for the library search box, folded as the typed text is */
 static void entry_index (WalpeEntry *e)
 {
     char *s = g_strdup_printf ("%s %s %s", e->title ? e->title : "", e->id ? e->id : "",
                                e->type ? e->type : "");
-    char *n = g_utf8_normalize (s, -1, G_NORMALIZE_ALL);
     g_free (e->search);
-    e->search = g_utf8_casefold (n ? n : s, -1);
-    g_free (n);
+    e->search = walpe_ui_search_fold (s);   /* case and accents folded (uitext.h) */
     g_free (s);
 }
 

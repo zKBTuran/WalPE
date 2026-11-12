@@ -378,6 +378,141 @@ static void test_load_error (void)
     g_free (t);
 }
 
+/* the library search: what was typed against a title, both folded */
+static gboolean finds (const char *typed, const char *title)
+{
+    char *n = walpe_ui_search_fold (typed), *h = walpe_ui_search_fold (title);
+    gboolean hit = *n && strstr (h, n) != NULL;
+    g_free (n);
+    g_free (h);
+    return hit;
+}
+
+/* ... as it was before: compatibility-decomposed and case-folded only */
+static gboolean found_before (const char *typed, const char *title)
+{
+    char *a = g_utf8_normalize (typed, -1, G_NORMALIZE_ALL), *b = g_utf8_normalize (title, -1, G_NORMALIZE_ALL);
+    char *n = g_utf8_casefold (a, -1), *h = g_utf8_casefold (b, -1);
+    gboolean hit = *n && strstr (h, n) != NULL;
+    g_free (a); g_free (b); g_free (n); g_free (h);
+    return hit;
+}
+
+static void test_search (const char *root)
+{
+    /* Turkish: the four i's are one letter to the search */
+    static const char *const ist[] = { "istanbul", "ISTANBUL", "\xc4\xb0stanbul", "\xc4\xb1stanbul",
+                                       "\xc4\xb0STANBUL", "Istanbul", "iSTANBUL" };
+    for (guint a = 0; a < G_N_ELEMENTS (ist); a++)
+        for (guint b = 0; b < G_N_ELEMENTS (ist); b++)
+            if (!finds (ist[a], ist[b])) {
+                g_printerr ("FAIL: \"%s\" does not find \"%s\"\n", ist[a], ist[b]);
+                failures++;
+            }
+    CHECK (!found_before ("istanbul", "\xc4\xb0stanbul Gece"));     /* (what was wrong) */
+    CHECK (finds ("isik", "I\xc5\x9f\xc4\xb1k ve G\xc3\xb6lge"));      /* Işık ve Gölge */
+    CHECK (finds ("GOLGE", "I\xc5\x9f\xc4\xb1k ve G\xc3\xb6lge"));
+    CHECK (finds ("\xc5\x9e" "EH\xc4\xb0R", "\xc5\x9f" "ehir"));                /* ŞEHİR / şehir */
+    CHECK (finds ("cay", "\xc3\x87" "ay bah\xc3\xa7" "esi"));                 /* Çay bahçesi */
+    CHECK (finds ("gunes", "G\xc3\x9cNE\xc5\x9e"));                      /* GÜNEŞ */
+    CHECK (finds ("yagmur", "Ya\xc4\x9fmur"));                        /* Yağmur */
+    /* German: sharp s, umlauts */
+    CHECK (finds ("STRASSE", "Stra\xc3\x9f" "e bei Nacht"));
+    CHECK (finds ("strasse", "STRASSE"));
+    CHECK (finds ("stra\xc3\x9f" "e", "Hauptstrasse"));
+    CHECK (finds ("uber", "\xc3\x9c" "ber den Wolken"));
+    CHECK (finds ("\xc3\x84pfel", "apfel"));
+    CHECK (finds ("madchen", "M\xc3\xa4" "dchen"));
+    /* accents, composed or as letter + mark; a typed accent finds the plain letter too */
+    CHECK (finds ("cafe", "Caf\xc3\xa9 de nuit"));
+    CHECK (finds ("cafe", "Cafe\xcc\x81 de nuit"));
+    CHECK (finds ("caf\xc3\xa9", "CAFE"));
+    CHECK (finds ("resume", "R\xc3\xa9sum\xc3\xa9"));
+    CHECK (finds ("nino", "El Ni\xc3\xb1o"));
+    CHECK (finds ("pho", "Ph\xe1\xbb\x9f"));                              /* Vietnamese: two marks on one letter */
+    CHECK (finds ("\xd0\xb8", "\xd0\x99"));                              /* Cyrillic short i / i */
+    /* full-width and ligature forms (compatibility), as before */
+    CHECK (finds ("4k", "\xef\xbc\x94\xef\xbc\xab wallpaper"));
+    CHECK (finds ("fire", "\xef\xac\x81re"));
+    /* other scripts keep their marks: a voiced kana typed does not find
+     * the plain one (ga / ka ki) */
+    CHECK (!finds ("\xe3\x81\x8c", "\xe3\x81\x8b\xe3\x81\x8d"));
+    CHECK (finds ("\xe3\x81\x8c", "\xe3\x81\x8c\xe3\x81\x8e"));
+    CHECK (finds ("\xe9\x9b\xa8", "\xe9\x9b\xa8\xe3\x81\xae\xe6\x97\xa5"));    /* CJK as it is */
+    CHECK (finds ("\xe2\x98\x94", "Rainy Day \xe2\x98\x94 4K"));
+    /* nothing typed, or only a mark, finds nothing by itself */
+    CHECK (!finds ("", "abc") && !finds ("\xcc\x81", "abc"));
+    char *f = walpe_ui_search_fold (NULL);
+    CHECK (!strcmp (f, ""));
+    g_free (f);
+    f = walpe_ui_search_fold ("a\xff" "b");                  /* not UTF-8: no crash, still text */
+    CHECK (g_utf8_validate (f, -1, NULL) && g_str_has_prefix (f, "a"));
+    g_free (f);
+
+    /* A search in ASCII finds what it found before, and never less: every
+     * pair that matched with case folding alone still matches */
+    static const char *const titles[] = {
+        "Blue Archive | Stargazing Arona [4K]", "Rainy Day", "4K Blue Archive whale", "Caf\xc3\xa9 de nuit",
+        "\xc4\xb0stanbul Gece", "Stra\xc3\x9f" "e", "R\xc3\xa9sum\xc3\xa9", "scene 3292662040 Scene",
+        "\xe9\x9b\xa8\xe3\x81\xae\xe6\x97\xa5 Rain", "NieR:Automata 2B", "\xc3\x9c" "ber", "abc ABC aBc", "",
+    };
+    static const char *const typed[] = {
+        "blue", "BLUE", "arona", "[4k]", "rainy day", "4K", "whale", "caf", "de nuit", "gece", "stra", "scene",
+        "3292662040", "rain", "nier:automata", "2b", "ber", "abc", "ABC", "x", "sum", "tanbul", " ", "|",
+        "caf\xc3\xa9", "\xc4\xb0stanbul", "stra\xc3\x9f" "e", "\xe9\x9b\xa8",
+    };
+    int kept = 0;
+    for (guint t = 0; t < G_N_ELEMENTS (titles); t++)
+        for (guint q = 0; q < G_N_ELEMENTS (typed); q++) {
+            gboolean was = found_before (typed[q], titles[t]), is = finds (typed[q], titles[t]);
+            kept += was;
+            if (was && !is) {
+                g_printerr ("FAIL: \"%s\" found \"%s\" before and does not now\n", typed[q], titles[t]);
+                failures++;
+            }
+            /* ASCII on both sides: exactly the same answer */
+            if (g_str_is_ascii (typed[q]) && g_str_is_ascii (titles[t]) && was != is) {
+                g_printerr ("FAIL: ASCII \"%s\" in \"%s\": %d before, %d now\n", typed[q], titles[t], was, is);
+                failures++;
+            }
+        }
+    if (kept < 25) {
+        g_printerr ("FAIL: only %d pairs matched before: the comparison compares nothing\n", kept);
+        failures++;
+    }
+    /* ... and ASCII text folds to the very same bytes as before */
+    for (guint t = 0; t < G_N_ELEMENTS (titles); t++)
+        if (g_str_is_ascii (titles[t])) {
+            char *now = walpe_ui_search_fold (titles[t]), *was = g_utf8_casefold (titles[t], -1);
+            CHECK (!strcmp (now, was));
+            g_free (now);
+            g_free (was);
+        }
+
+    /* the library's own haystack (store.c): title, folder name and type */
+    char *lib = g_build_filename (root, "lib-search", NULL);
+    char *a = g_build_filename (lib, "3100000001", NULL);
+    g_mkdir_with_parents (a, 0755);
+    put (a, "project.json", "{\"title\":\"\u0130stanbul Bo\u011faz\u0131\",\"type\":\"Scene\"}");
+    GList *l = walpe_store_scan (lib);
+    CHECK (g_list_length (l) == 1);
+    for (GList *i = l; i; i = i->next) {
+        WalpeEntry *e = i->data;
+        const char *const hit[] = { "istanbul", "ISTANBUL", "bogazi", "BO\xc4\x9e" "AZI", "3100000001", "scene", "SCENE" };
+        for (guint k = 0; k < G_N_ELEMENTS (hit); k++) {
+            char *n = walpe_ui_search_fold (hit[k]);
+            if (!e->search || !strstr (e->search, n)) {
+                g_printerr ("FAIL: the library entry is not found by \"%s\" (%s)\n", hit[k], e->search);
+                failures++;
+            }
+            g_free (n);
+        }
+    }
+    g_list_free_full (l, (GDestroyNotify) walpe_store_entry_free);
+    g_free (a);
+    g_free (lib);
+}
+
 int main (void)
 {
     char *tmp = g_dir_make_tmp ("walpe-uitext-XXXXXX", NULL);
@@ -388,6 +523,7 @@ int main (void)
     g_setenv ("HOME", T, TRUE);
     test_text ();
     test_scan (T);
+    test_search (T);
     test_import (T);
     test_load_error ();
     char *argv[] = { "/bin/rm", "-rf", "--", T, NULL };
