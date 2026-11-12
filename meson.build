@@ -2108,6 +2108,18 @@ if have_tray
     include_directories: inc,
     dependencies: [glib],
     install: false, build_by_default: false))
+  # walpe-tray next to a real daemon (scripts/lifecheck.py, case tray: own
+  # Xvfb, private XDG dirs): what it writes while the engine sends status
+  # lines. Skipped (77) without Xvfb.
+  if lifecheck_py.found() and have_x11
+    test('tray-life', lifecheck_py,
+      args: ['-I', meson.current_source_dir() / 'scripts/lifecheck.py',
+             '--build', meson.current_build_dir(), '--display', 'xvfb', '--only', 'tray'],
+      env: ['WALPE_BACKEND=x11'],
+      depends: [daemon, ctl, tray],
+      is_parallel: false,
+      timeout: 300)
+  endif
   endif  # with_tests
 endif
 

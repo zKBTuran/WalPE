@@ -310,6 +310,15 @@ static gboolean recent_push (const char *path)
     return TRUE;
 }
 
+/* the list as one string: what recent_save would write of it */
+static char *recent_sig (void)
+{
+    GString *s = g_string_new (NULL);
+    for (GList *l = T.recent.head; l; l = l->next)
+        g_string_append_printf (s, "%s\n", (char *) l->data);
+    return g_string_free (s, FALSE);
+}
+
 static void mon_free (gpointer p)
 {
     MonInfo *m = p;
@@ -438,13 +447,22 @@ static void on_status (const char *reply, gpointer user)
                 g_ptr_array_add (T.mons, m);
             }
         }
-        gboolean rc = FALSE;
+        /* Saved when the list is another one afterwards, not when a push
+         * moved something: with two monitors showing two wallpapers the
+         * second push moves its wallpaper in front of the first and the
+         * last one (the engine's "path", the first monitor's) moves that
+         * back - the same list as before, written again (a new file,
+         * two fsync, a rename) for every status line of the engine. */
+        char *before = recent_sig ();
         for (guint i = 0; T.mons && i < T.mons->len; i++)
-            rc |= recent_push (((MonInfo *) T.mons->pdata[i])->current);
-        rc |= recent_push (T.path);
-        rc |= recent_drop_deleted ();
-        if (rc)
+            recent_push (((MonInfo *) T.mons->pdata[i])->current);
+        recent_push (T.path);
+        recent_drop_deleted ();
+        char *after = recent_sig ();
+        if (strcmp (before, after))
             recent_save ();
+        g_free (before);
+        g_free (after);
         if (T.starting || T.restarting) {
             if (T.starting || (T.restarting && !was_alive)) {
                 T.starting = T.restarting = FALSE;

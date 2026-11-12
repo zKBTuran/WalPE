@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end checks of the daemon's lifecycle: loads, reloads, restarts.
 
-  python3 -I scripts/lifecheck.py --build build [--daemon FILE] [--display KIND] [--only a,b] [--keep] [--tmp DIR]
+  python3 -I scripts/lifecheck.py --build build [--daemon FILE] [--tray FILE] [--display KIND] [--only a,b] [--keep] [--tmp DIR]
 
 Uses the harness scripts/checkenv.py (private Xvfb, private daemon, pixel
 reading): generated scenes only, nothing of the user's is read or written. Each case starts its own daemon:
@@ -31,6 +31,10 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             request that only reads (quality, layers, resolution without
             a change, profile_result, status, props, mem) sends none; a
             pause and a resume send one each.
+  tray      walpe-tray next to two monitors that show two wallpapers: the
+            status lines it is sent while nothing changes which wallpapers
+            were shown last do not make it write its list of them again.
+            Skipped in a build without the tray.
   layout    the monitor layout changes while the daemon starts - after it
             read the layout, before it listens for changes, so no event
             tells it: it looks once more when it is up and follows.
@@ -88,7 +92,7 @@ under Wayland: outputs that change there are scripts/waylandcheck.py's.
 Exit code 0 = all passed, 1 = failures, 77 = skipped (the display's programs
 are not installed, or the build has no backend for it). --daemon FILE
 runs another walpe-daemon binary with the tools of --build (a build without
-the fixes: the cases fail there). LIFECHECK_PATIENCE=N multiplies every
+the fixes: the cases fail there); --tray FILE does the same for walpe-tray. LIFECHECK_PATIENCE=N multiplies every
 wait (a software renderer on a busy machine: 3 or more). --tmp DIR: work in
 DIR (must not exist; removed afterwards)."""
 import json, os, re, shutil, signal, socket, struct, subprocess, sys, threading, time
@@ -791,6 +795,81 @@ def case_push(env, W):
     check(any((g.get("state") or {}).get("resolution_prompt") is False for g in got),
           "push: a resolution request that changes a setting is told", f"{len(got)} lines")
     sub.close()
+    env.stop_daemon()
+
+
+# --------------------------------------------------------------------- tray
+def subscribers(env):
+    rep = env.ipc({"cmd": "mem", "wait": 0.2}) or {}
+    return ((rep.get("mem") or rep).get("counters") or {}).get("subscribers", 0)
+
+
+def case_tray(env, W):
+    """The tray keeps the wallpapers shown last in a file. With two monitors
+    showing two wallpapers every status line moved the second one to the
+    front and the first one back: the same list, and the file was written
+    again (a new file, synced, renamed over the old one) for each line."""
+    tray_bin = env.tray_bin or os.path.join(env.build, "walpe-tray")
+    if not os.path.exists(tray_bin):
+        print("lifecheck: tray skipped (no walpe-tray in the build)")
+        return
+    A, B = ("A", 640, 360, 0, 0), ("B", 640, 360, 640, 0)
+    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False})
+    if not check(env.start_daemon([A, B]), "tray: daemon started"):
+        return
+    env.open(W["red"], 0)
+    env.open(W["blue"], 1)
+    loaded(env, W["red"], 0)
+    loaded(env, W["blue"], 1)
+    log = open(os.path.join(env.tmp, "tray.log"), "a")
+    tray = subprocess.Popen([tray_bin], env=env.run_env, stdout=log, stderr=subprocess.STDOUT, cwd=env.tmp)
+    log.close()
+    try:
+        recent = os.path.join(env.run_env["HOME"], ".local", "state", "walpe", "tray-recent")
+        if "XDG_STATE_HOME" in env.run_env:
+            recent = os.path.join(env.run_env["XDG_STATE_HOME"], "walpe", "tray-recent")
+        up = wait_for(lambda: tray.poll() is None and subscribers(env) >= 1 and os.path.exists(recent), 30, 0.3)
+        if not check(bool(up), "tray: it runs, listens to the engine and wrote its list",
+                     f"exit status {tray.poll()}, subscribers {subscribers(env)}"):
+            return
+        time.sleep(1.5)
+
+        def ident():
+            st = os.stat(recent)
+            return st.st_ino, st.st_mtime_ns
+
+        first = ident()
+        with open(recent) as f:
+            text = f.read()
+        check(W["red"] in text and W["blue"] in text, "tray: both wallpapers are in the list", text)
+        sub = Subscriber(env.sock)
+        sub.lines(1.0)
+        told = 0
+        for _ in range(4):
+            env.ipc({"cmd": "pause"})
+            told += len(sub.lines(0.6))
+            env.ipc({"cmd": "resume"})
+            told += len(sub.lines(0.6))
+        sub.close()
+        time.sleep(1.0)
+        check(told >= 8, "tray: the engine sent a status line for every pause and resume", told)
+        check(ident() == first, "tray: status lines that change no wallpaper leave the list file alone",
+              f"(inode, mtime) {first} -> {ident()} after {told} lines")
+        # a wallpaper that was not shown before is written
+        env.open(W["anim"], 1)
+        loaded(env, W["anim"], 1)
+
+        def has_anim():
+            with open(recent) as f:
+                return W["anim"] in f.read()
+        check(bool(wait_for(has_anim, 10, 0.3)), "tray: a new wallpaper is added to the list file")
+    finally:
+        tray.terminate()
+        try:
+            tray.wait(timeout=10 * PATIENCE)
+        except subprocess.TimeoutExpired:
+            tray.kill()
+            tray.wait()
     env.stop_daemon()
 
 
@@ -1667,7 +1746,7 @@ def case_fullscreen(env, W):
 
 
 CASES = [("pointer", case_pointer), ("reload", case_reload), ("restart", case_restart),
-         ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("busy", case_busy), ("probe", case_probe),
+         ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("tray", case_tray), ("busy", case_busy), ("probe", case_probe),
          ("fullscreen", case_fullscreen), ("video", case_video), ("webunload", case_webunload)]
 
 
@@ -1675,12 +1754,15 @@ CASES = [("pointer", case_pointer), ("reload", case_reload), ("restart", case_re
 def main():
     args = sys.argv[1:]
     build, daemon, keep, tmp, only, display = "build", None, False, None, None, None
+    tray = None
     while args:
         a = args.pop(0)
         if a == "--build" and args:
             build = args.pop(0)
         elif a == "--daemon" and args:
             daemon = args.pop(0)
+        elif a == "--tray" and args:
+            tray = os.path.abspath(args.pop(0))
         elif a == "--display" and args:
             display = args.pop(0)
         elif a == "--keep":
@@ -1705,6 +1787,7 @@ def main():
             print(f"lifecheck: {b} not found")
             return 2
     env = Env(build, daemon, keep, tmp, display)
+    env.tray_bin = tray
     try:
         if len(env.sock.encode()) > 107:
             print(f"lifecheck: {env.sock} is too long for a socket ({len(env.sock.encode())} > 107 bytes): "
