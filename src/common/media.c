@@ -988,6 +988,32 @@ static gint64 var_int (GVariant *v)
     return 0;
 }
 
+/* A text of a player's metadata into *dst, at most max bytes of it (cut
+ * between two characters). The dictionary is whatever a program on the
+ * session bus sends: the same key twice (each value replaced the one
+ * before without freeing it: megabytes a message, for as many messages as
+ * the sender liked), or a "title" of a hundred megabytes, which every
+ * wallpaper with media integration then copied and handed to its page or
+ * its scripts. No real title, artist, album or genre list is near
+ * MD_TEXT_MAX; an art address can be a whole picture (data:) and has the
+ * size limit of one. */
+#define MD_TEXT_MAX 4096
+#define MD_ART_URL_MAX ((gsize) ART_MAX_BYTES / 3 * 4 + 4096)
+
+static void md_take (char **dst, char *s, gsize max)
+{
+    g_free (*dst);
+    *dst = s;
+    if (s && strlen (s) > max) {
+        if (max == MD_ART_URL_MAX) {
+            *s = 0;         /* a cut address is no address: none */
+        } else {
+            char *e = g_utf8_find_prev_char (s, s + max + 1);
+            *(e ? e : s) = 0;
+        }
+    }
+}
+
 /* returns TRUE when the track changed (trackid, title or url) */
 static gboolean apply_metadata (Player *p, GVariant *md)
 {
@@ -1007,25 +1033,26 @@ static gboolean apply_metadata (Player *p, GVariant *md)
     g_variant_iter_init (&it, md);
     while (g_variant_iter_next (&it, "{&sv}", &k, &v)) {
         if (!strcmp (k, "xesam:title"))
-            p->title = join_strv (v);
+            md_take (&p->title, join_strv (v), MD_TEXT_MAX);
         else if (!strcmp (k, "xesam:artist"))
-            p->artist = join_strv (v);
+            md_take (&p->artist, join_strv (v), MD_TEXT_MAX);
         else if (!strcmp (k, "xesam:album"))
-            p->album = join_strv (v);
+            md_take (&p->album, join_strv (v), MD_TEXT_MAX);
         else if (!strcmp (k, "xesam:albumArtist"))
-            p->album_artist = join_strv (v);
+            md_take (&p->album_artist, join_strv (v), MD_TEXT_MAX);
         else if (!strcmp (k, "xesam:genre"))
-            p->genres = join_strv (v);
+            md_take (&p->genres, join_strv (v), MD_TEXT_MAX);
         else if (!strcmp (k, "mpris:artUrl"))
-            p->art_url = join_strv (v);
+            md_take (&p->art_url, join_strv (v), MD_ART_URL_MAX);
         else if (!strcmp (k, "xesam:url"))
-            p->url = join_strv (v);
+            md_take (&p->url, join_strv (v), MD_TEXT_MAX);
         else if (!strcmp (k, "mpris:length"))
             p->length = (double) var_int (v) / 1e6;
         else if (!strcmp (k, "mpris:trackid"))
-            p->trackid = g_variant_is_of_type (v, G_VARIANT_TYPE_OBJECT_PATH) ||
-                         g_variant_is_of_type (v, G_VARIANT_TYPE_STRING)
-                ? g_variant_dup_string (v, NULL) : NULL;
+            md_take (&p->trackid,
+                     g_variant_is_of_type (v, G_VARIANT_TYPE_OBJECT_PATH) ||
+                     g_variant_is_of_type (v, G_VARIANT_TYPE_STRING)
+                         ? g_variant_dup_string (v, NULL) : NULL, MD_TEXT_MAX);
         g_variant_unref (v);
     }
     gboolean changed = g_strcmp0 (o_title, p->title) || g_strcmp0 (o_url, p->url) ||

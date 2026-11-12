@@ -1942,6 +1942,13 @@ test('race-media', executable('race-media-test', 'tests/race_media_test.c',
   include_directories: inc,
   dependencies: [core_dep, dependency('threads')],
   install: false, build_by_default: false), suite: 'race', timeout: 120)
+
+# media.c: a stand-in music player on a bus of the test's own - what its
+# metadata can make the daemon hold (repeated keys, a title of a megabyte)
+test('media-player', executable('media-player-test', 'tests/media_player_test.c',
+  include_directories: inc,
+  dependencies: [core_dep],
+  install: false, build_by_default: false), timeout: 120)
 endif  # with_tests
 
 # GPU numbers for a bug report: the kernel's statistics (walpe-ctl gpu-stats) or
