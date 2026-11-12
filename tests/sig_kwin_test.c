@@ -20,7 +20,11 @@
  *   comes back on the bus, and report nothing while it is away;
  *   say why when KWin is too old for the script;
  *   unload the script when the last rule goes off and when it is stopped;
- *   not start with WALPE_KWIN_SCRIPT=0.
+ *   not start with WALPE_KWIN_SCRIPT=0;
+ *   for the pointer from the Plasma add-on: own io.github.walpe.Pointer
+ *   exactly while it is wanted (no script in KWin for that), take events
+ *   from the connection that owns org.kde.plasmashell only, and let the
+ *   name go when it is no longer wanted and at stop.
  * The registry is tests/sig_stub.h. */
 #include "walpe-build-config.h"
 #include "sig_stub.h"
@@ -273,6 +277,82 @@ static gboolean file_gone (gpointer u)
     gboolean gone = F.file && !g_file_test (F.file, G_FILE_TEST_EXISTS);
     g_mutex_unlock (&F.lock);
     return gone;
+}
+
+/* ---- the pointer from the Plasma add-on */
+#define PTR "io.github.walpe.Pointer"
+
+static struct {
+    int n;
+    char *output;
+    guint what;
+    double x, y, a, b;
+} P;
+
+static void pointer_event (const char *output, guint what, double x, double y, double a, double b, gpointer user)
+{
+    (void) user;
+    P.n++;
+    g_free (P.output);
+    P.output = g_strdup (output);
+    P.what = what;
+    P.x = x, P.y = y, P.a = a, P.b = b;
+}
+
+static gboolean name_owned (GDBusConnection *c, const char *name)
+{
+    gboolean has = FALSE;
+    GVariant *r = g_dbus_connection_call_sync (c, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                                               "org.freedesktop.DBus", "NameHasOwner", g_variant_new ("(s)", name),
+                                               G_VARIANT_TYPE ("(b)"), G_DBUS_CALL_FLAGS_NONE, 3000, NULL, NULL);
+    if (r) {
+        g_variant_get (r, "(b)", &has);
+        g_variant_unref (r);
+    }
+    return has;
+}
+
+static GDBusConnection *ptr_from;
+static gboolean ptr_owned (gpointer want)
+{
+    g_main_context_iteration (NULL, FALSE);
+    return name_owned (ptr_from, PTR) == GPOINTER_TO_INT (want);
+}
+
+static gboolean ptr_state_has (gpointer needle)
+{
+    const char *s = walpe_sig_kwin_pointer_state ();
+    return s && strstr (s, needle);
+}
+
+/* Event from c; returns whether the daemon took it (waits for the answer
+ * while the provider's main context runs) */
+typedef struct {
+    gint done;
+    gboolean ok;
+} PtrCall;
+
+static void ptr_called (GObject *src, GAsyncResult *res, gpointer user)
+{
+    PtrCall *pc = user;
+    GVariant *r = g_dbus_connection_call_finish (G_DBUS_CONNECTION (src), res, NULL);
+    pc->ok = r != NULL;
+    if (r)
+        g_variant_unref (r);
+    pc->done = 1;
+}
+
+static gboolean ptr_done (gpointer pc) { return ((PtrCall *) pc)->done; }
+
+static gboolean pointer_send (GDBusConnection *c, const char *output, guint what, double x, double y, double a,
+                              double b)
+{
+    PtrCall pc = { 0, FALSE };
+    g_dbus_connection_call (c, PTR, "/io/github/walpe/Pointer", PTR, "Event",
+                            g_variant_new ("(sudddd)", output, what, x, y, a, b), NULL, G_DBUS_CALL_FLAGS_NONE,
+                            3000, NULL, ptr_called, &pc);
+    stub_wait (ptr_done, &pc, 4000);
+    return pc.ok;
 }
 
 static void settle (void)
@@ -529,6 +609,57 @@ int main (void)
            walpe_sig_kwin_state ());
     CHECK (walpe_sig_kwin_trouble () != NULL, "is trouble, so status will not say the rules work");
     stub_reset ();
+
+    /* 14. the pointer from the Plasma add-on: a name on the bus exactly while it is wanted */
+    walpe_sig_kwin_use_address (F.address);
+    walpe_sigprov_set_window_rules (0);
+    CHECK (start_provider (), "starts again");
+    ptr_from = other;
+    int loads = g_atomic_int_get (&F.loads);
+    settle ();
+    CHECK (!name_owned (other, PTR), "the pointer not wanted: nobody has " PTR);
+    CHECK (walpe_sig_kwin_pointer_state () == NULL, "and status has nothing about it");
+    walpe_sigprov_set_plasma_pointer (TRUE, pointer_event, NULL);
+    CHECK (stub_wait (ptr_owned, GINT_TO_POINTER (1), 3000), "wanted: the daemon has the name");
+    CHECK (stub_wait (state_has, "off", 1000) && g_atomic_int_get (&F.loads) == loads,
+           "no pause rule is on: no script goes into KWin for the pointer (%s)", walpe_sig_kwin_state ());
+    CHECK (stub_wait (ptr_state_has, "taken from", 3000), "status says so: %s", walpe_sig_kwin_pointer_state ());
+    CHECK (!pointer_send (other, "A", 0, 10, 20, 0, 0) && P.n == 0,
+           "an event from a connection that is not Plasma's shell is refused");
+    GVariant *own = g_dbus_connection_call_sync (other, "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                                                 "org.freedesktop.DBus", "RequestName",
+                                                 g_variant_new ("(su)", "org.kde.plasmashell", 0u), NULL,
+                                                 G_DBUS_CALL_FLAGS_NONE, 3000, NULL, NULL);
+    if (own)
+        g_variant_unref (own);
+    settle ();
+    CHECK (pointer_send (other, "A", 0, 10.5, 20.25, 0, 0) && P.n == 1 && !g_strcmp0 (P.output, "A") &&
+           P.what == 0 && P.x == 10.5 && P.y == 20.25, "the position from Plasma's shell arrives: %d event(s), "
+           "%s %u %.2f %.2f", P.n, P.output ? P.output : "-", P.what, P.x, P.y);
+    CHECK (pointer_send (other, "B", 1, 3, 4, 1, 0) && P.n == 2 && !g_strcmp0 (P.output, "B") && P.what == 1 &&
+           P.a == 1, "a press with its button");
+    CHECK (pointer_send (other, "B", 3, 3, 4, 0, -120) && P.n == 3 && P.what == 3 && P.b == -120,
+           "the wheel with its angle");
+    /* a pause rule comes and goes: the pointer stays, the script comes and goes */
+    int runs = g_atomic_int_get (&F.runs);
+    walpe_sigprov_set_window_rules (FS);
+    WAIT_COUNT (F.runs, runs + 1, "a rule on while the pointer is wanted: the script is loaded");
+    CHECK (name_owned (other, PTR), "the name is still the daemon's");
+    walpe_sigprov_set_window_rules (0);
+    settle ();
+    CHECK (name_owned (other, PTR) && pointer_send (other, "A", 0, 1, 2, 0, 0) && P.n == 4,
+           "the rule off again: the pointer still arrives");
+    g_mutex_lock (&F.lock);
+    CHECK (!F.loaded, "and the script is out of KWin");
+    g_mutex_unlock (&F.lock);
+    walpe_sigprov_set_plasma_pointer (FALSE, pointer_event, NULL);
+    CHECK (stub_wait (ptr_owned, GINT_TO_POINTER (0), 3000), "no longer wanted: the name is let go");
+    CHECK (walpe_sig_kwin_pointer_state () == NULL, "status has nothing about it");
+    walpe_sigprov_set_plasma_pointer (TRUE, pointer_event, NULL);
+    CHECK (stub_wait (ptr_owned, GINT_TO_POINTER (1), 3000), "wanted again: the name is back");
+    stub_reset ();
+    CHECK (stub_wait (ptr_owned, GINT_TO_POINTER (0), 3000), "stopped: the name is let go");
+    g_free (P.output);
 
     walpe_sig_kwin_use_address (NULL);
     g_dbus_connection_close_sync (other, NULL, NULL);

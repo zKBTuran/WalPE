@@ -674,7 +674,9 @@ test('sig-logind', executable('sig-logind-test', 'tests/sig_logind_test.c',
 # daemon's unique name in it, reports turned into values per output, only
 # KWin believed, outputs whose ids change, the see-through list, KWin
 # leaving the bus and coming back, a KWin too old, the script unloaded when
-# the rules go off and at stop. Skipped (77) without dbus-daemon.
+# the rules go off and at stop; the pointer from the Plasma add-on (a name
+# on the bus only while it is wanted, only Plasma's shell believed).
+# Skipped (77) without dbus-daemon.
 if have_wl_signals
   test('sig-kwin', executable('sig-kwin-test', 'tests/sig_kwin_test.c',
     include_directories: inc,

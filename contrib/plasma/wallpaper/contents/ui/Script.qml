@@ -12,7 +12,8 @@
  * It also listens to KWin's "showing the desktop" ("Peek at Desktop", the "Show Desktop"
  * shortcut): KWin then hides every window that is not part of the desktop, the daemon's
  * surface among them, and the desktop has to be filled for as long as that lasts.
- * Nothing here runs on a timer. */
+ * And it watches for the name walpe-daemon takes on the bus while a wallpaper wants the
+ * pointer (Pointer.qml). Nothing here runs on a timer. */
 import QtQuick
 import org.kde.plasma.workspace.dbus as DBus
 import "../code/shared.js" as Shared
@@ -21,6 +22,8 @@ Item {
     id: script
     property bool loaded: false
     property bool peek: false       // KWin is showing the desktop
+    // walpe-daemon wants the pointer: it has this name on the bus only while a wallpaper uses it
+    readonly property alias pointerWanted: pointer.registered
     readonly property string file: Qt.resolvedUrl("../code/below.js").toString().replace(/^file:\/\//, "")
 
     function call(path, iface, member, args, signature, then) {
@@ -51,6 +54,12 @@ Item {
         path: "/KWin"
         iface: "org.kde.KWin"
         function dbusshowingDesktopChanged(showing) { script.peek = showing === true; }
+    }
+
+    DBus.DBusServiceWatcher {
+        id: pointer
+        busType: DBus.BusType.Session
+        watchedService: "io.github.walpe.Pointer"
     }
 
     DBus.DBusServiceWatcher {

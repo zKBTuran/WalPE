@@ -63,6 +63,15 @@ guint walpe_sigprov_idle_timeout (void);
  * others do not look at it. At start and whenever a setting changes. */
 void walpe_sigprov_set_window_rules (guint mask);
 
+/* The pointer from the add-on for KDE Plasma (platform.h,
+ * walpe_platform_pointer_foreign has the meaning of the arguments). want:
+ * listen for it - a connection to the session bus and the name
+ * io.github.walpe.Pointer on it, for as long as want holds and the
+ * compositor is KWin; fn is called on the main thread per event. */
+typedef void (*WalpeSigPointerFn) (const char *output, guint what, double x, double y, double a,
+                                   double b, gpointer user);
+void walpe_sigprov_set_plasma_pointer (gboolean want, WalpeSigPointerFn fn, gpointer user);
+
 /* "transparent_windows": comma-separated app ids that never count as
  * covering (X11 matches the same list against WM_CLASS). NULL / "" = none */
 void walpe_sigprov_set_see_through (const char *app_ids);
@@ -104,6 +113,9 @@ guint walpe_sig_wl_passes (void);
 
 /* ---- KWin (kwin.c; with HAVE_WL_SIGNALS) */
 void walpe_sig_kwin_set_rules (guint mask);
+void walpe_sig_kwin_set_pointer (gboolean want, WalpeSigPointerFn fn, gpointer user);
+/* for status: NULL while the pointer is not wanted from the add-on */
+const char *walpe_sig_kwin_pointer_state (void);
 void walpe_sig_kwin_outputs_changed (void);
 /* tests: the bus to connect to instead of the session bus (an address);
  * before a rule is switched on. NULL = the session bus again. */

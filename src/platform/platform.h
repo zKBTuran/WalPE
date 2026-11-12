@@ -337,6 +337,29 @@ gboolean walpe_platform_pointer (WalpePointer *out);
 /* is `under` (from WalpePointer) the bare desktop, i.e. the wallpaper or a
  * desktop-icon window? May ask the window system once per new value. */
 gboolean walpe_platform_on_desktop (guintptr under);
+/* The pointer from somebody else. On KDE Plasma with the add-on for
+ * Plasma (contrib/plasma) Plasma's desktop window lies over the wallpaper
+ * and takes the pointer; the add-on's wallpaper type hands on what it sees
+ * of it (signals/kwin.c receives it on the session bus).
+ * walpe_platform_pointer_helper: such a helper can exist here and a
+ * wallpaper uses the pointer - the only time the daemon listens for it.
+ * walpe_platform_pointer_foreign: one event of it. output: the output's
+ * name; x, y: on that output, in the units a pointer has on a surface
+ * there (logical pixels from the output's top left corner); a, b: the
+ * button (1 left, 2 middle, 3 right) for PRESS / RELEASE, the wheel's
+ * horizontal and vertical angle in 1/8 degree (120 = one notch, as Qt
+ * counts it) for WHEEL. From then on the position reads like any pointer
+ * position and buttons arrive as button events. Main thread. */
+typedef enum {
+    WALPE_FOREIGN_MOTION = 0,
+    WALPE_FOREIGN_PRESS,
+    WALPE_FOREIGN_RELEASE,
+    WALPE_FOREIGN_WHEEL,
+    WALPE_FOREIGN_LEAVE,
+} WalpeForeignPointer;
+gboolean walpe_platform_pointer_helper (void);
+void walpe_platform_pointer_foreign (const char *output, WalpeForeignPointer what, double x, double y,
+                                     double a, double b);
 /* what the daemon wants to be told about (each costs wake-ups while on):
  * buttons - button events; motion - one pointer_motion event when the
  * pointer moves (the daemon then reads positions itself until it rests). */

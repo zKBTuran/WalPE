@@ -4453,6 +4453,15 @@ static void pointer_rest_sample (void)
         pointer_sample ();
 }
 
+/* one pointer event from the Plasma add-on (signals/kwin.c) */
+static void plasma_pointer_event (const char *output, guint what, double x, double y, double a, double b,
+                                  gpointer user)
+{
+    (void) user;
+    if (what <= WALPE_FOREIGN_LEAVE)
+        walpe_platform_pointer_foreign (output, (WalpeForeignPointer) what, x, y, a, b);
+}
+
 /* what the wallpapers need from the pointer changed (pause state, a load,
  * the parallax setting): event driven, there is no recheck timer */
 static void pointer_update (void)
@@ -4489,6 +4498,10 @@ static void pointer_update (void)
      * window and needs nothing */
     for (GList *l = D.mons; l; l = l->next)
         walpe_surface_want_pointer (((Mon *) l->data)->ps, mon_uses_pointer (l->data));
+    /* KDE Plasma with the add-on: Plasma's desktop window is over the
+     * wallpaper and has the pointer; its wallpaper type hands it on while
+     * a wallpaper here wants it (and only then is anything listening) */
+    walpe_sigprov_set_plasma_pointer (walpe_platform_pointer_helper (), plasma_pointer_event, NULL);
 }
 
 /* one query of the pointer, handed to every monitor that uses it; TRUE = the

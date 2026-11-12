@@ -21,6 +21,9 @@
  *     KWin leaving the bus drops the answers; KWin coming back (it was
  *     restarted) gets the script again. The script is unloaded when the
  *     last rule is switched off and when the daemon stops.
+ * The same connection takes the pointer from the add-on for Plasma while
+ * a wallpaper wants it ("the pointer" below): that is the one time the
+ * daemon owns a name on the bus.
  * Everything runs on the main thread. */
 #include "walpe-build-config.h"
 #include "signals/providers.h"
@@ -49,6 +52,13 @@ static struct {
     guint retry;                /* a second try to load, pending */
     gboolean retried;
     char *address;              /* tests: the bus to use */
+    /* the pointer from the Plasma add-on (see "the pointer" below) */
+    gboolean ptr_want;
+    WalpeSigPointerFn ptr_fn;
+    gpointer ptr_user;
+    guint ptr_own, ptr_object, ptr_watch;
+    gboolean ptr_named;         /* the bus gave us the name */
+    char *ptr_shell;            /* the unique name of Plasma's shell; NULL = not on the bus */
 } K;
 
 static void kwin_arm (void);
@@ -337,8 +347,37 @@ static void kwin_vanished (GDBusConnection *c, const char *name, gpointer user)
 
 /* ---- the connection */
 
-/* unload: the script is taken out of KWin first (a rule switched off,
- * the daemon stopping); FALSE when the connection is already dead */
+/* The pause rules' part of the connection goes: the script out of KWin
+ * (unload; not when the connection is dead already), the watch, what the
+ * script said. */
+static void kwin_rules_off (gboolean unload)
+{
+    if (K.retry)
+        g_source_remove (K.retry);
+    K.retry = 0;
+    K.retried = K.loading = K.reload = FALSE;
+    if (K.bus && unload && K.owner && !g_dbus_connection_is_closed (K.bus)) {
+        GVariant *r = g_dbus_connection_call_sync (
+            K.bus, KWIN_BUS_NAME, "/Scripting", "org.kde.kwin.Scripting", "unloadScript",
+            g_variant_new ("(s)", WALPE_KWIN_SCRIPT_NAME), NULL, G_DBUS_CALL_FLAGS_NO_AUTO_START, 1000,
+            NULL, NULL);
+        if (r)
+            g_variant_unref (r);
+    }
+    if (K.watch)
+        g_bus_unwatch_name (K.watch);
+    K.watch = 0;
+    g_clear_pointer (&K.owner, g_free);
+    g_clear_pointer (&K.see, g_free);
+    kwin_forget ();
+    char *f = kwin_script_file ();
+    g_unlink (f);
+    g_free (f);
+}
+
+static void kwin_pointer_off (void);
+
+/* everything goes: the connection is closed, or was */
 static void kwin_disconnect (gboolean unload)
 {
     if (K.cancel) {
@@ -346,21 +385,9 @@ static void kwin_disconnect (gboolean unload)
         g_clear_object (&K.cancel);
     }
     K.connecting = FALSE;
-    if (K.retry)
-        g_source_remove (K.retry);
-    K.retry = 0;
-    K.retried = K.loading = K.reload = FALSE;
+    kwin_rules_off (unload);
+    kwin_pointer_off ();
     if (K.bus) {
-        if (unload && K.owner && !g_dbus_connection_is_closed (K.bus)) {
-            GVariant *r = g_dbus_connection_call_sync (
-                K.bus, KWIN_BUS_NAME, "/Scripting", "org.kde.kwin.Scripting", "unloadScript",
-                g_variant_new ("(s)", WALPE_KWIN_SCRIPT_NAME), NULL, G_DBUS_CALL_FLAGS_NO_AUTO_START, 1000,
-                NULL, NULL);
-            if (r)
-                g_variant_unref (r);
-        }
-        if (K.watch)
-            g_bus_unwatch_name (K.watch);
         if (K.object)
             g_dbus_connection_unregister_object (K.bus, K.object);
         g_signal_handlers_disconnect_by_data (K.bus, &K);
@@ -368,13 +395,7 @@ static void kwin_disconnect (gboolean unload)
             g_dbus_connection_close_sync (K.bus, NULL, NULL);
         g_clear_object (&K.bus);
     }
-    K.watch = K.object = 0;
-    g_clear_pointer (&K.owner, g_free);
-    g_clear_pointer (&K.see, g_free);
-    kwin_forget ();
-    char *f = kwin_script_file ();
-    g_unlink (f);
-    g_free (f);
+    K.object = 0;
 }
 
 static void kwin_closed (GDBusConnection *c, gboolean remote, GError *err, gpointer user)
@@ -405,8 +426,7 @@ static void kwin_connected (GObject *src, GAsyncResult *res, gpointer user)
                                                   NULL, NULL, NULL);
     g_dbus_node_info_unref (info);
     g_signal_connect (bus, "closed", G_CALLBACK (kwin_closed), &K);
-    K.watch = g_bus_watch_name_on_connection (bus, KWIN_BUS_NAME, G_BUS_NAME_WATCHER_FLAGS_NONE,
-                                              kwin_appeared, kwin_vanished, NULL, NULL);
+    kwin_arm ();        /* what the connection is wanted for */
 }
 
 /* the session bus's address without GLib's fallback of starting a bus */
@@ -423,30 +443,139 @@ static char *kwin_bus_address (void)
     return addr;
 }
 
-/* connect while a rule is on, let go when none is */
+/* ---- the pointer
+ * With the add-on for Plasma (contrib/plasma) Plasma's desktop window lies
+ * over the wallpaper and the compositor gives the daemon no pointer there.
+ * The add-on's wallpaper type sees the pointer in that window and calls
+ * Event here. How it finds the daemon: by a name on the bus,
+ * io.github.walpe.Pointer, which the daemon owns only while the platform
+ * says a helper can exist and a wallpaper uses the pointer
+ * (walpe_platform_pointer_helper) - the type watches for the name and
+ * hands nothing on while nobody has it. Only the connection of Plasma's
+ * shell is believed. */
+#define PTR_NAME "io.github.walpe.Pointer"
+#define PTR_PATH "/io/github/walpe/Pointer"
+
+static const char ptr_xml[] =
+    "<node><interface name='" PTR_NAME "'>"
+    "<method name='Event'><arg type='s' name='output' direction='in'/>"
+    "<arg type='u' name='what' direction='in'/><arg type='d' name='x' direction='in'/>"
+    "<arg type='d' name='y' direction='in'/><arg type='d' name='a' direction='in'/>"
+    "<arg type='d' name='b' direction='in'/></method>"
+    "</interface></node>";
+
+static void ptr_method (GDBusConnection *c, const char *sender, const char *path, const char *iface,
+                        const char *method, GVariant *args, GDBusMethodInvocation *inv, gpointer user)
+{
+    (void) c; (void) path; (void) iface; (void) user;
+    if (g_strcmp0 (method, "Event") || !K.ptr_shell || g_strcmp0 (sender, K.ptr_shell)) {
+        g_dbus_method_invocation_return_error_literal (inv, G_DBUS_ERROR, G_DBUS_ERROR_ACCESS_DENIED,
+                                                       "only Plasma's shell reports here");
+        return;
+    }
+    const char *output = NULL;
+    guint32 what = 0;
+    double x = 0, y = 0, a = 0, b = 0;
+    g_variant_get (args, "(&sudddd)", &output, &what, &x, &y, &a, &b);
+    if (K.ptr_fn && K.ptr_want)
+        K.ptr_fn (output, what, x, y, a, b, K.ptr_user);
+    g_dbus_method_invocation_return_value (inv, NULL);
+}
+
+static const GDBusInterfaceVTable ptr_vt = { ptr_method, NULL, NULL, { 0 } };
+
+static void ptr_shell_appeared (GDBusConnection *c, const char *name, const char *owner, gpointer user)
+{
+    (void) c; (void) name; (void) user;
+    g_free (K.ptr_shell);
+    K.ptr_shell = g_strdup (owner);
+}
+
+static void ptr_shell_vanished (GDBusConnection *c, const char *name, gpointer user)
+{
+    (void) c; (void) name; (void) user;
+    g_clear_pointer (&K.ptr_shell, g_free);
+}
+
+static void ptr_name_acquired (GDBusConnection *c, const char *name, gpointer user)
+{
+    (void) c; (void) name; (void) user;
+    K.ptr_named = TRUE;
+}
+
+static void ptr_name_lost (GDBusConnection *c, const char *name, gpointer user)
+{
+    (void) c; (void) name; (void) user;
+    K.ptr_named = FALSE;        /* another walpe-daemon has it, or the connection ended */
+}
+
+static void kwin_pointer_on (void)
+{
+    if (!K.bus || K.ptr_own)
+        return;
+    GDBusNodeInfo *info = g_dbus_node_info_new_for_xml (ptr_xml, NULL);
+    K.ptr_object = g_dbus_connection_register_object (K.bus, PTR_PATH, info->interfaces[0], &ptr_vt, NULL,
+                                                      NULL, NULL);
+    g_dbus_node_info_unref (info);
+    K.ptr_watch = g_bus_watch_name_on_connection (K.bus, "org.kde.plasmashell", G_BUS_NAME_WATCHER_FLAGS_NONE,
+                                                  ptr_shell_appeared, ptr_shell_vanished, NULL, NULL);
+    K.ptr_own = g_bus_own_name_on_connection (K.bus, PTR_NAME, G_BUS_NAME_OWNER_FLAGS_DO_NOT_QUEUE,
+                                              ptr_name_acquired, ptr_name_lost, NULL, NULL);
+}
+
+static void kwin_pointer_off (void)
+{
+    if (K.ptr_own)
+        g_bus_unown_name (K.ptr_own);
+    if (K.ptr_watch)
+        g_bus_unwatch_name (K.ptr_watch);
+    if (K.bus && K.ptr_object)
+        g_dbus_connection_unregister_object (K.bus, K.ptr_object);
+    K.ptr_own = K.ptr_watch = K.ptr_object = 0;
+    K.ptr_named = FALSE;
+    g_clear_pointer (&K.ptr_shell, g_free);
+}
+
+/* The connection exists while a pause rule or the pointer wants it, and
+ * carries only what is wanted. */
 static void kwin_arm (void)
 {
-    gboolean want = K.started && K.rules != 0;
-    if (!want) {
+    gboolean rules = K.started && K.rules != 0, pointer = K.started && K.ptr_want;
+    if (!rules && !pointer) {
         if (K.bus || K.connecting)
             kwin_disconnect (TRUE);
         kwin_trouble (NULL, NULL);
         return;
     }
-    if (K.bus || K.connecting)
-        return;
-    char *addr = kwin_bus_address ();
-    if (!addr) {
-        kwin_trouble ("no session bus (DBUS_SESSION_BUS_ADDRESS is not set and the runtime directory "
-                      "has no bus socket): KWin cannot be asked about its windows", NULL);
-        return;
+    if (!K.bus) {
+        if (K.connecting)
+            return;
+        char *addr = kwin_bus_address ();
+        if (!addr) {
+            kwin_trouble ("no session bus (DBUS_SESSION_BUS_ADDRESS is not set and the runtime "
+                          "directory has no bus socket): KWin cannot be asked about its windows", NULL);
+            return;
+        }
+        K.connecting = TRUE;
+        K.cancel = g_cancellable_new ();
+        g_dbus_connection_new_for_address (
+            addr,
+            G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT | G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION,
+            NULL, K.cancel, kwin_connected, NULL);
+        g_free (addr);
+        return;         /* kwin_connected comes back here */
     }
-    K.connecting = TRUE;
-    K.cancel = g_cancellable_new ();
-    g_dbus_connection_new_for_address (
-        addr, G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT | G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION,
-        NULL, K.cancel, kwin_connected, NULL);
-    g_free (addr);
+    if (rules && !K.watch) {
+        K.watch = g_bus_watch_name_on_connection (K.bus, KWIN_BUS_NAME, G_BUS_NAME_WATCHER_FLAGS_NONE,
+                                                  kwin_appeared, kwin_vanished, NULL, NULL);
+    } else if (!rules && K.watch) {
+        kwin_rules_off (TRUE);
+        kwin_trouble (NULL, NULL);
+    }
+    if (pointer)
+        kwin_pointer_on ();
+    else
+        kwin_pointer_off ();
 }
 
 /* ---- what the daemon and the tests set */
@@ -460,6 +589,29 @@ void walpe_sig_kwin_set_rules (guint mask)
     K.rules = mask;
     if (K.started)
         kwin_arm ();
+}
+
+void walpe_sig_kwin_set_pointer (gboolean want, WalpeSigPointerFn fn, gpointer user)
+{
+    K.ptr_fn = fn;
+    K.ptr_user = user;
+    if (!!want == K.ptr_want)
+        return;
+    K.ptr_want = !!want;
+    if (K.started)
+        kwin_arm ();
+}
+
+const char *walpe_sig_kwin_pointer_state (void)
+{
+    if (!K.started || !K.ptr_want)
+        return NULL;
+    if (!K.bus)
+        return "wanted from the Plasma add-on, but there is no connection to the session bus";
+    return K.ptr_named ? "taken from the Plasma add-on where a desktop has the wallpaper type WalPE "
+                         "(" PTR_NAME " on the session bus)"
+                       : "wanted from the Plasma add-on; the name " PTR_NAME " on the session bus is "
+                         "not ours (yet)";
 }
 
 void walpe_sig_kwin_use_address (const char *address)
@@ -522,6 +674,7 @@ static void kwin_stop (const WalpeSignalProvider *self)
         return;
     kwin_disconnect (TRUE);
     K.started = FALSE;
+    K.ptr_want = FALSE;
     g_clear_pointer (&K.ids, g_hash_table_unref);
     g_clear_pointer (&K.trouble_own, g_free);
     K.trouble = NULL;

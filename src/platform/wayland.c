@@ -2733,6 +2733,81 @@ static gboolean wl_on_desktop (guintptr under)
     return under != 0;
 }
 
+/* ---- the pointer from the add-on for KDE Plasma (platform.h). Where a
+ * desktop has the add-on's wallpaper type, Plasma's desktop window lies
+ * over our surface and the compositor sends us no pointer there. The
+ * type's QML sees the pointer in that window and hands it on. */
+static WlPlasmaAddon wl_plasma_addon (void);
+
+/* worth listening: KWin, the add-on installed, a wallpaper that uses the pointer */
+static gboolean wl_pointer_helper (void)
+{
+    if (!W.is_open || !W.kwin || wl_plasma_addon () == WL_PLASMA_ADDON_NONE)
+        return FALSE;
+    gboolean want = FALSE;
+    for (GList *l = W.surfaces; l && !want; l = l->next) {
+        WlSurf *s = l->data;
+        g_mutex_lock (&s->lock);
+        want = s->kind == WALPE_SURFACE_WALLPAPER && s->want_pointer;
+        g_mutex_unlock (&s->lock);
+    }
+    return want;
+}
+
+/* One event of it, for the surface on that output; from here on it is a
+ * pointer like the seat's: the same mapping into the output list's space
+ * (wl_ptr_place), the same button events, the wheel as clicks. A seat
+ * whose pointer comes onto one of our surfaces takes over again. */
+static void wl_pointer_foreign (const char *output, WalpeForeignPointer what, double x, double y,
+                                double a, double b)
+{
+    static double wheel[2];
+    WlSurf *s = NULL;
+    for (GList *l = W.surfaces; W.is_open && l && !s; l = l->next) {
+        WlSurf *c = l->data;
+        g_mutex_lock (&c->lock);
+        if (c->kind == WALPE_SURFACE_WALLPAPER && c->want_pointer && !g_strcmp0 (c->out_name, output))
+            s = c;
+        g_mutex_unlock (&c->lock);
+    }
+    if (!s)
+        return;         /* no wallpaper there that uses the pointer */
+    if (what == WALPE_FOREIGN_LEAVE) {
+        if (!W.ptr.seat && W.ptr.surf == s) {
+            W.ptr.inside = FALSE;
+            W.ptr.surf = NULL;
+            W.motion_dirty = TRUE;
+        }
+        return;
+    }
+    if (!isfinite (x) || !isfinite (y) || !isfinite (a) || !isfinite (b))
+        return;
+    W.ptr.seat = NULL;
+    W.ptr.inside = TRUE;
+    W.ptr.surf = s;
+    wl_ptr_place (s, wl_fixed_from_double (CLAMP (x, -1e6, 1e6)), wl_fixed_from_double (CLAMP (y, -1e6, 1e6)));
+    W.motion_dirty = TRUE;
+    guint32 now_ms = (guint32) (g_get_monotonic_time () / 1000);
+    if (what == WALPE_FOREIGN_PRESS || what == WALPE_FOREIGN_RELEASE) {
+        int button = (int) a;
+        if (button >= 1 && button <= 3)
+            wl_ptr_queue_button (button, what == WALPE_FOREIGN_PRESS, now_ms);
+    } else if (what == WALPE_FOREIGN_WHEEL) {
+        /* notches of 120, as wl_pointer's axis_value120: whole clicks, the rest kept */
+        const double v[2] = { b, a };       /* axis 0 vertical, 1 horizontal, as wl_pointer has them */
+        for (int ax = 0; ax < 2; ax++) {
+            wheel[ax] += CLAMP (v[ax], -120.0 * WL_WHEEL_BURST_MAX, 120.0 * WL_WHEEL_BURST_MAX);
+            int clicks = (int) (wheel[ax] / 120.0);
+            wheel[ax] -= clicks * 120.0;
+            /* Qt: a positive angle is the wheel turned away from the user (up, left);
+             * wl_pointer: a positive value is down / right */
+            int button = wl_axis_button (ax, -clicks);
+            for (int i = 0; button && i < MIN (ABS (clicks), WL_WHEEL_BURST_MAX); i++)
+                wl_ptr_queue_button (button, TRUE, now_ms);
+        }
+    }
+}
+
 static void wl_input_select (gboolean buttons, gboolean motion)
 {
     W.sel_buttons = buttons;
@@ -3210,6 +3285,8 @@ const WalpePlatformOps walpe_wayland_ops = {
     .surface_present_stats = wl_surface_present_stats,
     .pointer = wl_pointer,
     .on_desktop = wl_on_desktop,
+    .pointer_helper = wl_pointer_helper,
+    .pointer_foreign = wl_pointer_foreign,
     .input_select = wl_input_select,
     .has_input_events = wl_has_input_events,
     .present_log = wl_present_log,

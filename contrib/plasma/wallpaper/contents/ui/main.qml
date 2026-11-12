@@ -92,6 +92,13 @@ WallpaperItem {
         source: "Script.qml"    // fails where Plasma has no D-Bus module for QML: the stand-in stays
     }
 
+    // the pointer for the daemon's wallpaper, only while that is under this desktop and wants it
+    Loader {
+        active: root.under && script.item.pointerWanted
+        source: "Pointer.qml"
+        onLoaded: item.view = root.view
+    }
+
     Rectangle {
         anchors.fill: parent
         visible: !root.under

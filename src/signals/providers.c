@@ -65,6 +65,15 @@ void walpe_sigprov_set_window_rules (guint mask)
 #endif
 }
 
+void walpe_sigprov_set_plasma_pointer (gboolean want, WalpeSigPointerFn fn, gpointer user)
+{
+#ifdef HAVE_WL_SIGNALS
+    walpe_sig_kwin_set_pointer (want, fn, user);
+#else
+    (void) want; (void) fn; (void) user;
+#endif
+}
+
 void walpe_sigprov_set_idle_timeout (guint seconds)
 {
     P.idle_timeout_s = seconds;
@@ -172,6 +181,10 @@ void walpe_sigprov_status_json (JsonBuilder *b, const WalpeConfig *cfg)
         /* KDE Plasma: what the provider "kwin" is doing (kwin.c) */
         json_builder_set_member_name (b, "pause_kwin_script");
         json_builder_add_string_value (b, walpe_sig_kwin_state ());
+    }
+    if (walpe_sig_kwin_pointer_state ()) {
+        json_builder_set_member_name (b, "wl_plasma_pointer");
+        json_builder_add_string_value (b, walpe_sig_kwin_pointer_state ());
     }
 #endif
 }

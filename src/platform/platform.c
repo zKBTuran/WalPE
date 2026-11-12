@@ -252,6 +252,18 @@ gboolean walpe_platform_pointer (WalpePointer *out)
     return ops ? ops->pointer (out) : FALSE;
 }
 
+gboolean walpe_platform_pointer_helper (void)
+{
+    return ops && ops->pointer_helper ? ops->pointer_helper () : FALSE;
+}
+
+void walpe_platform_pointer_foreign (const char *output, WalpeForeignPointer what, double x, double y,
+                                     double a, double b)
+{
+    if (ops && ops->pointer_foreign)
+        ops->pointer_foreign (output, what, x, y, a, b);
+}
+
 gboolean walpe_platform_on_desktop (guintptr under)
 {
     return ops && ops->on_desktop ? ops->on_desktop (under) : TRUE;
