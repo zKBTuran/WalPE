@@ -563,6 +563,8 @@ DEF (glBufferData, f_BufferData) DEF (glBufferSubData, f_BufferSubData)
 DEF (glCreateShader, f_CreateShader) DEF (glCreateProgram, f_CreateProgram)
 DEF (glShaderSource, f_ShaderSource) DEF (glDeleteShader, f_DeleteShader)
 DEF (glAttachShader, f_AttachShader) DEF (glLinkProgram, f_LinkProgram)
+/* (after the link, where the uniforms were listed: nothing to keep) */
+NOP (glDetachShader)
 DEF (glGetShaderiv, f_GetShaderiv) DEF (glGetProgramiv, f_GetProgramiv)
 DEF (glGetShaderInfoLog, f_GetInfoLog) DEF (glGetProgramInfoLog, f_GetInfoLog)
 DEF (glGetActiveUniform, f_GetActiveUniform) DEF (glGetUniformLocation, f_GetUniformLocation)
