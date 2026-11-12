@@ -132,6 +132,17 @@ Corrections to "Pause for fullscreen apps" per monitor, which is new in 0.13.0:
 - Shared rendering (two monitors of one size showing the same scene are rendered once):
   a paused monitor that follows the other one sleeps. It was woken for every frame of the
   monitor that draws, 52 times a second in the test, to find that it had nothing to show.
+- Web wallpapers: a page opened while everything is paused (`walpe-ctl pause`, a monitor
+  that is covered or has a fullscreen window) is paused like one that was running. It
+  was not: the page kept running for the whole pause - about 30 animation callbacks a
+  second in the test, and it was never told `setPaused` - behind a picture that stayed
+  black, because the one frame a paused monitor took was the one from the moment loading
+  ended, before the page had drawn. A new page now has one second after it finished
+  loading for its first picture, a paused monitor shows what it draws in that second,
+  and then the page is paused: in the test 1.8 seconds after it was opened, after 18 to
+  26 animation callbacks, and from there neither its processes nor the daemon used CPU
+  time worth counting. The same on both page hosts. Test: `web-wayland` / `web-x11`,
+  case `pausedopen`.
 
 ### Security
 

@@ -249,7 +249,10 @@ typedef struct {
     GHashTable *pushed_dirs;
     /* main thread: network switch as applied to the page's session */
     gboolean net_known, net_off;
-    gint64 born_us;           /* created (sh_first_frame_wanted) */
+    /* the page's first picture (sh_first_frame_wanted): first_done is
+     * written by the main thread under sh->lock, first_id is its timer */
+    gboolean first_done;
+    guint first_id;
     guint n_load_logs, n_media_logs;  /* "loaded" / "media state pushed" lines so far */
     /* main thread: what the page posted to the message handler (on_script_message) */
     gint64 msg_win_us;        /* start of the current counting window */
@@ -259,17 +262,26 @@ typedef struct {
 
 /* A page opened while every viewer is paused (walpe-ctl pause, a covered
  * monitor) was suspended before it had drawn anything: the monitor stayed
- * black until resume. It now counts as active until its first frame is
- * captured, for at most WEB_FIRST_FRAME_S. Call with sh->lock held. */
+ * black until resume. So a new page counts as active for its first
+ * picture, whatever its viewers say: until WEB_FIRST_SETTLE_MS after it
+ * finished loading (what it draws in that time - with its option values,
+ * from its first animation frames - is the picture a paused monitor
+ * keeps), and for at most WEB_FIRST_FRAME_S when it never finishes. Then
+ * sh_first_end brings it in line with its viewers: paused when they all
+ * are. (The first frame alone was not enough of a rule: that is the one
+ * taken the moment loading ended, often before the page had drawn at
+ * all, and nothing looked at the viewers again after it - the page of a
+ * paused monitor kept running, 30 animation frames a second, behind a
+ * black or half-drawn picture.) Call with sh->lock held. */
 #define WEB_FIRST_FRAME_S 30
+#define WEB_FIRST_SETTLE_MS 1000
 /* the size a page is made at when no viewer has drawn yet (sh_create_real);
  * it is resized to what its monitors ask for with their first frame */
 #define WEB_SIZE_UNKNOWN_W 1920
 #define WEB_SIZE_UNKNOWN_H 1080
 static gboolean sh_first_frame_wanted (WebShared *sh)
 {
-    return sh->seq == 0 &&
-           g_get_monotonic_time () - sh->born_us < WEB_FIRST_FRAME_S * G_TIME_SPAN_SECOND;
+    return !sh->first_done;
 }
 
 typedef struct {
@@ -411,6 +423,8 @@ static void sh_kick (WebShared *sh);
 static void sh_audio_wake (WebShared *sh);
 static int audio_silence_mode (void);
 static gboolean sh_state_main (gpointer user);
+static gboolean sh_first_end (gpointer user);
+static void timer_set (guint *id, gboolean want, guint ms, GSourceFunc fn, gpointer user);
 
 /* ------------------------------------------------------------ helpers */
 
@@ -1453,6 +1467,10 @@ static void on_load_changed (WebKitWebView *v, WebKitLoadEvent e, gpointer user)
         sh->loaded = TRUE;
         sh->js_paused = FALSE;
         sh_push_properties (sh, TRUE);
+        if (!sh->first_done) {  /* its first picture: from now it has WEB_FIRST_SETTLE_MS */
+            timer_set (&sh->first_id, FALSE, 0, NULL, NULL);
+            timer_set (&sh->first_id, TRUE, WEB_FIRST_SETTLE_MS, sh_first_end, sh);
+        }
         g_mutex_lock (&sh->lock);
         gboolean active = sh->active > 0 || sh_first_frame_wanted (sh);
         g_mutex_unlock (&sh->lock);
@@ -1571,14 +1589,17 @@ static void on_web_process_terminated (WebKitWebView *v, WebKitWebProcessTermina
 
 /* ----------------------------------------------------------- snapshots */
 
-static void sh_notify_viewers (WebShared *sh)
+/* all: the paused monitors too (sh_first_end) */
+static void sh_notify_viewers (WebShared *sh, gboolean all)
 {
     WebViewerRef refs[8];
     guint n = 0;
     g_mutex_lock (&sh->lock);
     for (guint i = 0; i < sh->viewers->len && n < G_N_ELEMENTS (refs); i++)
         refs[n++] = g_array_index (sh->viewers, WebViewerRef, i);
-    gboolean first = sh->seq == 1;  /* the page's first frame: paused monitors paint it too */
+    /* the page's first picture: paused monitors paint it too, every frame
+     * of it (web_gl_render keeps first_frame_pending up for that long) */
+    gboolean first = all || !sh->first_done;
     g_mutex_unlock (&sh->lock);
     for (guint i = 0; i < n; i++)
         if (refs[i].cb && (!refs[i].paused || first))
@@ -1801,7 +1822,7 @@ static void sh_publish (WebShared *sh, WebBuf *b)
     sh->dmg[sh->seq % WEB_DMG_N] = d;
     g_mutex_unlock (&sh->lock);
     sh_buf_put (sh, old);
-    sh_notify_viewers (sh);
+    sh_notify_viewers (sh, FALSE);
 }
 
 /* WALPE_WEB_SNAPSHOT: a WebKit snapshot -> a frame */
@@ -2500,6 +2521,7 @@ static void sh_timers_stop (WebShared *sh)
     timer_set (&sh->report_id, FALSE, 0, NULL, NULL);
     timer_set (&sh->cap_id, FALSE, 0, NULL, NULL);
     timer_set (&sh->replay_id, FALSE, 0, NULL, NULL);
+    timer_set (&sh->first_id, FALSE, 0, NULL, NULL);
 }
 
 /* main thread: something about the viewers changed (one attached, was
@@ -2544,6 +2566,23 @@ static gboolean sh_state_main (gpointer user)
     sh_timers_update (sh);
     if (!was)
         sh_kick (sh);     /* shown again: the frame it has now */
+    return G_SOURCE_REMOVE;
+}
+
+/* main thread: the page has had the time for its first picture
+ * (sh_first_frame_wanted). From here on it is as active as its viewers:
+ * when they are all paused it is told so and suspended now. */
+static gboolean sh_first_end (gpointer user)
+{
+    WebShared *sh = user;
+    sh->first_id = 0;
+    g_mutex_lock (&sh->lock);
+    sh->first_done = TRUE;
+    g_mutex_unlock (&sh->lock);
+    /* every monitor once more, the paused ones too: each takes the newest
+     * frame if it has not yet and stops asking for forced frames */
+    sh_notify_viewers (sh, TRUE);
+    sh_state_main (sh);
     return G_SOURCE_REMOVE;
 }
 
@@ -3578,6 +3617,9 @@ static gboolean sh_create_real (WebShared *sh)
     g_message ("web: %s (%dx%d, %s <= %d/s)", sh->html ? sh->html : sh->path, w, h,
                use_snapshots () ? "snapshots" : "captures on repaint", sh->fps);
     g_free (uri);
+    /* (replaced by the shorter one when the page has finished loading) */
+    if (!sh->first_done)
+        timer_set (&sh->first_id, TRUE, WEB_FIRST_FRAME_S * 1000, sh_first_end, sh);
     sh_state_main (sh);
     return G_SOURCE_REMOVE;
 }
@@ -3861,6 +3903,7 @@ static gboolean web_gl_render (WalpeContent *c, int w, int h, float px, float py
     int dx0 = 0, dy0 = 0, dx1 = 0, dy1 = 0;
     gboolean full = TRUE;
     g_mutex_lock (&sh->lock);
+    const gboolean first_done = sh->first_done;
     if (sh->px && sh->seq != v->drawn_seq) {
         fr = webbuf_ref (sh->px);
         fw = sh->pw;
@@ -3917,8 +3960,11 @@ static gboolean web_gl_render (WalpeContent *c, int w, int h, float px, float py
         walpe_glutil_draw_quad (v->tex, TRUE, 1.0f, m.m, WALPE_BLEND_NORMAL);
     }
     /* no frame of the page yet: the daemon keeps what is on screen and
-     * paints the first one when it arrives, also on a paused monitor */
-    c->first_frame_pending = !v->drawn_seq;
+     * paints the first one when it arrives, also on a paused monitor. And
+     * the ones after it while the page draws its first picture
+     * (sh_first_frame_wanted): the frame taken when loading ended is
+     * often an empty page. */
+    c->first_frame_pending = !v->drawn_seq || !first_done;
     return TRUE;
 }
 
@@ -4032,7 +4078,6 @@ WalpeContent *walpe_web_new (const char *path, const WalpeLoadOpts *opts, GError
     gboolean created = FALSE;
     if (!sh) {
         sh = g_new0 (WebShared, 1);
-        sh->born_us = g_get_monotonic_time ();
         g_mutex_init (&sh->lock);
         sh->viewers = g_array_new (FALSE, FALSE, sizeof (WebViewerRef));
         sh->path = g_strdup (path);

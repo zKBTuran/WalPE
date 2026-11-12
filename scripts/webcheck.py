@@ -35,6 +35,11 @@ that into the daemon's log). Nothing of the user's is read or written.
   pause     `walpe-ctl pause`: the page is told (setPaused), is hidden to itself, its
             requestAnimationFrame stops and its processes use (next to) no CPU time;
             `resume` brings all of it back.
+  pausedopen a page opened while everything is paused: the output gets its picture
+            (the page that was opened, drawn, not black and not the page before it),
+            then the page is told that it is paused; from there its
+            requestAnimationFrame does not run and its processes use (next to) no
+            CPU time, as with a page that was paused while it ran. `resume` starts it.
   restart   the daemon is ended and started again (the page is back), and restarts in
             place (web hardware acceleration switched): the page is back, the page
             processes of the old image are gone.
@@ -838,6 +843,69 @@ def case_pause(env, W):
     healthy(env, mark, "pause")
 
 
+def case_pausedopen(env, W):
+    if not start(env, [("A", 1280, 720, 0, 0)], "pausedopen"):
+        return
+    mark = env.mark()
+    mon = env.mons[0]
+    if not open_page(env, W["still"], "still", "pausedopen"):
+        return
+    shows_page(env, mon)
+    m0 = env.mark()
+    env.ctl("pause")
+    st = wait_state(env, "still", lambda s: s.get("paused") is True, 30, m0)
+    check(st.get("paused") is True, "pausedopen: everything is paused (the page that runs is told)", st.get("paused"))
+    # the animated page is opened now: nothing is unpaused for it
+    m1 = env.mark()
+    t0 = time.time()
+    if not open_page(env, W["live"], "live", "pausedopen"):
+        return
+    st = wait_state(env, "live", lambda s: s.get("paused") is True, 30, m1)
+    told = time.time() - t0
+    check(st.get("paused") is True,
+          "pausedopen: the page that was opened while paused is told that it is paused (setPaused(true))",
+          {k: st.get(k) for k in ("paused", "npause", "raf", "vis")})
+    # its first picture: the page, drawn (the quarters, the canvas) - and this page: only
+    # the animated one has the yellow box
+    ok, lk = shows_page(env, mon, TINT_RGB[TINT0], 20)
+    check(ok, "pausedopen: the output shows the page's picture although nothing was unpaused for it",
+          lk and (lk["bad"], lk["tint"]))
+    check(lk is not None and yellow_at(lk["frame"]) >= 0,
+          "pausedopen: and it is the page that was opened (not the one shown before it)",
+          lk and yellow_at(lk["frame"]))
+    time.sleep(1.5)
+    a = state(env, "live", fresh=True, timeout=6)
+    idle_pages, idle_daemon = busy(env, 4.0)
+    b = state(env, "live", fresh=True, timeout=6)
+    check(bool(a) and bool(b) and a.get("raf") == b.get("raf"),
+          "pausedopen: its requestAnimationFrame does not run while paused",
+          "%s -> %s callbacks in about 4 s" % (a.get("raf"), b.get("raf")))
+    check(b.get("vis") == "hidden", "pausedopen: the page is hidden to itself", b.get("vis"))
+    # (clock ticks of 10 ms over 4 s: 400 would be one CPU all the time; the page's
+    # record every half second and the daemon's log line for it are all that runs)
+    check(idle_pages <= 8, "pausedopen: its processes use next to no CPU time",
+          "%d ticks in 4 s" % idle_pages)
+    check(idle_daemon <= 8, "pausedopen: neither does the daemon", "%d ticks in 4 s" % idle_daemon)
+    note("pausedopen: told %.1f s after it was opened, after %s animation callbacks; paused: page processes "
+         "%d ticks / 4 s, daemon %d (10 ms ticks)" % (told, st.get("raf"), idle_pages, idle_daemon))
+    f1 = env.display.frame(mon)
+    lk2 = look(env, mon)
+    check(lk2["ok"] and yellow_at(f1) >= 0, "pausedopen: the picture is still there after that time", lk2["bad"])
+    m2 = env.mark()
+    env.ctl("resume")
+    st = wait_state(env, "live", lambda s: s.get("paused") is False and s.get("raf", 0) > b.get("raf", 0) + 10, 30, m2)
+    check(st.get("paused") is False and st.get("raf", 0) > b.get("raf", 0) + 10,
+          "pausedopen: resume is told and requestAnimationFrame runs", (st.get("paused"), b.get("raf"), st.get("raf")))
+    check(st.get("born") == b.get("born"), "pausedopen: it is the same page (not loaded again)")
+    bars = set()
+    for _ in range(6):
+        bars.add(bar_at(env.display.frame(mon)))
+        time.sleep(0.25)
+    bars.discard(-1)
+    check(len(bars) >= 2, "pausedopen: the picture on the output moves", sorted(bars))
+    healthy(env, mark, "pausedopen")
+
+
 # ------------------------------------------------------------------ restart
 def host_leftovers(env):
     """what the private page host could leave in the runtime directory: its socket directories"""
@@ -1404,6 +1472,7 @@ def case_offline(env, W):
 
 CASES = [("start", case_start), ("live", case_live), ("props", case_props), ("audio", case_audio),
          ("pointer", case_pointer), ("two", case_two), ("outputs", case_outputs), ("pause", case_pause),
+         ("pausedopen", case_pausedopen),
          ("restart", case_restart), ("crash", case_crash), ("stale", case_stale), ("leftover", case_leftover),
          ("sandbox", case_sandbox), ("widgets", case_widgets), ("clipboard", case_clipboard),
          ("offline", case_offline)]
