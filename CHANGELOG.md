@@ -242,6 +242,10 @@ could do to the daemon. None of these was seen being used.
   notice: that monitor showed the root window for as long as the daemon ran. It now
   restarts itself in place, at most once in ten seconds.
 - A video conversion that cannot start, or is cancelled, leaves no memory behind.
+- The daemon's log file is capped from the start. The cap (16 MiB, `WALPE_LOG_MAX_MB`) was
+  looked at only with every 256th line of a run and never for a file a shell had opened
+  with `> file`: a daemon started from an autostart entry at every login, saying little
+  each time, let the file grow for ever.
 - Import: a video with `%d` in its name (`take %03d.mp4`) got its thumbnail under another
   name, replaced a picture of that name next to it and was shown without a preview.
 - Build: **the tests and the developer tools are no part of a build unless asked for.**
