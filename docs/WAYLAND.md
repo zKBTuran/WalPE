@@ -2,7 +2,8 @@
 
 `walpe-daemon` draws its wallpapers either as an X11 client (one window per monitor below
 all other windows, as in every earlier version) or as a Wayland client (one layer-shell
-surface per output on the background layer). One daemon binary can hold both backends; it
+surface per output on the background layer; on KDE Plasma on the bottom layer, see
+[KDE Plasma](#kde-plasma)). One daemon binary can hold both backends; it
 picks one when it starts and keeps it until it ends. On an X11 session nothing is meant to
 change.
 
@@ -15,6 +16,9 @@ change.
 > go and change their mode, scale or transform under the running daemon; the restart in
 > place, and the wait for a compositor that was killed and started again; the pause rules
 > with stand-ins for logind and for the compositor's idle and window-list protocols.
+> One more thing was looked at on one more compositor: where a video wallpaper lies
+> relative to Plasma's desktop, on a headless KWin 6.8.2 and 5.27.11 with Plasma's shell
+> ([KDE Plasma](#kde-plasma)).
 > Nothing on this page has been
 > run on a real Wayland desktop, on a real output, on a GPU, or with any other compositor.
 > What is said below about Hyprland, KDE Plasma, GNOME, COSMIC, labwc, Wayfire, river and
@@ -29,7 +33,8 @@ A compositor that offers the layer shell (protocol `zwlr_layer_shell_v1`), and a
 | Compositor | Layer shell | |
 |---|---|---|
 | sway | yes | tested headless (1.9) |
-| Hyprland, river, labwc, Wayfire, niri, KDE Plasma (KWin), COSMIC | yes | expected to work, not tested |
+| KDE Plasma (KWin) | yes | shown on a headless Plasma 6.8 and 5.27; Plasma's desktop icons are behind the wallpaper: see [KDE Plasma](#kde-plasma) |
+| Hyprland, river, labwc, Wayfire, niri, COSMIC | yes | expected to work, not tested |
 | GNOME (Mutter), weston's desktop shell | no | not supported: use an X11 session |
 
 Without the layer shell the daemon says so and names the protocol. With `backend=auto` it
@@ -273,15 +278,70 @@ walpe-daemon`, `exec walpe-tray`; Hyprland: `exec-once = ...`). With the systemd
 systemd need, once per session, `systemctl --user import-environment WAYLAND_DISPLAY
 XDG_CURRENT_DESKTOP`.
 
+## KDE Plasma
+
+Plasma's desktop is not empty space behind the windows. It is a window of Plasma's shell
+that fills each monitor and holds Plasma's own wallpaper, the desktop icons and the
+widgets in one opaque picture. KWin, Plasma's compositor, keeps that window in the
+stacking layer it also uses for every surface on the layer shell's background layer, and
+orders the windows of that layer as it orders ordinary windows: the one clicked last is
+in front.
+
+WalPE 0.14.0 put its wallpapers on the background layer. On Plasma that gave two
+pictures. Started while an application's window was the active one (the WalPE window, a
+terminal), the wallpaper lay in front of Plasma's desktop and covered its icons until the
+first click on the desktop: KWin then raised Plasma's desktop over the wallpaper, the
+video was gone, and Plasma's own wallpaper and icons were back. Started while Plasma's
+desktop itself was the active window, the wallpaper was behind it from the start and
+never seen (Plasma 6). Either way the daemon went on running and drawing, with nothing in
+its log or status: KWin goes on asking a surface it has covered for frames. A user
+reported the first on Plasma 6.8; a headless Plasma 6.8.2 and a headless Plasma 5.27
+showed the same.
+
+From this version on the daemon puts its wallpapers on the layer shell's **bottom** layer
+when the compositor is KWin (told by the protocols `org_kde_plasma_shell` or
+`org_kde_plasma_virtual_desktop_management`, which only KWin offers). KWin stacks that
+layer above Plasma's desktop and below every window, so the wallpaper stays in front of
+Plasma's desktop whatever is clicked. The log says so when the daemon starts (a line
+starting with `wayland: KDE Plasma (KWin):`), and `walpe-ctl status` has `wl_layer`
+(`background` or `bottom`) and `wl_layer_why`.
+
+What follows from it on Plasma:
+
+- **Plasma's desktop icons and widgets cannot be seen while WalPE shows a wallpaper.**
+  They are part of the window the wallpaper lies on. The layer shell has no place between
+  Plasma's wallpaper and Plasma's icons, since both are one window, so no wallpaper
+  program that is a Wayland client of its own can draw under the icons there; on Plasma
+  only a wallpaper plugin that runs inside Plasma's shell can, and WalPE has none. The
+  icons are back when the daemon is quit.
+- Clicks on the desktop go on reaching Plasma as long as the wallpaper does not use the
+  pointer (a video and a picture never do, see "Clicks" in the table above): its
+  right-click menu opens, and icons that cannot be seen still take clicks. If that is in
+  the way, Plasma's desktop settings ("Desktop and Wallpaper" in the desktop's menu)
+  have the layout "Desktop", which shows no icons, next to "Folder View".
+- `WALPE_WL_LAYER=background` in the daemon's environment brings back the placement of
+  0.14.0, `WALPE_WL_LAYER=bottom` asks for the bottom layer on any compositor
+  ([ENVIRONMENT.md](ENVIRONMENT.md)). On the background layer the wallpaper is in front
+  of Plasma's desktop or behind it depending on which window was active when the daemon
+  started, and a click on the desktop hides it.
+
+> **State of testing on Plasma.** A headless Plasma 6.8.2 (KWin 6.8.2 on its virtual
+> output, Qt 6.12) and a headless Plasma 5.27 (KWin 5.27.11), each with one 1280 x 800
+> output, Mesa's software renderer, a video wallpaper and clicks from a virtual pointer.
+> With 0.14.0: what is described above. With this version: the wallpaper is in KWin's
+> stacking layer above Plasma's desktop from the start (on 6.8.2 both with Plasma's
+> desktop and with the WalPE window as the active window), it stays there through left
+> clicks on the desktop, and a right click opens Plasma's desktop menu over it. Not run: a
+> real Plasma session, a GPU, more than one monitor, "Peek at Desktop", the Plasma
+> versions in between.
+
 ## Notes per compositor (expected, not tested)
 
 - **sway**: remove `output * bg ...` from its configuration (or stop swaybg): that is
   another background surface, and the one created last lies on top. The layer namespace of
   WalPE's surfaces is `walpe`.
 - **Hyprland**: do not run hyprpaper / swww at the same time.
-- **KDE Plasma**: Plasma's own desktop (wallpaper, icons, right-click menu) is itself a
-  surface on the background layer. Which of the two lies on top is KWin's decision; there
-  is no protocol to order them and no setting on WalPE's side.
+- **KDE Plasma**: see [KDE Plasma](#kde-plasma) above.
 - **COSMIC**: its own wallpaper program is a background-layer surface too.
 - **Desktop-icon programs** on a layer above the background stay visible, and hide the
   wallpaper where they paint an opaque background.
@@ -321,7 +381,8 @@ XDG_CURRENT_DESKTOP`.
 
 ## For a bug report
 
-`walpe-ctl backend`, `walpe-ctl status` (the `wl_*` members, `monitors`), the daemon's log
+`walpe-ctl backend`, `walpe-ctl status` (the `wl_*` members, among them `wl_layer`, and
+`monitors`), the daemon's log
 from its start (the lines `display backend:`, `compositor:`, `present: Wayland:` and every
 line starting with `wayland:`), the compositor and its version. If the daemon ended with
 `wayland: protocol error ...`, that whole line: it names the request the compositor

@@ -84,6 +84,15 @@ software renderer only ([Known limitations](#known-limitations)).
   later; and a session started with a one-time socket (`WAYLAND_SOCKET`) cannot be
   restarted in place, so the daemon ends at the first change of a monitor there.
   [WAYLAND.md](WAYLAND.md#limits).
+- **KDE Plasma on Wayland: no desktop icons while a wallpaper is shown.** Plasma's
+  wallpaper, its desktop icons and its widgets are one window of Plasma's shell, and the
+  only place a wallpaper program of its own can take is in front of that window or behind
+  it. WalPE takes the place in front (the layer shell's bottom layer; on the background
+  layer, as in 0.14.0, the first click on the desktop put Plasma's desktop over the
+  wallpaper): the wallpaper stays, Plasma's icons and widgets are behind it. Clicks still
+  reach Plasma's desktop. Drawing under the icons would take a wallpaper plugin inside
+  Plasma's shell, which WalPE does not have. Seen on a headless Plasma 6.8.2 and 5.27
+  only. [WAYLAND.md](WAYLAND.md#kde-plasma).
 - **AMD and Intel graphics, GPU choice, OpenGL ES: written, not run on hardware.** The
   list of graphics devices, render offload to another GPU (`gpu=integrated|discrete`),
   the kernel's GPU statistics and the Mesa counterparts of the driver hints were tested
