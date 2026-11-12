@@ -10441,6 +10441,7 @@ int main (int argc, char **argv)
     if (!D.display_lost)    /* (it can go while the daemon is still starting) */
         g_main_loop_run (D.loop);
     diag_say (NULL);        /* a daemon that never drew: its summary now */
+    diag_end_line ((Sw.restart || D.restart) && !atomic_load (&term_signal));
     /* The daemon ends, or starts itself again. A render thread that is in
      * the middle of loading a scene is not waited for until the scene is
      * complete: the load gives up at its next layer or texture (content.h)

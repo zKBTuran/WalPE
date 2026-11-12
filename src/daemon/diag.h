@@ -15,6 +15,10 @@
  * ({"cmd":"diag"} -> {"ok":true,"text":...}).
  *
  * diag_quit_ipc (), diag_quit_signal (): who asked the daemon to stop.
+ * diag_end_line (): the last line of a daemon that ends by its own doing,
+ * with the reason. A start that follows a log without it is a daemon that
+ * died (and was started again by the window, which the summary's first
+ * line shows: "started by walpe").
  *
  * diag_sound_line (): one line when the sound settings begin or stop to
  * keep every wallpaper silent.
@@ -50,6 +54,16 @@ static void diag_no_home (GString *s)
         g_string_insert_c (s, at, '~');
         p = s->str + at;
     }
+}
+
+/* the name of a process as /proc has it (g_free; NULL = it is gone) */
+static char *diag_comm (int pid)
+{
+    char *path = g_strdup_printf ("/proc/%d/comm", pid), *comm = NULL;
+    if (g_file_get_contents (path, &comm, NULL, NULL))
+        g_strchomp (comm);
+    g_free (path);
+    return comm;
 }
 
 /* the sound settings as one fact: 0 = they let wallpapers be heard, else
@@ -89,11 +103,26 @@ static void diag_sound_line (void)
     diag_sound_said = gate;
 }
 
+/* the program that started the daemon ("walpe" = the window, "walpe-tray",
+ * a shell, systemd): its name as /proc has it, read once - at the first
+ * summary, a moment after the start */
+static const char *diag_started_by (void)
+{
+    static char *by;
+    if (!by) {
+        const int pp = (int) getppid ();
+        char *comm = diag_comm (pp);
+        by = g_strdup_printf ("%s (pid %d)", comm && *comm ? walpe_log_strn (comm, 32) : "?", pp);
+        g_free (comm);
+    }
+    return by;
+}
+
 static char *diag_text (void)
 {
     GString *s = g_string_new (NULL);
-    g_string_append_printf (s, "walpe-daemon %s \"%s\", pid %d, up for %.0f s\n", WALPE_VERSION,
-                            WALPE_CODENAME, (int) getpid (),
+    g_string_append_printf (s, "walpe-daemon %s \"%s\", pid %d, started by %s, up for %.0f s\n",
+                            WALPE_VERSION, WALPE_CODENAME, (int) getpid (), diag_started_by (),
                             (double) (g_get_monotonic_time () - daemon_start_us) / 1e6);
     {
         /* the session as the environment names it; of the two display
@@ -215,24 +244,20 @@ static void diag_ipc (JsonBuilder *b)
 /* "quit" over the control socket: which program sent it (the socket tells
  * the process id, /proc its name: walpe-ctl, walpe-tray, walpe = the
  * window). Read once, when it happens. */
-static char *diag_comm (int pid)
-{
-    char *path = g_strdup_printf ("/proc/%d/comm", pid), *comm = NULL;
-    if (g_file_get_contents (path, &comm, NULL, NULL))
-        g_strchomp (comm);
-    g_free (path);
-    return comm;
-}
+static char *diag_end_why;   /* why the daemon ends, for its last line (NULL = not by a request) */
 
 static void diag_quit_ipc (void)
 {
     int pid = walpe_ipc_current_pid ();
     char *comm = pid > 0 ? diag_comm (pid) : NULL;
+    g_free (diag_end_why);
     if (pid > 0)
-        g_message ("quit: asked for over the control socket by %s (pid %d): shutting down",
-                   comm && *comm ? walpe_log_strn (comm, 32) : "a process that is gone already", pid);
+        diag_end_why = g_strdup_printf ("quit asked for over the control socket by %s (pid %d)",
+                                        comm && *comm ? walpe_log_strn (comm, 32)
+                                                      : "a process that is gone already", pid);
     else
-        g_message ("quit: asked for over the control socket: shutting down");
+        diag_end_why = g_strdup ("quit asked for over the control socket");
+    g_message ("quit: %s: shutting down", diag_end_why + strlen ("quit "));
     g_free (comm);
 }
 
@@ -244,12 +269,29 @@ static void diag_quit_signal (int sig, int sender)
     const char *name = sig == SIGTERM ? "SIGTERM" : sig == SIGINT ? "SIGINT (Ctrl+C)"
                        : sig == SIGHUP ? "SIGHUP (its terminal was closed)" : NULL;
     char *comm = sender > 0 ? diag_comm (sender) : NULL;
+    g_free (diag_end_why);
     if (!name)
-        g_message ("signal: shutting down");
+        diag_end_why = g_strdup ("signal");
     else if (sender > 0)
-        g_message ("signal %s from %s (pid %d): shutting down", name,
-                   comm && *comm ? walpe_log_strn (comm, 32) : "a process that is gone already", sender);
+        diag_end_why = g_strdup_printf ("signal %s from %s (pid %d)", name,
+                                        comm && *comm ? walpe_log_strn (comm, 32)
+                                                      : "a process that is gone already", sender);
     else
-        g_message ("signal %s: shutting down", name);
+        diag_end_why = g_strdup_printf ("signal %s", name);
+    g_message ("%s: shutting down", diag_end_why);
     g_free (comm);
+}
+
+/* main, when its loop has ended: the daemon's last word about why. A log
+ * whose last line is not this one ends with a daemon that was killed or
+ * crashed. */
+static void diag_end_line (gboolean restarting)
+{
+    const char *why = restarting ? "the reason is in a line above"
+                      : D.display_lost ? "the connection to the window system is gone"
+                      : diag_end_why ? diag_end_why
+                      : D.windowed ? "its window was closed" : "its main loop ended (a line above says why)";
+    g_message ("walpe-daemon %s (pid %d) %s after %.0f s: %s", WALPE_VERSION, (int) getpid (),
+               restarting ? "restarts in place" : "ends",
+               (double) (g_get_monotonic_time () - daemon_start_us) / 1e6, why);
 }
