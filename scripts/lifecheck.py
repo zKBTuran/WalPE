@@ -1656,131 +1656,135 @@ def case_webunload(env, W):
         time.sleep(1.0)
         return mark, bool(rep and rep.get("ok")) and up and ok and SAID not in env.since(mark) and "web=loaded" in modules()
 
-    displays("on")
-    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": True,
-                          "pause_fullscreen": True, "pause_fullscreen_all": True, "current": W["red"]})
-    if not check(env.start_daemon([A, B], extra={"WALPE_WEB_UNLOAD_GAP_S": "0", "WALPE_FAKE_DPMS": dpms}),
-                 "webunload (unseen): daemon started"):
-        return
-    pid = env.daemon.pid
-    mark, ok = page_leaves_unloaded()
-    check(ok, "webunload (unseen): the page left with the setting off: the module is loaded and unused", modules())
-    rep = env.ipc({"cmd": "set", "web_unload": True})
-    time.sleep(1.5)
-    check(bool(rep and rep.get("ok")) and SAID not in env.since(mark) and "web=loaded" in modules(),
-          "webunload (unseen): the setting on, the wallpapers in sight: no restart", env.since(mark)[-300:])
-    env.ipc({"cmd": "pause"})
-    wait_for(lambda: paused() == [True, True], 10, 0.1)
-    time.sleep(1.5)
-    check(paused() == [True, True] and SAID not in env.since(mark) and "web=loaded" in modules(),
-          "webunload (unseen): paused by hand - the pictures stay on screen: no restart", (paused(), env.since(mark)[-300:]))
-    env.ipc({"cmd": "resume"})
-    wait_for(lambda: paused() == [False, False], 10, 0.1)
-    # a fullscreen window with the focus pauses every monitor here (pause_fullscreen_all): no moment
-    # for it either - the restart would load every wallpaper beside the application in full screen
-    xc = None
-    if env.display.winsys == "x11":
-        try:
-            xc = XClient(env.env["DISPLAY"])
-        except OSError:
-            xc = None
-    if xc:
-        try:
-            win = xc.window(A[3], A[4], A[1], A[2])
-            xc.clients([win])
-            xc.fullscreen(win, True)
-            xc.focus(win)
-            ok = bool(wait_for(lambda: paused() == [True, True], 10, 0.1))
-            time.sleep(1.5)
-            check(ok and SAID not in env.since(mark) and "web=loaded" in modules(),
-                  "webunload (unseen): every monitor paused for a fullscreen window: no restart",
-                  (paused(), env.since(mark)[-300:]))
-            # nor with skip_hidden and a window over each monitor, not a pixel of a wallpaper in sight:
-            # those windows can go at any moment, and a monitor would be caught without its picture
-            win2 = xc.window(B[3], B[4], B[1], B[2])
-            xc.clients([win, win2])
-            env.ctl("set", "skip_hidden=auto")
-            hid = bool(wait_for(lambda: str(env.state().get("monitors_state")).count("visible 0%") == 2, 10, 0.2))
-            time.sleep(1.5)
-            if hid:
-                check(SAID not in env.since(mark) and "web=loaded" in modules(),
-                      "webunload (unseen): every monitor hidden behind windows (skip_hidden): no restart",
-                      (env.state().get("monitors_state"), env.since(mark)[-300:]))
-            else:
-                print("skip webunload (unseen): the monitors are not reported hidden here",
-                      env.state().get("monitors_state"), flush=True)
-            env.ctl("set", "skip_hidden=off")
-        finally:
-            xc.close()
-        wait_for(lambda: paused() == [False, False], 10, 0.1)
+    if env.display.winsys != "x11":
+        print("skip webunload (unseen): the displays are put to sleep through WALPE_FAKE_DPMS, which the "
+              "X11 backend reads: X11 only")
     else:
-        print("skip webunload (unseen): the fullscreen window (X11 with libX11 for ctypes only)")
-    displays("off")
-    check(bool(wait_for(lambda: UNSEEN in env.since(mark) and restarted(mark), 60, 0.3)),
-          "webunload (unseen): the displays sleep: the restart that was put off is carried out", env.since(mark)[-400:])
-    check(env.daemon.poll() is None and env.daemon.pid == pid and
-          bool(wait_for(lambda: "web=not loaded" in modules(), 20)),
-          "webunload (unseen): the same process, web=not loaded", modules())
-    check(bool(wait_for(lambda: paused() == [True, True], 40, 0.3)) and env.state().get("dpms_pause") is True,
-          "webunload (unseen): the new image is paused for the sleeping displays too", (paused(), env.state().get("dpms_pause")))
-    ms = env.monitors()
-    check([m.get("current") for m in ms] == [W["red"], W["blue"]] and not [m for m in ms if m.get("load_error")],
-          "webunload (unseen): every monitor has its wallpaper", rc.brief(ms))
-    c0, c1 = colour_is(env, A, lambda c: rc.name_of(c) == "red"), colour_is(env, B, lambda c: rc.name_of(c) == "blue")
-    check(rc.name_of(c0) == "red" and rc.name_of(c1) == "blue",
-          "webunload (unseen): their pictures are there for the moment the displays wake", (c0, c1))
-    displays("on")
-    check(bool(wait_for(lambda: paused() == [False, False], 40, 0.3)) and env.state().get("web_unload") is True,
-          "webunload (unseen): the displays wake: the wallpapers run, the setting was kept", paused())
-    c0, c1 = colour_is(env, A, lambda c: rc.name_of(c) == "red"), colour_is(env, B, lambda c: rc.name_of(c) == "blue")
-    check(rc.name_of(c0) == "red" and rc.name_of(c1) == "blue", "webunload (unseen): and on screen", (c0, c1))
-    # the setting off: never, also unseen; on again and in sight: at the next change of wallpapers, as before
-    mark, ok = page_leaves_unloaded()
-    check(ok, "webunload (unseen, off): the page left with the setting off", modules())
-    displays("off")
-    check(bool(wait_for(lambda: paused() == [True, True], 40, 0.3)), "webunload (unseen, off): the displays sleep",
-          paused())
-    time.sleep(2.0)
-    check(SAID not in env.since(mark) and "web=loaded" in modules() and env.daemon.poll() is None,
-          "webunload (unseen, off): no restart with the setting off", env.since(mark)[-300:])
-    displays("on")
-    wait_for(lambda: paused() == [False, False], 40, 0.3)
-    env.ipc({"cmd": "set", "web_unload": True})
-    time.sleep(1.5)
-    check(SAID not in env.since(mark) and "web=loaded" in modules(),
-          "webunload (unseen, off): switched on while the wallpapers are in sight: no restart", env.since(mark)[-300:])
-    env.open(W["red"], 1)
-    check(bool(wait_for(lambda: restarted(mark), 60, 0.3)) and UNSEEN not in env.since(mark) and
-          bool(wait_for(lambda: "web=not loaded" in modules(), 20)),
-          "webunload (unseen, off): the next change of wallpapers restarts, as before", env.since(mark)[-400:])
-    check(loaded(env, W["red"]), "webunload (unseen, off): the wallpaper of that change is shown", rc.brief(env.monitors()))
-    env.stop_daemon()
-
-    # the daemon's binary can no longer be executed (restart_begin): the restart that waited is not
-    # begun while the displays sleep either - the daemon runs on, and status says why
-    displays("on")
-    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": True,
-                          "current": W["red"]})
-    if check(env.start_daemon([A, B], extra={"WALPE_WEB_UNLOAD_GAP_S": "0", "WALPE_FAKE_DPMS": dpms,
-                                             "WALPE_RESTART_EXEC": "fail"}),
-             "webunload (unseen, no exec): daemon started"):
-        mark, ok = page_leaves_unloaded()
-        env.ipc({"cmd": "set", "web_unload": True})
-        displays("off")
-        slept = bool(wait_for(lambda: paused() == [True, True], 40, 0.3))
-        why = wait_for(lambda: env.state().get("restart_failed"), 10, 0.3)
-        time.sleep(1.5)
-        check(ok and slept and bool(why) and UNSEEN not in env.since(mark) and env.daemon.poll() is None and
-              "web=loaded" in modules(),
-              "webunload (unseen, no exec): the displays sleep: no restart is begun, status has restart_failed",
-              (ok, slept, why, env.since(mark)[-300:]))
         displays("on")
-        awake = bool(wait_for(lambda: paused() == [False, False], 40, 0.3))
-        c0 = colour_is(env, A, lambda c: rc.name_of(c) == "red")
-        c1 = colour_is(env, B, lambda c: rc.name_of(c) == "blue")
-        check(awake and rc.name_of(c0) == "red" and rc.name_of(c1) == "blue",
-              "webunload (unseen, no exec): the displays wake: the wallpapers are there and run", (paused(), c0, c1))
+        rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": True,
+                              "pause_fullscreen": True, "pause_fullscreen_all": True, "current": W["red"]})
+        if not check(env.start_daemon([A, B], extra={"WALPE_WEB_UNLOAD_GAP_S": "0", "WALPE_FAKE_DPMS": dpms}),
+                     "webunload (unseen): daemon started"):
+            return
+        pid = env.daemon.pid
+        mark, ok = page_leaves_unloaded()
+        check(ok, "webunload (unseen): the page left with the setting off: the module is loaded and unused", modules())
+        rep = env.ipc({"cmd": "set", "web_unload": True})
+        time.sleep(1.5)
+        check(bool(rep and rep.get("ok")) and SAID not in env.since(mark) and "web=loaded" in modules(),
+              "webunload (unseen): the setting on, the wallpapers in sight: no restart", env.since(mark)[-300:])
+        env.ipc({"cmd": "pause"})
+        wait_for(lambda: paused() == [True, True], 10, 0.1)
+        time.sleep(1.5)
+        check(paused() == [True, True] and SAID not in env.since(mark) and "web=loaded" in modules(),
+              "webunload (unseen): paused by hand - the pictures stay on screen: no restart", (paused(), env.since(mark)[-300:]))
+        env.ipc({"cmd": "resume"})
+        wait_for(lambda: paused() == [False, False], 10, 0.1)
+        # a fullscreen window with the focus pauses every monitor here (pause_fullscreen_all): no moment
+        # for it either - the restart would load every wallpaper beside the application in full screen
+        xc = None
+        if env.display.winsys == "x11":
+            try:
+                xc = XClient(env.env["DISPLAY"])
+            except OSError:
+                xc = None
+        if xc:
+            try:
+                win = xc.window(A[3], A[4], A[1], A[2])
+                xc.clients([win])
+                xc.fullscreen(win, True)
+                xc.focus(win)
+                ok = bool(wait_for(lambda: paused() == [True, True], 10, 0.1))
+                time.sleep(1.5)
+                check(ok and SAID not in env.since(mark) and "web=loaded" in modules(),
+                      "webunload (unseen): every monitor paused for a fullscreen window: no restart",
+                      (paused(), env.since(mark)[-300:]))
+                # nor with skip_hidden and a window over each monitor, not a pixel of a wallpaper in sight:
+                # those windows can go at any moment, and a monitor would be caught without its picture
+                win2 = xc.window(B[3], B[4], B[1], B[2])
+                xc.clients([win, win2])
+                env.ctl("set", "skip_hidden=auto")
+                hid = bool(wait_for(lambda: str(env.state().get("monitors_state")).count("visible 0%") == 2, 10, 0.2))
+                time.sleep(1.5)
+                if hid:
+                    check(SAID not in env.since(mark) and "web=loaded" in modules(),
+                          "webunload (unseen): every monitor hidden behind windows (skip_hidden): no restart",
+                          (env.state().get("monitors_state"), env.since(mark)[-300:]))
+                else:
+                    print("skip webunload (unseen): the monitors are not reported hidden here",
+                          env.state().get("monitors_state"), flush=True)
+                env.ctl("set", "skip_hidden=off")
+            finally:
+                xc.close()
+            wait_for(lambda: paused() == [False, False], 10, 0.1)
+        else:
+            print("skip webunload (unseen): the fullscreen window (X11 with libX11 for ctypes only)")
+        displays("off")
+        check(bool(wait_for(lambda: UNSEEN in env.since(mark) and restarted(mark), 60, 0.3)),
+              "webunload (unseen): the displays sleep: the restart that was put off is carried out", env.since(mark)[-400:])
+        check(env.daemon.poll() is None and env.daemon.pid == pid and
+              bool(wait_for(lambda: "web=not loaded" in modules(), 20)),
+              "webunload (unseen): the same process, web=not loaded", modules())
+        check(bool(wait_for(lambda: paused() == [True, True], 40, 0.3)) and env.state().get("dpms_pause") is True,
+              "webunload (unseen): the new image is paused for the sleeping displays too", (paused(), env.state().get("dpms_pause")))
+        ms = env.monitors()
+        check([m.get("current") for m in ms] == [W["red"], W["blue"]] and not [m for m in ms if m.get("load_error")],
+              "webunload (unseen): every monitor has its wallpaper", rc.brief(ms))
+        c0, c1 = colour_is(env, A, lambda c: rc.name_of(c) == "red"), colour_is(env, B, lambda c: rc.name_of(c) == "blue")
+        check(rc.name_of(c0) == "red" and rc.name_of(c1) == "blue",
+              "webunload (unseen): their pictures are there for the moment the displays wake", (c0, c1))
+        displays("on")
+        check(bool(wait_for(lambda: paused() == [False, False], 40, 0.3)) and env.state().get("web_unload") is True,
+              "webunload (unseen): the displays wake: the wallpapers run, the setting was kept", paused())
+        c0, c1 = colour_is(env, A, lambda c: rc.name_of(c) == "red"), colour_is(env, B, lambda c: rc.name_of(c) == "blue")
+        check(rc.name_of(c0) == "red" and rc.name_of(c1) == "blue", "webunload (unseen): and on screen", (c0, c1))
+        # the setting off: never, also unseen; on again and in sight: at the next change of wallpapers, as before
+        mark, ok = page_leaves_unloaded()
+        check(ok, "webunload (unseen, off): the page left with the setting off", modules())
+        displays("off")
+        check(bool(wait_for(lambda: paused() == [True, True], 40, 0.3)), "webunload (unseen, off): the displays sleep",
+              paused())
+        time.sleep(2.0)
+        check(SAID not in env.since(mark) and "web=loaded" in modules() and env.daemon.poll() is None,
+              "webunload (unseen, off): no restart with the setting off", env.since(mark)[-300:])
+        displays("on")
+        wait_for(lambda: paused() == [False, False], 40, 0.3)
+        env.ipc({"cmd": "set", "web_unload": True})
+        time.sleep(1.5)
+        check(SAID not in env.since(mark) and "web=loaded" in modules(),
+              "webunload (unseen, off): switched on while the wallpapers are in sight: no restart", env.since(mark)[-300:])
+        env.open(W["red"], 1)
+        check(bool(wait_for(lambda: restarted(mark), 60, 0.3)) and UNSEEN not in env.since(mark) and
+              bool(wait_for(lambda: "web=not loaded" in modules(), 20)),
+              "webunload (unseen, off): the next change of wallpapers restarts, as before", env.since(mark)[-400:])
+        check(loaded(env, W["red"]), "webunload (unseen, off): the wallpaper of that change is shown", rc.brief(env.monitors()))
         env.stop_daemon()
+
+        # the daemon's binary can no longer be executed (restart_begin): the restart that waited is not
+        # begun while the displays sleep either - the daemon runs on, and status says why
+        displays("on")
+        rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": True,
+                              "current": W["red"]})
+        if check(env.start_daemon([A, B], extra={"WALPE_WEB_UNLOAD_GAP_S": "0", "WALPE_FAKE_DPMS": dpms,
+                                                 "WALPE_RESTART_EXEC": "fail"}),
+                 "webunload (unseen, no exec): daemon started"):
+            mark, ok = page_leaves_unloaded()
+            env.ipc({"cmd": "set", "web_unload": True})
+            displays("off")
+            slept = bool(wait_for(lambda: paused() == [True, True], 40, 0.3))
+            why = wait_for(lambda: env.state().get("restart_failed"), 10, 0.3)
+            time.sleep(1.5)
+            check(ok and slept and bool(why) and UNSEEN not in env.since(mark) and env.daemon.poll() is None and
+                  "web=loaded" in modules(),
+                  "webunload (unseen, no exec): the displays sleep: no restart is begun, status has restart_failed",
+                  (ok, slept, why, env.since(mark)[-300:]))
+            displays("on")
+            awake = bool(wait_for(lambda: paused() == [False, False], 40, 0.3))
+            c0 = colour_is(env, A, lambda c: rc.name_of(c) == "red")
+            c1 = colour_is(env, B, lambda c: rc.name_of(c) == "blue")
+            check(awake and rc.name_of(c0) == "red" and rc.name_of(c1) == "blue",
+                  "webunload (unseen, no exec): the displays wake: the wallpapers are there and run", (paused(), c0, c1))
+            env.stop_daemon()
 
     # ---- 4. the settings cannot be saved (a full disk, a read-only home): the image after a
     # restart would read the wallpapers of before the change and bring the page back
