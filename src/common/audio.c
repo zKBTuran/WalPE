@@ -418,6 +418,7 @@ typedef struct {
                              * and it may be read: samples are analysed */
     gboolean restart;       /* make the stream again (another default output,
                              * or its output is gone): no error */
+    gboolean ended;         /* ... because the server ended it */
     char *source;           /* the source the stream reads */
     char *sink;             /* the output it is the monitor of */
     char *def_sink;         /* the default output, as far as known */
@@ -563,7 +564,7 @@ static void cap_stream_state (pa_stream *st, void *user)
             g_message ("audio: the stream on %s was ended by the server (%s): connecting again",
                        c->source ? c->source : "?", pa_strerror (pa_context_errno (pa_stream_get_context (st))));
             c->checked = FALSE;
-            c->restart = TRUE;
+            c->restart = c->ended = TRUE;
         } else {
             cap_fail (c, "stream", pa_stream_get_context (st));
         }
@@ -600,8 +601,9 @@ static void cap_read (pa_stream *st, size_t nbytes, void *user)
     }
 }
 
-/* a stream that is made again and again (a server that ends it each time)
- * is an error like any other: so many times in a row without a wait */
+/* a stream that is made again and again (a server that ends it each time
+ * within a second) is an error like any other: so many times in a row
+ * without a wait */
 #define CAP_RESTARTS 3
 
 static gpointer capture_thread (gpointer data)
@@ -731,7 +733,7 @@ static gpointer capture_thread (gpointer data)
                 g_warning ("audio: capture lost: %s", cap.why ? cap.why : "?");
                 set_status ("error: %s", cap.why ? cap.why : "?");
             }
-            if (g_get_monotonic_time () - since > 10 * G_TIME_SPAN_SECOND)
+            if (g_get_monotonic_time () - since > G_TIME_SPAN_SECOND)
                 restarts = 0;
         }
         g_mutex_lock (&lock);
@@ -757,7 +759,9 @@ static gpointer capture_thread (gpointer data)
         g_free (cap.source);
         g_free (cap.sink);
         g_free (cap.def_sink);
-        if (restart && ++restarts > CAP_RESTARTS) {
+        /* (a stream made again because the user chose another output is
+         * not one the server ended: any number of those) */
+        if (restart && cap.ended && ++restarts > CAP_RESTARTS) {
             g_warning ("audio: the capture stream was made %d times in a row and ended each time: "
                        "waiting 5 s", restarts);
             set_status ("error: %s: the server ends the stream again and again", dev);
