@@ -614,8 +614,13 @@ static void hook_env (APic *ap)
 {
     GtkWidget *w = GTK_WIDGET (ap->pic);
     GtkRoot *root = gtk_widget_get_root (w);
-    if (root && GTK_IS_WINDOW (root))
+    if (root && GTK_IS_WINDOW (root)) {
         hook_object (root, "notify::is-active", G_CALLBACK (on_notify_kick));
+        /* ... and what the display says about the window itself (pic_can_play) */
+        GdkSurface *sf = gtk_native_get_surface (GTK_NATIVE (root));
+        if (sf && GDK_IS_TOPLEVEL (sf))
+            hook_object (sf, "notify::state", G_CALLBACK (on_notify_kick));
+    }
     GtkWidget *sw = gtk_widget_get_ancestor (w, GTK_TYPE_SCROLLED_WINDOW);
     if (sw) {
         hook_object (gtk_scrolled_window_get_vadjustment (GTK_SCROLLED_WINDOW (sw)),
@@ -623,6 +628,28 @@ static void hook_env (APic *ap)
         hook_object (gtk_scrolled_window_get_hadjustment (GTK_SCROLLED_WINDOW (sw)),
                      "value-changed", G_CALLBACK (on_any_kick));
     }
+}
+
+/* The window is not on screen although GTK still counts its widgets as
+ * mapped: a window manager took it off the display itself (another
+ * workspace, an icon), or a compositor says it cannot be seen. The focus
+ * need not have moved for that - a workspace without windows, a session
+ * without a window manager - and the previews of a window nobody sees went
+ * on playing: the 50 ms timer for as long as the window stayed hidden, with
+ * the decoded frames (up to the whole budget) held all that time. */
+static gboolean thumbs_state_hidden (GdkToplevelState st)
+{
+    GdkToplevelState hidden = GDK_TOPLEVEL_STATE_MINIMIZED;
+#if GTK_CHECK_VERSION (4, 12, 0)
+    hidden |= GDK_TOPLEVEL_STATE_SUSPENDED;
+#endif
+    return (st & hidden) != 0;
+}
+
+static gboolean thumbs_toplevel_hidden (GdkSurface *sf)
+{
+    return sf && GDK_IS_TOPLEVEL (sf) &&
+           thumbs_state_hidden (gdk_toplevel_get_state (GDK_TOPLEVEL (sf)));
 }
 
 static gboolean pic_can_play (APic *ap)
@@ -635,6 +662,8 @@ static gboolean pic_can_play (APic *ap)
     GtkRoot *root = gtk_widget_get_root (w);
     if (!root || !GTK_IS_WINDOW (root) || !gtk_window_is_active (GTK_WINDOW (root)))
         return FALSE;       /* minimised, or another window has the focus */
+    if (thumbs_toplevel_hidden (gtk_native_get_surface (GTK_NATIVE (root))))
+        return FALSE;       /* not on screen, whatever the focus says */
     if (anim_mode == WALPE_PREVIEW_HOVER && !ap->hover)
         return FALSE;
     GtkWidget *sw = gtk_widget_get_ancestor (w, GTK_TYPE_SCROLLED_WINDOW);

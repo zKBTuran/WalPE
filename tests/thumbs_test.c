@@ -130,6 +130,18 @@ static Job *anim_job (const char *path, int w, int h, ThumbMode mode)
 int main (void)
 {
     int n = 0, w = 0, h = 0;
+    /* a window that is not on screen plays no preview, wherever the focus
+     * is: minimised (what an X window unmapped by its window manager is
+     * to GDK), suspended (a compositor's "cannot be seen") */
+    CHECK (thumbs_state_hidden (GDK_TOPLEVEL_STATE_MINIMIZED));
+    CHECK (thumbs_state_hidden (GDK_TOPLEVEL_STATE_MINIMIZED | GDK_TOPLEVEL_STATE_FOCUSED));
+#if GTK_CHECK_VERSION (4, 12, 0)
+    CHECK (thumbs_state_hidden (GDK_TOPLEVEL_STATE_SUSPENDED | GDK_TOPLEVEL_STATE_FOCUSED));
+#endif
+    CHECK (!thumbs_state_hidden (0));
+    CHECK (!thumbs_state_hidden (GDK_TOPLEVEL_STATE_FOCUSED | GDK_TOPLEVEL_STATE_MAXIMIZED |
+                                 GDK_TOPLEVEL_STATE_FULLSCREEN | GDK_TOPLEVEL_STATE_TILED));
+    CHECK (!thumbs_toplevel_hidden (NULL));
     int *d = gif_frame_delays (test_gif, sizeof (test_gif), &n, &w, &h);
     CHECK (d && n == 5 && w == 8 && h == 6);
     /* gdk-pixbuf's rule for the third frame: under 20 ms plays as 20 */
