@@ -199,7 +199,7 @@ static int gpustat_main (int argc, char **argv)
         json_generator_set_pretty (g, TRUE);
         json_generator_set_indent (g, 1);
         char *txt = json_generator_to_data (g, NULL);
-        g_print ("%s\n", txt);
+        print_json (txt);
         g_free (txt);
         g_object_unref (g);
         json_node_unref (root);
@@ -212,7 +212,7 @@ static int gpustat_main (int argc, char **argv)
         g_string_append (t, "GPU: ");
         walpe_gpu_stat_format_device (r, t);
         if (gl_renderer && *gl_renderer && !r->name[0])
-            g_string_append_printf (t, " | GL: %s", gl_renderer);
+            g_string_append_printf (t, " | GL: %s", tt (gl_renderer));
         if (software)
             g_string_append (t, " | the daemon renders on the CPU (software rendering): the GPU's "
                              "figures are not its");

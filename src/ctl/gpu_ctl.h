@@ -136,7 +136,7 @@ static int gpu_ctl_main (int argc, char **argv)
         JsonNode *root = json_builder_get_root (b);
         json_generator_set_root (g, root);
         char *txt = json_generator_to_data (g, NULL);
-        g_print ("%s\n", txt);
+        print_json (txt);
         g_free (txt);
         json_node_unref (root);
         g_object_unref (g);
@@ -160,27 +160,28 @@ static int gpu_ctl_main (int argc, char **argv)
                      "starts\n");
         } else if (!has_gpu) {
             g_print ("rendering now: %s (this daemon is older than the gpu setting)\n",
-                     wpj_str (st, "gl_renderer", "?"));
+                     tt (wpj_str (st, "gl_renderer", "?")));
         } else if (use && wpj_bool (use, "software", FALSE)) {
-            g_print ("rendering now: on the CPU (%s)\n", wpj_str (st, "gl_renderer", "software renderer"));
+            g_print ("rendering now: on the CPU (%s)\n",
+                     tt (wpj_str (st, "gl_renderer", "software renderer")));
         } else if (use) {
-            const char *pci = wpj_str (use, "pci", NULL);
-            g_print ("rendering now: %s%s%s, %s, driver %s%s\n", wpj_str (use, "name", "?"),
-                     pci ? " at " : "", pci ? pci : "", wpj_str (use, "class", "?"),
-                     wpj_str (use, "driver", "?"),
+            const char *pci = tt (wpj_str (use, "pci", NULL));
+            g_print ("rendering now: %s%s%s, %s, driver %s%s\n", tt (wpj_str (use, "name", "?")),
+                     pci ? " at " : "", pci ? pci : "", tt (wpj_str (use, "class", "?")),
+                     tt (wpj_str (use, "driver", "?")),
                      wpj_bool (st, "gpu_offload", FALSE) ? " (frames are copied to the display GPU)"
                                                          : "");
             if (json_object_has_member (st, "gl_renderer"))
-                g_print ("               OpenGL: %s (%s)\n", wpj_str (st, "gl_renderer", "?"),
-                         wpj_str (st, "gl_driver", "?"));
+                g_print ("               OpenGL: %s (%s)\n", tt (wpj_str (st, "gl_renderer", "?")),
+                         tt (wpj_str (st, "gl_driver", "?")));
         } else {
             g_print ("rendering now: %s (the device could not be told)\n",
-                     wpj_str (st, "gl_renderer", "?"));
+                     tt (wpj_str (st, "gl_renderer", "?")));
         }
         if (has_gpu && json_object_has_member (st, "gpu_note"))
-            g_print ("note: %s\n", wpj_str (st, "gpu_note", ""));
+            g_print ("note: %s\n", tt (wpj_str (st, "gpu_note", "")));
         if (has_gpu && json_object_has_member (st, "gl_error"))
-            g_print ("ERROR: %s\n", wpj_str (st, "gl_error", ""));
+            g_print ("ERROR: %s\n", tt (wpj_str (st, "gl_error", "")));
         static const char *const words[] = { "auto", "integrated", "discrete" };
         g_print ("what the values mean here:\n");
         for (guint i = 0; i < G_N_ELEMENTS (words); i++) {

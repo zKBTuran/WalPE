@@ -13,7 +13,9 @@
  *     and what walpe-ctl writes to the terminal when the replies carry
  *     control characters (a Workshop title, layer names of a scene, the
  *     file names of a memory report): none of them, whether it prints
- *     text or the reply itself;
+ *     text or the reply itself; and when they carry letters that are not
+ *     ASCII (a title, a path, a layer name): those are written as they
+ *     came, byte for byte, in the "C" locale and in a UTF-8 one;
  *  3. common/setkeys.h: an unknown member or a value of the wrong type
  *     refuses the whole request, and every member the daemon's ipc_set ()
  *     reads is in the table (read from the source file). */
@@ -45,6 +47,7 @@ static char *last_props_req;   /* the last "props" a setprop asked */
 static int props_asked;
 
 static char *last_out;     /* what the last walpe-ctl run wrote to stdout */
+static const char *ctl_locale;  /* set: run_ctl () starts walpe-ctl with this LANG / LC_ALL */
 
 /* run walpe-ctl with the arguments (NULL-terminated); *err_out = its stderr */
 static int run_ctl (char **err_out, ...)
@@ -60,11 +63,19 @@ static int run_ctl (char **err_out, ...)
     char *out = NULL, *err = NULL;
     int status = -1;
     GError *e = NULL;
-    if (!g_spawn_sync (NULL, (char **) av->pdata, NULL, G_SPAWN_DEFAULT, NULL, NULL, &out, &err, &status,
+    char **envp = NULL;
+    if (ctl_locale) {
+        envp = g_get_environ ();
+        envp = g_environ_unsetenv (envp, "LANGUAGE");
+        envp = g_environ_setenv (envp, "LANG", ctl_locale, TRUE);
+        envp = g_environ_setenv (envp, "LC_ALL", ctl_locale, TRUE);
+    }
+    if (!g_spawn_sync (NULL, (char **) av->pdata, envp, G_SPAWN_DEFAULT, NULL, NULL, &out, &err, &status,
                        &e)) {
         g_printerr ("spawn: %s\n", e->message);
         g_clear_error (&e);
     }
+    g_strfreev (envp);
     g_ptr_array_free (av, TRUE);
     if (ctl_stdout) {       /* the caller asked for this run's output: its own copy */
         *ctl_stdout = g_strdup (out);
@@ -149,7 +160,36 @@ static const char hostile_mem[] =
     "\"role\":\"own\",\"note\":\"note" E "[7m\"}]}}";
 /* (DEL, U+009B and 0x1F as they are: what the daemon's JSON writer leaves alone) */
 static const char hostile_raw[] = "{\"ok\":true,\"title\":\"a\x7f" "b\xc2\x9b" "1m\x1f" "c" E "[2J\"}";
+/* the names of outputs and what the daemon says about them */
+static const char hostile_resolution[] =
+    "{\"ok\":true,\"monitors\":[{\"index\":0,\"name\":\"DP" E "]0;x\\u0007\",\"connected\":true,\"mode\":[8,8],"
+    "\"render_size\":[8,8],\"refresh\":60,\"resolution\":\"native" E "c\",\"texture_limit\":\"none\\u009b1m\","
+    "\"asked\":true,\"note\":\"note" E "[7m\"},"
+    "{\"index\":1,\"name\":\"HDMI\\u009b2J\",\"connected\":false,\"resolution\":\"r" E "\","
+    "\"texture_limit\":\"t\\u007f\"}],"
+    "\"video_resolution\":\"auto" E "\",\"scale_filter\":\"bi\\u007f\",\"note\":\"n" E "[2J\","
+    "\"raw\":\"a\x7f" "b\xc2\x9b" "1m\x1f" "c\"}";
 #undef E
+
+/* Replies whose texts have letters that are not ASCII (hostile_text == 2):
+ * two-, three- and four-byte characters, as UTF-8 and - in one place - as
+ * JSON's own escape. */
+#define U_DIR "/lib/Hintergr\xc3\xbcnde/\xc3\x9cn\xc3\xaf \xe6\x96\x87\xe4\xbb\xb6 \xf0\x9f\x8e\xac"
+#define U_TITLE "T\xc3\xaftle \xe6\x96\x87\xe5\xad\x97 \xf0\x9f\x8e\xac"
+#define U_LAYER "Gr\xc3\xb6\xc3\x9f" "e \xc3\xbcn\xc3\xaf \xe6\x96\x87\xe4\xbb\xb6"
+static const char utf8_status[] =
+    "{\"ok\":true,\"state\":{\"install_active\":false,\"install_dir\":\"" U_DIR "\",\"install_title\":\"" U_TITLE "\","
+    "\"monitors\":[{\"index\":0,\"name\":\"DP-1\",\"current\":\"" U_DIR "\",\"title\":\"" U_TITLE "\"}]}}";
+static const char utf8_layers[] =
+    "{\"ok\":true,\"scene\":true,\"running\":true,\"fresh\":true,\"path\":\"" U_DIR "\",\"size\":[1920,1080],"
+    "\"layers\":[{\"key\":\"1:" U_LAYER "\",\"type\":\"image\",\"shown\":true,\"pos\":[1,2],\"size\":[3,4],"
+    "\"parent\":-1,\"file\":\"models/" U_LAYER ".json\"},"
+    "{\"key\":\"2:\\u00fcber\",\"type\":\"text\",\"shown\":true,\"parent\":0,"
+    "\"text\":\"h\xc3\xa9llo \xe4\xb8\x96\xe7\x95\x8c\"}]}";
+static const char utf8_mem[] =
+    "{\"ok\":true,\"mem\":{\"version\":\"v\",\"time\":\"t\",\"uptime_s\":61,\"process\":{\"pid\":7},"
+    "\"modules\":{\"video\":{\"loaded\":true,\"loaded_after_s\":1,\"uses\":1,"
+    "\"loaded_for\":\"a video wallpaper was opened: " U_DIR ".mp4\"}}}}";
 
 /* the stand-in daemon: remembers the request; "quality" and "setprops"
  * are commands it does not have */
@@ -178,9 +218,22 @@ static char *handler (const char *req, gpointer user)
     g_free (last_req);
     last_req = g_strdup (req);
     g_mutex_unlock (&lock);
+    if (g_atomic_int_get (&hostile_text) == 2) {
+        if (strstr (req, "\"cmd\":\"status\""))
+            return g_strdup (utf8_status);
+        if (strstr (req, "\"cmd\":\"layers\""))
+            return g_strdup (utf8_layers);
+        if (strstr (req, "\"cmd\":\"mem\""))
+            return g_strdup (utf8_mem);
+        if (strstr (req, "\"cmd\":\"layeradj\""))
+            return g_strdup ("{\"ok\":false,\"error\":\"no layer \xe2\x80\x9c" U_LAYER "\xe2\x80\x9d\"}");
+        return g_strdup ("{\"ok\":true}");
+    }
     if (g_atomic_int_get (&hostile_text)) {
         if (strstr (req, "\"cmd\":\"status\""))
             return g_strdup (hostile_status);
+        if (strstr (req, "\"cmd\":\"resolution\""))
+            return g_strdup (hostile_resolution);
         if (strstr (req, "\"cmd\":\"quality\""))
             return g_strdup (hostile_quality);
         if (strstr (req, "\"cmd\":\"profile_result\""))
@@ -625,6 +678,79 @@ static gpointer client_thread (gpointer u)
         g_free (fa);
         g_free (fb);
     }
+    /* the names of outputs and the daemon's notes in `resolution`, as a
+     * table and as the reply itself */
+    CHECK (run_ctl (&err, "resolution", NULL) == 0);
+    CHECK (last_out && strstr (last_out, "DP\\x1b]0;x\\x07") && strstr (last_out, "HDMI\\x9b2J") &&
+           strstr (last_out, "none\\x9b1m") && strstr (last_out, "note\\x1b[7m") && strstr (last_out, "bi\\x7f") &&
+           strstr (last_out, "note: n\\x1b[2J"));
+    CHECK (terminal_safe (last_out) && terminal_safe (err));
+    g_clear_pointer (&err, g_free);
+    CHECK (run_ctl (&err, "resolution", "--json", NULL) == 0);
+    CHECK (last_out && strstr (last_out, "HDMI\\u009b2J") && strstr (last_out, "bi\\u007f") &&
+           strstr (last_out, "a\\u007fb\\u009b1m\\u001fc") && terminal_safe (last_out) && terminal_safe (err));
+    g_clear_pointer (&err, g_free);
+    g_atomic_int_set (&hostile_text, 0);
+
+    /* Replies whose texts have letters that are not ASCII: a path, a title,
+     * layer names. They are written as they came - walpe-ctl put a "?" for
+     * every such character, in every locale (it never asked for one, and
+     * g_print () converts to the locale's character set): the path in
+     * `walpe-ctl status` named no file. In the "C" locale and in a UTF-8
+     * one alike: what a script reads must not depend on LANG. */
+    g_atomic_int_set (&hostile_text, 2);
+    static const char *const locales[] = { "C", "C.UTF-8" };
+    char *help0 = NULL;
+    for (guint li = 0; li < G_N_ELEMENTS (locales); li++) {
+        ctl_locale = locales[li];
+        err = NULL;
+        /* the reply itself: the same bytes and a line feed */
+        CHECK (run_ctl (&err, "status", NULL) == 0);
+        {
+            char *want = g_strconcat (utf8_status, "\n", NULL);
+            CHECK (last_out && !strcmp (last_out, want));
+            g_free (want);
+        }
+        CHECK (err && !*err);
+        g_clear_pointer (&err, g_free);
+        CHECK (run_ctl (&err, "layers", "--json", NULL) == 0);
+        {
+            char *want = g_strconcat (utf8_layers, "\n", NULL);
+            CHECK (last_out && !strcmp (last_out, want));
+            g_free (want);
+        }
+        g_clear_pointer (&err, g_free);
+        /* texts taken out of a reply */
+        CHECK (run_ctl (&err, "install", "1", NULL) == 0);
+        CHECK (last_out && strstr (last_out, "installed: " U_DIR " (" U_TITLE ")\n"));
+        g_clear_pointer (&err, g_free);
+        CHECK (run_ctl (&err, "layers", NULL) == 0);
+        CHECK (last_out && g_str_has_prefix (last_out, U_DIR "\nscene 1920 x 1080, 2 layers") &&
+               strstr (last_out, "\n1:" U_LAYER " ") && strstr (last_out, "    file models/" U_LAYER ".json\n") &&
+               strstr (last_out, "\n2:\xc3\xbc" "ber ") &&
+               strstr (last_out, "    text \"h\xc3\xa9llo \xe4\xb8\x96\xe7\x95\x8c\"\n"));
+        CHECK (last_out && !strchr (last_out, '?'));
+        g_clear_pointer (&err, g_free);
+        CHECK (run_ctl (&err, "mem", NULL) == 0);
+        CHECK (last_out && strstr (last_out, "(a video wallpaper was opened: " U_DIR ".mp4)"));
+        g_clear_pointer (&err, g_free);
+        /* ... and on stderr: what the daemon says, and a word of the user's own */
+        CHECK (run_ctl (&err, "layers", "hide", "k", NULL) != 0);
+        CHECK (err && !strcmp (err, "no layer \xe2\x80\x9c" U_LAYER "\xe2\x80\x9d\n"));
+        g_clear_pointer (&err, g_free);
+        CHECK (run_ctl (&err, "resolution", "--prompt", "vielleicht \xc3\xbc", NULL) == 1);
+        CHECK (err && !strcmp (err, "resolution: --prompt needs on or off, not 'vielleicht \xc3\xbc'\n"));
+        g_clear_pointer (&err, g_free);
+        /* walpe-ctl's own text is the same in both */
+        CHECK (run_ctl (NULL, "help", NULL) == 0);
+        CHECK (last_out && strstr (last_out, "usage:") && g_str_is_ascii (last_out));
+        if (!help0)
+            help0 = g_strdup (last_out);
+        else
+            CHECK (last_out && !strcmp (last_out, help0));
+    }
+    g_free (help0);
+    ctl_locale = NULL;
     g_atomic_int_set (&hostile_text, 0);
 
     g_main_loop_quit (loop);

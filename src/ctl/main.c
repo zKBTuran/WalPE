@@ -402,6 +402,47 @@ static gboolean target_arg (int argc, char **argv, int *i, GString *out)
     return TRUE;
 }
 
+/* What walpe-ctl writes is written as it is. g_print () turns its text into
+ * the character set of the locale, and a program that never calls
+ * setlocale () is in the "C" locale whatever the terminal is: every
+ * character that is not ASCII came out as "?". `walpe-ctl status` named
+ * ".../Hintergr?nde/..." where the wallpaper is in ".../Hintergründe/..." -
+ * JSON that scripts read, with a path that names no file - and so did a
+ * title, a layer name, a file in the memory report. What the daemon sends
+ * is UTF-8; nothing is converted any more, in any locale (setlocale ()
+ * would only have made the answer depend on LANG, and on the locale's
+ * decimal point with it). walpe-ctl's own sentences are ASCII.
+ * Control characters are not taken care of here: tt () and print_json ()
+ * below do that, before the text gets this far. A text that is not UTF-8
+ * goes the way it always went (GLib writes it with those bytes made
+ * visible). Each call is flushed, as g_print () does it. */
+static void out_as_it_is (const gchar *s);
+static void err_as_it_is (const gchar *s);
+
+static void out_as_it_is (const gchar *s)
+{
+    if (g_utf8_validate (s, -1, NULL)) {
+        fputs (s, stdout);
+        fflush (stdout);
+    } else {
+        g_set_print_handler (NULL);
+        g_print ("%s", s);
+        g_set_print_handler (out_as_it_is);
+    }
+}
+
+static void err_as_it_is (const gchar *s)
+{
+    if (g_utf8_validate (s, -1, NULL)) {
+        fputs (s, stderr);
+        fflush (stderr);
+    } else {
+        g_set_printerr_handler (NULL);
+        g_printerr ("%s", s);
+        g_set_printerr_handler (err_as_it_is);
+    }
+}
+
 /* Text in a reply is in part a stranger's: the title of a Workshop item,
  * the layer and effect names of a scene, a line steamcmd printed. A
  * terminal obeys the control characters in what is written to it (an
@@ -973,10 +1014,10 @@ static int backend_show (void)
         rc = so ? 0 : 3;
     } else {
         g_print ("backend: %s\n  chosen: %s\n  setting: %s (from: %s)\n  built into this daemon: %s\n",
-                 wpj_str (so, "display_backend", "?"), wpj_str (so, "display_backend_why", "?"),
-                 wpj_str (so, "display_backend_setting", "auto"),
-                 wpj_str (so, "display_backend_source", "default"),
-                 wpj_str (so, "display_backends_built", "?"));
+                 tt (wpj_str (so, "display_backend", "?")), tt (wpj_str (so, "display_backend_why", "?")),
+                 tt (wpj_str (so, "display_backend_setting", "auto")),
+                 tt (wpj_str (so, "display_backend_source", "default")),
+                 tt (wpj_str (so, "display_backends_built", "?")));
         JsonObject *ps = wpj_obj (so, "pause_signals");
         static const char *const sig[][2] = {
             { "fullscreen", "a fullscreen window has the focus (fs)" },
@@ -989,8 +1030,8 @@ static int backend_show (void)
         g_print ("  what can pause a wallpaper here, and who reports it:\n");
         for (guint i = 0; ps && i < G_N_ELEMENTS (sig); i++) {
             JsonObject *one = wpj_obj (ps, sig[i][0]);
-            const char *from = one ? wpj_str (one, "from", "") : "";
-            const char *miss = one ? wpj_str (one, "missing", "") : "";
+            const char *from = one ? tt (wpj_str (one, "from", "")) : "";
+            const char *miss = one ? tt (wpj_str (one, "missing", "")) : "";
             g_print ("    %-52s %s%s%s%s\n", sig[i][1], *from ? from : "nobody in this session",
                      *miss ? "  (not available: " : "", miss, *miss ? ")" : "");
         }
@@ -1014,9 +1055,9 @@ static void resolution_print (JsonObject *r)
         if (!m)
             continue;
         if (!wpj_bool (m, "connected", TRUE)) {
-            g_print ("%-4s %-14s %-20s %-11s %-12s %-7s %-13s %s\n", "-", wpj_str (m, "name", "?"),
-                     "(not connected)", wpj_str (m, "resolution", "?"), "", "",
-                     wpj_str (m, "texture_limit", "?"), wpj_bool (m, "asked", FALSE) ? "yes" : "no");
+            g_print ("%-4s %-14s %-20s %-11s %-12s %-7s %-13s %s\n", "-", tt (wpj_str (m, "name", "?")),
+                     "(not connected)", tt (wpj_str (m, "resolution", "?")), "", "",
+                     tt (wpj_str (m, "texture_limit", "?")), wpj_bool (m, "asked", FALSE) ? "yes" : "no");
             continue;
         }
         double mw = 0, mh = 0, rw = 0, rh = 0;
@@ -1028,22 +1069,22 @@ static void resolution_print (JsonObject *r)
         g_snprintf (hz, sizeof (hz), "%.1f", wpj_num (m, "refresh", 0));
         g_snprintf (pct, sizeof (pct), "%.0f %%", wpj_num (m, "render_percent", 100));
         g_snprintf (idx, sizeof (idx), "%.0f", wpj_num (m, "index", 0));
-        g_print ("%-4s %-14s %-12s %-7s %-11s %-12s %-7s %-13s %s\n", idx, wpj_str (m, "name", "?"),
-                 mode, hz, wpj_str (m, "resolution", "?"), rend, pct,
-                 wpj_str (m, "texture_limit", "?"),
+        g_print ("%-4s %-14s %-12s %-7s %-11s %-12s %-7s %-13s %s\n", idx, tt (wpj_str (m, "name", "?")),
+                 mode, hz, tt (wpj_str (m, "resolution", "?")), rend, pct,
+                 tt (wpj_str (m, "texture_limit", "?")),
                  wpj_bool (m, "asked", FALSE) ? "yes" : "not yet");
         if (json_object_has_member (m, "note"))
-            g_print ("     %s\n", wpj_str (m, "note", ""));
+            g_print ("     %s\n", tt (wpj_str (m, "note", "")));
     }
     double bw = 0, bh = 0;
     wpj_num2 (r, "video_box", &bw, &bh);
     if (bw > 0 && bh > 0)
         g_print ("videos: imported and converted at up to %.0fx%.0f (video_resolution %s)\n", bw, bh,
-                 wpj_str (r, "video_resolution", "auto"));
+                 tt (wpj_str (r, "video_resolution", "auto")));
     else
         g_print ("videos: imported and converted at their own size (video_resolution %s)\n",
-                 wpj_str (r, "video_resolution", "none"));
-    g_print ("scaling to the monitor: %s (scale_filter)\n", wpj_str (r, "scale_filter", "bilinear"));
+                 tt (wpj_str (r, "video_resolution", "none")));
+    g_print ("scaling to the monitor: %s (scale_filter)\n", tt (wpj_str (r, "scale_filter", "bilinear")));
     if (wpj_bool (r, "env", FALSE))
         g_print ("WALPE_RESOLUTION in the daemon's environment decides the sizes while it is set\n");
     int un = (int) wpj_num (r, "unasked", 0);
@@ -1054,7 +1095,7 @@ static void resolution_print (JsonObject *r)
                  wpj_bool (r, "prompt", TRUE) ? " (the WalPE window asks about them once; "
                                                 "`walpe --resolution` opens that dialog)" : "");
     if (json_object_has_member (r, "note"))
-        g_print ("note: %s\n", wpj_str (r, "note", ""));
+        g_print ("note: %s\n", tt (wpj_str (r, "note", "")));
 }
 
 /* <monitor> as a request member: an index, "all", or an output name */
@@ -1187,7 +1228,7 @@ static int resolution_cmd (int argc, char **argv)
         JsonObject *ro = rn && JSON_NODE_HOLDS_OBJECT (rn) ? json_node_get_object (rn) : NULL;
         gboolean ok = ro && wpj_bool (ro, "ok", FALSE);
         if (json || !ok)
-            g_print ("%s\n", reply);
+            print_json (reply);
         else
             resolution_print (ro);
         if (!ok) {
@@ -1576,6 +1617,8 @@ static int run (int argc, char **argv)
  * ends walpe-ctl by SIGPIPE, as it does every filter. */
 int main (int argc, char **argv)
 {
+    g_set_print_handler (out_as_it_is);
+    g_set_printerr_handler (err_as_it_is);
     int rc = run (argc, argv);
     gboolean bad = ferror (stdout) != 0;
     if (fflush (stdout) != 0)
