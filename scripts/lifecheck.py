@@ -219,7 +219,7 @@ class Env(rc.Env):
     """the harness's environment, plus: a daemon on chosen CPUs, extra
     environment for one start, the log from a mark on"""
 
-    def start_daemon(self, mons, cpus=None, extra=None, hz=None, args=None):
+    def start_daemon(self, mons, cpus=None, extra=None, hz=None, args=None, log_append=True):
         hz = hz or [60] * len(mons)
         self.mons = mons = self.display.place(mons, hz)
         env = dict(self.env)
@@ -227,7 +227,13 @@ class Env(rc.Env):
             env["WALPE_MONITORS"] = ",".join(f"{n}={w}x{h}+{x}+{y}@{z}" for (n, w, h, x, y), z in zip(mons, hz))
         env.update(extra or {})
         self.run_env = env
-        log = open(self.log, "a")
+        if log_append:
+            log = open(self.log, "a")
+        else:
+            # what a shell's "> file" is after a while: opened for writing,
+            # not for appending, the offset at the end
+            log = os.fdopen(os.open(self.log, os.O_WRONLY | os.O_CREAT, 0o600), "wb", buffering=0)
+            log.seek(0, os.SEEK_END)
         pre = (lambda: os.sched_setaffinity(0, cpus)) if cpus else None
         self.daemon = subprocess.Popen([self.daemon_bin] + list(args or []), env=env, stdout=log,
                                        stderr=subprocess.STDOUT, cwd=self.tmp, preexec_fn=pre)
@@ -2057,7 +2063,52 @@ def case_winlost(env, W):
     env.stop_daemon()
 
 
-CASES = [("pointer", case_pointer), ("reload", case_reload), ("restart", case_restart),
+def case_logcap(env, W):
+    """The daemon's log file does not grow without limit, whoever started the
+    daemon: a file that is over the limit when the daemon starts is cut back
+    at once (not after the 256th line of a run that may never write so
+    many), and a file that was opened for writing instead of appending - a
+    shell's "> file" - is capped like any other and stays the size it was
+    cut to."""
+    A = ("A", 320, 180, 0, 0)
+    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False})
+    limit = 1 << 20
+    for append in (True, False):
+        how = "opened for appending" if append else "opened for writing"
+        with open(env.log, "w") as f:
+            i = 0
+            while f.tell() < limit * 3 // 2:
+                f.write("old line %07d of an earlier run\n" % i)
+                i += 1
+        last_old = "old line %07d of an earlier run" % (i - 1)
+        before = os.path.getsize(env.log)
+        if not check(env.start_daemon([A], extra={"WALPE_LOG_MAX_MB": "1"}, log_append=append),
+                     f"logcap: daemon started, log {how}"):
+            return
+        st = env.state()        # (answered: the start-up lines are written)
+        time.sleep(0.5)
+        text = open(env.log, errors="replace").read()
+        size = os.path.getsize(env.log)
+        check(size < limit + 65536 and "log passed its size limit" in text,
+              f"logcap: {how}, {before} bytes at the start: cut back to the limit when the daemon starts",
+              f"{size} bytes")
+        check(last_old in text and "old line 0000000 " not in text,
+              f"logcap: {how}: the newest old lines are kept, the oldest are gone")
+        check("monitor 0" in text, f"logcap: {how}: this run's lines follow", text[-300:])
+        # more lines of this run: they land at the end of the shorter file
+        # (a descriptor that kept its offset would bring the old length back)
+        for _ in range(3):
+            env.ipc({"cmd": "set", "fps": 31})
+            env.ipc({"cmd": "set", "fps": 30})
+        time.sleep(0.3)
+        stt = os.stat(env.log)
+        check(stt.st_size < limit + 65536 and stt.st_blocks * 512 < limit + 131072,
+              f"logcap: {how}: the file stays that size", f"{stt.st_size} bytes, {stt.st_blocks * 512} on disk")
+        check(bool(st) and env.daemon.poll() is None, f"logcap: {how}: the daemon runs")
+        env.stop_daemon()
+
+
+CASES = [("logcap", case_logcap), ("pointer", case_pointer), ("reload", case_reload), ("restart", case_restart),
          ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("tray", case_tray), ("window", case_window), ("busy", case_busy), ("probe", case_probe),
          ("fullscreen", case_fullscreen), ("video", case_video), ("webunload", case_webunload),
          ("winlost", case_winlost), ("convert", case_convert)]

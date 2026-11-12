@@ -75,7 +75,7 @@ The other way round, `WALPE_MEM_STATS=1` switches memory numbers by kind in
 |---|---|---|
 | `WALPE_TEX_BUDGET_MB=n` | 1024 | MiB all textures of one scene may take; beyond it the largest are stored smaller. `0` = no limit |
 | `WALPE_PKG_CACHE_MB=n` | 1024 | MiB of unpacked `scene.pkg` files kept in `~/.cache/walpe` |
-| `WALPE_LOG_MAX_MB=n` | 16 | MiB at which a `daemon.log` the daemon appends to is cut back to its last 1 MiB (0 = never, at most 4096) |
+| `WALPE_LOG_MAX_MB=n` | 16 | MiB at which the file the daemon logs to (`daemon.log` when the GUI started it, or the file its output was redirected to) is cut back to its last 1 MiB: checked when the daemon starts and every 256 log lines (0 = never, at most 4096) |
 | `WALPE_CONVERT_MAX_MIN=n` / `WALPE_CONVERT_MAX_MB=n` | 60 / 8192 | a video wallpaper the player cannot read is converted once into `~/.cache/walpe/video`, and so is a video inside a scene that is larger than it is shown; the run is stopped after `n` minutes or when its output exceeds `n` MB (also when less than 256 MB of disk are left). `0` = no limit. `walpe-ctl add` is not limited |
 | `WALPE_STEAMCMD_TIMEOUT=s` | 1800 | time limit of one steamcmd download |
 | `WALPE_FIRST_FRAME_S=n` | 20 | seconds a video wallpaper may take for its first picture before the load counts as failed (the previous wallpaper is opened again; `walpe-ctl status` shows `load_error`). `0` = a video counts as loaded once its file was opened |

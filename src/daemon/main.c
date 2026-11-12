@@ -3514,8 +3514,9 @@ static void apply_pause_state (void)
  * timer): a log that is a regular
  * file opened for appending and has passed 16 MiB keeps its last 1 MiB
  * (WALPE_LOG_MAX_MB=<n> changes the limit, 0 switches this off). A
- * terminal, a pipe, the journal or a file opened without O_APPEND is left
- * alone. */
+ * terminal, a pipe or the journal is left alone; a file that was opened
+ * for writing only is appended to from the start on (log_file_setup),
+ * so it is capped like the others. */
 static gboolean log_cap_now (void)   /* TRUE = the file was cut back */
 {
     static gint64 limit = -1;
@@ -3550,6 +3551,30 @@ static gboolean log_cap_now (void)   /* TRUE = the file was cut back */
     }
     g_free (tail);
     return TRUE;
+}
+
+/* main (), before the first log line. Two things the cap above did not
+ * reach when the daemon was not started by the GUI:
+ *  - a log opened for writing, not for appending (a shell's "> file", an
+ *    autostart entry that redirects): never capped, for good reason - cut
+ *    back under a descriptor that keeps its old offset, the file is as
+ *    long as before with the next line. Such a descriptor, when it stands
+ *    at the end of a regular file, is switched to appending: the same
+ *    place to write to, now and after every line, and after a cut;
+ *  - a file that is over the limit already: the check came with the 256th
+ *    line of a run, so a daemon that is started often and says little
+ *    each time (an autostart at every login) added to its log for ever.
+ *    The cap is applied once now. */
+static void log_file_setup (void)
+{
+    struct stat st;
+    int fl = fcntl (STDERR_FILENO, F_GETFL);
+    if (fl < 0 || fstat (STDERR_FILENO, &st) != 0 || !S_ISREG (st.st_mode))
+        return;
+    if (!(fl & O_APPEND) && lseek (STDERR_FILENO, 0, SEEK_CUR) == st.st_size &&
+        fcntl (STDERR_FILENO, F_SETFL, fl | O_APPEND) != 0)
+        return;
+    log_cap_now ();
 }
 
 /* ------------------------------------------------------ power source
@@ -9458,6 +9483,7 @@ int main (int argc, char **argv)
     }
 
     daemon_start_us = g_get_monotonic_time ();     /* walpe-ctl mem: "uptime_s" */
+    log_file_setup ();                             /* a log file: appended to, capped from the start */
     g_log_set_default_handler (log_guard, NULL);   /* rate limit + file size cap */
     /* libmpv refuses to initialize with a non-C LC_NUMERIC */
     setlocale (LC_NUMERIC, "C");
