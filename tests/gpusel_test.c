@@ -2,10 +2,12 @@
  * a display or EGL: the device list read from made-up sysfs trees
  * (tests/fakegpu.h: laptops with two GPUs, desktops, a virtual machine,
  * an ARM board), the integrated / discrete classification, the values of
- * the `gpu` setting matched against the lists, the display device, the
- * environment for rendering on another GPU, the probe's report, the
- * record of the GPU in use, the config keys and the Mesa equivalents of
- * gpu.conf's driver hints.
+ * the `gpu` setting matched against the lists, what `auto` chooses on each
+ * of the machines, the display device, the environment for rendering on
+ * another GPU, the probe's report, the record of the GPU in use, the
+ * config keys and the Mesa equivalents of gpu.conf's driver hints.
+ * `gpusel-test --tree <machine> <dir>` writes one of the trees and nothing
+ * else (tests/gpu_auto_test.sh starts a daemon on it).
  *
  * The trees and ids are illustrations written from the layout of sysfs
  * and public PCI ids, not captures of real machines. Nothing here says
@@ -475,6 +477,151 @@ static void test_outputs_and_values (void)
     CHECK (walpe_gpu_value_normalize (big) == NULL);
     CHECK (walpe_gpu_value_is_word ("auto") && walpe_gpu_value_is_word (" Discrete") &&
            walpe_gpu_value_is_word (NULL) && !walpe_gpu_value_is_word ("nvidia"));
+    /* "display": a word, stored in lower case, and not a device's name */
+    CHECK (walpe_gpu_value_is_word ("display") && walpe_gpu_value_is_word (" Display "));
+    CHECK (walpe_gpu_value_is_display ("display") && walpe_gpu_value_is_display (" DISPLAY ") &&
+           !walpe_gpu_value_is_display ("auto") && !walpe_gpu_value_is_display (NULL) &&
+           !walpe_gpu_value_is_display ("") && !walpe_gpu_value_is_display ("displayport"));
+    v = walpe_gpu_value_normalize (" Display ");
+    CHECK (!g_strcmp0 (v, "display"));
+    g_free (v);
+}
+
+/* the device gpu = auto renders on, for a machine of fakegpu.h: display =
+ * what sysfs says drives the displays (-2), or the index given */
+static int auto_on (const char *machine, int display, char **why)
+{
+    char *root = P (machine);
+    CHECK (fakegpu_machine (machine, root));
+    GPtrArray *a = walpe_gpu_enumerate (root);
+    if (display == -2)
+        display = walpe_gpu_default_renderer (a, walpe_gpu_display_index (a, NULL, NULL));
+    int t = walpe_gpu_auto_target (a, display, why);
+    /* `display` names no device on any machine, and never has a reason */
+    char *w = (char *) 1;
+    CHECK (walpe_gpu_match (a, "display", display, &w) == -1 && w == NULL);
+    g_ptr_array_unref (a);
+    g_free (root);
+    return t;
+}
+
+/* What gpu = auto means, row by row. -1 = the window system's GPU renders
+ * and nothing is set (what `display` means everywhere, and what auto meant
+ * up to 0.14.0). */
+static void test_auto (void)
+{
+    char *why = (char *) 1;
+    /* one GPU: that one, whatever its kind; nothing to say */
+    CHECK (auto_on ("desktop-nvidia", -2, &why) == -1 && why == NULL);
+    CHECK (auto_on ("vm", -2, &why) == -1 && why == NULL);
+    /* a card drives the displays, the processor's graphics sits unused:
+     * the card renders already */
+    CHECK (auto_on ("desktop-igpu-arc", -2, &why) == -1 && why == NULL);
+    /* ... and auto never goes from a card to the integrated GPU or to
+     * another card, whichever of two cards the window system uses */
+    CHECK (auto_on ("desktop-two-cards", -2, &why) == -1 && why == NULL);
+    CHECK (auto_on ("desktop-two-cards", 1, &why) == -1 && why == NULL);
+    /* which device drives the displays is not known: nothing is guessed */
+    CHECK (auto_on ("laptop-intel-nvidia", -1, &why) == -1 && why == NULL);
+    CHECK (auto_on ("laptop-intel-nvidia", 7, &why) == -1 && why == NULL);
+    CHECK (walpe_gpu_auto_target (NULL, 0, &why) == -1 && why == NULL);
+
+    /* a laptop: the integrated GPU drives the panel, the second GPU renders */
+    CHECK (auto_on ("laptop-intel-nvidia", -2, &why) == 1 && why == NULL);
+    /* ... unless the window system turns out to render on that one itself
+     * (EGL's answer, asked after sysfs's): then it is a card that drives
+     * the displays */
+    CHECK (auto_on ("laptop-intel-nvidia", 1, &why) == -1 && why == NULL);
+    /* two Mesa devices; the card's class is "assumed" and it is AMD's */
+    CHECK (auto_on ("laptop-amd-amd", -2, &why) == 1 && why == NULL);
+    /* a device of a vendor no rule knows is not chosen on a guess */
+    {
+        char *root = P ("unknown-card");
+        fakegpu_laptop_unknown_card (root);
+        GPtrArray *a = walpe_gpu_enumerate (root);
+        CHECK (a->len == 2 && dev (a, 1)->klass == WALPE_GPU_DISCRETE && dev (a, 1)->class_guessed);
+        CHECK (walpe_gpu_auto_target (a, 0, &why) == -1 && why == NULL);
+        /* (by name it can still be asked for) */
+        CHECK (walpe_gpu_match (a, "discrete", 0, NULL) == 1);
+        g_ptr_array_unref (a);
+        g_free (root);
+    }
+
+    /* EGL draws and names no device: the renderer's name says whose GPU */
+    CHECK (walpe_gpu_renderer_is_vendor ("NVIDIA GeForce RTX 4050 Laptop GPU/PCIe/SSE2", 0x10de));
+    CHECK (!walpe_gpu_renderer_is_vendor ("NVIDIA GeForce RTX 4050 Laptop GPU/PCIe/SSE2", 0x8086));
+    CHECK (walpe_gpu_renderer_is_vendor ("Mesa Intel(R) Graphics (ADL GT2)", 0x8086));
+    CHECK (!walpe_gpu_renderer_is_vendor ("Mesa Intel(R) Graphics (ADL GT2)", 0x10de));
+    CHECK (walpe_gpu_renderer_is_vendor ("AMD Radeon RX 7600 (radeonsi, navi33)", 0x1002));
+    CHECK (!walpe_gpu_renderer_is_vendor ("llvmpipe (LLVM 20.1.2, 256 bits)", 0x10de));
+    CHECK (!walpe_gpu_renderer_is_vendor (NULL, 0x10de) &&
+           !walpe_gpu_renderer_is_vendor ("NVIDIA GeForce", 0) &&
+           !walpe_gpu_renderer_is_vendor ("NVIDIA GeForce", 0x1ed5));
+
+    /* the second GPU has no driver: nothing is tried, and the reason is told */
+    CHECK (auto_on ("laptop-nvidia-undriven", -2, &why) == -1);
+    CHECK (why && strstr (why, "no kernel driver") && strstr (why, "rendering stays on"));
+    g_free (why);
+    why = NULL;
+    {
+        /* NVIDIA's driver bound without its DRM module; a device without a
+         * render node */
+        char *root = P ("laptop-intel-nvidia");
+        GPtrArray *a = walpe_gpu_enumerate (root);
+        WalpeGpuDev *n = dev (a, 1);
+        int card = n->card;
+        n->card = -1;
+        CHECK (walpe_gpu_auto_target (a, 0, &why) == -1 && why && strstr (why, "no DRM device"));
+        g_free (why);
+        n->card = card;
+        char *rn = n->render_node;
+        n->render_node = NULL;
+        CHECK (walpe_gpu_auto_target (a, 0, &why) == -1 && why && strstr (why, "no render node"));
+        g_free (why);
+        why = NULL;
+        n->render_node = rn;
+        CHECK (walpe_gpu_auto_target (a, 0, NULL) == 1);
+        g_ptr_array_unref (a);
+        g_free (root);
+    }
+
+    /* more than one discrete GPU beside the integrated one */
+    {
+        char *root = P ("laptop-two-discrete");
+        fakegpu_laptop_two_discrete (root);
+        GPtrArray *a = walpe_gpu_enumerate (root);
+        CHECK (a->len == 3);
+        if (a->len == 3) {
+            /* the first by card number - the one `discrete` names too */
+            CHECK (walpe_gpu_auto_target (a, 0, &why) == 1 && why == NULL);
+            CHECK (walpe_gpu_match (a, "discrete", 0, NULL) == 1);
+            /* the firmware's primary one before the others */
+            dev (a, 2)->boot_vga = TRUE;
+            CHECK (walpe_gpu_auto_target (a, 0, &why) == 2 && why == NULL);
+            dev (a, 2)->boot_vga = FALSE;
+            /* one that cannot be used is passed over, without a word */
+            char *drv = dev (a, 1)->driver;
+            dev (a, 1)->driver = g_strdup ("");
+            CHECK (walpe_gpu_auto_target (a, 0, &why) == 2 && why == NULL);
+            /* none can: the first is named, and that there is no other */
+            dev (a, 2)->card = -1;
+            CHECK (walpe_gpu_auto_target (a, 0, &why) == -1 && why &&
+                   strstr (why, "NVIDIA") && strstr (why, "no other discrete GPU"));
+            g_free (why);
+            why = NULL;
+            g_free (dev (a, 1)->driver);
+            dev (a, 1)->driver = drv;
+            /* what is set for the one chosen is what `discrete` sets */
+            char **env = walpe_gpu_offload_env (dev (a, 0), dev (a, 1), WALPE_GPU_WS_WAYLAND,
+                                                "/x/m.json", "/x/n.json", NULL);
+            CHECK (!g_strcmp0 (pair (env, "__NV_PRIME_RENDER_OFFLOAD"), "1") &&
+                   !g_strcmp0 (pair (env, "__EGL_VENDOR_LIBRARY_FILENAMES"), "/x/n.json") &&
+                   !pair (env, "DRI_PRIME"));
+            g_strfreev (env);
+        }
+        g_ptr_array_unref (a);
+        g_free (root);
+    }
 }
 
 #define ICD(lib) "{ \"file_format_version\" : \"1.0.0\", \"ICD\" : { \"library_path\" : \"" lib "\" } }"
@@ -1025,8 +1172,16 @@ static void test_hostile_sysfs (void)
     g_free (root);
 }
 
-int main (void)
+int main (int argc, char **argv)
 {
+    if (argc == 4 && !strcmp (argv[1], "--tree")) {
+        /* a made-up sysfs tree for a test that starts a daemon on it
+         * (tests/gpu_auto_test.sh) */
+        if (fakegpu_machine (argv[2], argv[3]))
+            return 0;
+        g_printerr ("gpusel-test: no machine \"%s\"\n", argv[2]);
+        return 2;
+    }
     T = g_dir_make_tmp ("walpe-gpusel-XXXXXX", NULL);
     g_assert (T);
     char *cfg = P ("cfg");
@@ -1040,6 +1195,7 @@ int main (void)
     test_laptop_intel_nvidia ();
     test_other_machines ();
     test_outputs_and_values ();
+    test_auto ();
     test_vendor_files_and_probe ();
     test_in_use ();
     test_config ();

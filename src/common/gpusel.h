@@ -5,11 +5,21 @@
  * Setting `gpu` (config.json "gpu", `walpe-ctl set gpu=...`, WALPE_GPU in
  * the environment, which wins):
  *
- *   auto        (default) nothing is set. EGL is started on the connection
- *               to the window system, and the driver that answers there
- *               renders on the GPU the X server / the compositor itself
- *               uses - the one that drives the displays. Frames go to the
- *               screen without a copy between GPUs.
+ *   auto        (default) a discrete GPU when the machine has one. Where
+ *               the window system's GPU is the only one or is discrete
+ *               already - every desktop with one card - that is `display`:
+ *               nothing is set, nothing is tested. Where an integrated GPU
+ *               drives the displays and a discrete one with a driver sits
+ *               beside it (a laptop with two GPUs) that one renders, as
+ *               with `discrete` - after the same test, and with `display`
+ *               as what is done when the test fails
+ *               (walpe_gpu_auto_target).
+ *   display     nothing is set. EGL is started on the connection to the
+ *               window system, and the driver that answers there renders
+ *               on the GPU the X server / the compositor itself uses - the
+ *               one that drives the displays. Frames go to the screen
+ *               without a copy between GPUs. What `auto` meant up to
+ *               0.14.0.
  *   integrated  the GPU that is part of the processor (Intel graphics, AMD
  *               APU graphics, an ARM SoC's GPU): lowest power draw; shares
  *               the machine's memory.
@@ -23,8 +33,9 @@
  * driver renders there and copies every finished frame to the display GPU
  * (PRIME render offload): one full-screen copy per monitor and frame
  * through system memory or a shared buffer, and the second GPU stays
- * powered. That is the cost of every value except `auto` on a laptop with
- * two GPUs; on a machine with one GPU every value means the same device.
+ * powered. That is the cost of every value except `display` on a laptop
+ * with two GPUs; on a machine with one GPU every value means the same
+ * device.
  *
  * How a device is reached (nothing but environment variables, which the
  * drivers read when EGL starts - so they are set before the first EGL
@@ -125,20 +136,45 @@ const char *walpe_gpu_class_name (WalpeGpuClass c);   /* "integrated", ... */
 const char *walpe_gpu_vendor_word (guint vendor);
 /* the driver is NVIDIA's own (not nouveau) */
 gboolean walpe_gpu_driver_is_nvidia (const char *driver);
+/* a GL_RENDERER string carries the word of that PCI vendor ("NVIDIA GeForce
+ * RTX 4050/PCIe/SSE2": NVIDIA; "Mesa Intel(R) Graphics (ADL GT2)": Intel).
+ * FALSE for a vendor without a word and for NULL. For the one case in
+ * which EGL draws on a GPU and does not say on which device. */
+gboolean walpe_gpu_renderer_is_vendor (const char *renderer, guint vendor);
 
 /* "0000:01:00.0" -> "pci-0000_01_00_0" (g_free); NULL in -> NULL */
 char *walpe_gpu_pci_path_tag (const char *pci);
 
 /* The device a setting value names: its index in devs, -1 = none.
- * "auto", "" and NULL name none. For "integrated" / "discrete": the
+ * "auto", "display", "" and NULL name none (for "auto" see
+ * walpe_gpu_auto_target). For "integrated" / "discrete": the
  * device of that class; among several the one at index `prefer` (the
  * display device) when it is of the class, else the firmware's primary
  * one, else the first. *why (optional, g_free): the sentence when the
  * value names nothing here. */
 int walpe_gpu_match (GPtrArray *devs, const char *value, int prefer, char **why);
-/* the value is one of the three words (auto / integrated / discrete) */
+/* the value is one of the words (auto / display / integrated / discrete) */
 gboolean walpe_gpu_value_is_word (const char *value);
-/* the setting as it is stored: lower case and trimmed for the three words,
+/* the value names no device and none is looked for: "display" (NULL, ""
+ * and "auto" are not that: `auto` may choose) */
+gboolean walpe_gpu_value_is_display (const char *value);
+/* The device `auto` renders on when that is not the window system's own
+ * GPU: its index in devs, -1 = the window system's GPU renders and nothing
+ * is set. `display`: the device that renders for the window system when
+ * nothing is set (walpe_gpu_default_renderer; -1 = not known).
+ *   not known, or not an integrated GPU (a card, a virtual adapter): -1;
+ *   an integrated GPU, and no discrete device beside it: -1;
+ *   an integrated GPU and discrete devices: the first of them that can be
+ *   rendered on from here - a kernel driver is bound, it has a DRM device
+ *   and a render node - the firmware's primary one before the others,
+ *   then by DRM card number. A device whose class is a guess counts only
+ *   when it is AMD's (a Radeon card is "discrete (assumed)"; beside an
+ *   integrated GPU that is what it is).
+ * *why (optional, g_free): set only when discrete devices are there and
+ * none of them can be used - the sentence that says which and why. NULL in
+ * every case in which there is nothing to say. Reads nothing. */
+int walpe_gpu_auto_target (GPtrArray *devs, int display, char **why);
+/* the setting as it is stored: lower case and trimmed for the words,
  * the text as given otherwise; "" / NULL -> "auto". NULL = not acceptable
  * (longer than 127 bytes, control characters, not UTF-8). g_free */
 char *walpe_gpu_value_normalize (const char *value);

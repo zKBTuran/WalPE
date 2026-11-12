@@ -13,9 +13,14 @@ static void gpu_ctl_usage (void)
     g_print ("walpe-ctl gpu [--json]\n"
              "  lists the graphics devices, says which one renders the wallpapers and what\n"
              "  the values of the gpu setting mean on this machine.\n"
-             "walpe-ctl set gpu=auto|integrated|discrete|<device>\n"
-             "  auto        (default) the GPU that drives the displays: frames reach the screen\n"
-             "              without a copy between GPUs\n"
+             "walpe-ctl set gpu=auto|display|integrated|discrete|<device>\n"
+             "  auto        (default) a discrete GPU when there is one: on a machine with one GPU,\n"
+             "              or with a card that drives the displays, the same as display; on a\n"
+             "              laptop whose integrated GPU drives the screen, the second GPU - after\n"
+             "              a test, and display when the test fails\n"
+             "  display     the GPU that drives the displays (the X server's / the compositor's):\n"
+             "              frames reach the screen without a copy between GPUs, a second GPU can\n"
+             "              sleep. The one to choose on a laptop to save battery\n"
              "  integrated  the processor's own graphics: lowest power draw, shares system memory\n"
              "  discrete    the separate card / the laptop's second GPU: fastest, draws more power\n"
              "  <device>    a PCI address (01:00.0), a DRM node (card1, renderD129), ids\n"
@@ -35,17 +40,27 @@ static char *gpu_ctl_pick (GPtrArray *devs, const char *value, int display)
 {
     char *why = NULL;
     int idx = walpe_gpu_match (devs, value, display, &why);
-    if (!strcmp (value, "auto"))
+    const gboolean is_auto = !strcmp (value, "auto");
+    const gboolean nothing_set = is_auto || !strcmp (value, "display");
+    if (nothing_set)
         idx = display;
+    if (is_auto) {
+        /* the discrete GPU beside an integrated one that drives the displays */
+        int t = walpe_gpu_auto_target (devs, display, NULL);
+        if (t >= 0)
+            idx = t;
+    }
     char *line;
     if (idx < 0) {
-        line = g_strdup_printf ("%s", !strcmp (value, "auto") ? "the GPU the window system uses"
-                                                              : why ? why : "no such device");
+        line = g_strdup_printf ("%s", nothing_set ? "the GPU the window system uses"
+                                                  : why ? why : "no such device");
     } else {
         const WalpeGpuDev *d = g_ptr_array_index (devs, idx);
         const char *cost = display < 0 || idx == display
                                ? "no copy between GPUs"
-                               : "every frame is copied to the window system's GPU";
+                               : is_auto ? "every frame is copied to the window system's GPU; that "
+                                           "one renders when the test at start fails"
+                                         : "every frame is copied to the window system's GPU";
         line = g_strdup_printf ("%s%s%s%s (%s)", d->name, d->pci ? " at " : "",
                                 d->pci ? d->pci : "", d->driver && *d->driver ? "" : ", NO DRIVER",
                                 cost);
@@ -182,14 +197,15 @@ static int gpu_ctl_main (int argc, char **argv)
             g_print ("note: %s\n", tt (wpj_str (st, "gpu_note", "")));
         if (has_gpu && json_object_has_member (st, "gl_error"))
             g_print ("ERROR: %s\n", tt (wpj_str (st, "gl_error", "")));
-        static const char *const words[] = { "auto", "integrated", "discrete" };
+        static const char *const words[] = { "auto", "display", "integrated", "discrete" };
         g_print ("what the values mean here:\n");
         for (guint i = 0; i < G_N_ELEMENTS (words); i++) {
             char *line = gpu_ctl_pick (devs, words[i], display);
             g_print ("  %-11s %s\n", words[i], line);
             g_free (line);
         }
-        g_print ("change it: walpe-ctl set gpu=auto|integrated|discrete|<PCI address or name>   "
+        g_print ("change it: walpe-ctl set gpu=auto|display|integrated|discrete|<PCI address or "
+                 "name>   "
                  "(walpe-ctl gpu --help)\n");
         g_print ("load and memory figures: walpe-ctl gpu-stats\n");
     }

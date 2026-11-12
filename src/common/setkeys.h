@@ -34,7 +34,7 @@ static const WalpeSetKey walpe_set_keys[] = {
     { "present", WALPE_SET_STR },
     { "software_render", WALPE_SET_BOOL },
     { "software_threads", WALPE_SET_ANY },      /* a number or "auto" */
-    { "gpu", WALPE_SET_STR },                   /* auto | integrated | discrete | a device */
+    { "gpu", WALPE_SET_STR },                   /* auto, display, integrated, discrete, a device */
     { "preset_follow_gpu", WALPE_SET_BOOL },
     { "gl_api", WALPE_SET_STR },                /* auto, gl or gles */
     { "fps", WALPE_SET_NUM },

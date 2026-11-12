@@ -11,9 +11,14 @@
  *                    when another GPU than the display's is asked for,
  *                    sets the driver's environment variables - after a
  *                    child process (`walpe-daemon --gpu-probe`) has shown
- *                    that a window can be drawn that way. With gpu = auto
- *                    it reads the device list (not the PCI id list) and
- *                    sets nothing.
+ *                    that a window can be drawn that way. With gpu =
+ *                    display it reads the device list (not the PCI id
+ *                    list) and sets nothing. So it does with gpu = auto
+ *                    on every machine but one where an integrated GPU
+ *                    drives the displays and a discrete one that can be
+ *                    used sits beside it: there auto is tried as
+ *                    `discrete` is, and the window system's GPU renders
+ *                    when the test fails.
  *   gpu_note_egl ()  after eglInitialize: which device EGL really uses,
  *                    for `status`, the log and the modules.
  *
@@ -36,7 +41,8 @@ static struct {
     GPtrArray *devs;        /* the machine's graphics devices (WalpeGpuDev) */
     gboolean named;         /* their names are those of the PCI id list (gpu_names) */
     int display;            /* the device that drives the displays, -1 = not known */
-    int target;             /* the device the setting names, -1 = auto / none */
+    int target;             /* the device the setting names or auto chose, -1 = none */
+    gboolean by_auto;       /* ... auto chose it (the setting names no device) */
     int in_use;             /* the device EGL renders on, -1 = not known */
     gboolean offload;       /* variables for another GPU than the display's are set */
     char *env_text;         /* those variables, "NAME=VALUE ..." */
@@ -59,11 +65,11 @@ static void gpu_set_note (char *note)   /* takes note */
 }
 
 /* The devices' names from the PCI id list (1.5 MB of text, read once).
- * Only when a value other than "auto" is in play: it may name a device by
- * a part of its name, and the notes about it carry the names. With
- * gpu = auto the daemon never reads the list: its log lines and its status
- * name a PCI device by vendor and ids, and `walpe-ctl gpu` reads the list
- * in its own process. */
+ * Only when a value that names a device is in play: it may name it by a
+ * part of its name, and the notes about it carry the names. With gpu =
+ * auto or display the daemon never reads the list: its log lines and its
+ * status name a PCI device by vendor and ids, and `walpe-ctl gpu` reads
+ * the list in its own process. */
 static void gpu_names (void)
 {
     if (Gpu.named || !Gpu.devs)
@@ -130,6 +136,13 @@ static gboolean gpu_gl_driver_is_software (const char *gl_driver)
 
 /* -------------------------------------------------------------- probe */
 
+/* How long one test process may take before it is ended (SIGALRM), in
+ * seconds: for a GPU the user named, and for the discrete GPU gpu = auto
+ * found. A GPU that was powered down has to wake within this; when it
+ * does not, the window system's GPU renders for this run. */
+#define GPU_PROBE_LIMIT_S      10
+#define GPU_PROBE_LIMIT_AUTO_S 5
+
 /* `walpe-daemon --gpu-probe`, run by gpu_setup () in a child that has the
  * environment to be tried: the daemon's own path once - the display of
  * the window system the parent chose (--backend, as for --sw-probe), EGL
@@ -141,7 +154,13 @@ static gboolean gpu_gl_driver_is_software (const char *gl_driver)
  * (The steps are sw_probe_run ()'s, plus the device lines.) */
 static int gpu_probe_run (int argc, char **argv)
 {
-    alarm (10);   /* never hold up the daemon's start */
+    /* never hold up the daemon's start: 10 s, or what the parent allows
+     * (--gpu-probe-limit S: a choice nobody asked for by name gets less) */
+    guint limit = GPU_PROBE_LIMIT_S;
+    for (int i = 1; i + 1 < argc; i++)
+        if (!g_strcmp0 (argv[i], "--gpu-probe-limit"))
+            limit = (guint) CLAMP (atoi (argv[i + 1]), 1, GPU_PROBE_LIMIT_S);
+    alarm (limit);
     Gpu.probing = TRUE;
     char *perr = NULL;
     if (!probe_open (argc, argv, &perr)) {
@@ -191,23 +210,31 @@ static int gpu_probe_run (int argc, char **argv)
 }
 
 /* Runs the probe with `pairs` (key, value, ..., NULL; may be NULL) on top
- * of this process's environment. TRUE: a hardware renderer drew a frame;
- * *idx = the device it reports (-1 = it does not say), *renderer its
- * GL_RENDERER (g_free). FALSE: *why (g_free). */
-static gboolean gpu_probe (char **pairs, int *idx, char **renderer, char **why)
+ * of this process's environment, for at most limit_s seconds. TRUE: a
+ * hardware renderer drew a frame; *idx = the device it reports (-1 = it
+ * does not say), *renderer its GL_RENDERER (g_free). FALSE: *why (g_free). */
+static gboolean gpu_probe (char **pairs, guint limit_s, int *idx, char **renderer, char **why)
 {
     *idx = -1;
     *renderer = *why = NULL;
     char **envp = walpe_sw_environ (g_get_environ (), pairs);
+    char lim[16];
+    g_snprintf (lim, sizeof lim, "%u", limit_s);
     /* the child draws on the window system this process chose */
     char *pargv[] = { Sw.exe, (char *) "--gpu-probe", (char *) "--backend",
-                      (char *) walpe_backend_name (D.backend), NULL };
+                      (char *) walpe_backend_name (D.backend), (char *) "--gpu-probe-limit", lim,
+                      NULL };
     char *out = NULL, *errout = NULL;
     GError *e = NULL;
     gboolean ok = FALSE;
-    if (!g_spawn_sync (NULL, pargv, envp, G_SPAWN_DEFAULT, NULL, NULL, &out, &errout, NULL, &e)) {
+    int wstatus = 0;
+    if (!g_spawn_sync (NULL, pargv, envp, G_SPAWN_DEFAULT, NULL, NULL, &out, &errout, &wstatus,
+                       &e)) {
         *why = g_strdup_printf ("the test could not be run (%s)", e ? e->message : "?");
         g_clear_error (&e);
+    } else if (WIFSIGNALED (wstatus) && WTERMSIG (wstatus) == SIGALRM) {
+        /* (its own alarm: gpu_probe_run) */
+        *why = g_strdup_printf ("the test did not finish within %u s", limit_s);
     } else {
         char *dev = NULL, *rn = NULL;
         ok = walpe_gpu_parse_probe (out, &dev, &rn, renderer, why);
@@ -283,7 +310,8 @@ static void gpu_setup (WalpeGpuWinsys winsys, const char *const *outputs, const 
     Gpu.env_forced = env_val != NULL;
     g_free (Gpu.setting);
     Gpu.setting = env_val ? env_val : g_strdup (D.cfg && D.cfg->gpu ? D.cfg->gpu : "auto");
-    if (strcmp (Gpu.setting, "auto"))
+    const gboolean is_auto = !strcmp (Gpu.setting, "auto");
+    if (!is_auto && !walpe_gpu_value_is_display (Gpu.setting))
         gpu_names ();
     /* the device that renders for the displays when nothing is set (on a
      * system-on-chip not the display controller itself) */
@@ -295,25 +323,42 @@ static void gpu_setup (WalpeGpuWinsys winsys, const char *const *outputs, const 
                    (int) i == Gpu.display ? " - the window system's GPU" : "");
         g_free (d);
     }
-    if (!strcmp (Gpu.setting, "auto")) {
+    if (walpe_gpu_value_is_display (Gpu.setting)) {
         /* nothing is set: EGL renders on the GPU of the window system */
         gpu_mesa_hints ();
         return;
     }
-    if (Sw.active) {
-        gpu_set_note (g_strdup_printf ("gpu = %s has no effect while \"Render on CPU\" is on",
-                                       Gpu.setting));
-        g_message ("gpu: %s", Gpu.note);
-        return;
-    }
     char *why = NULL;
-    Gpu.target = walpe_gpu_match (Gpu.devs, Gpu.setting, Gpu.display, &why);
-    if (Gpu.target < 0) {
-        g_warning ("gpu = %s: %s. Rendering on the GPU that drives the displays.", Gpu.setting,
-                   why ? why : "no such device");
-        gpu_set_note (why);
-        gpu_mesa_hints ();
-        return;
+    if (is_auto) {
+        /* A discrete GPU beside an integrated one that drives the displays?
+         * Told from the list read above. On every other machine - one GPU,
+         * or a card that drives the displays itself - auto is `display`:
+         * nothing more is read, nothing is started, nothing is set. */
+        Gpu.target = Sw.active ? -1 : walpe_gpu_auto_target (Gpu.devs, Gpu.display, &why);
+        if (Gpu.target < 0) {
+            if (why) {
+                g_message ("gpu = auto: %s", why);
+                gpu_set_note (why);
+            }
+            gpu_mesa_hints ();
+            return;
+        }
+        Gpu.by_auto = TRUE;
+    } else {
+        if (Sw.active) {
+            gpu_set_note (g_strdup_printf ("gpu = %s has no effect while \"Render on CPU\" is on",
+                                           Gpu.setting));
+            g_message ("gpu: %s", Gpu.note);
+            return;
+        }
+        Gpu.target = walpe_gpu_match (Gpu.devs, Gpu.setting, Gpu.display, &why);
+        if (Gpu.target < 0) {
+            g_warning ("gpu = %s: %s. Rendering on the GPU that drives the displays.", Gpu.setting,
+                       why ? why : "no such device");
+            gpu_set_note (why);
+            gpu_mesa_hints ();
+            return;
+        }
     }
     WalpeGpuDev *t = gpu_dev (Gpu.target);
     /* a variable of the kind set below that the user has set is the
@@ -323,23 +368,68 @@ static void gpu_setup (WalpeGpuWinsys winsys, const char *const *outputs, const 
             gpu_set_note (g_strdup_printf ("%s is set in the environment: gpu = %s is not applied "
                                            "(unset the variable to let WalPE choose)", *n,
                                            Gpu.setting));
-            g_warning ("gpu: %s", Gpu.note);
+            if (is_auto) {
+                /* (nobody asked for a device: nothing went wrong) */
+                g_message ("gpu: %s", Gpu.note);
+                Gpu.target = -1;
+            } else {
+                g_warning ("gpu: %s", Gpu.note);
+            }
             gpu_mesa_hints ();
             return;
         }
+    /* auto: a choice nobody asked for by name may hold up the start for
+     * less time than one that was asked for */
+    const guint limit_s = is_auto ? GPU_PROBE_LIMIT_AUTO_S : GPU_PROBE_LIMIT_S;
+    const gint64 t0 = g_get_monotonic_time ();
     /* which device renders when nothing is set: EGL's own answer, from a
      * child process, beats what sysfs suggests */
+    char *base_renderer = NULL;
+    gboolean base_unnamed = FALSE;      /* a GPU drew, and EGL does not say which */
     {
         int idx = -1;
-        char *r = NULL, *w = NULL;
-        if (gpu_probe (NULL, &idx, &r, &w) && idx >= 0)
-            Gpu.display = idx;
-        g_free (r);
+        char *w = NULL;
+        if (gpu_probe (NULL, limit_s, &idx, &base_renderer, &w)) {
+            if (idx >= 0)
+                Gpu.display = idx;
+            else
+                base_unnamed = TRUE;
+        }
         g_free (w);
     }
+    if (is_auto && Gpu.display != Gpu.target) {
+        /* The same question again with EGL's answer: the window system may
+         * render on the discrete GPU although another one has the outputs
+         * (an X server set up that way) - then that is a card driving the
+         * displays, and nothing is set. Where EGL names no device, its
+         * renderer's name is taken for the answer when it carries the
+         * vendor of the discrete GPU and not the integrated one's. */
+        int again = walpe_gpu_auto_target (Gpu.devs, Gpu.display, NULL);
+        const WalpeGpuDev *dd = gpu_dev (Gpu.display);
+        const gboolean on_target = base_unnamed && dd &&
+                                   walpe_gpu_renderer_is_vendor (base_renderer, t->vendor) &&
+                                   !walpe_gpu_renderer_is_vendor (base_renderer, dd->vendor);
+        if (again < 0 || on_target) {
+            g_message ("gpu = auto: the window system renders on %s, nothing to set (asked in "
+                       "%d ms)", on_target ? base_renderer : dd ? dd->name : "its own GPU",
+                       (int) ((g_get_monotonic_time () - t0) / 1000));
+            Gpu.target = -1;
+            Gpu.by_auto = FALSE;
+            g_free (base_renderer);
+            gpu_mesa_hints ();
+            return;
+        }
+        Gpu.target = again;
+        t = gpu_dev (Gpu.target);
+    }
+    g_free (base_renderer);
     if (Gpu.display == Gpu.target) {
         g_message ("gpu = %s: %s is the GPU that drives the displays, nothing to set",
                    Gpu.setting, t->name);
+        if (is_auto) {
+            Gpu.target = -1;
+            Gpu.by_auto = FALSE;
+        }
         gpu_mesa_hints ();
         return;
     }
@@ -351,17 +441,23 @@ static void gpu_setup (WalpeGpuWinsys winsys, const char *const *outputs, const 
     g_free (mesa_json);
     g_free (nv_json);
     if (!pairs[0]) {
-        g_warning ("gpu = %s: %s. Rendering on the GPU that drives the displays.", Gpu.setting,
-                   env_note ? env_note : "nothing can be set for this device");
+        g_log (G_LOG_DOMAIN, is_auto ? G_LOG_LEVEL_MESSAGE : G_LOG_LEVEL_WARNING,
+               "gpu = %s: %s. Rendering on the GPU that drives the displays.", Gpu.setting,
+               env_note ? env_note : "nothing can be set for this device");
         gpu_set_note (env_note ? env_note : g_strdup ("nothing can be set for this device"));
         g_strfreev (pairs);
+        if (is_auto) {
+            Gpu.target = -1;
+            Gpu.by_auto = FALSE;
+        }
         gpu_mesa_hints ();
         return;
     }
     int idx = -1;
     char *renderer = NULL;
     why = NULL;
-    gboolean ok = gpu_probe (pairs, &idx, &renderer, &why);
+    gboolean ok = gpu_probe (pairs, limit_s, &idx, &renderer, &why);
+    const int took_ms = (int) ((g_get_monotonic_time () - t0) / 1000);
     if (ok && idx >= 0 && idx != Gpu.target) {
         ok = FALSE;
         why = g_strdup_printf ("the driver still renders on %s", gpu_dev (idx)->name);
@@ -376,22 +472,33 @@ static void gpu_setup (WalpeGpuWinsys winsys, const char *const *outputs, const 
         Gpu.env_text = g_string_free (txt, FALSE);
         const WalpeGpuDev *dd = gpu_dev (Gpu.display);
         gpu_set_note (g_strdup_printf ("rendering on %s while %s drives the displays: every "
-                                       "frame is copied from one GPU to the other",
-                                       t->name, dd ? dd->name : "another GPU"));
-        g_message ("gpu = %s: %s (%s; renderer: %s)", Gpu.setting, Gpu.note, Gpu.env_text,
-                   renderer ? renderer : "?");
+                                       "frame is copied from one GPU to the other%s",
+                                       t->name, dd ? dd->name : "another GPU",
+                                       is_auto ? " (gpu = auto takes a discrete GPU when there is "
+                                                 "one; gpu = display renders on the displays' GPU "
+                                                 "and lets this one sleep)" : ""));
+        g_message ("gpu = %s: %s (%s; renderer: %s; tested in %d ms)", Gpu.setting, Gpu.note,
+                   Gpu.env_text, renderer ? renderer : "?", took_ms);
         if (env_note)
             g_message ("gpu: %s", env_note);
         g_free (env_note);
     } else {
         const WalpeGpuDev *dd = gpu_dev (Gpu.display);
         gpu_set_note (g_strdup_printf ("%s could not be made the renderer (%s%s%s): rendering on "
-                                       "%s", t->name, why ? why : "the test failed",
+                                       "%s%s", t->name, why ? why : "the test failed",
                                        env_note ? "; " : "", env_note ? env_note : "",
-                                       dd ? dd->name : "the GPU that drives the displays"));
-        g_warning ("gpu = %s: %s", Gpu.setting, Gpu.note);
+                                       dd ? dd->name : "the GPU that drives the displays",
+                                       is_auto ? " (gpu = auto tried the discrete GPU; gpu = "
+                                                 "display does not try)" : ""));
+        if (is_auto)
+            /* (nobody asked for that device: the start goes on as it did
+             * before auto looked for one) */
+            g_message ("gpu = auto: %s (tested in %d ms)", Gpu.note, took_ms);
+        else
+            g_warning ("gpu = %s: %s", Gpu.setting, Gpu.note);
         g_free (env_note);
         Gpu.target = -1;
+        Gpu.by_auto = FALSE;
     }
     g_free (why);
     g_free (renderer);
@@ -532,8 +639,9 @@ static void gpu_note_egl (EGLDisplay dpy)
         g_message ("gpu: rendering on %s (%s)", txt, how);
         g_free (txt);
         if (Gpu.target >= 0 && idx != Gpu.target) {
-            gpu_set_note (g_strdup_printf ("gpu = %s names %s, but EGL renders on %s",
-                                           Gpu.setting, gpu_dev (Gpu.target)->name, d->name));
+            gpu_set_note (g_strdup_printf ("gpu = %s %s %s, but EGL renders on %s", Gpu.setting,
+                                           Gpu.by_auto ? "chose" : "names",
+                                           gpu_dev (Gpu.target)->name, d->name));
             g_warning ("gpu: %s", Gpu.note);
         }
     } else {
@@ -623,10 +731,12 @@ static gboolean gpu_restart_cb (gpointer user)
 }
 
 /* the device that renders under a setting value, as far as it can be
- * told here: the device it names, else the display device */
+ * told here: the device it names (auto: the discrete GPU it would try),
+ * else the display device */
 static int gpu_effective (const char *value)
 {
-    int t = walpe_gpu_match (Gpu.devs, value, Gpu.display, NULL);
+    int t = !strcmp (value, "auto") ? walpe_gpu_auto_target (Gpu.devs, Gpu.display, NULL)
+                                    : walpe_gpu_match (Gpu.devs, value, Gpu.display, NULL);
     return t >= 0 ? t : Gpu.display;
 }
 
@@ -642,11 +752,11 @@ static gboolean gpu_ipc_set (JsonObject *o, gboolean busy, gboolean *restart, ch
     if (json_object_has_member (o, "gpu")) {
         char *v = walpe_gpu_value_normalize (wpj_str (o, "gpu", NULL));
         if (!v) {
-            *err = g_strdup ("gpu: auto, integrated, discrete, or one device by PCI address or "
-                             "name (at most 127 characters); nothing was changed");
+            *err = g_strdup ("gpu: auto, display, integrated, discrete, or one device by PCI "
+                             "address or name (at most 127 characters); nothing was changed");
             return FALSE;
         }
-        if (strcmp (v, "auto")) {
+        if (strcmp (v, "auto") && !walpe_gpu_value_is_display (v)) {
             /* a value that names nothing here would silently mean auto
              * (it may name a device by a part of its name) */
             gpu_names ();
@@ -682,6 +792,7 @@ static gboolean gpu_ipc_set (JsonObject *o, gboolean busy, gboolean *restart, ch
             /* the same device under another name: taken over without a restart */
             g_free (Gpu.setting);
             Gpu.setting = g_strdup (v);
+            Gpu.by_auto = Gpu.target >= 0 && !strcmp (v, "auto");
         }
     }
     if (json_object_has_member (o, "preset_follow_gpu")) {

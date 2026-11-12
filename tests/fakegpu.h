@@ -221,3 +221,45 @@ static inline void fakegpu_laptop_nvidia_undriven (const char *root)
     fakegpu_card (root, 0, 128, "0000:00:02.0", "8086:9A49", "i915", TRUE, o0);
     fakegpu_pci_only (root, "0000:01:00.0", "0x030200", "10de", "28a1");
 }
+
+/* a laptop with three: Intel graphics drives the panel, an NVIDIA GPU
+ * inside (NVIDIA's driver), and an AMD card in an external enclosure */
+static inline void fakegpu_laptop_two_discrete (const char *root)
+{
+    static const char *const o0[] = { "eDP-1=connected", NULL };
+    static const char *const o2[] = { "DP-3=disconnected", NULL };
+    fakegpu_card (root, 0, 128, "0000:00:02.0", "8086:A7A0", "i915", TRUE, o0);
+    fakegpu_card (root, 1, 129, "0000:01:00.0", "10DE:28A1", "nvidia", FALSE, NULL);
+    fakegpu_card (root, 2, 130, "0000:3c:00.0", "1002:7480", "amdgpu", FALSE, o2);
+}
+
+/* Intel graphics drives the panel; beside it a PCI display device of a
+ * vendor no rule knows, with a driver and a render node */
+static inline void fakegpu_laptop_unknown_card (const char *root)
+{
+    static const char *const o0[] = { "eDP-1=connected", NULL };
+    fakegpu_card (root, 0, 128, "0000:00:02.0", "8086:9A49", "i915", TRUE, o0);
+    fakegpu_card (root, 1, 129, "0000:01:00.0", "1ED5:0201", "somegpu", FALSE, NULL);
+}
+
+/* a machine by name, for a test that starts a daemon on such a tree
+ * (gpusel-test --tree <machine> <dir>); FALSE = no such machine */
+static inline gboolean fakegpu_machine (const char *name, const char *root)
+{
+    static const struct { const char *name; void (*make) (const char *); } m[] = {
+        { "laptop-intel-nvidia", fakegpu_laptop_intel_nvidia },
+        { "laptop-amd-amd", fakegpu_laptop_amd_amd },
+        { "laptop-nvidia-undriven", fakegpu_laptop_nvidia_undriven },
+        { "laptop-two-discrete", fakegpu_laptop_two_discrete },
+        { "desktop-nvidia", fakegpu_desktop_nvidia },
+        { "desktop-igpu-arc", fakegpu_desktop_igpu_arc },
+        { "desktop-two-cards", fakegpu_desktop_two_cards },
+        { "vm", fakegpu_vm },
+    };
+    for (guint i = 0; i < G_N_ELEMENTS (m); i++)
+        if (!strcmp (m[i].name, name)) {
+            m[i].make (root);
+            return TRUE;
+        }
+    return FALSE;
+}

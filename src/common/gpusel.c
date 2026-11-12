@@ -146,6 +146,12 @@ gboolean walpe_gpu_driver_is_nvidia (const char *driver)
                       !strcmp (driver, "nvidia_drm"));
 }
 
+gboolean walpe_gpu_renderer_is_vendor (const char *renderer, guint vendor)
+{
+    const char *w = walpe_gpu_vendor_word (vendor);
+    return renderer && w && contains_ci (renderer, w);
+}
+
 /* The PCI device ids of AMD's processors with graphics (APUs), as ranges.
  * From the public PCI id list; a processor newer than this table is
  * classified by the rule after it (a card, marked as guessed). */
@@ -745,10 +751,59 @@ gboolean walpe_gpu_value_is_word (const char *value)
         return TRUE;
     char *v = g_ascii_strdown (value, -1);
     g_strstrip (v);
-    gboolean w = !*v || !strcmp (v, "auto") || !strcmp (v, "integrated") ||
-                 !strcmp (v, "discrete");
+    gboolean w = !*v || !strcmp (v, "auto") || !strcmp (v, "display") ||
+                 !strcmp (v, "integrated") || !strcmp (v, "discrete");
     g_free (v);
     return w;
+}
+
+gboolean walpe_gpu_value_is_display (const char *value)
+{
+    if (!value)
+        return FALSE;
+    char *v = g_ascii_strdown (value, -1);
+    g_strstrip (v);
+    gboolean d = !strcmp (v, "display");
+    g_free (v);
+    return d;
+}
+
+int walpe_gpu_auto_target (GPtrArray *devs, int display, char **why)
+{
+    if (why)
+        *why = NULL;
+    if (!devs || display < 0 || (guint) display >= devs->len)
+        return -1;
+    const WalpeGpuDev *dd = g_ptr_array_index (devs, display);
+    if (dd->klass != WALPE_GPU_INTEGRATED)
+        return -1;
+    int first = -1, boot = -1, unusable = -1, n_unusable = 0;
+    for (guint i = 0; i < devs->len; i++) {
+        const WalpeGpuDev *d = g_ptr_array_index (devs, i);
+        if ((int) i == display || d->klass != WALPE_GPU_DISCRETE ||
+            (d->class_guessed && d->vendor != WALPE_PCI_AMD))
+            continue;
+        if (!d->driver || !*d->driver || d->card < 0 || !d->render_node) {
+            if (unusable < 0)
+                unusable = (int) i;
+            n_unusable++;
+            continue;
+        }
+        if (first < 0)
+            first = (int) i;
+        if (d->boot_vga && boot < 0)
+            boot = (int) i;
+    }
+    if (first < 0 && unusable >= 0 && why) {
+        const WalpeGpuDev *u = g_ptr_array_index (devs, unusable);
+        const char *what = !u->driver || !*u->driver ? "has no kernel driver loaded"
+                           : u->card < 0             ? "has a driver but no DRM device"
+                                                     : "has no render node";
+        *why = g_strdup_printf ("%s %s%s: rendering stays on %s", u->name, what,
+                                n_unusable > 1 ? " (and no other discrete GPU can be used)" : "",
+                                dd->name);
+    }
+    return boot >= 0 ? boot : first;
 }
 
 char *walpe_gpu_value_normalize (const char *value)
@@ -834,7 +889,7 @@ int walpe_gpu_match (GPtrArray *devs, const char *value, int prefer, char **why)
     if (why)
         *why = NULL;
     char *v = walpe_gpu_value_normalize (value);
-    if (!v || !strcmp (v, "auto")) {
+    if (!v || !strcmp (v, "auto") || !strcmp (v, "display")) {
         g_free (v);
         return -1;
     }

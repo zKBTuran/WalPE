@@ -125,7 +125,8 @@ typedef struct WalpeConfig_ {
     int     software_threads; /* llvmpipe rasteriser threads in that mode;
                                * 0 = automatic (half of the CPUs, 1..8) */
     char   *gpu;              /* which GPU renders (common/gpusel.h): "auto" (the
-                               * default: the one that drives the displays),
+                               * default: a discrete GPU when there is one),
+                               * "display" (the one that drives the displays),
                                * "integrated", "discrete", or one device by PCI
                                * address or name. Never NULL after a load.
                                * WALPE_GPU in the daemon's environment wins. */
