@@ -10,7 +10,8 @@
  * resolution", the Workshop install and the delete dialogs. No desktop
  * entry is called walpe.desktop: on KDE Plasma those windows had the
  * generic Wayland icon in their title bars, next to a main window with
- * the right one.
+ * the right one. And without a session bus GTK names the library window
+ * "walpe" as well (wlappid.h), so the id is set on every toplevel.
  *
  * Making them windows of the application (gtk_window_set_application)
  * would also give them its accelerators - Ctrl+Q in the settings window

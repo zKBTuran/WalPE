@@ -3,13 +3,18 @@
 #pragma once
 #include <glib.h>
 
-/* Is this file's work wanted for a toplevel? Only where the toolkit would
- * name the window after the program ("walpe"): a Wayland toplevel that is
- * not a window of the GtkApplication (those carry its id already). Pure;
+/* Is this file's work wanted for a toplevel? For every Wayland toplevel.
+ * GTK names a window of the GtkApplication after the application only
+ * when the process has a session bus (its Wayland code for application
+ * windows is part of its D-Bus code); without one - a compositor started
+ * from a console with no dbus-run-session - the library window said
+ * "walpe" like the dialogs once did (seen with GTK 4.24 on labwc 0.20).
+ * Saying the id a window already has changes nothing. Pure;
  * tests/ui_session_test.c. */
 static inline gboolean walpe_wl_app_id_wanted (gboolean wayland_toplevel, gboolean application_window)
 {
-    return wayland_toplevel && !application_window;
+    (void) application_window;
+    return wayland_toplevel;
 }
 
 /* From now on every toplevel of this process says app_id on a Wayland

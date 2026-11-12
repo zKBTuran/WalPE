@@ -191,7 +191,8 @@ int main (void)
 
     /* ---- which windows are given the application's id */
     CHECK (walpe_wl_app_id_wanted (TRUE, FALSE), "Wayland, a dialog of the GUI: yes");
-    CHECK (!walpe_wl_app_id_wanted (TRUE, TRUE), "Wayland, the application's own window: GTK did it");
+    CHECK (walpe_wl_app_id_wanted (TRUE, TRUE),
+           "Wayland, the application's own window: yes (GTK names it only with a session bus)");
     CHECK (!walpe_wl_app_id_wanted (FALSE, FALSE) && !walpe_wl_app_id_wanted (FALSE, TRUE),
            "X11 (no Wayland toplevel): never");
 

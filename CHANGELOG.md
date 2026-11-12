@@ -281,6 +281,10 @@ comes from and what it costs).
   and so get the WalPE icon instead of the generic one where the desktop entry is
   installed. [BUILDING.md](docs/BUILDING.md) names the two files that give the icon to
   a WalPE that is run from the build directory.
+- Wayland, a session without a D-Bus session bus (a compositor started from a console
+  without `dbus-run-session`): the library window itself said the id `walpe`, for which
+  there is no desktop entry, while its dialogs said the right one. It says
+  `io.github.walpe.ui` now, bus or no bus (seen on labwc 0.20 with GTK 4.24).
 - A video added with `walpe-ctl add` while the window is open is listed; it used to
   appear after F5 or the next start.
 - An engine that does not start is quoted, not only counted: "The engine stopped: cannot
