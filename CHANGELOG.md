@@ -100,10 +100,13 @@ copy.
   "Smaller copies of videos in scenes"), `walpe-ctl status`: `scene_videos`. Only 8-bit
   4:2:0 clips are converted, the frame rate is kept, the picture differs from the original
   by the scaling and one more encoding. A copy in the cache that cannot be read any more
-  (cut short when the machine lost power) is removed and made again. Measured with a
-  3840x2160 60 fps clip on a 1920x1080 monitor, software decoding: 16.1 - 16.8 ms of CPU
-  per picture before, 4.9 ms from the copy (3.3 to 3.5 times less), about 110 MB less
-  memory; the conversion took 64 CPU seconds once (docs/VIDEO.md).
+  (cut short when the machine lost power) is removed and made again. A clip that is
+  stored rotated gets no copy (it would never be played: `not made (the clip is stored
+  rotated)`), and a copy that turns out not to be the clip (`not usable`) is no longer
+  kept for ever. Measured with a 3840x2160 60 fps clip on a 1920x1080 monitor, software
+  decoding: 16.1 - 16.8 ms of CPU per picture before, 4.9 ms from the copy (3.3 to 3.5
+  times less), about 110 MB less memory; the conversion took 64 CPU seconds once
+  (docs/VIDEO.md).
 
 ### Pausing
 
