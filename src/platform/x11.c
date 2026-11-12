@@ -80,6 +80,8 @@ static struct {
     guint cover_timer_id;    /* debounced coverage recompute */
     gboolean stack_dirty;    /* a window may have got below a wallpaper window */
     GHashTable *watched_clients; /* client windows with PropertyChangeMask selected */
+    GHashTable *client_props;    /* Window -> ClientProps: what the cover scan keeps of them */
+    guint top_probe_wait;        /* scans left until the root's children are listed again */
     Atom cm_atom;            /* _NET_WM_CM_S<screen> (x11_present_log) */
     gboolean sleep_watching; /* sleep_watch_init ran */
 } X;
@@ -375,9 +377,10 @@ static gulong window_prop32 (Window w, Atom prop, Atom type, gulong max, guchar 
  * iconic (WM_STATE) or _NET_WM_STATE_HIDDEN windows. dwm keeps the windows
  * of other tags mapped but moves them off-screen, so the geometry test
  * already ignores them. */
-static gboolean window_is_normal_visible (Window w)
+static Atom a_type, a_normal, a_dialog, a_state, a_hidden, a_wmstate;
+
+static void normal_visible_atoms (void)
 {
-    static Atom a_type, a_normal, a_dialog, a_state, a_hidden, a_wmstate;
     if (!a_type) {
         a_type = XInternAtom (X.xd, "_NET_WM_WINDOW_TYPE", False);
         a_normal = XInternAtom (X.xd, "_NET_WM_WINDOW_TYPE_NORMAL", False);
@@ -386,6 +389,11 @@ static gboolean window_is_normal_visible (Window w)
         a_hidden = XInternAtom (X.xd, "_NET_WM_STATE_HIDDEN", False);
         a_wmstate = XInternAtom (X.xd, "WM_STATE", False);
     }
+}
+
+static gboolean window_is_normal_visible (Window w)
+{
+    normal_visible_atoms ();
     guchar *d = NULL;
     gulong n = window_prop32 (w, a_type, XA_ATOM, 16, &d);
     if (d) {
@@ -498,6 +506,67 @@ static float monitor_coverage (const XRect *g, const XRect *wins, guint n)
     return (float) marked / (COVER_GRID * COVER_GRID);
 }
 
+/* What the cover scan keeps of a client between two scans: the answer of
+ * window_is_normal_visible, which is made of three of the window's
+ * properties (type, _NET_WM_STATE, WM_STATE). The scan read them anew for
+ * every window every time - three round trips per window, for a focus
+ * change or for each step of another window being dragged - although the
+ * server tells this connection of every change of them: the clients of
+ * _NET_CLIENT_LIST have PropertyChangeMask selected (clients_watch).
+ * The answer is kept while that holds, exactly:
+ *  - `since` is the number of the first request that read the properties.
+ *    A PropertyNotify carries the number of the last request the server
+ *    had worked off when it made the event: an event numbered below
+ *    `since` is older than the read and in its answer, any other one ends
+ *    the kept answer (client_props_event).
+ *  - a scan begins with a round trip (the client list). When its reply is
+ *    there, every event the server made before it is in Xlib's queue; the
+ *    scan looks through that queue before it uses a kept answer
+ *    (cover_look_ahead), so a kept answer is the server's state at that
+ *    moment - what the three reads would have returned then.
+ *  - the answer of a window is used only while the window still has this
+ *    connection's selection (XGetWindowAttributes, asked for anyway, says
+ *    so: your_event_mask). Another window that was given the number of one
+ *    that is gone has none: it is selected and read. */
+typedef struct {
+    gulong since;
+    gboolean valid;
+    gboolean normal;
+} ClientProps;
+
+static void client_props_event (const XPropertyEvent *e)
+{
+    if (!X.client_props || !a_type ||
+        (e->atom != a_type && e->atom != a_state && e->atom != a_wmstate))
+        return;
+    ClientProps *p = g_hash_table_lookup (X.client_props, GSIZE_TO_POINTER (e->window));
+    if (p && e->serial >= p->since)
+        p->valid = FALSE;
+}
+
+/* XCheckIfEvent predicate that takes nothing out of the queue */
+static Bool cover_look_ahead (Display *d, XEvent *e, XPointer arg)
+{
+    (void) d; (void) arg;
+    if (e->type == PropertyNotify)
+        client_props_event (&e->xproperty);
+    return False;
+}
+
+/* the kept answers of the clients that are still listed (the others go) */
+static void client_props_keep (const Window *w, guint n)
+{
+    GHashTable *now = g_hash_table_new_full (NULL, NULL, NULL, g_free);
+    for (guint i = 0; X.client_props && i < n; i++) {
+        gpointer key = GSIZE_TO_POINTER (w[i]), val = NULL;
+        if (g_hash_table_steal_extended (X.client_props, key, NULL, &val))
+            g_hash_table_insert (now, key, val);
+    }
+    if (X.client_props)
+        g_hash_table_unref (X.client_props);
+    X.client_props = now;
+}
+
 /* Property changes of the clients (state: hidden / iconic / fullscreen,
  * opacity, type) decide whether they cover: the daemon asks for them on
  * every client of _NET_CLIENT_LIST once, when it first sees it, instead
@@ -540,6 +609,13 @@ static void recompute_covered (void)
         }
     }
     clients_watch (clients, n);
+    /* listed clients are watched: what was read of them is kept (ClientProps) */
+    const gboolean listed = clients != NULL;
+    client_props_keep (clients, n);
+    if (listed) {
+        XEvent ev;
+        XCheckIfEvent (X.xd, &ev, cover_look_ahead, NULL);
+    }
     Window *tree_clients = NULL;
     if (!clients) {
         Window r2, parent;
@@ -547,6 +623,35 @@ static void recompute_covered (void)
         if (XQueryTree (X.xd, X.root, &r2, &parent, &tree_clients, &tn) && tree_clients) {
             clients = tree_clients;
             n = tn;
+        }
+    }
+    /* A client that is a child of the root (no frame window around it: dwm
+     * and the other window managers that do not reparent) has its place on
+     * the root in its own geometry, which is asked for anyway: no
+     * XTranslateCoordinates round trip for it. Which ones are: the root's
+     * children, one request for all of them (the fallback list above is
+     * that list). Under a window manager that puts every client into a
+     * frame the request finds none and is left out for a while. */
+    GHashTable *top = NULL;
+    const gboolean all_top = tree_clients != NULL;
+    if (listed && n > 0) {
+        if (X.top_probe_wait > 0) {
+            X.top_probe_wait--;
+        } else {
+            Window r2, parent, *kids = NULL;
+            guint kn = 0;
+            if (XQueryTree (X.xd, X.root, &r2, &parent, &kids, &kn)) {
+                top = g_hash_table_new (NULL, NULL);
+                for (guint k = 0; k < kn; k++)
+                    g_hash_table_add (top, GSIZE_TO_POINTER (kids[k]));
+                if (kids)
+                    XFree (kids);
+                guint n_top = 0;
+                for (guint i = 0; i < n; i++)
+                    n_top += g_hash_table_contains (top, GSIZE_TO_POINTER (clients[i])) ? 1 : 0;
+                if (!n_top)
+                    X.top_probe_wait = 63;
+            }
         }
     }
 
@@ -567,8 +672,14 @@ static void recompute_covered (void)
             continue;
         Window junk0;
         int ox, oy;     /* root coords (attrs x/y are parent-relative) */
-        if (!XTranslateCoordinates (X.xd, clients[i], X.root, 0, 0, &ox, &oy, &junk0))
+        if (all_top || (top && g_hash_table_contains (top, GSIZE_TO_POINTER (clients[i])))) {
+            /* the parent is the root: x / y are the outer corner there, the
+             * window's own origin lies inside its border */
+            ox = wa.x + wa.border_width;
+            oy = wa.y + wa.border_width;
+        } else if (!XTranslateCoordinates (X.xd, clients[i], X.root, 0, 0, &ox, &oy, &junk0)) {
             continue;
+        }
         /* cheap rejection first: on no monitor at all (dwm parks the
          * windows of other tags off-screen) */
         gboolean on_any = FALSE;
@@ -579,7 +690,28 @@ static void recompute_covered (void)
         }
         if (!on_any)
             continue;
-        if (!window_is_normal_visible (clients[i]))
+        gboolean normal;
+        ClientProps *cp = listed ? g_hash_table_lookup (X.client_props, GSIZE_TO_POINTER (clients[i]))
+                                 : NULL;
+        if (cp && cp->valid && (wa.your_event_mask & PropertyChangeMask)) {
+            normal = cp->normal;
+        } else {
+            if (listed && !(wa.your_event_mask & PropertyChangeMask))
+                XSelectInput (X.xd, clients[i], PropertyChangeMask);   /* (not the window it was) */
+            normal_visible_atoms ();
+            const gulong since = NextRequest (X.xd);
+            normal = window_is_normal_visible (clients[i]);
+            if (listed) {
+                if (!cp) {
+                    cp = g_new0 (ClientProps, 1);
+                    g_hash_table_insert (X.client_props, GSIZE_TO_POINTER (clients[i]), cp);
+                }
+                cp->since = since;
+                cp->valid = TRUE;
+                cp->normal = normal;
+            }
+        }
+        if (!normal)
             continue;
         if (clients[i] == X.watched_win) {
             focus = (XRect) { ox, oy, wa.width, wa.height };
@@ -620,6 +752,8 @@ static void recompute_covered (void)
         }
     }
     g_free (wins);
+    if (top)
+        g_hash_table_unref (top);
     if (data)
         XFree (data);
     if (tree_clients)
@@ -968,6 +1102,7 @@ static gboolean xdata_ready (gint fd, GIOCondition cond, gpointer user)
                 a_opaque = XInternAtom (X.xd, "_NET_WM_OPAQUE_REGION", False);
             }
             Atom at = e.xproperty.atom;
+            client_props_event (&e.xproperty);   /* what the cover scan keeps of the window */
             if (e.xproperty.window == X.root) {
                 if (at == a_active)
                     update_active_window ();

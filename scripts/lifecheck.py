@@ -40,6 +40,18 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             that shows nothing); status lines that say what the last one
             said draw no frame in it (counted by the window's own probe,
             WALPE_UI_STATS). Skipped in a build without the window.
+  scan      the scan of the windows that decides "covered" and "an
+            application has the focus" (X11): what it keeps of a window
+            between two scans is dropped when the window's type or state
+            changes without it moving (hidden, iconic, a dock type, back
+            again), a window with a border and one inside a frame window
+            are where the server says, and a window that is moved costs
+            the X requests of a scan that asks each window for its
+            attributes only.
+  panel     a wallpaper's quality panel and the engine's answers (the
+            program perf-panel-test of the build, on this check's
+            display): an answer that says what the last one said leaves
+            the panel's widgets alone. Skipped where it is not built.
   layout    the monitor layout changes while the daemon starts - after it
             read the layout, before it listens for changes, so no event
             tells it: it looks once more when it is up and follows.
@@ -1587,6 +1599,7 @@ class XClient:
         x.XFree.argtypes = [vp]
         x.XSync.argtypes = [vp, i]
         x.XSetInputFocus.argtypes = [vp, ul, i, ul]
+        x.XSetWindowBorderWidth.argtypes = [vp, ul, u]
         x.XCloseDisplay.argtypes = [vp]
         self.x = x
         self.d = x.XOpenDisplay(display.encode())
@@ -1638,6 +1651,14 @@ class XClient:
     def focus(self, win):
         """win gets the focus as a window manager says it (0 = no window has it)"""
         self.prop(self.root, "_NET_ACTIVE_WINDOW", self.XA_WINDOW, [win])
+
+    def unprop(self, win, name):
+        self.x.XDeleteProperty(self.d, win, self.atom(name))
+        self.x.XSync(self.d, 0)
+
+    def border(self, win, width):
+        self.x.XSetWindowBorderWidth(self.d, win, width)
+        self.x.XSync(self.d, 0)
 
     def input_focus(self, win):
         """the keyboard focus itself (no window manager here to give it)"""
@@ -2193,8 +2214,116 @@ def case_panel(env, W):
     check(status == 0 and bool(lines), "panel: perf-panel-test ended well", f"exit status {status}\n{out[-600:]}")
 
 
+# --------------------------------------------------------------------- scan
+def case_scan(env, W):
+    """The scan of the client windows (X11): after every change of a window's
+    place, of the focus or of a client's state it asked the server about
+    every client anew - attributes, root position, type, state, WM_STATE:
+    five round trips per window on a monitor. It now keeps the answer made
+    of the three properties while the server reports no change of them and
+    takes the root position of a client without a frame from its geometry."""
+    if env.display.winsys != "x11":
+        print("lifecheck: scan skipped (the scan of windows is the X11 backend's)")
+        return
+    A, B = ("A", 640, 360, 0, 0), ("B", 640, 360, 640, 0)
+    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": True, "pause_dpms": False,
+                          "pause_fullscreen": True})
+    if not check(env.start_daemon([A, B]), "scan: daemon started"):
+        return
+    env.open(W["red"], 0)
+    env.open(W["blue"], 1)
+    loaded(env, W["red"], 0)
+    loaded(env, W["blue"], 1)
+    xc = XClient(env.env["DISPLAY"])
+
+    def flags(key):
+        return [bool(m.get(key)) for m in env.monitors()]
+
+    def becomes(key, want, what):
+        got = wait_for(lambda: flags(key) == want, 8, 0.2)
+        return check(bool(got), what, f"{key} {flags(key)}, expected {want}")
+
+    def xreq():
+        return env.state().get("x_requests") or 0
+
+    try:
+        big = xc.window(0, 0, 640, 360)             # all of monitor A
+        small = [xc.window(660 + 30 * k, 20, 20, 60) for k in range(7)]    # slivers on B
+        xc.clients([big] + small)
+        becomes("covered", [True, False], "scan: a window over all of monitor A covers it")
+        # the scan runs a few times with nothing new about the big window: its answer is a kept one
+        for k in range(4):
+            xc.move(small[0], 660, 20 + k, 20, 60)
+            time.sleep(0.3)
+        check(flags("covered") == [True, False], "scan: still covered after other windows moved")
+        hidden, normal = xc.atom("_NET_WM_STATE_HIDDEN"), xc.atom("_NET_WM_WINDOW_TYPE_NORMAL")
+        xc.prop(big, "_NET_WM_STATE", xc.XA_ATOM, [hidden])
+        becomes("covered", [False, False], "scan: the window says it is hidden: not covered")
+        xc.prop(big, "_NET_WM_STATE", xc.XA_ATOM, [])
+        becomes("covered", [True, False], "scan: no longer hidden: covered")
+        xc.prop(big, "WM_STATE", xc.atom("WM_STATE"), [3, 0])        # IconicState
+        becomes("covered", [False, False], "scan: the window is iconic (WM_STATE): not covered")
+        xc.prop(big, "WM_STATE", xc.atom("WM_STATE"), [1, 0])        # NormalState
+        becomes("covered", [True, False], "scan: normal again: covered")
+        xc.prop(big, "_NET_WM_WINDOW_TYPE", xc.XA_ATOM, [xc.atom("_NET_WM_WINDOW_TYPE_DOCK")])
+        becomes("covered", [False, False], "scan: the window becomes a dock: not covered")
+        xc.prop(big, "_NET_WM_WINDOW_TYPE", xc.XA_ATOM, [normal])
+        becomes("covered", [True, False], "scan: a normal window again: covered")
+        xc.prop(big, "_NET_WM_WINDOW_TYPE", xc.XA_ATOM, [xc.atom("_NET_WM_WINDOW_TYPE_DOCK")])
+        becomes("covered", [False, False], "scan: a dock once more: not covered")
+        xc.unprop(big, "_NET_WM_WINDOW_TYPE")
+        becomes("covered", [True, False], "scan: the type taken away: covered")
+        xc.move(big, 640, 0, 640, 360)
+        becomes("covered", [False, True], "scan: the window moved to monitor B covers that one")
+        xc.move(big, 0, 0, 200, 100)
+        becomes("covered", [False, False], "scan: made small: nothing covered")
+
+        # a window with a border, its own origin exactly on monitor B's first column: the
+        # focused application is on B and not on A (the border is on A)
+        xc.border(small[1], 3)
+        xc.move(small[1], 637, 100, 50, 50)
+        xc.focus(small[1])
+        becomes("focused_app", [False, True], "scan: a focused window whose border alone is on A counts for B")
+        xc.move(small[1], 636, 100, 50, 50)
+        becomes("focused_app", [True, True], "scan: one pixel to the left it is on both")
+        xc.focus(0)
+        becomes("focused_app", [False, False], "scan: no window focused")
+
+        # a client inside a frame window (a reparenting window manager): its place is the
+        # frame's plus its own
+        frame = xc.window(640, 0, 640, 360)
+        inner = xc.window(0, 0, 640, 360, parent=frame)
+        xc.clients([big] + small + [inner])
+        becomes("covered", [False, True], "scan: a client inside a frame on monitor B covers B")
+        xc.move(frame, 0, 0, 640, 360)
+        becomes("covered", [True, False], "scan: its frame moved to A: A is covered")
+        xc.destroy(inner)
+        xc.destroy(frame)
+        xc.clients([big] + small)
+        becomes("covered", [False, False], "scan: the framed client gone: nothing covered")
+
+        # what a moved window costs: 8 clients on the monitors, 20 moves, one scan each
+        time.sleep(0.5)
+        nwin, moves = 1 + len(small), 20
+        before = xreq()
+        for k in range(moves):
+            xc.move(small[0], 660, 30 + k, 20, 60)
+            time.sleep(0.25)
+        time.sleep(0.5)
+        used = xreq() - before
+        # attributes (two requests) per client and a handful per scan; it was 6 per client + 3
+        limit = moves * (3 * nwin + 8)
+        check(used <= limit, f"scan: {moves} moves of one of {nwin} windows cost at most {limit} X requests",
+              f"{used} requests = {used / moves:.1f} per move")
+        check(flags("covered") == [False, False] and env.daemon.poll() is None,
+              "scan: the daemon runs, nothing covered")
+    finally:
+        xc.close()
+    env.stop_daemon()
+
+
 CASES = [("logcap", case_logcap), ("pointer", case_pointer), ("reload", case_reload), ("restart", case_restart),
-         ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("tray", case_tray), ("window", case_window), ("panel", case_panel), ("busy", case_busy), ("probe", case_probe),
+         ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("scan", case_scan), ("tray", case_tray), ("window", case_window), ("panel", case_panel), ("busy", case_busy), ("probe", case_probe),
          ("fullscreen", case_fullscreen), ("video", case_video), ("webunload", case_webunload),
          ("winlost", case_winlost), ("convert", case_convert)]
 
