@@ -76,7 +76,7 @@ The other way round, `WALPE_MEM_STATS=1` switches memory numbers by kind in
 | `WALPE_TEX_BUDGET_MB=n` | 1024 | MiB all textures of one scene may take; beyond it the largest are stored smaller. `0` = no limit |
 | `WALPE_PKG_CACHE_MB=n` | 1024 | MiB of unpacked `scene.pkg` files kept in `~/.cache/walpe` |
 | `WALPE_LOG_MAX_MB=n` | 16 | MiB at which a `daemon.log` the daemon appends to is cut back to its last 1 MiB (0 = never, at most 4096) |
-| `WALPE_CONVERT_MAX_MIN=n` / `WALPE_CONVERT_MAX_MB=n` | 60 / 8192 | a video wallpaper the player cannot read is converted once into `~/.cache/walpe/video`; the run is stopped after `n` minutes or when its output exceeds `n` MB (also when less than 256 MB of disk are left). `0` = no limit. `walpe-ctl add` is not limited |
+| `WALPE_CONVERT_MAX_MIN=n` / `WALPE_CONVERT_MAX_MB=n` | 60 / 8192 | a video wallpaper the player cannot read is converted once into `~/.cache/walpe/video`, and so is a video inside a scene that is larger than it is shown; the run is stopped after `n` minutes or when its output exceeds `n` MB (also when less than 256 MB of disk are left). `0` = no limit. `walpe-ctl add` is not limited |
 | `WALPE_STEAMCMD_TIMEOUT=s` | 1800 | time limit of one steamcmd download |
 | `WALPE_FIRST_FRAME_S=n` | 20 | seconds a video wallpaper may take for its first picture before the load counts as failed (the previous wallpaper is opened again; `walpe-ctl status` shows `load_error`). `0` = a video counts as loaded once its file was opened |
 | `WALPE_MALLOC_MMAP_MB=n` | 4 | `walpe-daemon`: memory blocks from this size on get their own mapping and return to the system when freed (at most 32). `0` = glibc's adaptive threshold (more memory stays resident after a load) |
@@ -201,6 +201,8 @@ The other way round, `WALPE_MEM_STATS=1` switches memory numbers by kind in
 | `WALPE_VIDEO_HWDEC=off\|auto\|<api>` (also `0` / `1`) | config `video_hwdec` (off) | hardware decoding off / what the machine offers / one API only (`vaapi`, `cuda`, `vdpau`, `vulkan`, `drm`, `v4l2m2m`). Never used on software GL ([VIDEO.md](VIDEO.md)) |
 | `WALPE_VIDEO_ZEROCOPY=0\|1` | config `video_zerocopy` (off) | hardware-decoded pictures stay in GPU memory where that is exact |
 | `WALPE_VIDEO_LIMIT=0\|1` | config `video_limit` (off) | videos follow the frame rate limit |
+| `WALPE_VIDEO_SCENE_CONVERT=0\|1` | config `video_scene_convert` (on) | a video inside a scene that is larger than it is shown is played from a converted copy of the size shown ([VIDEO.md](VIDEO.md)) |
+| `WALPE_CONVERT_BACKGROUND=0` | lowest priority | (testing) the ffmpeg that makes such a copy runs at the daemon's priority instead of nice 19 / `SCHED_IDLE` / idle I/O: on a machine that is never idle it would not finish |
 | `WALPE_VIDEO_UPLOAD=mode` | config `video_upload` (legacy) | how frames reach their textures: `legacy`, `pbo`, `pbodata`, `persist`, `direct`, each also `+pingpong` |
 | `WALPE_VIDEO_THREADS=n` | by need, at most 1 up to 720p, 2 up to 1080p, 3 up to 1440p, 4 above | fixed number of decoder threads |
 | `WALPE_VIDEO_SKIP_DEBLOCK=1` / `=nonref` | filter on | leave the H.264 deblocking filter out for all pictures (blocky) / only for pictures nothing is predicted from |

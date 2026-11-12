@@ -59,7 +59,7 @@ fluid simulation and their switches), [SOUND.md](docs/SOUND.md), [VIDEO.md](docs
 | Effects | yes | Wallpaper Engine's GLSL dialect compiled for GL 3.3 (`#include`, combos, HLSL helpers, implicit conversions repaired from the shader source before the first compile); multi-pass chains with named targets, `copy` passes, masks, compose / fullscreen layers. Builtin effects need your Wallpaper Engine install's `assets/` ([below](#wallpaper-engine-assets)) |
 | Particle systems | yes | emitters, initializers, operators, children, instance overrides, control points; sprites, sprite trails and rope ribbons; perspective systems; animated sprite sheets; refracting materials |
 | Puppet warp layers (`.mdl`) | yes | skinned 2D mesh, bones, keyframed bone animations |
-| Video textures (MP4 inside a `.tex`) | yes | one shared decoder per unique texture |
+| Video textures (MP4 inside a `.tex`) | yes | one shared decoder per unique texture; a clip larger than it is shown is played from a converted copy of the size shown ([Video](#video)) |
 | SceneScript | subset | QuickJS: scripts on layer `text` / `visible` / `alpha` / `origin` / `scale` / `angles` / `color`, on effect visibility and material constants, media events, property animations, cursor events |
 | Media integration | yes | the "now playing" session of any MPRIS player: title, artist, album art with its colours, playback state, timeline; for scene scripts and web pages |
 | Audio-reactive wallpapers | yes | captures the default output monitor (PulseAudio or PipeWire's pipewire-pulse) while such a wallpaper is visible |
@@ -397,6 +397,7 @@ is [docs/SETTINGS.md](docs/SETTINGS.md); the most used:
 | `scene_sound=on\|off`, `volume=0..1`, `mute=on\|off` | off, 0, off | wallpaper sound |
 | `bloom`, `camera_shake`, `camera_parallax`, `sprite_sheets`, `script_camera`, `script_texanim`, `fluid_sim` `=on\|off` | on | scene features; `parallax_offset` is off |
 | `hwdec=off\|auto\|<api>`, `video_zerocopy=on\|off` | off | decode videos with a hardware decoder; keep its pictures in GPU memory |
+| `video_scene_convert=on\|off` | on | a video inside a scene that is larger than it is shown is played from a converted copy of the size shown |
 | `web_accel=on\|off` | off | web pages on the GPU |
 | `web_unload=on\|off` | on | restart in place when the last web wallpaper is replaced, so WebKit leaves the daemon's memory |
 | `we_assets=<dir>` | auto-detect | your Wallpaper Engine install |
@@ -496,6 +497,15 @@ for a configuration from an older version; never upscaled), source frame rate ke
 dropped; a file that already conforms is
 remuxed. `walpe-ctl open` on another format converts it once into `~/.cache/walpe/video`.
 ffmpeg runs as a child process with an argument vector (no shell).
+
+A video inside a scene that is larger than the scene shows it - a 4K clip on a 1080p
+monitor - is decoded at its own size, four times the work of what is seen. With
+`video_scene_convert` (on by default) it is converted once, in the background at the lowest
+priority, into a copy of the size shown (`video_resolution`) in the same cache, and the
+scene plays the copy from where the clip next starts again; the original plays until then
+and whenever the switch is off. `walpe-ctl status` says what each such video does
+(`scene_videos`: source size, played size, `copy: converting 42 %` / `ready` / `off` / `not
+needed`).
 
 Hardware decoding (`walpe-ctl set hwdec=auto`, or one API by name: VA-API, NVDEC, VDPAU,
 Vulkan Video, V4L2 through FFmpeg) is off by default and not confirmed on a graphics
@@ -729,7 +739,7 @@ directory; nothing of your session is read, written or disturbed:
 
 | Test | Display | Checks |
 |---|---|---|
-| `daemon-life`, `sec-daemon`, `daemon-resolution`, `websec` | `Xvfb` | loads, reloads, the restart in place; what the daemon trusts on the local machine; render resolution; a hostile web wallpaper |
+| `daemon-life`, `sec-daemon`, `daemon-resolution`, `daemon-scene-video`, `websec` | `Xvfb` | loads, reloads, the restart in place; what the daemon trusts on the local machine; render resolution; a scene's video played from a converted copy; a hostile web wallpaper |
 | `daemon-life-wayland`, `sec-daemon-wayland` | headless sway | the same cases on Wayland; the two of `daemon-life` that change the monitor layout are skipped there (the next row does that with real outputs) |
 | `daemon-wayland-silent` | none | a compositor socket that accepts the connection and never answers: the daemon gives up after ten seconds (`scripts/wlsilentcheck.py`) |
 | `daemon-wayland-wait-socket` | none | a daemon restarted in place that waits for its compositor and gives up: which control socket file it removes, and what its log says (`scripts/wlwaitcheck.py`) |

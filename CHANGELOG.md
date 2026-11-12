@@ -124,6 +124,18 @@ the final tree with those of that earlier tree.
   the GPU that renders (`walpe-ctl set hwdec=off|auto|<api>`: VA-API, NVDEC, VDPAU, Vulkan
   Video, V4L2); on NVIDIA's driver NVDEC stays first. Optional zero-copy
   (`video_zerocopy`). Both off by default.
+- A video inside a scene that is larger than the scene shows it (a 4K clip on a 1080p
+  monitor) used to be decoded at its own size for as long as the scene ran: four times the
+  decoding of what is seen. It is now converted once, in the background and at the lowest
+  priority, into a copy of the size shown (`video_resolution`) in `~/.cache/walpe/video`,
+  and the scene plays the copy from where the clip next starts again; the original plays
+  until then. `walpe-ctl set video_scene_convert=on|off` (on by default; Engine settings,
+  "Smaller copies of videos in scenes"), `walpe-ctl status`: `scene_videos`. Only 8-bit
+  4:2:0 clips are converted, the frame rate is kept, the picture differs from the original
+  by the scaling and one more encoding. Measured with a 3840x2160 60 fps clip on a
+  1920x1080 monitor, software decoding: 16.1 - 16.8 ms of CPU per picture before, 4.9 ms
+  from the copy (3.3 to 3.5 times less), about 110 MB less memory; the conversion took 64
+  CPU seconds once (docs/VIDEO.md).
 
 ### Pausing
 

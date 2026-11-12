@@ -11,9 +11,92 @@ An in-house MP4 demuxer feeds libavcodec's **H.264** decoder (`walpe-video.so`);
 is shared by all monitors and all objects that show the same clip. Frames are shown by
 presentation time from a short queue. Colours: BT.709 for untagged HD, the stream's
 `colorspace` tag otherwise; YUV to RGB on the GPU. A clip shown at half its size or less is
-decoded at half size. Anything else ffmpeg can read (WebM, HEVC, MKV, ...) is converted once:
+handed on at half size (decoding it costs the same; a video inside a scene is played from a
+smaller copy instead, below). Anything else ffmpeg can read (WebM, HEVC, MKV, ...) is converted once:
 `walpe-ctl open` does it by itself into `~/.cache/walpe/video` and changes the wallpaper when
 the result is ready; `walpe-ctl add` imports a file into the library for good.
+
+## Videos inside scenes: played from a smaller copy
+
+A scene's video layer is decoded at the clip's own size. libavcodec's H.264 decoder cannot
+decode to a smaller picture, so a 3840×2160 clip on a 1920×1080 monitor costs the decoding
+of four times the pixels that are shown; the half-size path above only keeps the frames
+smaller. With **`video_scene_convert`** (on by default) such a clip is converted once, in the
+background, into a copy of the size it is needed at, and the scene plays the copy.
+
+* **Which clips.** One that has at least 1.5 times the pixels of its copy. The copy is the
+  clip fitted into `video_resolution` ([RESOLUTION.md](RESOLUTION.md): `auto` = the largest
+  render resolution among the monitors that show the scene, 1920×1080 for a configuration
+  that comes from an older version, `none` = no copies), in the clip's own shape, never
+  enlarged. A layer the scene draws larger than that - zoomed, or a 16:9 scene that covers an
+  upright or ultra-wide monitor - gets a copy that covers what is drawn, in steps of an
+  eighth of the clip's size, or none when that would save too little: a copy is never shown
+  enlarged by more than the texture slack (2 %). A scene whose textures stay at file size
+  (`tex_downscale` off, `texture_limit` none) keeps its videos as they are too.
+* **What the copy is.** The import's format: H.264 High, yuv420p, `libx264 -preset medium
+  -crf 19`, bicubic scaling, MP4 with `+faststart`, no audio (video layers are silent). Every
+  picture of the clip at the clip's own frame rate: the rate is never reduced, because what a
+  monitor shows depends on settings that change while the copy stays (`fps`, the battery
+  and focus limits), and `video_limit` already leaves out the pictures nobody sees. Only a
+  clip that is 8-bit 4:2:0 H.264 in limited range - what the copy is - gets one; full range,
+  10 bit, 4:2:2 and 4:4:4 clips play as they are. The copy says which colour matrix its
+  samples are in (the one the player uses for the clip: an untagged clip's is decided by its
+  size, and the copy is smaller), so the colours are the clip's. H.264 has no alpha channel:
+  video layers are opaque with and without a copy.
+* **Where it is kept.** `~/.cache/walpe/video/<id>-scene-<W>x<H>.mp4`, next to the converted
+  video wallpapers and under their rules: a private folder, unfinished files removed when
+  the daemon starts, copies nothing has played for 90 days removed too. `<id>` is made of
+  where the clip is (file, offset, length) and of its content (its first and last 64 KiB),
+  so a package that is unpacked again keeps its copy and a clip that was replaced gets a new
+  one. Nothing is written into the wallpaper's folder or the Steam library. To clear them:
+  `rm ~/.cache/walpe/video/*-scene-*.mp4`; they are made again when a scene needs them.
+* **How it is made.** `ffmpeg` as a child process with an argument vector (no shell). It
+  reads the clip's bytes out of the `.tex` through FFmpeg's `subfile` protocol - no
+  temporary file - and for this run only that protocol and only the MP4 reader are allowed;
+  the file name follows the protocol's options, behind `file:`. The limits of a conversion
+  on open hold (`WALPE_CONVERT_MAX_MIN`, `WALPE_CONVERT_MAX_MB`, 256 MB of free disk). It
+  runs at the lowest priority (nice 19, `SCHED_IDLE`, idle I/O class) and gets the time
+  nothing else wants; one clip at a time, and an import or a conversion you start yourself
+  comes first. It runs only while a scene that waits for the copy is shown: when that
+  wallpaper is replaced, the conversion is stopped and its partial file removed. A scene
+  without an oversized video starts nothing and keeps nothing.
+* **The change-over.** Until the copy exists the clip plays as before. The copy takes over
+  where the clip starts again - its last picture is followed by the copy's first one frame
+  interval later, which is what a loop looks like anyway - so a clip that is minutes long
+  plays to its end once more. From then on, and whenever the scene is loaded again, the copy
+  plays from the first picture and the original's decoder is never opened. The layer keeps
+  the clip's size in the scene (positions, effects). Monitors that show the same clip share
+  one decoder as before; as soon as one of them needs the clip itself, all get it.
+* **What it is doing.** `walpe-ctl status`, `scene_videos`: one entry per video of the scenes
+  on screen,
+  `CA2A….tex: source 3840x2160 60.00 fps, played 1920x1080 60.00 fps, copy: ready`. After
+  `copy:` - `waiting`, `converting 42 %`, `ready (played from where the clip starts again)`,
+  `ready`, `off`, `not needed`, `not made (why)`, `not usable (why)`, `failed (why)`.
+  `video_decoder` is the decoder of what is played. The log says when a copy is started,
+  made and taken into use.
+* **The switch.** `walpe-ctl set video_scene_convert=off` (window: Engine settings, "Smaller
+  copies of videos in scenes"; `WALPE_VIDEO_SCENE_CONVERT=0|1` in front of `walpe-daemon`
+  overrides): the clip itself again, from where it starts next; nothing is converted. The
+  copies stay in the cache for the next time it is on.
+
+**Measured** (a scene whose background is a 3840x2160 60 fps H.264 clip of 12 s and 15.1 MB,
+one 1920x1080 monitor, `video_resolution=1080p`, software decoding, on a machine without a
+GPU; CPU time of the video threads per decoded picture, `WALPE_FPS_LOG`):
+
+| | the clip itself | its 1920x1080 copy |
+|---|---|---|
+| decoding one picture | 14.6 - 15.2 ms | 4.8 ms |
+| handing it on (the clip: reduced 2x2 first) | 1.4 ms | 0.0 ms |
+| **video threads per picture** | **16.1 - 16.8 ms** | **4.9 ms** |
+| the same at 60 pictures a second | 58 - 60 CPU seconds a minute | 17.5 CPU seconds a minute |
+| daemon memory (anonymous, resident) | 196 - 201 MB | 88 MB |
+| file | 15.1 MB | 6.9 MB |
+
+That is 3.3 to 3.5 times less CPU time for the video and about 110 MB less memory. Making
+the copy took 64 CPU seconds of `ffmpeg`, once (at the lowest priority it takes as long as
+the rest of the machine leaves it; its memory, about 750 MB at the peak for a 3840x2160
+clip, is the `ffmpeg` process's and is gone with it). How much it is on another machine
+depends on its CPU: compare the daemon's CPU in a process monitor with the switch off and on.
 
 ## Import (`walpe-ctl add`, **Import** in the GUI)
 
@@ -58,6 +141,7 @@ with.
 | what | how | default |
 |---|---|---|
 | Videos follow the frame rate limit | window: Engine settings, "Videos follow the frame rate cap"; `walpe-ctl set video_limit=on\|off`; `WALPE_VIDEO_LIMIT=0\|1` in front of `walpe-daemon` overrides | off: videos keep their own frame rate |
+| A video inside a scene is played from a copy of the size it is shown at | window: Engine settings, "Smaller copies of videos in scenes"; `walpe-ctl set video_scene_convert=on\|off`; `WALPE_VIDEO_SCENE_CONVERT=0\|1` overrides (above) | on |
 | Hardware decoding | `walpe-ctl set hwdec=off\|auto\|<api>`, `video_zerocopy=on\|off` (see below) | off |
 | Leave the deblocking filter out | `WALPE_VIDEO_SKIP_DEBLOCK=nonref` in front of `walpe-daemon`: only for pictures no other picture is predicted from (they alone get slightly blockier; nothing builds on them); `=1`: for all pictures (blocky between keyframes) | filter on |
 | Box filter kernel of the half-size path | `WALPE_VIDEO_SIMD=c\|sse2` (comparisons only; the result is the same bytes) | AVX2 when the CPU has it, else SSE2 |

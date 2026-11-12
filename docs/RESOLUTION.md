@@ -24,7 +24,7 @@ Global:
 
 | Key | Values | Meaning |
 |---|---|---|
-| `video_resolution` | `auto`, `none`, `720p` ... `4k`, `<width>x<height>` | the largest size videos are imported at and converted at ([VIDEO.md](VIDEO.md)). `auto`: the largest render resolution among the monitors that show the video (for an import: among all monitors); the default of a new installation. `none`: the video's own size. A `config.json` from an older version is set to `1080p`, what those versions did, so nothing changes size after an upgrade. Nothing is ever enlarged |
+| `video_resolution` | `auto`, `none`, `720p` ... `4k`, `<width>x<height>` | the largest size videos are imported at and converted at, and the size a larger video inside a scene is played at, from a converted copy (`video_scene_convert`; [VIDEO.md](VIDEO.md)). `auto`: the largest render resolution among the monitors that show the video (for an import: among all monitors); the default of a new installation. `none`: the video's own size. A `config.json` from an older version is set to `1080p`, what those versions did, so nothing changes size after an upgrade. Nothing is ever enlarged |
 | `scale_filter` | `bilinear` (default), `nearest` | how a scene rendered at another size than the monitor's is scaled to it: smooth, or whole pixels (exact at whole multiples, blocky otherwise) |
 | `resolution_prompt` | on (default), off | may the WalPE window ask about monitors it has not asked about |
 
@@ -77,8 +77,10 @@ at 4K), and the frame is copied to the monitor once.
 - The quality presets and `render_scale` work on top: `render_scale` is a percentage of
   the chosen resolution. Presets do not change the resolution.
 - Videos: decoding costs what the clip costs; the choice decides how large the frames are
-  kept (a clip at least twice the chosen size is halved while it is decoded) and how large
-  imports and converted copies are (`video_resolution`).
+  kept (a clip at least twice the chosen size is halved after it is decoded) and how large
+  imports and converted copies are (`video_resolution`). A video inside a scene that is
+  larger than that is played from a converted copy of that size, which costs the decoding
+  of the smaller picture (`video_scene_convert`, on by default; [VIDEO.md](VIDEO.md)).
 - Web pages get the chosen size as their page size; pictures are decoded and stored at it;
   text in scenes is drawn at it and scaled with the frame, so it is pixel-exact only at
   native.
@@ -112,6 +114,7 @@ at 4K), and the frame is copied to the monitor once.
 - `texture_limit` as a number is applied to scene layer pictures after the first frames
   and to picture wallpapers; particle sprites and effect masks are not capped.
 - `video_resolution=auto` fits a video inside the largest render size: a clip wider than
-  the monitor's shape is kept a little smaller than covering it would need.
+  the monitor's shape is kept a little smaller than covering it would need. (The copy of a
+  video inside a scene is made as large as the scene draws the layer when that is more.)
 - On sway the "Monitor resolution" dialog is tiled beside the main window instead of
   floating over it.
