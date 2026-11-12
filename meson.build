@@ -1593,12 +1593,23 @@ test('restore', executable('restore-test', 'tests/restore_test.c',
 # that case is skipped where there is none).
 # Skipped (77) without Xvfb. `meson test -C build daemon-life`
 lifecheck_py = find_program('python3', required: false)
+# lifecheck.py loads the modules the build has through the daemon (the
+# clip of its video case, the web page of its restart case) and leaves
+# those parts out where a module is missing. `meson test` builds what a
+# test names here and nothing else, so the modules are named.
+lifecheck_deps = [daemon, ctl]
+if have_web
+  lifecheck_deps += web_mod
+endif
+if have_ffmpeg
+  lifecheck_deps += video_mod
+endif
 if lifecheck_py.found() and have_x11
   test('daemon-life', lifecheck_py,
     args: ['-I', meson.current_source_dir() / 'scripts/lifecheck.py',
            '--build', meson.current_build_dir(), '--display', 'xvfb'],
     env: ['WALPE_BACKEND=x11'],     # its own Xvfb, also inside a Wayland session
-    depends: [daemon, ctl],
+    depends: lifecheck_deps,
     is_parallel: false,
     timeout: 900)
   # render resolution per monitor through a real daemon (own Xvfb, private
@@ -1664,7 +1675,7 @@ if lifecheck_py.found()
   test('daemon-life-wayland', lifecheck_py,
     args: ['-I', meson.current_source_dir() / 'scripts/lifecheck.py',
            '--build', meson.current_build_dir(), '--display', 'sway'],
-    depends: [daemon, ctl],
+    depends: lifecheck_deps,
     is_parallel: false,
     timeout: 900)
   # (a dozen cases, and every change of an output is a restart in place of
