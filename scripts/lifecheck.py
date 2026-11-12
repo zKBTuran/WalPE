@@ -1074,12 +1074,15 @@ class XClient:
         self.prop(self.root, "_NET_CLIENT_LIST", self.XA_WINDOW, wins)
 
     def close(self):
+        if not self.d:
+            return      # closed already: its Display is freed memory
         for name in ("_NET_ACTIVE_WINDOW", "_NET_CLIENT_LIST"):
             self.x.XDeleteProperty(self.d, self.root, self.atom(name))
         for win in reversed(self.wins):
             self.x.XDestroyWindow(self.d, win)
         self.x.XSync(self.d, 0)
         self.x.XCloseDisplay(self.d)
+        self.d = None
 
 
 def case_fullscreen(env, W):
@@ -1292,8 +1295,11 @@ def case_fullscreen(env, W):
         # The same with shared rendering, the default: same-size monitors that show one
         # scene are rendered once, by a leader the others follow. Each still pauses on
         # its own: the leader's scene keeps running for a follower that is shown.
-        xc.close()
-        xc = XClient(env.env["DISPLAY"])
+        # (the new client before the old one leaves: an X server whose last client has
+        # left resets itself and may refuse the next connection for a moment - and the
+        # `finally` below then closed the closed client a second time)
+        old, xc = xc, XClient(env.env["DISPLAY"])
+        old.close()
 
         # The daemon draws on the second monitor only (--monitor 1). The monitor that
         # holds most of the window is still found among all monitors of the screen: a
