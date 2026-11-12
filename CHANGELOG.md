@@ -136,6 +136,13 @@ Corrections to "Pause for fullscreen apps" per monitor, which is new in 0.13.0:
   is being made. `walpe-ctl set web_unload=off` keeps the module loaded as before;
   `walpe-ctl status` shows `modules`. The video module (FFmpeg) is small and stays
   loaded.
+- BMP pictures: a file of 60 bytes that calls itself a BMP could make gdk-pixbuf's
+  decoder reserve up to 4 GiB of memory, because the decoder takes three sizes from the
+  file's first bytes before it checks anything. Those three fields are checked first now
+  (the header size is one the format knows, the pixel data starts inside the file, the
+  palette is no larger than the bits of a pixel can name), wherever a BMP can come from: a
+  texture, a layer picture, a picture wallpaper, a preview, cover art. A BMP that fails
+  is not shown; a BMP as the format defines it passes. Found by fuzzing.
 - The daemon, `walpe-video.so` and `walpe-web.so` have to come from the same build, as
   before: the number of the module interface changed, and a module of 0.13.0 next to a
   daemon of 0.14.0 is refused.
@@ -179,7 +186,11 @@ Corrections to "Pause for fullscreen apps" per monitor, which is new in 0.13.0:
   effects on a colour-only layer; scene switches that reload once; more of the fullscreen
   rule on X11, and its case no longer ends in a crash of the test script when the X
   server refuses a connection for a moment; the converted copies of scene videos
-  (`scenevideo`, `daemon-scene-video`); the memory report (`memreport`).
+  (`scenevideo`, `daemon-scene-video`); the memory report (`memreport`). Fuzz harnesses
+  for the parsers of wallpaper files (`tests/fuzz`: packages, textures, MP4, GIF and JPEG
+  checks, JSON, puppets, particles, shader text, sound files, scenes) for libFuzzer
+  (`-Dfuzz=enabled`, clang); their seeds and every input that once broke a parser run in
+  the suite as `fuzz-regress-<target>`.
 
 ### Known limitations
 
