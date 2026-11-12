@@ -5932,7 +5932,11 @@ static void ipc_status (JsonBuilder *b)
         jb_str (b, "sound", snd);
         g_free (snd);
     }
-    jb_str (b, "backend", D.cfg->video_backend);
+    /* the video backend that plays: FFmpeg, the one there is. (The stored
+     * word was shown here, and after `set video_backend=mpv` - still taken,
+     * for files and clients of earlier versions - status said "mpv" while
+     * the refusal of any other word says that FFmpeg is the one backend.) */
+    jb_str (b, "backend", WALPE_VIDEO_BACKEND);
     /* per monitor (version 0.11.1): index (for open/props "monitor"), output
      * name (config key), geometry, the wallpaper it shows, own pause */
     json_builder_set_member_name (b, "monitors");
@@ -7602,6 +7606,7 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
         changed = TRUE;
         pointer_update ();
     }
+    gboolean mpv_word = FALSE;      /* "mpv" was stored: the reply says what that means */
     if (ipc_has_str (o, "video_backend")) {
         const char *bk = wpj_str (o, "video_backend", "ffmpeg");
         if (!g_strcmp0 (bk, "mpv") || !g_strcmp0 (bk, "ffmpeg")) {
@@ -7610,6 +7615,7 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
             g_free (D.cfg->video_backend);
             D.cfg->video_backend = g_strdup (bk);
             changed = TRUE;
+            mpv_word = !strcmp (bk, "mpv");
         }
     }
     changed = changed || changed_res;
@@ -7623,6 +7629,10 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
         }
         if (res_note)
             jb_str (b, "note", res_note);
+        if (mpv_word)
+            jb_str (b, "video_backend_note", "stored; mpv means the same as " WALPE_VIDEO_BACKEND
+                                             ": FFmpeg is the one video backend, and status shows "
+                                             "it as \"backend\"");
         if (restart) {
             jb_bool (b, "restarting", TRUE);   /* after this reply is out */
             sw_schedule_restart ();
@@ -10314,7 +10324,7 @@ int main (int argc, char **argv)
     {
         char *desc = walpe_platform_describe ();
         g_message ("walpe-daemon %s \"%s\" up (%s, backend=%s)", WALPE_VERSION, WALPE_CODENAME,
-                   desc, D.cfg->video_backend);
+                   desc, WALPE_VIDEO_BACKEND);
         g_free (desc);
     }
 

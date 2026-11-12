@@ -30,11 +30,11 @@ the wrong kind and the whole request is refused. A switch takes `on` / `off` (al
 "set name" is the short name `walpe-ctl set` also accepts; the key itself works too. Where
 that column is in brackets `walpe-ctl set` does not take the key: it is changed by the
 command named there, or only in the file while the daemon is not running ("file only").
-`walpe-ctl status` shows every key `set` takes under the key's name (`video_backend` as
-`backend` and the window system setting `backend` as `display_backend_setting`, the
-quality knobs in `walpe-ctl quality`, the scene feature switches in
-`feature_switches`; `software_threads` there is the number in use,
-`software_threads_saved` the setting).
+`walpe-ctl status` shows every key `set` takes under the key's name (the window system
+setting `backend` as `display_backend_setting`, the quality knobs in `walpe-ctl quality`,
+the scene feature switches in `feature_switches`; `software_threads` there is the number
+in use, `software_threads_saved` the setting). `video_backend` is the one exception: it
+is stored only, and `backend` in status is the video backend that plays, always `ffmpeg`.
 
 ### Wallpapers and playback
 
@@ -50,7 +50,7 @@ quality knobs in `walpe-ctl quality`, the scene feature switches in
 | `mute` | false | | wallpaper sound silent, the volume value stays |
 | `sound_defaults` | 2 | (file only) | written by WalPE: the file was saved by a version in which wallpaper sound is on by default. A file without it that holds volume 0 and no `scene_sound: true` (the defaults up to 0.14.0) takes the new defaults once |
 | `parallax` | true | | scenes follow the pointer where they are made to |
-| `video_backend` | `ffmpeg` | | stored only |
+| `video_backend` | `ffmpeg` | | stored only: FFmpeg is the one video backend. `mpv`, from a file or a client of an earlier version, is still taken, kept as written and means the same; any other word is refused |
 | `vsync`, `audio` | true, false | (file only) | stored only (presentation is set in `gpu.conf`) |
 | `we_assets` | unset = auto-detect | | Wallpaper Engine install or its `assets/` folder; `we_assets=` (empty) goes back to auto-detection |
 | `steam_user` | unset | | Steam account name for steamcmd downloads (never a password) |

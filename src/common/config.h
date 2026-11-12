@@ -27,6 +27,11 @@ const char *walpe_skip_hidden_name (int v);
  * anything else gives dflt */
 int walpe_skip_hidden_parse (const char *s, int dflt);
 
+/* The video backend there is (mpv was removed). config "video_backend" is
+ * stored only, for files and clients of earlier versions: "mpv" is kept as
+ * it was written and means this one. */
+#define WALPE_VIDEO_BACKEND "ffmpeg"
+
 typedef struct WalpeConfig_ {
     char   *wallpapers_dir;   /* library root */
     char   *current;          /* active wallpaper path ("" = none): the default for
@@ -34,7 +39,7 @@ typedef struct WalpeConfig_ {
     GHashTable *monitor_current; /* output name (e.g. "HDMI-0") -> wallpaper path
                                   * shown on that monitor instead of `current`
                                   * (owned strings; "monitor_current" in the JSON) */
-    char   *video_backend;    /* "mpv" | "ffmpeg" */
+    char   *video_backend;    /* "mpv" | "ffmpeg": stored only, both mean WALPE_VIDEO_BACKEND */
     int     fps;              /* fps cap (scenes, web capture); each monitor is
                                * also limited to its refresh rate */
     int     config_version;   /* WALPE_CONFIG_VERSION once loaded; the file's

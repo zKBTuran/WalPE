@@ -808,7 +808,7 @@ static void scan_daemon (const char *path)
         "preset", "post", "scale", "tex", "slack", "fx_fast",
         /* the quality knobs: `walpe-ctl quality` (status has quality_preset) */
         "fx_rate", "fx_rate_mode", "fps_idle", "post_processing", "tex_res", "fx_res", "texture_slack",
-        /* in status as "backend" */
+        /* stored only: status has the backend that plays as "backend" */
         "video_backend",
         /* written by the functions ipc_status calls: gpu_status_json
          * (daemon/gpu_glue.h), status_backend */
@@ -838,6 +838,12 @@ static void scan_daemon (const char *path)
             g_free (member);
         }
         CHECK (strstr (body, "(b, \"software_threads_saved\""));   /* the setting next to the count in use */
+        /* "backend" is the video backend that plays, the one there is - not
+         * the stored word: after `set video_backend=mpv` status said "mpv",
+         * while the refusal of any other word says FFmpeg is the one backend */
+        CHECK (strstr (body, "jb_str (b, \"backend\", WALPE_VIDEO_BACKEND)"));
+        CHECK (!strstr (body, "D.cfg->video_backend"));
+        CHECK (!strcmp (WALPE_VIDEO_BACKEND, "ffmpeg"));
         g_free (body);
     }
     g_free (txt);

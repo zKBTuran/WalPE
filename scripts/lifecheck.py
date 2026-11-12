@@ -146,6 +146,9 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             comes back; a clip that plays is not held for one, on a paused
             monitor either. Needs an ffmpeg program that writes H.264
             (the clip is made here); skipped without one.
+  settings  what `walpe-ctl set` answers and what status and config.json
+            hold afterwards: video_backend=mpv is stored and status shows
+            the video backend that plays (ffmpeg).
 
 The display is Xvfb, or with --display sway (or WALPE_CHECK_DISPLAY=sway) a
 headless Wayland compositor (scripts/displayenv.py); the cases are the same
@@ -2927,6 +2930,39 @@ def case_logcap(env, W):
         env.stop_daemon()
 
 
+# ----------------------------------------------------------------- settings
+def case_settings(env, W):
+    """What `walpe-ctl set` answers and what status and config.json hold
+    afterwards, on a daemon that shows nothing."""
+    A = ("A", 320, 180, 0, 0)
+    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False})
+    if not check(env.start_daemon([A]), "settings: daemon started"):
+        return
+
+    def saved():
+        try:
+            return json.load(open(env.config))
+        except (OSError, ValueError):
+            return {}
+
+    # video_backend is stored only: FFmpeg is the one backend, and status says so
+    rcode, rep = env.ctl("set", "video_backend=mpv")
+    rep = rep or {}
+    check(rcode == 0 and rep.get("ok") is True and "FFmpeg is the one video backend" in rep.get("video_backend_note", ""),
+          "settings: video_backend=mpv is taken, and the reply says it means ffmpeg", rep)
+    st = env.state()
+    check(st.get("backend") == "ffmpeg" and saved().get("video_backend") == "mpv",
+          "settings: status shows the video backend that plays (ffmpeg); config.json keeps the word",
+          (st.get("backend"), saved().get("video_backend")))
+    rcode, rep = env.ctl("set", "video_backend=vlc")
+    check(rcode == 3 and "FFmpeg is the one video backend" in (rep or {}).get("error", "") and
+          saved().get("video_backend") == "mpv" and env.state().get("backend") == "ffmpeg",
+          "settings: another word is refused with the same sentence and changes nothing", rep)
+    rcode, rep = env.ctl("set", "video_backend=ffmpeg")
+    check(rcode == 0 and "video_backend_note" not in (rep or {}) and saved().get("video_backend") == "ffmpeg",
+          "settings: video_backend=ffmpeg is stored without a note", rep)
+
+
 # -------------------------------------------------------------------- panel
 def case_panel(env, W):
     """tests/perf_panel_test.c needs a display: it gets this check's"""
@@ -3056,7 +3092,7 @@ def case_scan(env, W):
     env.stop_daemon()
 
 
-CASES = [("logcap", case_logcap), ("pointer", case_pointer), ("reload", case_reload), ("restart", case_restart),
+CASES = [("logcap", case_logcap), ("settings", case_settings), ("pointer", case_pointer), ("reload", case_reload), ("restart", case_restart),
          ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("scan", case_scan), ("tray", case_tray), ("traymenu", case_traymenu), ("trayreg", case_trayreg), ("window", case_window), ("panel", case_panel), ("busy", case_busy), ("probe", case_probe),
          ("fullscreen", case_fullscreen), ("video", case_video), ("webunload", case_webunload),
          ("winlost", case_winlost), ("convert", case_convert),
