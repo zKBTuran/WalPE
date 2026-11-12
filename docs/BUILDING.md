@@ -109,7 +109,8 @@ or `media-plugins/gst-plugins-libav`; missing ones are named in `walpe-ctl statu
 ```
 
 A daemon with both backends picks one when it starts: Wayland where the compositor has the
-layer shell, else X11; `walpe-ctl backend` shows and sets it ([WAYLAND.md](WAYLAND.md)).
+layer shell, X11 in an X session, and neither on a Wayland compositor without the layer
+shell (it ends and says so); `walpe-ctl backend` shows and sets it ([WAYLAND.md](WAYLAND.md)).
 The web module holds the page hosts its build found the parts for (the configure summary
 lists them): the off-screen X window, and a Wayland display of its own inside the daemon
 that needs no X at all; which one a page gets is decided when the first page is made
