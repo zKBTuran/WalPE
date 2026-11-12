@@ -13,10 +13,18 @@
  *  - a run that is cancelled leaves no output and no ".part" file, and its
  *    callback is not called;
  *  - the unfinished outputs of a killed daemon are removed
- *    (walpe_import_tidy_parts), and only those. */
+ *    (walpe_import_tidy_parts), and only those;
+ *  - the ffmpeg of a conversion does not outlive the process that started
+ *    it (this program, started again with --hold, is killed mid-way). */
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include "common/import.h"
 
 static int fails;
@@ -293,6 +301,63 @@ static void result_clear (Result *r)
     g_free (r->mode);
 }
 
+/* the first process whose parent is pid (0 = none), and whether a process
+ * still runs (a zombie does not) */
+static long stat_field (long pid, int which, char *state)
+{
+    char *path = g_strdup_printf ("/proc/%ld/stat", pid), *txt = NULL;
+    long v = -1;
+    if (g_file_get_contents (path, &txt, NULL, NULL)) {
+        const char *p = strrchr (txt, ')');     /* (the name may hold spaces) */
+        char st = 0;
+        long ppid = 0;
+        if (p && sscanf (p + 1, " %c %ld", &st, &ppid) == 2) {
+            v = which ? ppid : 0;
+            if (state)
+                *state = st;
+        }
+    }
+    g_free (txt);
+    g_free (path);
+    return v;
+}
+
+static long child_of (long pid)
+{
+    long found = 0;
+    GDir *d = g_dir_open ("/proc", 0, NULL);
+    const char *name;
+    while (d && !found && (name = g_dir_read_name (d))) {
+        long p = g_ascii_isdigit (*name) ? atol (name) : 0;
+        if (p > 0 && stat_field (p, 1, NULL) == pid)
+            found = p;
+    }
+    if (d)
+        g_dir_close (d);
+    return found;
+}
+
+static gboolean pid_runs (long pid)
+{
+    char st = 0;
+    return stat_field (pid, 0, &st) == 0 && st != 'Z' && st != 'X';
+}
+
+/* import-test --hold <src> <dst>: a conversion into <dst>, and this
+ * process stays until it is killed */
+static int hold_main (const char *src, const char *dst)
+{
+    Result r = { 0 };
+    loop = g_main_loop_new (NULL, FALSE);
+    WalpeImport *imp = walpe_import_start_to (src, dst, "libx264", &hd, done_cb, &r, NULL);
+    if (!imp)
+        return 2;
+    g_main_loop_run (loop);
+    for (;;)
+        pause ();
+    return 0;
+}
+
 static void test_runs (void)
 {
     char *ff = g_find_program_in_path ("ffmpeg"), *fp = g_find_program_in_path ("ffprobe");
@@ -447,6 +512,37 @@ static void test_runs (void)
         g_free (part);
         g_free (dst);
     }
+    /* the daemon is killed in the middle of a conversion: its ffmpeg ends
+     * with it (only the daemon names the output and watches its limits).
+     * The "daemon" is this program started again as a helper. */
+    {
+        char *self = g_file_read_link ("/proc/self/exe", NULL);
+        char *dst = g_build_filename (lib, "held.mp4", NULL), *part = g_strconcat (dst, ".part", NULL);
+        char *hargv[] = { self, (char *) "--hold", lng, dst, NULL };
+        GPid helper = 0;
+        gboolean up = self && g_spawn_async (NULL, hargv, NULL, G_SPAWN_DO_NOT_REAP_CHILD, NULL, NULL,
+                                             &helper, NULL);
+        CHECK (up);
+        long child = 0;
+        for (int i = 0; up && i < 600 && !(child && g_file_test (part, G_FILE_TEST_EXISTS)); i++) {
+            g_usleep (100000);
+            child = child_of ((long) helper);
+        }
+        if (up) {
+            CHECK (child > 0 && g_file_test (part, G_FILE_TEST_EXISTS));
+            kill (helper, SIGKILL);
+            waitpid (helper, NULL, 0);
+            gboolean gone = child <= 0;
+            for (int i = 0; child > 0 && i < 100 && !(gone = !pid_runs (child)); i++)
+                g_usleep (100000);
+            CHECK (gone);
+            if (child > 0 && !gone)
+                kill ((pid_t) child, SIGKILL);     /* not left behind by a failing run */
+            g_usleep (200000);
+        }
+        g_unlink (part);
+        g_free (self); g_free (dst); g_free (part);
+    }
 out:
     {
         /* remove what the runs made */
@@ -467,8 +563,10 @@ out:
     g_free (fine); g_free (big); g_free (junk); g_free (lng); g_free (in); g_free (lib);
 }
 
-int main (void)
+int main (int argc, char **argv)
 {
+    if (argc == 4 && !strcmp (argv[1], "--hold"))
+        return hold_main (argv[2], argv[3]);
     tmp = g_dir_make_tmp ("walpe-import-test-XXXXXX", NULL);
     g_assert (tmp);
     g_setenv ("HOME", tmp, TRUE);

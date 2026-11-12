@@ -544,10 +544,18 @@ static void encode_wait_cb (GObject *o, GAsyncResult *res, gpointer user)
 
 /* Between fork and exec of a conversion nobody asked for in person (only
  * calls that may be made there): the lowest CPU and disk priority - it gets
- * the time nothing else wants - and it does not outlive the daemon. What
- * the system refuses stays as it was. user: 0 = the daemon's priority
- * (WALPE_CONVERT_BACKGROUND=0: for tests on a machine that is never idle,
- * where such a child would not get to run). */
+ * the time nothing else wants. What the system refuses stays as it was.
+ * user: 0 = the daemon's priority (a conversion somebody waits for; or
+ * WALPE_CONVERT_BACKGROUND=0: for tests on a machine that is never idle,
+ * where such a child would not get to run).
+ *
+ * For every child that reads the source: it does not outlive the daemon.
+ * Only the daemon gives its output a name (the ".part" file is renamed
+ * when the child is done) and only the daemon watches its limits
+ * (import_watch). A child that went on after its daemon was killed wrote a
+ * file nobody would ever use, for as long and as much as the source made
+ * it, and the next daemon removed that file by name at its start while the
+ * child still filled it. */
 static void background_child_setup (gpointer user)
 {
     if (GPOINTER_TO_INT (user)) {
@@ -585,18 +593,15 @@ static void start_encode (WalpeImport *imp)
     char **argv = build_argv (imp->src, imp->dst_part, &imp->mi, imp->used_encoder, imp->remux,
                               &imp->box, imp->is_scene ? &imp->scene : NULL);
     GError *err = NULL;
-    if (imp->is_scene) {
+    {
         GSubprocessLauncher *l = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE |
                                                             G_SUBPROCESS_FLAGS_STDERR_MERGE);
         const char *bg = g_getenv ("WALPE_CONVERT_BACKGROUND");
         g_subprocess_launcher_set_child_setup (l, background_child_setup,
-                                               GINT_TO_POINTER (!(bg && *bg == '0')), NULL);
+                                               GINT_TO_POINTER (imp->is_scene && !(bg && *bg == '0')),
+                                               NULL);
         imp->proc = g_subprocess_launcher_spawnv (l, (const char *const *) argv, &err);
         g_object_unref (l);
-    } else {
-        imp->proc = g_subprocess_newv ((const char *const *) argv,
-                                       G_SUBPROCESS_FLAGS_STDOUT_PIPE |
-                                       G_SUBPROCESS_FLAGS_STDERR_MERGE, &err);
     }
     g_strfreev (argv);
     if (!imp->proc) {
@@ -746,9 +751,13 @@ static void start_probe (WalpeImport *imp)
                                  "-show_format", "-show_streams", "-select_streams", "v:0",
                                  in, NULL };
     GError *err = NULL;
-    imp->proc = g_subprocess_newv (imp->is_scene ? argv_scene : argv,
-                                   G_SUBPROCESS_FLAGS_STDOUT_PIPE |
-                                   G_SUBPROCESS_FLAGS_STDERR_PIPE, &err);
+    {
+        GSubprocessLauncher *l = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+                                                            G_SUBPROCESS_FLAGS_STDERR_PIPE);
+        g_subprocess_launcher_set_child_setup (l, background_child_setup, GINT_TO_POINTER (0), NULL);
+        imp->proc = g_subprocess_launcher_spawnv (l, imp->is_scene ? argv_scene : argv, &err);
+        g_object_unref (l);
+    }
     g_free (in);
     if (!imp->proc) {
         finish (imp, FALSE, err->message);
