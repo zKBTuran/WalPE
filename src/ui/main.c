@@ -386,10 +386,18 @@ static void sup_set_state (DState st, const char *msg)
         return;
     U.dstate = st;
     static const char *const cls[] = { "up", "busy", "down", NULL };
-    for (int i = 0; cls[i]; i++)
-        gtk_widget_remove_css_class (U.dot, cls[i]);
     const char *c = st == D_UP ? "up" : (st == D_STARTING || st == D_BUSY) ? "busy" : "down";
-    gtk_widget_add_css_class (U.dot, c);
+    /* Only what differs is touched, here and below: this runs for every
+     * status line of the engine. Taking a class away and putting it back
+     * restyles the window, and setting a tooltip - the one it has, or none
+     * again - makes GTK ask the X server where the pointer is, under a
+     * server grab: a layout, a frame and some twenty round trips for a
+     * status that says what the last one said. */
+    for (int i = 0; cls[i]; i++)
+        if (strcmp (cls[i], c) && gtk_widget_has_css_class (U.dot, cls[i]))
+            gtk_widget_remove_css_class (U.dot, cls[i]);
+    if (!gtk_widget_has_css_class (U.dot, c))
+        gtk_widget_add_css_class (U.dot, c);
     char *txt;
     if (st == D_UP) {
         const char *ty = U.last_state ? wpj_str (U.last_state, "type", "none") : "none";
@@ -414,7 +422,8 @@ static void sup_set_state (DState st, const char *msg)
          * outputs the toolkit sees, by the names the engine will use
          * (connector names on X11 and Wayland alike) */
         char *tip = st == D_UP ? NULL : walpe_ui_monitors_line (gdk_display_get_default ());
-        gtk_widget_set_tooltip_text (GTK_WIDGET (U.engine_lbl), tip);
+        if (g_strcmp0 (tip, gtk_widget_get_tooltip_text (GTK_WIDGET (U.engine_lbl))))
+            gtk_widget_set_tooltip_text (GTK_WIDGET (U.engine_lbl), tip);
         g_free (tip);
     }
     gtk_widget_set_visible (U.restart_btn, st == D_DOWN || st == D_GAVE_UP || st == D_BUSY);

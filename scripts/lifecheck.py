@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end checks of the daemon's lifecycle: loads, reloads, restarts.
 
-  python3 -I scripts/lifecheck.py --build build [--daemon FILE] [--tray FILE] [--display KIND] [--only a,b] [--keep] [--tmp DIR]
+  python3 -I scripts/lifecheck.py --build build [--daemon FILE] [--tray FILE] [--window FILE] [--display KIND] [--only a,b] [--keep] [--tmp DIR]
 
 Uses the harness scripts/checkenv.py (private Xvfb, private daemon, pixel
 reading): generated scenes only, nothing of the user's is read or written. Each case starts its own daemon:
@@ -35,6 +35,10 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             status lines it is sent while nothing changes which wallpapers
             were shown last do not make it write its list of them again.
             Skipped in a build without the tray.
+  window    the library window next to a running engine: status lines
+            that say what the last one said draw no frame in it (counted
+            by the window's own probe, WALPE_UI_STATS). Skipped in a
+            build without the window.
   layout    the monitor layout changes while the daemon starts - after it
             read the layout, before it listens for changes, so no event
             tells it: it looks once more when it is up and follows.
@@ -92,7 +96,7 @@ under Wayland: outputs that change there are scripts/waylandcheck.py's.
 Exit code 0 = all passed, 1 = failures, 77 = skipped (the display's programs
 are not installed, or the build has no backend for it). --daemon FILE
 runs another walpe-daemon binary with the tools of --build (a build without
-the fixes: the cases fail there); --tray FILE does the same for walpe-tray. LIFECHECK_PATIENCE=N multiplies every
+the fixes: the cases fail there); --tray FILE and --window FILE do the same for walpe-tray and walpe. LIFECHECK_PATIENCE=N multiplies every
 wait (a software renderer on a busy machine: 3 or more). --tmp DIR: work in
 DIR (must not exist; removed afterwards)."""
 import json, os, re, shutil, signal, socket, struct, subprocess, sys, threading, time
@@ -890,6 +894,99 @@ def case_tray(env, W):
         except subprocess.TimeoutExpired:
             tray.kill()
             tray.wait()
+    env.stop_daemon()
+
+
+# ------------------------------------------------------------------- window
+def case_window(env, W):
+    """Every status line of the engine went through the window's engine
+    indicator: its style class taken away and put back, its tooltip set to
+    what it was. GTK restyles for the one and asks the X server where the
+    pointer is for the other (under a server grab): a layout, a frame and
+    some twenty round trips per line, whatever the line said."""
+    win_bin = env.window_bin or os.path.join(env.build, "walpe")
+    if not os.path.exists(win_bin):
+        print("lifecheck: window skipped (no walpe in the build)")
+        return
+    A = ("A", 640, 360, 0, 0)
+    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False,
+                          "wallpapers_dir": os.path.dirname(W["red"]), "preview_anim": "off"})
+    put(os.path.join(os.path.dirname(env.config), "tray.ini"), "[tray]\nstart_with_gui=false\n")
+    if not check(env.start_daemon([A]), "window: daemon started"):
+        return
+    env.open(W["red"])
+    loaded(env, W["red"])
+    stats = os.path.join(env.tmp, "ui-stats.txt")
+    genv = dict(env.run_env)
+    genv.update({"WALPE_UI_STATS": stats, "GSK_RENDERER": "cairo", "GTK_A11Y": "none"})
+    log = open(os.path.join(env.tmp, "window.log"), "a")
+    win = subprocess.Popen([win_bin], env=genv, stdout=log, stderr=subprocess.STDOUT, cwd=env.tmp)
+    log.close()
+
+    def frames(seconds, during=None):
+        """frame clock cycles of the window in the next `seconds`, None when it is gone"""
+        if win.poll() is not None:
+            return None
+        mark = os.path.getsize(stats) if os.path.exists(stats) else 0
+        win.send_signal(signal.SIGUSR1)     # counts from here
+        time.sleep(0.3 * PATIENCE)
+        if during:
+            during()
+        time.sleep(seconds * PATIENCE)
+        if win.poll() is not None:
+            return None
+        win.send_signal(signal.SIGUSR2)     # writes them
+
+        def written():
+            try:
+                with open(stats) as f:
+                    f.seek(mark)
+                    m = re.findall(r"^frame_work: n=(\d+)", f.read(), re.M)
+                    return [int(m[-1])] if m else None
+            except OSError:
+                return None
+        got = wait_for(written, 10, 0.2)
+        return got[0] if got else None
+
+    try:
+        up = wait_for(lambda: win.poll() is not None or subscribers(env) >= 1, 60, 0.5)
+        if not check(bool(up) and win.poll() is None, "window: it runs and listens to the engine",
+                     f"exit status {win.poll()}"):
+            return
+        time.sleep(3.0 * PATIENCE)   # the probe is attached with the window; the library is read
+        quiet = None
+        for _ in range(12):
+            quiet = frames(2.0)
+            if quiet == 0 or quiet is None:
+                break
+        if not check(quiet == 0, "window: nothing is drawn while nothing happens", quiet):
+            return
+        sub = Subscriber(env.sock)
+        sub.lines(1.0)
+        told = [0]
+
+        def poke():
+            # a request that changes nothing and is none that only reads: the
+            # engine tells its subscribers, and the line says what the last did
+            for _ in range(5):
+                env.ipc({"cmd": "import_cancel"})
+                told[0] += len(sub.lines(0.5))
+        n = frames(1.5, poke)
+        sub.close()
+        check(told[0] >= 5, "window: the engine sent a status line per request", told[0])
+        check(n is not None and n <= 1, "window: status lines that change nothing draw no frame",
+              f"{n} frames for {told[0]} lines")
+        # a line that does change something is shown
+        n = frames(1.5, lambda: env.ipc({"cmd": "pause"}))
+        check(n is not None and n >= 1, "window: a pause is drawn", n)
+        env.ipc({"cmd": "resume"})
+    finally:
+        win.terminate()
+        try:
+            win.wait(timeout=20 * PATIENCE)
+        except subprocess.TimeoutExpired:
+            win.kill()
+            win.wait()
     env.stop_daemon()
 
 
@@ -1766,7 +1863,7 @@ def case_fullscreen(env, W):
 
 
 CASES = [("pointer", case_pointer), ("reload", case_reload), ("restart", case_restart),
-         ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("tray", case_tray), ("busy", case_busy), ("probe", case_probe),
+         ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("tray", case_tray), ("window", case_window), ("busy", case_busy), ("probe", case_probe),
          ("fullscreen", case_fullscreen), ("video", case_video), ("webunload", case_webunload)]
 
 
@@ -1774,7 +1871,7 @@ CASES = [("pointer", case_pointer), ("reload", case_reload), ("restart", case_re
 def main():
     args = sys.argv[1:]
     build, daemon, keep, tmp, only, display = "build", None, False, None, None, None
-    tray = None
+    tray = window = None
     while args:
         a = args.pop(0)
         if a == "--build" and args:
@@ -1783,6 +1880,8 @@ def main():
             daemon = args.pop(0)
         elif a == "--tray" and args:
             tray = os.path.abspath(args.pop(0))
+        elif a == "--window" and args:
+            window = os.path.abspath(args.pop(0))
         elif a == "--display" and args:
             display = args.pop(0)
         elif a == "--keep":
@@ -1808,6 +1907,7 @@ def main():
             return 2
     env = Env(build, daemon, keep, tmp, display)
     env.tray_bin = tray
+    env.window_bin = window
     try:
         if len(env.sock.encode()) > 107:
             print(f"lifecheck: {env.sock} is too long for a socket ({len(env.sock.encode())} > 107 bytes): "

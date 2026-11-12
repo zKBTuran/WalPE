@@ -1669,6 +1669,15 @@ if lifecheck_py.found() and have_x11
     depends: lifecheck_deps,
     is_parallel: false,
     timeout: 900)
+  # the library window next to a real daemon (the case window of
+  # scripts/lifecheck.py): the frames it draws for the engine's status lines
+  test('ui-life', lifecheck_py,
+    args: ['-I', meson.current_source_dir() / 'scripts/lifecheck.py',
+           '--build', meson.current_build_dir(), '--display', 'xvfb', '--only', 'window'],
+    env: ['WALPE_BACKEND=x11'],
+    depends: [daemon, ctl, ui],
+    is_parallel: false,
+    timeout: 300)
   # render resolution per monitor through a real daemon (own Xvfb, private
   # XDG dirs): a new installation, refused values, a render size that is
   # not the monitor's (status, config.json, the picture), monitors that
