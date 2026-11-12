@@ -7,14 +7,23 @@
  *
  *  1. The players of a scene start together, each with a connection of its
  *     own. A server takes connections from a short queue, and what does
- *     not fit is refused: streams are opened one at a time.
+ *     not fit is refused: streams are opened one at a time, and no player
+ *     is left to play into nothing meanwhile.
  *  2. A server that does not answer the stream being opened holds that one
  *     player. The others do not wait behind it without a limit: they play
- *     into nothing, as after a refusal, and their group can be freed. */
+ *     into nothing, as after a refusal, and their group can be freed.
+ *  3. A connection the server refuses (its queue is full of other clients)
+ *     is asked for again in the same turn, and heard; one it refuses five
+ *     times running plays into nothing, and the status line says what the
+ *     server said.
+ *  4. A server that is slow but answers - more time for all the streams
+ *     together than one turn may last - loses nobody: the limit is on the
+ *     turn, not on the queue. */
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <stdio.h>
 #include <string.h>
+#include <pulse/def.h>
 #include "engine/scenesound.h"
 #include "engine/scenesound_server.h"
 
@@ -30,6 +39,19 @@ static gint most_inside;     /* the largest number of them at one time */
 static gint opened, closed;
 static gint hang;            /* 1: the next new_stream does not return until this is 0 again */
 static gint hanging;         /* a new_stream is held */
+static gint refuse_first;    /* so many of a player's first calls are refused */
+static gint refused;         /* calls that were refused */
+static GPrivate asked;       /* calls of this thread (one player) so far */
+static gint open_us = 3000;  /* the round trips of opening a stream */
+/* the lines the players print when they are left without an output */
+static gint said_nothing;    /* "... playing into nothing ..." */
+
+static void log_count (const gchar *domain, GLogLevelFlags level, const gchar *msg, gpointer user)
+{
+    (void) domain; (void) level; (void) user;
+    if (msg && strstr (msg, "playing into nothing"))
+        g_atomic_int_inc (&said_nothing);
+}
 
 static pa_simple *srv_new (const char *server, const char *app, pa_stream_direction_t dir, const char *device,
                            const char *stream, const pa_sample_spec *spec, const pa_channel_map *map,
@@ -42,13 +64,23 @@ static pa_simple *srv_new (const char *server, const char *app, pa_stream_direct
         if (now <= most || g_atomic_int_compare_and_exchange (&most_inside, most, now))
             break;
     }
+    const int mine = GPOINTER_TO_INT (g_private_get (&asked));
+    g_private_set (&asked, GINT_TO_POINTER (mine + 1));
+    if (mine < g_atomic_int_get (&refuse_first)) {
+        /* the queue is full: a connect () fails at once */
+        g_atomic_int_inc (&refused);
+        g_atomic_int_add (&inside, -1);
+        if (error)
+            *error = PA_ERR_CONNECTIONREFUSED;
+        return NULL;
+    }
     if (g_atomic_int_compare_and_exchange (&hang, 1, 2)) {
         g_atomic_int_set (&hanging, 1);
         while (g_atomic_int_get (&hang))
             g_usleep (1000);
         g_atomic_int_set (&hanging, 0);
     } else {
-        g_usleep (3000);     /* the round trips of opening a stream */
+        g_usleep ((gulong) g_atomic_int_get (&open_us));
     }
     Stream *st = g_new0 (Stream, 1);
     st->bytes_per_s = MAX (spec->rate * spec->channels * 2u, 1u);
@@ -145,6 +177,10 @@ static void test_one_at_a_time (const char *wav)
     CHECK (g_atomic_int_get (&opened) == N, "%d players: %d streams were opened", N, g_atomic_int_get (&opened));
     CHECK (g_atomic_int_get (&most_inside) == 1, "streams are opened one at a time: %d at once",
            g_atomic_int_get (&most_inside));
+    /* (a player that gave up its turn and came back five seconds later
+     * has its stream as well by now: the wait above does not tell) */
+    CHECK (g_atomic_int_get (&said_nothing) == 0, "none of them was left to play into nothing meanwhile: %d were",
+           g_atomic_int_get (&said_nothing));
     int sounding = 0;
     for (int w = 0; w < 5000 && sounding < N; w++) {
         g_usleep (1000);
@@ -200,6 +236,92 @@ static void test_server_does_not_answer (const char *wav)
            g_atomic_int_get (&closed), g_atomic_int_get (&opened));
 }
 
+/* ---- 3 ---- */
+static void test_refused_asks_again (const char *wav)
+{
+    enum { N = 6, FIRST = 2 };
+    const gint opened0 = g_atomic_int_get (&opened), nothing0 = g_atomic_int_get (&said_nothing);
+    g_atomic_int_set (&most_inside, 0);
+    g_atomic_int_set (&refused, 0);
+    g_atomic_int_set (&refuse_first, FIRST);
+    WalpeSoundGroup *g = walpe_sound_group_new ("/w/server-c", 1);
+    for (int i = 0; i < N; i++)
+        player (g, wav);
+    walpe_sound_group_set_active (g, TRUE);
+    /* (three seconds: less than the five after which a layer that plays
+     * into nothing asks the server again) */
+    WAIT (g_atomic_int_get (&opened) == opened0 + N, 3000);
+    CHECK (g_atomic_int_get (&opened) == opened0 + N && g_atomic_int_get (&refused) == N * FIRST,
+           "%d players, each refused %d times first: %d streams are open after %d refusals", N, FIRST,
+           g_atomic_int_get (&opened) - opened0, g_atomic_int_get (&refused));
+    CHECK (g_atomic_int_get (&said_nothing) == nothing0 && g_atomic_int_get (&most_inside) == 1,
+           "... in the same turn: %d played into nothing meanwhile, %d asked at a time",
+           g_atomic_int_get (&said_nothing) - nothing0, g_atomic_int_get (&most_inside));
+    walpe_sound_group_free (g);
+    CHECK (threads_gone (), "the threads end: %d left", walpe_sound_threads ());
+
+    /* refused every time (no server is there): the first attempt and
+     * four more for every one of them, then into nothing - with the
+     * server's reason, also for those that were far back in the queue */
+    enum { M = WALPE_SOUND_MAX_STREAMS, EVERY = 1000 };
+    g_atomic_int_set (&refused, 0);
+    g_atomic_int_set (&refuse_first, EVERY);
+    const gint opened1 = g_atomic_int_get (&opened);
+    WalpeSound *q[M];
+    g = walpe_sound_group_new ("/w/server-d", 1);
+    for (int i = 0; i < M; i++)
+        q[i] = player (g, wav);
+    walpe_sound_group_set_active (g, TRUE);
+    int going = 0;
+    for (int w = 0; w < 4000 && (going < M || g_atomic_int_get (&refused) < M * 5); w++) {
+        g_usleep (1000);
+        going = 0;
+        for (int i = 0; i < M; i++)
+            going += frames_of (q[i]) > 0;
+    }
+    char *line = walpe_sound_status (), *want = g_strdup_printf ("%d stream(s) play into nothing", M);
+    CHECK (going == M && g_atomic_int_get (&refused) == M * 5 && g_atomic_int_get (&opened) == opened1 && line &&
+           strstr (line, want) && strstr (line, "Connection refused"),
+           "refused every time: %d attempts for %d players, then into nothing: %s", g_atomic_int_get (&refused), M,
+           line ? line : "(null)");
+    g_free (want);
+    g_free (line);
+    CHECK (g_atomic_int_get (&said_nothing) == nothing0 + M, "... and each of them says so once: %d line(s)",
+           g_atomic_int_get (&said_nothing) - nothing0);
+    walpe_sound_group_free (g);
+    g_atomic_int_set (&refuse_first, 0);
+    CHECK (threads_gone (), "the threads end: %d left", walpe_sound_threads ());
+    CHECK (g_atomic_int_get (&closed) == g_atomic_int_get (&opened), "every stream was closed: %d of %d",
+           g_atomic_int_get (&closed), g_atomic_int_get (&opened));
+}
+
+/* ---- 4 ---- */
+static void test_slow_server (const char *wav)
+{
+    /* 40 ms a stream: the sixteenth has waited 0.6 s when its turn comes,
+     * more than twice the time one turn may last */
+    enum { N = WALPE_SOUND_MAX_STREAMS };
+    const gint opened0 = g_atomic_int_get (&opened), nothing0 = g_atomic_int_get (&said_nothing);
+    g_atomic_int_set (&most_inside, 0);
+    g_atomic_int_set (&open_us, 40000);
+    WalpeSoundGroup *g = walpe_sound_group_new ("/w/server-e", 1);
+    for (int i = 0; i < N; i++)
+        player (g, wav);
+    walpe_sound_group_set_active (g, TRUE);
+    WAIT (g_atomic_int_get (&opened) == opened0 + N, 4000);
+    CHECK (g_atomic_int_get (&opened) == opened0 + N && g_atomic_int_get (&most_inside) == 1,
+           "a server that takes 40 ms a stream: %d of %d streams are open, %d asked at a time",
+           g_atomic_int_get (&opened) - opened0, N, g_atomic_int_get (&most_inside));
+    CHECK (g_atomic_int_get (&said_nothing) == nothing0,
+           "... and nobody was left to play into nothing behind the others: %d were",
+           g_atomic_int_get (&said_nothing) - nothing0);
+    g_atomic_int_set (&open_us, 3000);
+    walpe_sound_group_free (g);
+    CHECK (threads_gone (), "the threads end: %d left", walpe_sound_threads ());
+    CHECK (g_atomic_int_get (&closed) == g_atomic_int_get (&opened), "every stream was closed: %d of %d",
+           g_atomic_int_get (&closed), g_atomic_int_get (&opened));
+}
+
 int main (void)
 {
     g_unsetenv ("WALPE_SOUND_NULL");       /* the output is the stand-in server */
@@ -214,8 +336,11 @@ int main (void)
     walpe_sound_allow (TRUE);
     walpe_sound_set_master (1.0);
 
+    g_log_set_default_handler (log_count, NULL);
     test_one_at_a_time (wav);
-    test_server_does_not_answer (wav);
+    test_refused_asks_again (wav);
+    test_slow_server (wav);
+    test_server_does_not_answer (wav);   /* (last: it leaves its turn taken for a moment) */
 
     g_remove (wav);
     g_rmdir (dir);

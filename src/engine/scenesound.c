@@ -519,28 +519,50 @@ void walpe_sound_set_server_calls (const WalpeSoundServerCalls *calls)
  * streams a few milliseconds apart instead of together). Should the server
  * still refuse one (a queue full of other clients), that player asks
  * again, in its turn: up to CONNECT_AGAIN times, 10 ms apart.
- * A player waits for its turn for CONNECT_TURN_US at most and then
- * goes on as before (into nothing, asking again later): should the server
- * stop answering the one whose turn it is, nobody else waits behind it
- * without a limit. Turn and attempts together stay below the half second
- * by which a player on the null device may be late and still keep its
- * place in time (out_write). */
+ * A player that has no output yet waits while the turns go round. Only
+ * when the player whose turn it is has had it for CONNECT_TURN_US - the
+ * server has stopped answering it - do those behind it go on as before
+ * (into nothing), and they ask for their turn again CONNECT_TURN_US later,
+ * not after SERVER_RETRY_US: the server did not refuse them. The limit is
+ * on the one turn, not on the time a player spends in the queue: counted
+ * from when a player began to wait, 16 layers behind a server that takes
+ * 16 ms or more for a stream (a busy machine, a sink that has to wake up
+ * first) left the last of them without sound for five seconds, which is
+ * what the turns are there to end.
+ * A player that plays into nothing and asks again (out_write) does give up
+ * after CONNECT_TURN_US in the queue, whoever is served: with its attempts
+ * that stays below the half second by which a player on the null device
+ * may be late and still keep its place in time. It asks again as soon. */
 #define CONNECT_TURN_US (G_USEC_PER_SEC / 4)
 #define CONNECT_AGAIN 4
 #define CONNECT_AGAIN_US 10000
 static GMutex turn_lock;          /* (taken alone, by a player's thread, for a few instructions) */
 static GCond turn_cond;
 static gboolean turn_taken;       /* turn_lock: a player is opening its stream */
+static guint turn_serial;         /* turn_lock: counts the turns */
+static gint64 turn_since;         /* turn_lock: when the turn that is taken began */
 
-static gboolean connect_turn_take (void)
+/* give_up: the time (monotonic) after which the caller does not wait any
+ * longer, 0 = as long as the turns go round */
+static gboolean connect_turn_take (gint64 give_up)
 {
-    const gint64 until = g_get_monotonic_time () + CONNECT_TURN_US;
     g_mutex_lock (&turn_lock);
-    while (turn_taken && g_cond_wait_until (&turn_cond, &turn_lock, until))
-        ;
+    while (turn_taken) {
+        const guint serial = turn_serial;
+        gint64 until = turn_since + CONNECT_TURN_US;
+        if (give_up && give_up < until)
+            until = give_up;
+        while (turn_taken && turn_serial == serial && g_cond_wait_until (&turn_cond, &turn_lock, until))
+            ;
+        if (turn_taken && (turn_serial == serial || (give_up && g_get_monotonic_time () >= give_up)))
+            break;      /* the same turn and its time is over, or the caller's is */
+    }
     const gboolean mine = !turn_taken;
-    if (mine)
+    if (mine) {
         turn_taken = TRUE;
+        turn_serial++;
+        turn_since = g_get_monotonic_time ();
+    }
     g_mutex_unlock (&turn_lock);
     return mine;
 }
@@ -566,7 +588,8 @@ static pa_simple *connect_turn_open (const pa_sample_spec *ss, const pa_buffer_a
     return pa;
 }
 
-/* TRUE: the stream is open on the sound server */
+/* TRUE: the stream is open on the sound server. FALSE: o->retry_us says
+ * when to ask again. */
 static gboolean out_connect (Out *o, const char *name)
 {
     /* (the samples are gint16 in memory: the machine's byte order) */
@@ -577,16 +600,16 @@ static gboolean out_connect (Out *o, const char *name)
                           .prebuf = (uint32_t) -1, .minreq = (uint32_t) -1, .fragsize = (uint32_t) -1 };
     int e = 0;
     const gboolean lib = pas_load ();
+    /* (nowhere: the player is on the null device and keeps time there) */
+    const gboolean busy = lib && !connect_turn_take (o->nowhere ? g_get_monotonic_time () + CONNECT_TURN_US : 0);
     const char *why = "libpulse-simple.so.0 could not be loaded";
-    if (lib && !connect_turn_take ()) {
-        why = "the sound server is still busy with another stream";
+    if (busy) {
+        why = "the sound server is busy with another stream";
     } else if (lib) {
         o->pa = connect_turn_open (&ss, &ba, name, &e);
         connect_turn_give ();
         why = pa_strerror (e);
     }
-    if (!o->pa)
-        server_error_set (why);
     if (o->pa) {
         g_atomic_int_inc (&n_real);
         if (o->said)
@@ -594,10 +617,18 @@ static gboolean out_connect (Out *o, const char *name)
         o->said = FALSE;
         return TRUE;
     }
-    if (!o->said)
+    /* (the reason of a layer that only waits behind another one does not
+     * replace what the server said to that one) */
+    if (!busy || !o->said)
+        server_error_set (why);
+    if (!o->said && busy)
+        g_message ("sound: %s: no audio output yet (%s): playing into nothing until it is this layer's turn",
+                   name, why);
+    else if (!o->said)
         g_message ("sound: %s: no audio output (%s): playing into nothing, asking again every %d s",
                    name, why, (int) (SERVER_RETRY_US / G_USEC_PER_SEC));
     o->said = TRUE;
+    o->retry_us = g_get_monotonic_time () + (busy ? CONNECT_TURN_US : SERVER_RETRY_US);
     return FALSE;
 }
 #endif
@@ -679,7 +710,6 @@ static void out_open (Out *o, int rate, int channels, const char *name)
     if (!o->null_out && !out_connect (o, name)) {
         o->null_out = TRUE;
         out_set_nowhere (o, TRUE);
-        o->retry_us = g_get_monotonic_time () + SERVER_RETRY_US;
     }
 #else
     (void) name;
@@ -694,8 +724,6 @@ static void out_write (Out *o, const gint16 *buf, int frames, const char *name)
         if (out_connect (o, name)) {
             o->null_out = FALSE;
             out_set_nowhere (o, FALSE);
-        } else {
-            o->retry_us = g_get_monotonic_time () + SERVER_RETRY_US;
         }
     }
     if (o->pa) {

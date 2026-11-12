@@ -53,9 +53,13 @@ refused, with the reason.
 Output: PulseAudio, or PipeWire through `pipewire-pulse`: one stream per sounding layer,
 named after the layer, application name `walpe`, so the desktop's mixer shows each of them.
 If no server runs, WalPE says so in the log, goes on silently and asks again every 5
-seconds. A connection the server refuses because many layers ask in the same instant is
-asked for again at once (up to four times, 10 ms apart), so such a layer does not stay
-silent for those 5 seconds. `WALPE_SOUND_SINK=<sink name>` plays into that sink instead of the default one;
+seconds. The layers of a scene open their streams one at a time, a few milliseconds apart
+(asked for in the same instant, some were refused by the server), and a connection the
+server still refuses is asked for again at once (up to four times, 10 ms apart), so such a
+layer does not stay silent for those 5 seconds. A layer waits while the others get their
+streams; only behind a stream the server has not answered for a quarter of a second it
+plays into nothing meanwhile and asks for its turn again a quarter of a second later.
+`WALPE_SOUND_SINK=<sink name>` plays into that sink instead of the default one;
 `WALPE_SOUND_NULL=1` plays into nothing (tests).
 
 ## When it is silent

@@ -1087,9 +1087,10 @@ test('scenesound', executable('scenesound-test', 'tests/scenesound_test.c',
   install: false, build_by_default: false), env: ['WALPE_SOUND_NULL=1'], timeout: 240)
 # scene sound and the sound server (engine/scenesound.c, out_connect), with
 # stand-ins for the five functions of libpulse-simple: players that start
-# together and are refused by a server whose queue is full ask again at
-# once, and a server that stops answering holds one player only. Contacts
-# no sound server; no display.
+# together open their streams one at a time, one that is refused by a
+# server whose queue is full asks again in the same turn, a slow server
+# loses nobody, and a server that stops answering holds one player only.
+# Contacts no sound server; no display.
 if have_pulse
   test('scenesound-server', executable('scenesound-server-test', 'tests/scenesound_server_test.c',
     include_directories: inc,

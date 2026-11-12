@@ -113,9 +113,10 @@ the final tree with those of that earlier tree.
   `walpe-ctl setprop walpe_sound=on|off`. The `volume` setting now has an effect.
   The sound layers of a scene open their streams one at a time, a few milliseconds
   apart: asked for in the same instant, some were refused by the sound server. A
-  connection it still refuses is asked for again at once. A layer waits for its turn for
-  a quarter of a second at most; after that it plays into nothing and asks again 5
-  seconds later. Measured against a null sink by recording it; nobody has heard it.
+  connection it still refuses is asked for again at once. A layer waits while the others
+  get their streams; only behind a stream the server has not answered for a quarter of a
+  second it plays into nothing meanwhile, and asks for its turn again a quarter of a
+  second later. Measured against a null sink by recording it; nobody has heard it.
 
 ### Video
 
