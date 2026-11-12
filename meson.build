@@ -320,7 +320,7 @@ if ffmpeg_opt != 'disabled'
     have_ffmpeg = true
   endforeach
   if not have_ffmpeg and ffmpeg_opt == 'enabled'
-    error('video=enabled but FFmpeg/libva dev libs are missing')
+    error('video=enabled but libavcodec and libavutil (FFmpeg, with their development files) were not found')
   endif
 endif
 
