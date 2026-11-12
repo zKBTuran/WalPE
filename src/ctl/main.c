@@ -304,7 +304,8 @@ static void usage (void)
              "  walpe-ctl mem --diff FILE1 FILE2\n"
              "                                 what changed between two reports saved with --json\n"
              "  walpe-ctl quit                 stop the daemon\n"
-             "exit status: 0 done, 1 usage, 2 no daemon (or it did not answer in time: the message\n"
+             "exit status: 0 done, 1 usage (or the output could not be written), 2 no daemon (or it\n"
+             "             did not answer in time: the message\n"
              "             says which), 3 the daemon refused the command\n");
 }
 
@@ -1202,7 +1203,7 @@ static int resolution_cmd (int argc, char **argv)
     return rc;
 }
 
-int main (int argc, char **argv)
+static int run (int argc, char **argv)
 {
     if (argc < 2) {
         usage ();
@@ -1563,4 +1564,27 @@ int main (int argc, char **argv)
     g_free (sock);
     g_free (req);
     return 0;
+}
+
+/* What a command prints is its result. `walpe-ctl status > file` on a full
+ * disk left an empty file and ended with 0, and so did every other command
+ * whose output could not be written (a closed stdout, a full pipe's file):
+ * nothing was said. A write that failed is now said on stderr and ends the
+ * program with 1, the status of walpe-ctl's own errors (bad input, a file
+ * it cannot read) - unless the command itself failed already: then its
+ * status stays. A reader that went away (`walpe-ctl help | head -1`) still
+ * ends walpe-ctl by SIGPIPE, as it does every filter. */
+int main (int argc, char **argv)
+{
+    int rc = run (argc, argv);
+    gboolean bad = ferror (stdout) != 0;
+    if (fflush (stdout) != 0)
+        bad = TRUE;
+    if (bad) {
+        g_printerr ("walpe-ctl: the output could not be written (%s)\n",
+                    rc == 0 ? "the command itself was carried out" : "and the command failed");
+        if (rc == 0)
+            rc = 1;
+    }
+    return rc;
 }

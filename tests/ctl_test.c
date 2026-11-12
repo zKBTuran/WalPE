@@ -23,6 +23,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <sys/wait.h>
 
 #include "common/config.h"
 #include "common/ipc.h"
@@ -88,6 +89,23 @@ static int run_ctl (char **err_out, ...)
         g_free (e_); \
     } while (0)
 #define NODAEMON(...) CHECK (run_ctl (NULL, __VA_ARGS__, NULL) == 2)
+
+/* walpe-ctl with its stdout on a device that takes nothing (to = "/dev/full")
+ * or closed (to = NULL); *err_out = its stderr. -1: could not be run */
+static int run_ctl_out (const char *to, char **err_out, const char *a1, const char *a2)
+{
+    char *sh = to ? g_strdup_printf ("exec \"$0\" \"$@\" > %s", to) : g_strdup ("exec \"$0\" \"$@\" >&-");
+    const char *av[] = { "/bin/sh", "-c", sh, ctl, a1, a2, NULL };
+    char *err = NULL;
+    int status = -1;
+    gboolean ok = g_spawn_sync (NULL, (char **) av, NULL, G_SPAWN_DEFAULT, NULL, NULL, NULL, &err, &status, NULL);
+    g_free (sh);
+    if (err_out)
+        *err_out = err;
+    else
+        g_free (err);
+    return ok && WIFEXITED (status) ? WEXITSTATUS (status) : -1;
+}
 
 /* Replies with control characters in every text walpe-ctl prints: an
  * escape sequence (ESC [ 2 J, ESC ] 0 ; ... BEL), a C1 control (U+009B),
@@ -223,6 +241,20 @@ static gpointer client_thread (gpointer u)
     JsonNode *n;
     JsonObject *o;
     char *err = NULL;
+
+    if (g_file_test ("/dev/full", G_FILE_TEST_EXISTS)) {
+        /* the reply arrived and could not be printed: 1, and the sentence
+         * says that the command itself was carried out; a refusal that
+         * could not be printed stays 3 */
+        CHECK (run_ctl_out ("/dev/full", &err, "status", NULL) == 1);
+        CHECK (err && strstr (err, "could not be written") && strstr (err, "was carried out"));
+        g_clear_pointer (&err, g_free);
+        CHECK (run_ctl_out ("/dev/full", &err, "set", "refuse=1") == 3);
+        g_clear_pointer (&err, g_free);
+        n = sent ();
+        if (n)
+            json_node_unref (n);
+    }
 
     /* set: several keys in one request, each with the type its key has */
     CHECK (run_ctl (NULL, "set", "fps=48", "covered=off", "steam_user=on", "focus=limit",
@@ -838,6 +870,24 @@ int main (int argc, char **argv)
     CHECK (run_ctl (NULL, "help", NULL) == 0);
     CHECK (run_ctl (NULL, "--help", NULL) == 0);
     CHECK (run_ctl (NULL, "frobnicate", NULL) == 1);
+    if (g_file_test ("/dev/full", G_FILE_TEST_EXISTS)) {
+        /* output that cannot be written is a failure (it ended with 0 and
+         * said nothing): status 1, a sentence on stderr; a command that
+         * failed by itself keeps its own status */
+        char *e = NULL;
+        CHECK (run_ctl_out ("/dev/full", &e, "help", NULL) == 1);
+        CHECK (e && strstr (e, "could not be written"));
+        g_clear_pointer (&e, g_free);
+        CHECK (run_ctl_out (NULL, &e, "help", NULL) == 1);          /* stdout closed */
+        CHECK (e && strstr (e, "could not be written"));
+        g_clear_pointer (&e, g_free);
+        CHECK (run_ctl_out ("/dev/full", &e, "status", NULL) == 2);  /* no daemon: that is the failure */
+        CHECK (e && strstr (e, "is not running") && !strstr (e, "could not be written"));
+        g_clear_pointer (&e, g_free);
+        CHECK (run_ctl_out ("/dev/null", &e, "help", NULL) == 0);
+        CHECK (e && !*e);
+        g_clear_pointer (&e, g_free);
+    }
     BAD ("at least one", "set");
     BAD ("is not <key>=<value>", "set", "fps", "30");
     BAD ("is not <key>=<value>", "set", "fps=30", "covered");
