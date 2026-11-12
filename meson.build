@@ -858,6 +858,12 @@ test('linkage', find_program('sh'),
          have_wayland ? 'wayland' : 'nowayland',
          have_x11 or have_webhost_x11 ? 'x11' : 'nox11'],
   depends: linkage_deps, timeout: 60)
+
+# docs/ENVIRONMENT.md names every variable of WalPE's own that a test
+# program (tests/*.c) or a check script (scripts/*.py) reads from its
+# environment: tests/envdoc_test.sh. Reads the sources; nothing is built.
+test('envdoc', find_program('sh'),
+  args: [files('tests/envdoc_test.sh'), meson.current_source_dir()], timeout: 60)
 endif  # with_tests
 
 # GUI stylesheet compiled in (data/style.css; ~/.config/walpe/style.css overrides)
