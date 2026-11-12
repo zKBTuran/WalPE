@@ -5,7 +5,7 @@
 
 Starts a private Xvfb (-displayfd) and a private walpe-daemon (own XDG dirs in a temp dir, two fake
 640x360 monitors), generates a GIF and a picture with ffmpeg (loose media files, opened as wallpapers
-by their path), and runs the commands README.md documents:
+by their path), and runs the commands docs/USAGE.md documents:
 
   - status: one JSON object with the documented fields, two monitors
   - every `set` key of the usage text: answered ok, the value is in config.json afterwards (and in
