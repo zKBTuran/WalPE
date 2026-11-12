@@ -1907,6 +1907,37 @@ if have_web and have_x11
   endif
 endif
 
+# real web wallpapers end to end in a session without X: a private headless
+# Wayland compositor with Xwayland switched off (scripts/displayenv.py), no
+# DISPLAY, generated pages in WebKitGTK on the private page host
+# (scripts/webcheck.py): the picture on one and two outputs, animation, the
+# Wallpaper Engine listeners, pointer input, outputs that come, change and
+# go, pause and resume (CPU time of the page), restarts, a page process that
+# dies, DISPLAY left over without an X server, what is left behind, what the
+# page's sandbox can see, popups and choosers, the session's clipboard,
+# network access off. Skipped (77) without sway + grim, and where WebKit does
+# not start; not registered in a build without the private page host.
+if have_web and have_webhost_wl and lifecheck_py.found()
+  test('web-wayland', lifecheck_py,
+    args: ['-I', meson.current_source_dir() / 'scripts/webcheck.py',
+           '--build', meson.current_build_dir()],
+    depends: [daemon, ctl, web_mod],
+    is_parallel: false,
+    timeout: 1800)
+endif
+# the same pages on the X11 page host: a private Xvfb, the daemon on X11
+# (the cases that need outputs that come and go, or a Wayland session, are
+# left out there). What the two page hosts have to agree on is checked by
+# the same script on both.
+if have_web and have_webhost_x11 and have_x11 and lifecheck_py.found()
+  test('web-x11', lifecheck_py,
+    args: ['-I', meson.current_source_dir() / 'scripts/webcheck.py',
+           '--build', meson.current_build_dir(), '--display', 'xvfb'],
+    depends: [daemon, ctl, web_mod],
+    is_parallel: false,
+    timeout: 1500)
+endif
+
 # dev tool (not installed): renders the "Wallpaper options" panel of one
 # project.json into a PNG without the rest of the GUI (needs a display):
 #   propshot <project.json> <out.png> data/style.css [width] [height]

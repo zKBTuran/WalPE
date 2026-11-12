@@ -36,7 +36,12 @@
 # 10. a part of a large file of the page (Range: bytes=0-, what a media
 #     player sends) with the answer left waiting does not cost the daemon
 #     the file's size in memory - it did, once for every such request;
-#     and a HEAD with that header is answered as a HEAD without it.
+#     and a HEAD with that header is answered as a HEAD without it;
+# 11. the private page host (the run with WALPE_WEB_HOST=private): once
+#     the page is up its display has no socket left in the runtime
+#     directory and nothing listens under its name, so no second client
+#     can ever connect; with the X11 page host it is not started at all
+#     (no thread of it in the daemon).
 #
 # Skipped (exit 77) without Xvfb / python3 / the web module, or when WebKit
 # does not come up here. Run: meson test -C build websec -v
@@ -317,6 +322,26 @@ private|x11)
         bad "the page was not on the page host asked for (WALPE_WEB_HOST=$WALPE_WEB_HOST); status says: $(grep -Eo '"web_host" *: *"[a-z0-9]*"' "$T/status.json" | head -1)"
     ;;
 esac
+# the private page host's display: a thread of the daemon ("walpe-web-host").
+# Its socket lives in <runtime dir>/walpe-web-XXXXXX/ only until the page's
+# toolkit is connected. (/proc/net/unix: a listening socket has the flag
+# 00010000; the one accepted connection keeps the path's name without being
+# reachable through it.)
+host_thread=0
+for c in /proc/"$DPID"/task/*/comm; do
+    [ "$(cat "$c" 2>/dev/null)" = walpe-web-host ] && host_thread=1
+done
+if grep -Eq '"web_host" *: *"private' "$T/status.json"; then
+    [ $host_thread = 1 ] || bad "the page is on the private page host, and the daemon has no thread of it"
+    left=$(ls "$XDG_RUNTIME_DIR" 2>/dev/null | grep '^walpe-web-' | tr '\n' ' ')
+    [ -z "$left" ] || bad "the private page host left its socket directory in the runtime directory while its page runs: $left"
+    if [ -r /proc/net/unix ]; then
+        lis=$(awk -v d="$XDG_RUNTIME_DIR/walpe-web-" '$4 == "00010000" && index($8, d) == 1 { print $8 }' /proc/net/unix | tr '\n' ' ')
+        [ -z "$lis" ] || bad "a socket of the private page host still listens (a second client could connect): $lis"
+    fi
+else
+    [ $host_thread = 0 ] || bad "the page is on the X11 page host, and the private page host was started all the same (a thread of it runs)"
+fi
 if [ -s "$T/listen.log" ]; then
     bad "with network access off the page reached another port of this machine:"; sed 's/^/    /' "$T/listen.log" | head -5
 fi

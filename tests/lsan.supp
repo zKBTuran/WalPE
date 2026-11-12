@@ -16,3 +16,17 @@
 # (What the text code allocates through fontconfig itself is given back in
 # walpe_text_release (); a text-part check holds that against the heap.)
 leak:libfontconfig.so
+
+# WebKitGTK inside the daemon (web-wayland, web-x11: a sanitizer build of
+# walpe-daemon that ran a page and ended through `walpe-ctl quit`): WebKit
+# makes one JavaScriptCore context of its own in the daemon's process
+# (JSGlobalContextCreateInGroup, called from its main-loop work) and keeps
+# it for the life of the process. The eleven literal names its set-up puts
+# into JavaScriptCore's string table (24 bytes each, 264 in all) are
+# reported at exit, with the X11 page host and with the private one alike.
+# Every frame between malloc and the main loop is in libjavascriptcoregtk
+# or libwebkitgtk. The line names the function and not the library:
+# WebKit's run loop lives in that library too, so its name is in the stack
+# of every callback into the web module, and what this tree's code
+# allocates there has to stay visible.
+leak:JSC::JSGlobalObject::init
