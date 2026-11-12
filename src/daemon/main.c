@@ -3677,10 +3677,32 @@ static void prof_note_pauses (void)
     }
 }
 
+/* The log says when a monitor's wallpaper stops and when it runs again, and
+ * which rule stopped it (the first that applies, as `status` tells it): a
+ * wallpaper that "froze" or "went silent" after a click was a pause rule at
+ * work more often than a fault, and the log had no word of it. One line per
+ * change of a monitor's own state, written by the main thread where the
+ * change is decided: a window that covers the desktop and uncovers it makes
+ * two. */
+static void pause_said (Mon *m, gboolean paused)
+{
+    const char *why = paused ? pause_reason_mon (m) : "";
+    if (paused)
+        g_message ("monitor %d (%s): paused: %s", m->index, m->name ? m->name : "?",
+                   *why ? why : "nothing of it can be seen");
+    else
+        g_message ("monitor %d (%s): running again", m->index, m->name ? m->name : "?");
+}
+
 static void apply_pause_state (void)
 {
-    for (GList *l = D.mons; l; l = l->next)
-        ((Mon *) l->data)->own_paused = want_pause_mon (l->data);
+    for (GList *l = D.mons; l; l = l->next) {
+        Mon *m = l->data;
+        const gboolean was = m->own_paused;
+        m->own_paused = want_pause_mon (m);
+        if (m->own_paused != was)
+            pause_said (m, m->own_paused);
+    }
     prof_note_pauses ();
     for (GList *l = D.mons; l; l = l->next) {
         Mon *m = l->data;
