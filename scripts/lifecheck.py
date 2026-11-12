@@ -1015,6 +1015,10 @@ def case_window(env, W):
     if not os.path.exists(win_bin):
         print("lifecheck: window skipped (no walpe in the build)")
         return
+    if env.display.winsys != "x11":
+        print("skip window (the check gives the input focus to an X client of its own: X11 only; "
+              "the test ui-life runs it)")
+        return
     A = ("A", 640, 360, 0, 0)
     rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False,
                           "wallpapers_dir": os.path.dirname(W["red"]), "preview_anim": "off"})
