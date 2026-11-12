@@ -101,6 +101,8 @@ or `media-plugins/gst-plugins-libav`; missing ones are named in `walpe-ctl statu
 | `-Dhardening=true` | default | stack protector, stack clash and control-flow protection, `_FORTIFY_SOURCE`, format-security errors, full RELRO and immediate binding |
 | `-Dvideo`, `-Dweb`, `-Daudio`, `-Dscenescript`, `-Dtray` | `auto` | the optional parts above. `-Dweb=enabled` fails at the configure step only when neither page host can be built |
 | `-Dquickjs_libdir=/abs/dir` | | one more directory searched first for `libquickjs.a` (a QuickJS built by hand, or the target's in a cross build) |
+| `-Dtests=true` | `false` | the test programs, the tests of `meson test` and the tools built with them (`sceneshot`, `scenecpu` ...): [Tests](DEVELOPMENT.md#tests). `false`: the build directory has none of them |
+| `-Dfuzz=enabled` | `disabled` | the libFuzzer targets of `tests/fuzz`: needs clang (`CC=clang`), to be combined with `-Db_sanitize=address,undefined -Db_lundef=false`. A developer tool, never part of a normal build |
 
 ```sh
 ./build.sh -Dwayland=disabled                  # the X11-only build, as the 0.12 releases are

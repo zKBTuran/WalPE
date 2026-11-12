@@ -102,6 +102,7 @@ All of these are written to the file only while they are not at their default.
 | `video_resolution` | `auto` (new installation), `1080p` (a file from an older version) | | the largest size videos are imported and converted at: `auto`, `none`, a preset or `WxH`. Always written |
 | `scale_filter` | `bilinear` | | how a scene rendered at another size than the monitor's is scaled to it: `bilinear`, `nearest` |
 | `resolution_prompt` | true | | may the WalPE window ask about monitors it has not asked about |
+| `resolution_migrate` | unset | (written by the daemon) | in a file an older version wrote, from its first load until the daemon knows its monitors: those are then entered as "native, asked about" and the member is gone |
 
 ### Rendering
 
@@ -113,7 +114,7 @@ All of these are written to the file only while they are not at their default.
 | `skip_hidden_margin`, `skip_hidden_inset` | 32, 0 | | with `always`: pixels drawn around what is visible / pixels taken off every side of a hiding window (rounded corners) |
 | `fx_cache` | true | | reuse the output of effect chains that do not change |
 | `fx_specialize` | false | | effect constants compiled into the shaders; each such shader is compared with the plain one before it is used (`walpe-ctl status`: `fx_verified`, `fx_rejected`). Reloads the scenes |
-| `fx_quality` | `exact` | | `fast`: cheaper shader variants, stacked wave / shake effects in one pass (small pixel differences). Reloads the scenes |
+| `fx_quality` | `exact` | | `fast`: cheaper shader variants, stacked wave / shake effects in one pass (small pixel differences). Reloads the scenes. `set` also takes the switch `fx_fast=on\|off`, the earlier name of `fx_quality=fast\|exact` (the settings window sends it); it is not a key of the file |
 | `tex_downscale` | true | | oversized layer pictures are stored at the size they are shown at (next load) |
 | `particle_lowres` | `auto` | | large soft particles at reduced resolution: `off`, `auto` (only where the picture stays nearly the same), `all` |
 | `particle_density` | 100 | | per cent of its particles every system emits, 5-100 |

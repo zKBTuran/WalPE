@@ -33,8 +33,9 @@ walpe-daemon (src/daemon/)   no GTK. Per monitor one EGL surface - an override-r
 walpe      (src/ui/)         GTK4 library window, options panel, settings, Workshop tab
 walpe-ctl  (src/ctl/)        command line client of the control socket
 walpe-tray (src/tray/)       tray icon (XEmbed + StatusNotifierItem), own process
-scripts/                     walpe-gpu-report.sh (installed); the end-to-end tests' harness:
-                             displayenv.py, checkenv.py, lifecheck.py, waylandcheck.py, rescheck.py
+scripts/                     walpe-gpu-report.sh, walpe-collect.sh (installed); the end-to-end tests' harness:
+                             displayenv.py, checkenv.py, lifecheck.py, waylandcheck.py, rescheck.py,
+                             scenevideocheck.py, webcheck.py, wlsilentcheck.py, wlwaitcheck.py
 protocols/                   Wayland protocol descriptions (third-party, see Licence)
 cross/                       meson cross files for aarch64
 data/                        systemd user unit, autostart and desktop entries, style.css, icon
