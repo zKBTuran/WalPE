@@ -26,7 +26,10 @@
  *     end by themselves.
  *  8. The process's streams: of more players than WALPE_SOUND_MAX_STREAMS,
  *     over two wallpapers, that many sound and the others wait; a waiting
- *     one gets its output when another falls silent. */
+ *     one gets its output when another falls silent.
+ *  9. walpe_sound_restart_at (the sound track of a video): the file from a
+ *     place inside it, from its beginning again, from behind its end, and
+ *     a place asked for while the player is not heard. */
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <math.h>
@@ -780,6 +783,67 @@ static void test_stream_cap (const char *dir)
     g_free (lng);
 }
 
+/* ---- 9 ---- */
+static void test_restart (const char *dir)
+{
+    WalpeSoundStats st;
+    walpe_sound_use_null (TRUE);
+    char *two = write_wav (dir, "two.wav", 48000, 2, 16, 1, 96000, TRUE, -1);   /* two seconds */
+    WalpeSoundGroup *g = group_on ("/w/restart");
+    WalpeSound *s = snd_new (g, two, NULL, WALPE_SOUND_SINGLE, 1.0f);
+    /* from 1.5 s: the last half second is put out, the file was played once */
+    walpe_sound_restart_at (s, 1.5);
+    WAIT (stats_of (s).plays == 1, 5000);
+    st = stats_of (s);
+    CHECK (st.plays == 1 && st.opens == 1 && st.frames == 24000 && st.pos == 96000 && !walpe_sound_is_playing (s),
+           "from 1.5 s: %d play(s), %d open(s), %" G_GINT64_FORMAT " frames, place %" G_GINT64_FORMAT,
+           st.plays, st.opens, st.frames, st.pos);
+    /* from the beginning: all of it */
+    walpe_sound_restart_at (s, 0.0);
+    WAIT (stats_of (s).plays == 2, 5000);
+    st = stats_of (s);
+    CHECK (st.plays == 2 && st.frames == 24000 + 96000 && st.pos == 96000,
+           "from 0: %d play(s), %" G_GINT64_FORMAT " frames, place %" G_GINT64_FORMAT, st.plays, st.frames, st.pos);
+    /* behind its end: nothing to play, and the player is not left waiting */
+    walpe_sound_restart_at (s, 30.0);
+    WAIT (stats_of (s).plays == 3, 5000);
+    st = stats_of (s);
+    CHECK (st.plays == 3 && st.frames == 24000 + 96000 && !walpe_sound_is_playing (s),
+           "from behind the end: %d play(s), %" G_GINT64_FORMAT " frames", st.plays, st.frames);
+    /* while the wallpaper is paused the place is kept and nothing is opened */
+    walpe_sound_group_set_active (g, FALSE);
+    walpe_sound_restart_at (s, 1.0);
+    g_usleep (100000);
+    st = stats_of (s);
+    CHECK (st.opens == 3 && st.frames == 24000 + 96000 && st.pos == 48000 && walpe_sound_is_playing (s),
+           "asked while paused: %d open(s), %" G_GINT64_FORMAT " frames, place %" G_GINT64_FORMAT,
+           st.opens, st.frames, st.pos);
+    walpe_sound_group_set_active (g, TRUE);
+    WAIT (stats_of (s).plays == 4, 5000);
+    st = stats_of (s);
+    CHECK (st.plays == 4 && st.opens == 4 && st.frames == 24000 + 96000 + 48000,
+           "shown again: %d play(s), %" G_GINT64_FORMAT " frames", st.plays, st.frames);
+    /* at the pace of real output: a place asked for in the middle of the
+     * file takes effect at once, in the same stream */
+    walpe_sound_use_null (FALSE);
+    WalpeSound *r = snd_new (g, two, NULL, WALPE_SOUND_SINGLE, 1.0f);
+    walpe_sound_play (r);
+    WAIT (stats_of (r).frames > 4800, 5000);
+    gint64 t0 = g_get_monotonic_time ();
+    walpe_sound_restart_at (r, 1.9);
+    WAIT (stats_of (r).plays == 1, 5000);
+    double el = (g_get_monotonic_time () - t0) / 1e6;
+    st = stats_of (r);
+    CHECK (st.plays == 1 && st.opens == 2 && el < 1.0 && st.frames < 48000,
+           "in the middle of the file: ended %.2f s later, %d open(s), %" G_GINT64_FORMAT " frames",
+           el, st.opens, st.frames);
+    walpe_sound_use_null (TRUE);
+    walpe_sound_group_free (g);
+    CHECK (threads_gone (), "restart: the threads end");
+    g_remove (two);
+    g_free (two);
+}
+
 int main (void)
 {
     test_names ();
@@ -815,6 +879,7 @@ int main (void)
     test_limits (dir, sine);
     test_free_running (dir);
     test_stream_cap (dir);
+    test_restart (dir);
 
     g_remove (sine);
     g_rmdir (dir);

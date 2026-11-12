@@ -46,6 +46,8 @@ struct WalpeSound {
     gboolean gate;       /* the group is heard (walpe_sound_group_speaking) */
     gboolean quit;       /* the group was freed: the thread ends */
     gboolean rewind;     /* stop (): let the file go, start again at the next play */
+    gboolean restart;    /* walpe_sound_restart_at (): the first file again, from restart_s */
+    double restart_s;
     gboolean broken;     /* none of its files can be played: never tried again */
     float volume;
     gint wp_q16;         /* atomic: the wallpaper's own volume, 16.16 (the group's) */
@@ -810,12 +812,12 @@ static gboolean may_run_locked (const WalpeSound *s)
     return s->state == ST_PLAYING && !s->hold && s->gate && !s->broken;
 }
 
-enum { ACT_RUN, ACT_PARK, ACT_REWIND, ACT_QUIT };
+enum { ACT_RUN, ACT_PARK, ACT_REWIND, ACT_QUIT, ACT_RESTART };
 
 /* What the thread does next. It sleeps here while there is nothing to do;
  * with an open output (out_open) it comes back at once with ACT_PARK, so
  * that the caller can end the output before it sleeps. */
-static int next_action (WalpeSound *s, gboolean out_is_open)
+static int next_action (WalpeSound *s, gboolean out_is_open, double *restart_s)
 {
     int act;
     g_mutex_lock (&s->lock);
@@ -824,7 +826,12 @@ static int next_action (WalpeSound *s, gboolean out_is_open)
             act = ACT_QUIT;
         else if (s->rewind)
             act = ACT_REWIND;
-        else if (may_run_locked (s))
+        else if (may_run_locked (s) && s->restart) {
+            /* (only a player that is heard: until then the place is kept) */
+            act = ACT_RESTART;
+            s->restart = FALSE;
+            *restart_s = s->restart_s;
+        } else if (may_run_locked (s))
             act = ACT_RUN;
         else if (out_is_open)
             act = ACT_PARK;
@@ -941,11 +948,33 @@ static gpointer sound_thread (gpointer data)
     gint64 k_prev = -1;       /* gain of the block before, 16.16; -1 = none: the
                                * next block starts at its own gain (a file's first
                                * sample sounds as it was made) */
+    double skip_s = 0;        /* walpe_sound_restart_at: the file opened next begins there */
     GRand *rng = g_rand_new ();
     gint16 buf[WALPE_SOUND_BLOCK * 2];
     memset (&src, 0, sizeof src);
     for (;;) {
-        int act = next_action (s, out.rate != 0 || out.slot);
+        int act = next_action (s, out.rate != 0 || out.slot, &skip_s);
+        if (act == ACT_RESTART) {
+            /* The first file again, from skip_s, in the stream that is
+             * open: 20 ms of what was playing, faded out, and no wait for
+             * the stream to play what it holds - the new place follows
+             * what was written, as the next block of the file would. */
+            int n = have && out.rate && k_prev > 0
+                        ? src_read (&src, buf, MIN (WALPE_SOUND_BLOCK, MAX (out.rate / 50, 1))) : 0;
+            if (n > 0) {
+                scale_block (buf, n, src.channels, k_prev, 0, n);
+                out_write (&out, buf, n, s->name);
+            }
+            if (have)
+                src_close (&src);
+            have = FALSE;
+            idx = -1;
+            k_prev = out.rate ? 0 : -1;     /* into a stream that was sounding: faded in */
+            g_mutex_lock (&s->lock);
+            s->st.frames += MAX (n, 0);
+            g_mutex_unlock (&s->lock);
+            continue;
+        }
         if (act != ACT_RUN) {
             if (out.rate) {
                 /* Silence from here on. The wave is not cut where it stands
@@ -1029,10 +1058,27 @@ static gpointer sound_thread (gpointer data)
             }
             have = TRUE;
             played = 0;
+            if (skip_s > 0) {
+                /* a place inside the file: the decoders have no seek, the
+                 * sound before it is decoded and dropped (a FLAC track
+                 * decodes some hundred times faster than it plays) */
+                gint64 want = (gint64) (MIN (skip_s, (double) WALPE_SOUND_MAX_SECONDS) * src.rate);
+                while (want > 0) {
+                    int n = src_read (&src, buf, (int) MIN ((gint64) WALPE_SOUND_BLOCK, want));
+                    if (n <= 0)
+                        break;
+                    want -= n;
+                    played += n;
+                }
+                if (k_prev < 0)
+                    k_prev = 0;     /* not the file's first sample: faded in */
+            }
+            skip_s = 0;
             g_mutex_lock (&s->lock);
             s->st.rate = src.rate;
             s->st.channels = src.channels;
             s->st.opens++;
+            s->st.pos = played;
             g_mutex_unlock (&s->lock);
         }
         /* The output for it, whether the file was opened just now or is one
@@ -1056,6 +1102,7 @@ static gpointer sound_thread (gpointer data)
             const int file_rate = src.rate;
             src_close (&src);
             have = FALSE;
+            skip_s = 0;
             if (!played) {
                 /* not one frame of sound: such a file would be opened again
                  * and again as fast as the disk allows */
@@ -1122,6 +1169,8 @@ static gpointer sound_thread (gpointer data)
         out_write (&out, buf, n, s->name);
         g_mutex_lock (&s->lock);
         s->st.frames += n;
+        if (!s->restart)    /* (else the place asked for stands, walpe_sound_restart_at) */
+            s->st.pos = played;
         s->st.peak = MAX (s->st.peak, peak);
         s->st.null_out = out.null_out;
         s->st.running = TRUE;
@@ -1394,6 +1443,25 @@ void walpe_sound_play (WalpeSound *s)
     g_mutex_lock (&s->lock);
     if (!s->broken)
         s->state = ST_PLAYING;
+    kick_locked (s);
+    g_mutex_unlock (&s->lock);
+}
+
+void walpe_sound_restart_at (WalpeSound *s, double seconds)
+{
+    if (!s || !isfinite (seconds))
+        return;
+    g_mutex_lock (&s->lock);
+    if (!s->broken) {
+        s->state = ST_PLAYING;
+        s->rewind = FALSE;
+        s->restart = TRUE;
+        s->restart_s = MAX (seconds, 0.0);
+        /* what a reader takes for the player's place from now on, also
+         * before the thread got there */
+        s->st.pos = s->st.rate > 0 ? (gint64) (s->restart_s * s->st.rate) : 0;
+        g_cond_broadcast (&s->cond);
+    }
     kick_locked (s);
     g_mutex_unlock (&s->lock);
 }

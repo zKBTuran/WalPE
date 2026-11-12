@@ -156,6 +156,14 @@ void walpe_sound_set_prepare (WalpeSound *s, void (*prepare) (const char *arg), 
 void walpe_sound_play (WalpeSound *s);    /* start, or go on after pause */
 void walpe_sound_pause (WalpeSound *s);
 void walpe_sound_stop (WalpeSound *s);    /* stop; the next play starts the file again */
+/* Play the layer's first file from `seconds` into it (0 = its beginning),
+ * whatever the player did before: what is heard now is faded out and the
+ * new place follows in the same output stream, without the silence of a
+ * stop and a play (which close the stream and open another). Behind the
+ * end of the file there is nothing to play: the file counts as played.
+ * While the layer is not heard the place is kept for when it is. For the
+ * sound track of a video (video.c), which has to follow the picture. */
+void walpe_sound_restart_at (WalpeSound *s, double seconds);
 /* told to play and not ended (a "single" sound ends by itself) - also
  * while nothing is heard because the scene is paused or sound is off */
 gboolean walpe_sound_is_playing (WalpeSound *s);
@@ -173,6 +181,8 @@ typedef struct {
     gboolean null_out;   /* plays into the null device */
     gboolean running;    /* has a thread that produces output right now */
     char error[160];     /* last failure ("" = none) */
+    gint64 pos;          /* where in its file the player is: sample frames from the file's
+                          * start to the last one handed to the output (-1 = no file) */
 } WalpeSoundStats;
 void walpe_sound_stats (WalpeSound *s, WalpeSoundStats *out);
 
