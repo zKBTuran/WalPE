@@ -20,3 +20,5 @@ option('wayland', type: 'feature', value: 'auto',
   description: 'walpe-daemon: the Wayland backend (layer shell; wayland-client, wayland-egl, wayland-scanner). The daemon picks X11 or Wayland when it starts: walpe-ctl backend')
 option('tests', type: 'boolean', value: false,
   description: 'The test programs, the tests of `meson test` and the developer tools (sceneshot, scenecpu ...). Off (the default): the build directory has none of them, so `ninja`, `meson compile` and `meson install` build the installed programs only. On: `meson test -C build` runs the suite; a plain `ninja` or `meson install` then builds the test programs too')
+option('fuzz', type: 'feature', value: 'disabled',
+  description: 'Build the libFuzzer targets of tests/fuzz (clang; use with -Db_sanitize=address,undefined -Db_lundef=false). Developer tool: never part of a normal build')

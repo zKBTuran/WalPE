@@ -81,6 +81,17 @@ if get_option('hardening')
   ]), language: 'c')
 endif
 
+# Fuzz targets (-Dfuzz=enabled, clang; tests/fuzz). Every source gets the
+# coverage instrumentation libFuzzer steers by; combine with
+# -Db_sanitize=address,undefined -Db_lundef=false. Off by default: nothing
+# of it is in any other build.
+if get_option('fuzz').enabled()
+  if not cc.has_argument('-fsanitize=fuzzer-no-link')
+    error('fuzz=enabled needs a compiler with libFuzzer (clang): CC=clang meson setup ...')
+  endif
+  add_project_arguments('-fsanitize=fuzzer-no-link', language: 'c')
+endif
+
 # release builds: GObject type-cast macros (GTK_WINDOW (x), ...) are plain
 # casts, as GLib recommends for production builds
 if not get_option('debug')
@@ -2046,3 +2057,10 @@ if have_ffmpeg
   programs += video_mod
 endif
 alias_target('programs', programs)
+
+# Fuzz harnesses for the parsers of wallpaper files (-Dfuzz=enabled), and
+# the inputs that once broke one as tests of the suite (-Dtests=true):
+# tests/fuzz/meson.build. Without either option nothing of it is defined.
+if with_tests or get_option('fuzz').enabled()
+  subdir('tests/fuzz')
+endif  # with_tests or fuzz

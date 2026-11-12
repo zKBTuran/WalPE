@@ -1,0 +1,1 @@
+{"camera": {"center": "0 0 -1", "eye": "0 0 0", "up": "0 1 0"}, "general": {"orthogonalprojection": {"width": 64, "height": 64}, "clearcolor": "0 0 0"}, "objects": [{"id": 1, "name": "a", "image": "models/a.json", "origin": "32 32 0", "scale": "1 1 1", "angles": "0 0 0", "size": "64 64", "visible": true}]}
