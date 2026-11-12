@@ -1519,10 +1519,26 @@ test('swrender', executable('swrender-test', 'tests/swrender_test.c',
 # values of the gpu setting, the display device, the environment for
 # rendering on another GPU, the probe's report, the config keys, the Mesa
 # equivalents of gpu.conf's driver hints
-test('gpusel', executable('gpusel-test', 'tests/gpusel_test.c',
+gpusel_test = executable('gpusel-test', 'tests/gpusel_test.c',
   include_directories: [inc, include_directories('tests')],
   dependencies: [core_dep],
-  install: false, build_by_default: false))
+  install: false, build_by_default: false)
+test('gpusel', gpusel_test)
+
+# gpu = auto in a running daemon, on made-up machines (the trees of
+# tests/fakegpu.h, written by `gpusel-test --tree`): no test process and no
+# variable where one GPU or a card drives the displays, or with gpu =
+# display; on a laptop with two GPUs the discrete one is tested, and when
+# the test fails - here it always does: a software renderer draws - the
+# window system's GPU renders and log and status say why. Its own Xvfb
+# (exit 77 = skipped without it), private directories.
+if have_x11
+  test('gpu-auto', find_program('sh'),
+    args: [meson.current_source_dir() / 'tests/gpu_auto_test.sh', daemon, ctl, gpusel_test],
+    env: ['WALPE_BACKEND=x11', 'WALPE_CHECK_DISPLAY=xvfb'],
+    is_parallel: false,
+    timeout: 300)
+endif
 
 # the capability structure (common/gpucaps.h), without a GL context: driver,
 # API and version, features and format fallbacks from the strings and
@@ -1805,6 +1821,12 @@ if lifecheck_py.found()
     env: ['WALPE_CHECK_DISPLAY=sway'],
     is_parallel: false,
     timeout: 240)
+  # gpu = auto on the Wayland backend (see 'gpu-auto')
+  test('gpu-auto-wayland', find_program('sh'),
+    args: [meson.current_source_dir() / 'tests/gpu_auto_test.sh', daemon, ctl, gpusel_test],
+    env: ['WALPE_CHECK_DISPLAY=sway'],
+    is_parallel: false,
+    timeout: 300)
 endif
 
 # ------------------------------------------------------ sanitizer runs
