@@ -45,8 +45,11 @@
 
 #define NLAYERS 4
 
+#ifdef WALPE_QJS_MALLOC_STATE
 /* bytes the C library has handed out (0 where it cannot say: under
- * AddressSanitizer, whose leak check covers the same ground) */
+ * AddressSanitizer, whose leak check covers the same ground). Asked by the
+ * one check that needs a QuickJS with a replaceable allocator: a build
+ * without it (-Dscenescript=disabled, an older libquickjs) has no caller. */
 static gsize heap_in_use (void)
 {
 #if defined (__GLIBC__) && defined (__GLIBC_PREREQ) && __GLIBC_PREREQ (2, 33)
@@ -56,6 +59,7 @@ static gsize heap_in_use (void)
     return 0;
 #endif
 }
+#endif
 static char *layer_text[NLAYERS];
 static int layer_sets[NLAYERS];
 static double layer_scale[NLAYERS][3], layer_alpha[NLAYERS];
