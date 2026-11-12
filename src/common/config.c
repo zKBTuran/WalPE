@@ -287,8 +287,6 @@ static JsonNode *config_to_json (WalpeConfig *c)
     json_builder_add_string_value (b, walpe_preview_anim_name (c->preview_anim));
     json_builder_set_member_name (b, "vsync");
     json_builder_add_boolean_value (b, c->vsync);
-    json_builder_set_member_name (b, "audio");
-    json_builder_add_boolean_value (b, c->audio);
     /* quality knobs (quality.h): flat keys + the name of the preset they
      * equal; then each wallpaper's own keys */
     walpe_quality_to_json (b, &c->quality, WALPE_Q_ALL, TRUE);
@@ -594,7 +592,6 @@ WalpeConfig *walpe_config_load (void)
     c->preset_gpu_class  = NULL;
     c->gl_api            = WALPE_GL_API_AUTO;
     c->vsync             = TRUE;
-    c->audio             = FALSE;
     c->focus_action      = WALPE_FOCUS_RUN;
     c->focus_fps         = 15;
     c->pause_battery     = FALSE;
@@ -783,7 +780,6 @@ WalpeConfig *walpe_config_load (void)
         { const char *wa = wpj_str (o, "we_assets", NULL);
           if (wa && *wa) c->we_assets = walpe_expand_path (wa); }
         c->vsync = wpj_bool (o, "vsync", c->vsync);
-        c->audio = wpj_bool (o, "audio", c->audio);
         c->focus_action = walpe_focus_action_parse (wpj_str (o, "focus_action", NULL), c->focus_action);
         c->focus_fps = (int) CLAMP (wpj_num (o, "focus_fps", c->focus_fps), 1.0, 200.0);
         c->pause_battery = wpj_bool (o, "pause_battery", c->pause_battery);
@@ -928,6 +924,13 @@ WalpeConfig *walpe_config_load (void)
                 for (guint q = 0; q < G_N_ELEMENTS (optional_keys); q++)
                     optional = optional || !strcmp (name, optional_keys[q]);
                 if (json_object_has_member (mo, name) || optional)
+                    continue;
+                /* "audio": written by every version up to 0.14.0 ("video
+                 * wallpaper audio output") and read by nothing - the
+                 * player had no sound, and what switches wallpaper sound
+                 * is "scene_sound". It is dropped, not carried along as a
+                 * member of some other version. */
+                if (!strcmp (name, "audio"))
                     continue;
                 if (!c->extra)
                     c->extra = json_object_new ();

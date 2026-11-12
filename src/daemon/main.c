@@ -1503,7 +1503,6 @@ static void mon_do_load_ex (Mon *m, const char *path, gboolean paused, int fps,
     WalpeType ntype = walpe_detect_type (path, NULL);
     WalpeLoadOpts opts = {
         .video_backend = "ffmpeg",
-        .audio = FALSE,
         .fps = mon_content_fps (m, ntype, fps),
         .origin_dir = path,
         .no_tex_downscale = !g_atomic_int_get (&D.cfg->tex_downscale),

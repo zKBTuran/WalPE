@@ -162,7 +162,6 @@ struct WalpeContent {
 
 typedef struct {
     const char *video_backend; /* "mpv" | "ffmpeg" */
-    gboolean audio;
     int fps;                   /* scene fps cap */
     const char *origin_dir;    /* the wallpaper path as opened (project dir or
                                 * media file): user-property override key and

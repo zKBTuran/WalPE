@@ -144,7 +144,6 @@ typedef struct WalpeConfig_ {
                                * Saved as "gl_api": "gl" | "gles"; auto is
                                * not written */
     gboolean vsync;
-    gboolean audio;           /* video wallpaper audio output */
     char   *we_assets;        /* Wallpaper Engine install assets/ dir (or the
                                * install root); NULL = auto-detect (env
                                * WALPE_WE_ASSETS wins, then Steam libraries) */

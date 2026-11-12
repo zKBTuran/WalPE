@@ -132,7 +132,6 @@ static void test_round_trip (void)
     c->pause_idle = 300;
     c->preview_anim = WALPE_PREVIEW_HOVER;
     c->vsync = FALSE;
-    c->audio = TRUE;
     c->scene_sound = c->mute = TRUE;
     walpe_quality_preset (WALPE_PRESET_LOW, &c->quality);
     c->quality.fps_idle = 40;       /* a custom mix */
@@ -170,7 +169,7 @@ static void test_round_trip (void)
     CHECK (c->focus_action == WALPE_FOCUS_LIMIT && c->focus_fps == 20);
     CHECK (c->pause_battery && c->battery_fps == 24 && c->preview_anim == WALPE_PREVIEW_HOVER);
     CHECK (c->pause_idle == 300);
-    CHECK (!c->vsync && c->audio);
+    CHECK (!c->vsync);
     CHECK (c->scene_sound && c->mute);
     CHECK (c->quality.fps_idle == 40 && c->quality.render_scale == low_scale &&
            c->quality.tex_slack == low_slack);
