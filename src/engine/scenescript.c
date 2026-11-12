@@ -1595,7 +1595,11 @@ static char *ss_env_locale (const char *category, gboolean we_code)
  *    runtime is abandoned after that (never entered again; its memory is
  *    given back without QuickJS's help, see SsHeap): the wallpaper goes
  *    on without its scripts instead of freezing its monitor - and the
- *    daemon's quit, which waits for the thread. */
+ *    daemon's quit, which waits for the thread.
+ * Memory: SS_HEAP_BYTES for everything a wallpaper's scripts hold, and
+ * SS_STACK_BYTES of C stack for their calls. */
+#define SS_HEAP_BYTES (64 * 1024 * 1024)
+#define SS_STACK_BYTES (512 * 1024)
 #define SS_SOFT_NS (250 * G_GINT64_CONSTANT (1000000))
 #define SS_BLAME_NS (50 * G_GINT64_CONSTANT (1000000))
 #define SS_HARD_NS (1500 * G_GINT64_CONSTANT (1000000))
@@ -1606,6 +1610,7 @@ static __thread struct {
     sigjmp_buf jmp;
     volatile sig_atomic_t armed;   /* inside JS (ss_run) */
     volatile sig_atomic_t busy;    /* inside a host callback: not here */
+    volatile sig_atomic_t heap_full;   /* ss_heap_full left the entry */
     gboolean interrupted;          /* the soft limit fired in this entry */
     gboolean timer_tried, timer_ok;
     int timer;                     /* kernel timer id */
@@ -1654,9 +1659,37 @@ static inline void ss_block_unlink (SsBlock *b)
     b->next->prev = b->prev;
 }
 
+/* The runtime asks for memory beyond SS_HEAP_BYTES. Answering "no" is what
+ * the allocator interface foresees, and QuickJS then throws an "out of
+ * memory" error at the script - but it does not survive that answer once
+ * the memory is full to the last small block. The error object is built
+ * with allocations that are refused in turn, and then (2021-03-27, what
+ * Debian and Ubuntu install) its backtrace is stored through a null
+ * pointer (build_backtrace), or the error path calls itself until the C
+ * stack ends (JS_ThrowError2 from JS_DefineProperty), or the `arguments`
+ * object of a call is filled in through one (js_build_arguments); the
+ * release of 2026-06-04 still reads through one in build_backtrace. Each
+ * is the end of the process, 0.1 s after a wallpaper with a script of
+ * four lines was opened. So QuickJS never gets that answer:
+ *  - inside an entry the entry ends here, the way the watchdog ends one
+ *    (back to ss_run; the runtime is abandoned, and its memory goes back
+ *    block by block when the wallpaper is closed);
+ *  - outside an entry (arguments and JSON text this file hands over) the
+ *    request is served (TRUE): those are small, and the next entry ends
+ *    at its first allocation. */
+static gboolean ss_heap_full (void)
+{
+    if (ss_tls.armed && !ss_tls.busy) {
+        ss_tls.armed = 0;
+        ss_tls.heap_full = 1;
+        siglongjmp (ss_tls.jmp, 1);
+    }
+    return TRUE;
+}
+
 static void *ss_js_malloc (JSMallocState *s, size_t size)
 {
-    if (size == 0 || s->malloc_size + size > s->malloc_limit)
+    if (size == 0 || (s->malloc_size + size > s->malloc_limit && !ss_heap_full ()))
         return NULL;
     ss_host_enter ();
     SsBlock *b = malloc (sizeof (SsBlock) + size);
@@ -1692,7 +1725,7 @@ static void *ss_js_realloc (JSMallocState *s, void *ptr, size_t size)
     }
     SsBlock *b = (SsBlock *) ptr - 1;
     const size_t old = ss_block_usable (b);
-    if (s->malloc_size + size - old > s->malloc_limit)
+    if (s->malloc_size + size - old > s->malloc_limit && !ss_heap_full ())
         return NULL;
     ss_host_enter ();
     ss_block_unlink (b);
@@ -2017,11 +2050,20 @@ static gboolean ss_run (WalpeSceneScript *ss, const char *what, JSValueConst fn,
     ss_wd_thread_init ();
     ss_tls.interrupted = FALSE;
     arm_deadline (SS_SOFT_NS);
+    ss_tls.heap_full = 0;
     if (sigsetjmp (ss_tls.jmp, 1) != 0) {
-        /* from ss_wd_handler: a built-in did not return */
+        /* from ss_wd_handler: a built-in did not return; or from
+         * ss_heap_full */
         ss_wd_set (0, 0);
         ss_tls.deadline = 0;
         ss->dead = ss->lost = TRUE;
+        if (ss_tls.heap_full) {
+            ss_tls.heap_full = 0;
+            g_warning ("scenescript: %s: the scripts of this wallpaper filled their memory "
+                       "(%d MiB). All scripts of this wallpaper are stopped; the wallpaper keeps "
+                       "running", walpe_log_str (what), SS_HEAP_BYTES / (1024 * 1024));
+            return FALSE;
+        }
         g_warning ("scenescript: %s: a script did not come back from a built-in function "
                    "(a regular expression that backtracks without end?) within %.1f s of CPU "
                    "time. All scripts of this wallpaper are stopped; the wallpaper keeps running",
@@ -2090,8 +2132,8 @@ WalpeSceneScript *walpe_ss_new (const WalpeSsHost *host, float canvas_w, float c
         g_free (ss);
         return NULL;
     }
-    JS_SetMemoryLimit (ss->rt, 64 * 1024 * 1024);
-    JS_SetMaxStackSize (ss->rt, 512 * 1024);
+    JS_SetMemoryLimit (ss->rt, SS_HEAP_BYTES);
+    JS_SetMaxStackSize (ss->rt, SS_STACK_BYTES);
     JS_SetInterruptHandler (ss->rt, interrupt_cb, NULL);
     ss->ctx = JS_NewContext (ss->rt);
     if (!ss->ctx) {

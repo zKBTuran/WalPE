@@ -33,7 +33,10 @@
  * 11. time zone names: only names of zones reach GLib (a file of the zone
  *     directory that is no zone costs a critical warning per call);
  * 12. the watchdog's signal arrives while a call into the scene holds a
- *     lock: the call runs to its end.
+ *     lock: the call runs to its end;
+ * 13. the script memory filled to the last block, in every place a script
+ *     runs (QuickJS ends the process there, old releases and current
+ *     ones): the wallpaper goes on, each case in a child process.
  * `meson test -C build script-hostile` */
 #include "walpe-build-config.h"
 #include <glib.h>
@@ -42,6 +45,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include "engine/scenescript.h"
 
@@ -925,8 +929,100 @@ static void slow_call (void)
            "to its end %d time(s), its lock is %s", slow_calls, unlocked ? "free" : "still held");
 }
 
+/* ------------------------------------------- 13. the script memory, full */
+
+/* Scripts that keep what they allocate until the runtime's memory limit
+ * refuses, down to the last small block, and then go on. QuickJS takes
+ * that badly: the "out of memory" error is built with more allocations,
+ * and what the next refusal returns is read or written through - the
+ * process (the daemon, with every wallpaper it shows) ended 0.1 s after
+ * such a wallpaper opened. Six of these cases did that with QuickJS
+ * 2021-03-27, the fifth still does with 2026-06-04. Each case runs in a
+ * child (this program, `memory-child <case>`), so a crash is an exit
+ * status here. Layer 0 has a script that counts frames. */
+#define MEM_FILL \
+    "'use strict';\nconst a = [];\n" \
+    "function fill() { try { for (;;) a.push(new Array(8000).fill(0)); } catch (e) {}\n" \
+    "  try { for (;;) a.push([0, 1, 2, 3, 4, 5, 6, 7]); } catch (e) {} try { for (;;) a.push({}); } catch (e) {} }\n"
+static const char *const MEM_JS[][2] = {
+    { "update(), which then reads a property of null",
+      MEM_FILL "export function update(v) { fill(); null.x; }\n" },
+    { "update(), which then runs a regular expression",
+      MEM_FILL "export function update(v) { fill(); for (let i = 0; i < 100; i++) { try { /a(b+)c/.exec('abbbc' + i); } catch (e) {} } return v; }\n" },
+    { "update(), which then writes a date as text",
+      MEM_FILL "export function update(v) { fill(); for (let i = 0; i < 100; i++) { try { new Date().toString(); (1.5).toFixed(3); } catch (e) {} } return v; }\n" },
+    { "update(), which then compiles a function",
+      MEM_FILL "export function update(v) { fill(); for (let i = 0; i < 100; i++) { try { new Function('return 1')(); } catch (e) {} } return v; }\n" },
+    { "the argument objects of calls kept in update()",
+      "'use strict';\nconst a = [];\n"
+      "export function update(v) { for (;;) a.push(function () { return arguments; }(1, 2, 3)); }\n" },
+    { "the top of the module",
+      MEM_FILL "fill();\nexport function update(v) { return v + 'x'; }\n" },
+    { "init()",
+      MEM_FILL "export function init(v) { fill(); return v; }\nexport function update(v) { return v + 'x'; }\n" },
+    { "a promise reaction",
+      MEM_FILL "export function init(v) { Promise.resolve().then(() => { fill(); null.x; }); return v; }\n"
+      "export function update(v) { return v; }\n" },
+    { "a timer",
+      MEM_FILL "export function init(v) { engine.setTimeout(() => { fill(); null.x; }, 0); return v; }\n"
+      "export function update(v) { return v; }\n" },
+    { "update(), and left full for the events that follow",
+      MEM_FILL "let full = false;\nexport function update(v) { if (!full) { full = true; fill(); } return v; }\n"
+      "export function cursorClick(e) { a.push('' + e.worldPosition); }\n"
+      "export function mediaPropertiesChanged(e) { a.push(e.title + e.title); }\n" },
+};
+
+static int memory_child (guint k)
+{
+    if (k >= G_N_ELEMENTS (MEM_JS))
+        return 2;
+    WalpeSceneScript *ss = make ();
+    add (ss, 0, "text", "'use strict';\nlet n = 0;\nexport function update(v) { return 'n' + (++n); }\n");
+    add (ss, 1, "text", MEM_JS[k][1]);
+    start (ss);
+    for (int f = 1; f <= 6; f++) {
+        tick (ss, f);
+        walpe_ss_cursor_event (ss, "cursorClick", 1, 1, 2, 3, 4);
+        walpe_ss_media_event (ss, "mediaPropertiesChanged", "{\"title\":\"a title of some length\"}");
+    }
+    WalpeSsMem m;
+    walpe_ss_mem (ss, &m);
+    printf ("6 frames, scripts %s, the counting script at %s\n", m.dead ? "stopped" : "running",
+            text[0] ? text[0] : "-");
+    walpe_ss_free (ss);
+    fflush (stdout);
+    return 0;
+}
+
+static void memory_full (void)
+{
+    char *exe = g_file_read_link ("/proc/self/exe", NULL);
+    for (guint k = 0; exe && k < G_N_ELEMENTS (MEM_JS); k++) {
+        char num[16];
+        g_snprintf (num, sizeof num, "%u", k);
+        char *argv[] = { exe, (char *) "memory-child", num, NULL };
+        char *out = NULL;
+        int status = -1;
+        gint64 t0 = g_get_monotonic_time ();
+        gboolean ran = g_spawn_sync (NULL, argv, NULL, G_SPAWN_STDERR_TO_DEV_NULL, NULL, NULL, &out,
+                                     NULL, &status, NULL);
+        char *nl = out ? strrchr (g_strchomp (out), '\n') : NULL;
+        CHECK (ran && WIFEXITED (status) && WEXITSTATUS (status) == 0 && out && strstr (out, "6 frames"),
+               "script memory filled in %s: the wallpaper went on (%.1f s; %s%s%s)", MEM_JS[k][0],
+               (g_get_monotonic_time () - t0) / 1e6,
+               !ran ? "not started" : WIFSIGNALED (status) ? "the process ended with signal " : "",
+               ran && WIFSIGNALED (status) ? g_strsignal (WTERMSIG (status)) : "",
+               ran && WIFEXITED (status) ? (nl ? nl + 1 : out ? out : "") : "");
+        g_free (out);
+    }
+    CHECK (exe != NULL, "script memory: the test found its own program");
+    g_free (exe);
+}
+
 int main (int argc, char **argv)
 {
+    if (argc > 2 && !strcmp (argv[1], "memory-child"))
+        return memory_child ((guint) atoi (argv[2]));
     WalpeSceneScript *ss = make ();
     if (!ss) {
         printf ("skip: built without QuickJS\n");
@@ -956,6 +1052,8 @@ int main (int argc, char **argv)
         time_zones ();
     if (!only || !strcmp (only, "slowcall"))
         slow_call ();
+    if (!only || !strcmp (only, "memory"))
+        memory_full ();
     if (!only || !strcmp (only, "driver")) {
         int before = contract_breaks;
         /* 6 seeds by default (each takes seconds: its scripts run into the
