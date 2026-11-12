@@ -281,6 +281,12 @@ def case_start(env, W):
     sf = st.get("wl_surfaces") or [{}]
     check(len(sf) == 1 and sf[0].get("role") == "ready" and sf[0].get("buffer") == [640, 360],
           "start: status wl_surfaces: one surface, ready, buffer 640x360", sf)
+    # KWin's pause script is KWin's: no session-bus connection, no word of it, on another compositor
+    rules = st.get("pause_rules") or {}
+    check("pause_kwin_script" not in st and
+          not any("kwin" in (r.get("sources") or "") for r in rules.values()),
+          "start: the provider for KWin stays out on this compositor",
+          (st.get("pause_kwin_script"), {k: r.get("sources") for k, r in rules.items()}))
     # what this compositor lets the daemon know (for the reader; no rule here says which must work)
     sig = st.get("pause_signals") or {}
     note("start: pause signals and who reports them: " +

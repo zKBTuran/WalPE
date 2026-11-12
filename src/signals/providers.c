@@ -30,6 +30,9 @@ void walpe_sigprov_register (WalpeBackend backend)
      * version 1 the second one declines, and the tracker stays up */
     walpe_signals_register (&walpe_sig_wl_windows);
     walpe_signals_register (&walpe_sig_wl_fullscreen);
+    /* KWin has no window list: there the two above decline and this one
+     * answers (on other compositors it declines, without a word) */
+    walpe_signals_register (&walpe_sig_kwin);
 #endif
 }
 
@@ -49,6 +52,16 @@ void walpe_sigprov_outputs_changed (void)
 {
 #ifdef HAVE_WL_SIGNALS
     walpe_sig_wl_outputs_changed ();
+    walpe_sig_kwin_outputs_changed ();
+#endif
+}
+
+void walpe_sigprov_set_window_rules (guint mask)
+{
+#ifdef HAVE_WL_SIGNALS
+    walpe_sig_kwin_set_rules (mask);
+#else
+    (void) mask;
 #endif
 }
 
@@ -71,6 +84,7 @@ void walpe_sigprov_set_see_through (const char *app_ids)
 #ifdef HAVE_WL_SIGNALS
     if (walpe_sig_wl_windows.recheck)
         walpe_sig_wl_windows.recheck (&walpe_sig_wl_windows, WALPE_SIG_COVERED, FALSE);
+    walpe_sig_kwin.recheck (&walpe_sig_kwin, WALPE_SIG_COVERED, FALSE);
 #endif
 }
 
@@ -108,6 +122,18 @@ void walpe_sigprov_status_json (JsonBuilder *b, const WalpeConfig *cfg)
          * same signal: copy before asking for the other one) */
         char *sources = g_strdup (walpe_signal_sources (r->signal));
         char *missing = g_strdup (walpe_signal_missing (r->signal));
+#ifdef HAVE_WL_SIGNALS
+        /* KWin's script answers for the rule but cannot report right now:
+         * the rule is judged without it, and the reason is what is missing */
+        const char *kwin = walpe_sig_kwin_trouble ();
+        if (kwin && walpe_pause_rule_has_source (sources, WALPE_RULE_SRC_KWIN)) {
+            char *rest = walpe_pause_rule_sources_without (sources, WALPE_RULE_SRC_KWIN);
+            g_free (sources);
+            g_free (missing);
+            sources = rest;
+            missing = g_strdup (kwin);
+        }
+#endif
         char *note = walpe_pause_rule_note (r, sources, missing);
         if (!note && r->signal == WALPE_SIG_FULLSCREEN) {
             /* it works, but not per monitor in this session */
@@ -141,4 +167,11 @@ void walpe_sigprov_status_json (JsonBuilder *b, const WalpeConfig *cfg)
         g_free (missing);
     }
     json_builder_end_object (b);
+#ifdef HAVE_WL_SIGNALS
+    if (walpe_sig_kwin_state ()) {
+        /* KDE Plasma: what the provider "kwin" is doing (kwin.c) */
+        json_builder_set_member_name (b, "pause_kwin_script");
+        json_builder_add_string_value (b, walpe_sig_kwin_state ());
+    }
+#endif
 }

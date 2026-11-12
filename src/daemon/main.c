@@ -3606,6 +3606,17 @@ static gboolean mon_fullscreen (Mon *m)
     return D.fs_active && (m->fs_here || !mon_output (m));
 }
 
+/* Which of the rules that need other programs' windows are switched on:
+ * a provider that costs something to keep (KWin's: a connection to the
+ * session bus and a script in KWin) is kept only for a rule that is. */
+static void sig_window_rules (void)
+{
+    walpe_sigprov_set_window_rules (
+        (D.cfg->pause_fullscreen ? WALPE_SIG_BIT (WALPE_SIG_FULLSCREEN) : 0) |
+        (D.cfg->pause_covered ? WALPE_SIG_BIT (WALPE_SIG_COVERED) : 0) |
+        (D.cfg->focus_action != WALPE_FOCUS_RUN ? WALPE_SIG_BIT (WALPE_SIG_FOCUS_APP) : 0));
+}
+
 /* "Pause for fullscreen apps" (pause_fullscreen) applies to this monitor:
  * the focused fullscreen window is on it. A film or a game in full screen
  * on one monitor leaves the wallpaper of the monitor next to it running;
@@ -7110,6 +7121,7 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
     if (json_object_has_member (o, "pause_fullscreen")) {
         D.cfg->pause_fullscreen = wpj_bool (o, "pause_fullscreen", D.cfg->pause_fullscreen);
         changed = TRUE;
+        sig_window_rules ();
         walpe_signals_recheck (WALPE_SIG_FULLSCREEN, TRUE);
         apply_pause_state ();
     }
@@ -7130,6 +7142,7 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
     if (json_object_has_member (o, "pause_covered")) {
         D.cfg->pause_covered = wpj_bool (o, "pause_covered", D.cfg->pause_covered);
         changed = TRUE;
+        sig_window_rules ();
         walpe_signals_recheck (WALPE_SIG_COVERED, TRUE);
         apply_pause_state ();
     }
@@ -7149,6 +7162,7 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
         }
         D.cfg->focus_action = fa;
         changed = TRUE;
+        sig_window_rules ();
         apply_pause_state ();
     }
     if (ipc_has_num (o, "focus_fps")) {
@@ -10394,6 +10408,7 @@ int main (int argc, char **argv)
     walpe_sigprov_set_idle_timeout ((guint) MAX (D.cfg->pause_idle, 0));
     walpe_sigprov_set_see_through (D.cfg->transparent_windows);
     walpe_sigprov_set_output_lookup (sig_output_lookup, NULL);
+    sig_window_rules ();
     walpe_sigprov_register (D.backend);
     walpe_platform_start (!windowed, &signal_sink, NULL);
     /* The layout this daemon runs with was read at the top of start-up

@@ -81,6 +81,34 @@ static inline char *walpe_pause_rule_frames_only_note (const char *sources, cons
                             missing && *missing ? missing : "");
 }
 
+/* On KDE Plasma the provider "kwin" answers for fullscreen, covering and
+ * focused windows as soon as the compositor is KWin, but it reports only
+ * while its script runs in KWin (kwin.c): no session bus, KWin not on the
+ * bus, a KWin that did not take the script are possible. Then the rule
+ * must not be said to work on the strength of that provider. What is left
+ * of `sources` when "kwin" cannot report (trouble = why; NULL = it can):
+ * the other providers, "" when it was the only one. g_free. */
+#define WALPE_RULE_SRC_KWIN "kwin"
+
+static inline char *walpe_pause_rule_sources_without (const char *sources, const char *name)
+{
+    GString *g = g_string_new (NULL);
+    char **v = g_strsplit (sources ? sources : "", ",", -1);
+    for (guint i = 0; v[i]; i++)
+        if (*v[i] && strcmp (v[i], name))
+            g_string_append_printf (g, "%s%s", g->len ? "," : "", v[i]);
+    g_strfreev (v);
+    return g_string_free (g, FALSE);
+}
+
+static inline gboolean walpe_pause_rule_has_source (const char *sources, const char *name)
+{
+    char *without = walpe_pause_rule_sources_without (sources, name);
+    gboolean has = strlen (without) != strlen (sources ? sources : "");
+    g_free (without);
+    return has;
+}
+
 /* "Pause for fullscreen apps" pauses the monitor the focused fullscreen
  * window is on. Where the session reports such a window but not the
  * monitor it is on (a Wayland compositor that does not name the window's

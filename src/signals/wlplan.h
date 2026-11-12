@@ -14,6 +14,8 @@
  *                                      compositors (sway, Hyprland, river,
  *                                      labwc, Wayfire, niri ...), not
  *                                      GNOME Shell, not KWin
+ *                                      (KWin is asked through a script
+ *                                      instead: kwin.c)
  *   ext_foreign_toplevel_list_v1       every toplevel with title and
  *                                      app id, but NO state and no output:
  *                                      it cannot say what is fullscreen,
@@ -38,6 +40,7 @@ typedef struct {
     guint32 idle_notifier;      /* ext_idle_notifier_v1 */
     guint32 wlr_toplevel;       /* zwlr_foreign_toplevel_manager_v1 */
     guint32 ext_toplevel_list;  /* ext_foreign_toplevel_list_v1 */
+    gboolean kwin;              /* the compositor is KWin: a global only it announces */
 } WalpeWlCaps;
 
 /* one wl_registry.global announcement */
@@ -57,6 +60,9 @@ static inline void walpe_wlcaps_add (WalpeWlCaps *c, const char *interface, guin
         c->wlr_toplevel = MAX (c->wlr_toplevel, version);
     else if (!strcmp (interface, "ext_foreign_toplevel_list_v1"))
         c->ext_toplevel_list = MAX (c->ext_toplevel_list, version);
+    else if (!strcmp (interface, "org_kde_plasma_shell") ||
+             !strcmp (interface, "org_kde_plasma_virtual_desktop_management"))
+        c->kwin = TRUE;     /* (the two the wallpaper side goes by: platform/wayland_logic.h) */
 }
 
 typedef struct {

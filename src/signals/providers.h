@@ -11,6 +11,8 @@
  *   wl-fullscreen   fullscreen, fullscreen_on        zwlr_foreign_toplevel_manager_v1 >= 2
  *                   (per output)
  *   wl-windows      covered, focus_app (per output)  zwlr_foreign_toplevel_manager_v1
+ *   kwin            fullscreen, fullscreen_on,       KWin (KDE Plasma) on the session bus:
+ *                   covered, focus_app (per output)  a script the daemon loads into it
  *
  * The Wayland providers use a connection of their own (wl_session.c), not
  * the one the wallpaper surfaces live on: a protocol error or a compositor
@@ -28,6 +30,7 @@ extern const WalpeSignalProvider walpe_sig_logind;
 extern const WalpeSignalProvider walpe_sig_wl_idle;         /* builds with HAVE_WL_SIGNALS */
 extern const WalpeSignalProvider walpe_sig_wl_fullscreen;   /* " */
 extern const WalpeSignalProvider walpe_sig_wl_windows;      /* " */
+extern const WalpeSignalProvider walpe_sig_kwin;            /* " */
 
 /* Register the providers of this file's family with the registry
  * (walpe_signals_register); call once, before walpe_signals_start.
@@ -51,6 +54,14 @@ void walpe_sigprov_outputs_changed (void);
  * the provider's next start or recheck. */
 void walpe_sigprov_set_idle_timeout (guint seconds);
 guint walpe_sigprov_idle_timeout (void);
+
+/* Which of the rules that need to know about other programs' windows are
+ * switched on: WALPE_SIG_BIT () of WALPE_SIG_FULLSCREEN (pause_fullscreen),
+ * WALPE_SIG_COVERED (pause_covered) and WALPE_SIG_FOCUS_APP (focus_action
+ * other than "run"). The provider "kwin" keeps its connection to the
+ * session bus and its script in KWin only while one of them is; the
+ * others do not look at it. At start and whenever a setting changes. */
+void walpe_sigprov_set_window_rules (guint mask);
 
 /* "transparent_windows": comma-separated app ids that never count as
  * covering (X11 matches the same list against WM_CLASS). NULL / "" = none */
@@ -90,3 +101,14 @@ void walpe_sig_wl_outputs_changed (void);       /* no-op without HAVE_WL_SIGNALS
 const char *walpe_sig_wl_fullscreen_everywhere (void);
 /* how often the window list has been worked through (the tests count it) */
 guint walpe_sig_wl_passes (void);
+
+/* ---- KWin (kwin.c; with HAVE_WL_SIGNALS) */
+void walpe_sig_kwin_set_rules (guint mask);
+void walpe_sig_kwin_outputs_changed (void);
+/* tests: the bus to connect to instead of the session bus (an address);
+ * before a rule is switched on. NULL = the session bus again. */
+void walpe_sig_kwin_use_address (const char *address);
+/* for status: NULL where the provider did not start (not KWin), else what
+ * it is doing; and, while a rule is on and it cannot report, why */
+const char *walpe_sig_kwin_state (void);
+const char *walpe_sig_kwin_trouble (void);

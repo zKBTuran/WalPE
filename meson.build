@@ -607,7 +607,8 @@ endif
 # daemon draws on (src/signals/providers.h): logind over GDBus (always
 # built) and, with the Wayland backend and libwayland-client, the
 # compositor's idle notification and window list on a connection of their
-# own (HAVE_WL_SIGNALS). The registry starts those only on the Wayland
+# own, and for KWin, which has no window list, a script loaded into it over
+# the session bus (HAVE_WL_SIGNALS). The registry starts those only on the Wayland
 # backend, so a build without that backend (-Dwayland=disabled) leaves
 # them out: its daemon has no Wayland code and links no Wayland library.
 # The daemon links signals_dep and calls walpe_sigprov_register ().
@@ -617,6 +618,7 @@ signals_deps = [glib, gobject, gio, jsonglib]
 have_wl_signals = have_wayland and have_wl_scan and wl_client_dep.found()
 if have_wl_signals
   signals_srcs += ['src/signals/wl_session.c', 'src/signals/wl_idle.c', 'src/signals/wl_toplevel.c',
+    'src/signals/kwin.c',
     wl_gen['ext-idle-notify-v1'][0], wl_gen['ext-idle-notify-v1'][2],
     wl_gen['wlr-foreign-toplevel-management-unstable-v1'][0],
     wl_gen['wlr-foreign-toplevel-management-unstable-v1'][2]]
@@ -665,6 +667,20 @@ test('sig-logind', executable('sig-logind-test', 'tests/sig_logind_test.c',
   include_directories: inc,
   dependencies: [signals_dep],
   install: false, build_by_default: false), timeout: 120)
+
+# the provider for KDE Plasma against a stand-in KWin on a private bus
+# (GTestDBus + a thread of the test owning org.kde.KWin with the script
+# interface): nothing kept while no rule is on, the script loaded with the
+# daemon's unique name in it, reports turned into values per output, only
+# KWin believed, outputs whose ids change, the see-through list, KWin
+# leaving the bus and coming back, a KWin too old, the script unloaded when
+# the rules go off and at stop. Skipped (77) without dbus-daemon.
+if have_wl_signals
+  test('sig-kwin', executable('sig-kwin-test', 'tests/sig_kwin_test.c',
+    include_directories: inc,
+    dependencies: [signals_dep],
+    install: false, build_by_default: false), timeout: 120)
+endif
 
 # the Wayland providers against a stand-in compositor (libwayland-server on
 # a thread, private runtime directory): focus / covered per output,
