@@ -439,6 +439,43 @@ static void test_not_utf8 (void)
     g_unlink (cfg_path);
 }
 
+/* A number that is no JSON. "1e999" in config.json reads as infinity; in a
+ * member this build does not read - one of another version, or one of its
+ * own with a value of the wrong type - it was carried along and written
+ * back as "inf.0": the save after the first load made a file the next load
+ * set aside as damaged. Found by a run of random configurations held to
+ * "what a load accepts, the save writes so that it is accepted again". */
+static void test_not_a_number (void)
+{
+    broken_copies (TRUE);
+    put_config ("{\"fps\":50,\"mute\":true,\"volume\":0.2,\"current\":\"/lib/walls/9\","
+                "\"of_another_version\":1e999,\"preset_gpu_class\":-1e999,\"wayland_pointer\":1e999,"
+                "\"more\":{\"list\":[1,-1e999,{\"deep\":1e999}],\"fine\":2.5}}");
+    WalpeConfig *c = walpe_config_load ();
+    CHECK (!c->broken_copy && c->fps == 50 && c->mute && c->volume == 0.2);
+    CHECK (walpe_config_save (c));
+    walpe_config_free (c);
+    JsonNode *n = read_config ();
+    CHECK (n != NULL && JSON_NODE_HOLDS_OBJECT (n));    /* JSON again */
+    if (n && JSON_NODE_HOLDS_OBJECT (n)) {
+        JsonObject *o = json_node_get_object (n);
+        /* what was carried along is still there, as numbers a file can hold */
+        CHECK (json_object_has_member (o, "of_another_version") &&
+               wpj_num (o, "of_another_version", 0) == G_MAXDOUBLE);
+        CHECK (wpj_num (o, "preset_gpu_class", 0) == -G_MAXDOUBLE);
+        JsonObject *more = wpj_obj (o, "more");
+        CHECK (more && wpj_num (more, "fine", 0) == 2.5 && wpj_arr_len (wpj_arr (more, "list")) == 3);
+    }
+    if (n)
+        json_node_unref (n);
+    c = walpe_config_load ();
+    CHECK (!c->broken_copy && broken_copies (FALSE) == 0);
+    CHECK (c->fps == 50 && c->mute && c->volume == 0.2 && !g_strcmp0 (c->current, "/lib/walls/9"));
+    CHECK (walpe_config_save (c) && walpe_config_save_error () == NULL);
+    walpe_config_free (c);
+    g_unlink (cfg_path);
+}
+
 /* "pause_fullscreen_all" (a focused fullscreen window pauses every monitor,
  * as up to 0.12): off by default and not written then (an untouched config
  * keeps its bytes), written and read back when set, gone from the file
@@ -704,6 +741,7 @@ int main (void)
     test_sound_defaults ();
     test_broken ();
     test_not_utf8 ();
+    test_not_a_number ();
     test_backend_keys ();
     test_fullscreen_all ();
     test_save_failure ();

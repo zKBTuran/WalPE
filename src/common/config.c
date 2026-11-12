@@ -2,6 +2,7 @@
 #include "glapi.h"
 #include "util.h"
 #include <glib/gstdio.h>
+#include <math.h>
 #include <stdio.h>
 #include "layeradj.h"
 #include "gpusel.h"
@@ -953,6 +954,44 @@ WalpeConfig *walpe_config_load (void)
     return c;
 }
 
+/* A number that is no JSON. "1e999" in a file reads as infinity; a member
+ * this build does not read is carried along as it came (`extra`), and
+ * json-glib writes infinity as "inf.0", which no JSON reader takes - its
+ * own least of all. They become the largest numbers there are. */
+static void config_json_finite (JsonNode *n)
+{
+    if (!n)
+        return;
+    switch (json_node_get_node_type (n)) {
+    case JSON_NODE_VALUE:
+        if (json_node_get_value_type (n) == G_TYPE_DOUBLE) {
+            const double d = json_node_get_double (n);
+            if (!isfinite (d))
+                json_node_set_double (n, isnan (d) ? 0.0 : d > 0 ? G_MAXDOUBLE : -G_MAXDOUBLE);
+        }
+        break;
+    case JSON_NODE_ARRAY: {
+        JsonArray *a = json_node_get_array (n);
+        for (guint i = 0, len = a ? json_array_get_length (a) : 0; i < len; i++)
+            config_json_finite (json_array_get_element (a, i));
+        break;
+    }
+    case JSON_NODE_OBJECT: {
+        JsonObject *o = json_node_get_object (n);
+        JsonObjectIter it;
+        JsonNode *v;
+        if (!o)
+            break;
+        json_object_iter_init (&it, o);
+        while (json_object_iter_next (&it, NULL, &v))
+            config_json_finite (v);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
 gboolean walpe_config_save (WalpeConfig *cfg)
 {
     g_atomic_int_inc (&save_count);
@@ -972,6 +1011,7 @@ gboolean walpe_config_save (WalpeConfig *cfg)
                                         json_node_copy (json_object_get_member (cfg->extra, k->data)));
         g_list_free (ks);
     }
+    config_json_finite (root);
     g_autoptr (JsonGenerator) gen = json_generator_new ();
     json_generator_set_root (gen, root);
     json_generator_set_pretty (gen, TRUE);
@@ -989,8 +1029,26 @@ gboolean walpe_config_save (WalpeConfig *cfg)
                    "bytes that are no text replaced (U+FFFD)");
     }
     GError *err = NULL;
+    gboolean ok = TRUE;
+    {
+        /* What is written is what the next start reads, and a file its
+         * loader refuses costs every setting (it is set aside as damaged).
+         * The two repairs above are the ways such a text was made; whatever
+         * else may make one, the text is read back here before it replaces
+         * the file - a few kilobytes, when a setting changed - and a text
+         * that is no JSON object is not written: the file stays as it is,
+         * and the request that made the change is told (save_error). */
+        JsonNode *back = wpj_parse_data (data, -1);
+        ok = back && JSON_NODE_HOLDS_OBJECT (back);
+        if (back)
+            json_node_unref (back);
+        if (!ok)
+            g_set_error_literal (&err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                                 "the settings do not make a config.json that can be read again; the "
+                                 "file is left as it is");
+    }
     /* 0600 (see walpe_config_load), written next to the file and renamed */
-    gboolean ok = walpe_write_private (path, data, -1, &err);
+    ok = ok && walpe_write_private (path, data, -1, &err);
     if (!ok)
         g_warning ("config save failed: %s", err ? err->message : "?");
     /* kept for whoever answers the request that made the change: the
