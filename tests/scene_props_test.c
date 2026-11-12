@@ -22,7 +22,7 @@
  *      init, update and inside a timer callback; engine.canvasSize is the
  *      scene's size.
  * Values are chosen exact in single precision (the scene stores floats).
- * Skipped (exit 0, "skip") without EGL surfaceless / GL 3.3 or QuickJS. */
+ * Skipped (exit 77) without EGL surfaceless / GL 3.3 or QuickJS. */
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <epoxy/gl.h>
@@ -366,7 +366,7 @@ int main (void)
     setvbuf (stdout, NULL, _IONBF, 0);
     if (!epoxy_has_egl_extension (EGL_NO_DISPLAY, "EGL_MESA_platform_surfaceless")) {
         printf ("skip (no EGL surfaceless platform)\n");
-        return 0;
+        return 77;
     }
     EGLDisplay dpy = eglGetPlatformDisplayEXT (EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL);
     EGLint maj, min, nc = 0;
@@ -377,7 +377,7 @@ int main (void)
     if (dpy == EGL_NO_DISPLAY || !eglInitialize (dpy, &maj, &min) || !eglBindAPI (EGL_OPENGL_API) ||
         !eglChooseConfig (dpy, attr, cfgs, 128, &nc) || nc < 1) {
         printf ("skip (no EGL pbuffer config with desktop GL)\n");
-        return 0;
+        return 77;
     }
     ecfg = cfgs[0];
     for (int i = 0; i < nc; i++) {
@@ -394,7 +394,7 @@ int main (void)
     EGLSurface surf = eglCreatePbufferSurface (dpy, ecfg, pa);
     if (ctx == EGL_NO_CONTEXT || surf == EGL_NO_SURFACE || !eglMakeCurrent (dpy, surf, surf, ctx)) {
         printf ("skip (no GL 3.3 context on a pbuffer)\n");
-        return 0;
+        return 77;
     }
     char *tmp = g_dir_make_tmp ("walpe-scene-props-XXXXXX", NULL);
     if (!tmp) {
@@ -417,5 +417,6 @@ int main (void)
     rm_rf (tmp);
     g_free (tmp);
     printf ("%s (%d check(s), %d failure(s))\n", fails ? "FAILED" : "PASSED", checks, fails);
-    return fails ? 1 : 0;
+    /* no script ran (a build without QuickJS): nothing was checked */
+    return fails ? 1 : checks ? 0 : 77;
 }

@@ -648,7 +648,7 @@ int main (void)
 {
     if (!epoxy_has_egl_extension (EGL_NO_DISPLAY, "EGL_MESA_platform_surfaceless")) {
         printf ("skip (no EGL surfaceless platform)\n");
-        return 0;
+        return 77;
     }
     EGLDisplay dpy = eglGetPlatformDisplayEXT (EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL);
     EGLint maj, min, nc = 0;
@@ -659,7 +659,7 @@ int main (void)
     if (dpy == EGL_NO_DISPLAY || !eglInitialize (dpy, &maj, &min) || !eglBindAPI (EGL_OPENGL_API) ||
         !eglChooseConfig (dpy, attr, &cfg, 1, &nc) || nc < 1) {
         printf ("skip (no usable GL config)\n");
-        return 0;
+        return 77;
     }
     const EGLint ca[] = { EGL_CONTEXT_MAJOR_VERSION, 3, EGL_CONTEXT_MINOR_VERSION, 3, EGL_NONE };
     const EGLint pa[] = { EGL_WIDTH, VW, EGL_HEIGHT, VH, EGL_NONE };
@@ -667,7 +667,7 @@ int main (void)
     EGLSurface surf = eglCreatePbufferSurface (dpy, cfg, pa);
     if (ctx == EGL_NO_CONTEXT || surf == EGL_NO_SURFACE || !eglMakeCurrent (dpy, surf, surf, ctx)) {
         printf ("skip (no GL 3.3 context with a pbuffer)\n");
-        return 0;
+        return 77;
     }
     const char *ren = (const char *) glGetString (GL_RENDERER);
     /* bit for bit where the renderer's own half-size blit is the CPU
@@ -687,7 +687,7 @@ int main (void)
     char *sdir = g_dir_make_tmp ("walpe-texload-scene-XXXXXX", NULL);
     if (!dir || !sdir) {
         printf ("skip (no temporary directory)\n");
-        return 0;
+        return 77;
     }
     cache_checks (dir);
     scene_checks (sdir);

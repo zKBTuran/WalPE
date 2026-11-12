@@ -17,7 +17,7 @@
  *  2. "parents": a script chains 100 000 layers parent to parent at run
  *     time (the load limits such chains; a script could rebuild one, and
  *     the per-frame transform walk went one stack frame down per layer).
- * Run under ASan + UBSan in the sanitizer builds. Skipped (exit 0, "skip")
+ * Run under ASan + UBSan in the sanitizer builds. Skipped (exit 77)
  * without EGL surfaceless / GL 3.3 or without QuickJS.
  * `meson test -C build scene-hostile` */
 #include "walpe-build-config.h"
@@ -356,12 +356,12 @@ int main (int argc, char **argv)
 {
 #ifndef HAVE_QUICKJS
     printf ("skip (built without QuickJS)\n");
-    return 0;
+    return 77;
 #endif
     const char *only = argc > 1 && strcmp (argv[1], "all") ? argv[1] : NULL;
     if (!epoxy_has_egl_extension (EGL_NO_DISPLAY, "EGL_MESA_platform_surfaceless")) {
         printf ("skip (no EGL surfaceless platform)\n");
-        return 0;
+        return 77;
     }
     EGLDisplay dpy = eglGetPlatformDisplayEXT (EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL);
     EGLint maj, min, nc = 0;
@@ -372,7 +372,7 @@ int main (int argc, char **argv)
     if (dpy == EGL_NO_DISPLAY || !eglInitialize (dpy, &maj, &min) || !eglBindAPI (EGL_OPENGL_API) ||
         !eglChooseConfig (dpy, attr, cfgs, 128, &nc) || nc < 1) {
         printf ("skip (no usable GL config)\n");
-        return 0;
+        return 77;
     }
     cfg = cfgs[0];
     for (int i = 0; i < nc; i++) {
@@ -389,7 +389,7 @@ int main (int argc, char **argv)
     EGLSurface surf = eglCreatePbufferSurface (dpy, cfg, pa);
     if (ctx == EGL_NO_CONTEXT || surf == EGL_NO_SURFACE || !eglMakeCurrent (dpy, surf, surf, ctx)) {
         printf ("skip (no GL 3.3 context with a pbuffer)\n");
-        return 0;
+        return 77;
     }
     printf ("GL: %s / %s\n", glGetString (GL_RENDERER), glGetString (GL_VERSION));
     if (!g_getenv ("WALPE_SCENE_HOSTILE_VERBOSE"))

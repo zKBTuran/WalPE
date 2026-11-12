@@ -324,7 +324,7 @@ int main (void)
     }
     if (!ok) {
         printf ("skip: no EGL device / surfaceless platform with desktop GL\n");
-        return 0;
+        return 77;
     }
     const EGLint ca[] = { EGL_CONTEXT_MAJOR_VERSION, 3, EGL_CONTEXT_MINOR_VERSION, 3,
                           EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
@@ -332,12 +332,12 @@ int main (void)
     EGLContext ctx = eglCreateContext (dpy, cfg, EGL_NO_CONTEXT, ca);
     if (ctx == EGL_NO_CONTEXT || !eglMakeCurrent (dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)) {
         printf ("skip: no surfaceless GL 3.3 context\n");
-        return 0;
+        return 77;
     }
     char *dir = g_dir_make_tmp ("walpe-texcache-XXXXXX", NULL);
     if (!dir) {
         printf ("skip: no temporary directory\n");
-        return 0;
+        return 77;
     }
     printf ("GL: %s\n", (const char *) glGetString (GL_RENDERER));
     run (dir);

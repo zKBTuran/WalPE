@@ -309,7 +309,9 @@ the final tree with those of that earlier tree.
 - Tests: in a build without QuickJS (`-Dscenescript=disabled`) `fx-alpha` and `layers`
   leave out the checks that need a script instead of failing, and `sig-wl` no longer
   waits for ever where `TMPDIR` is too long for a socket path (it makes its directory in
-  `/tmp` then).
+  `/tmp` then). A test that cannot run at all - no OpenGL context, or nothing but script
+  checks in a build without QuickJS - ends with exit status 77, so `meson test` counts
+  it as skipped; 13 such tests ended with 0 and were counted as passed.
 
 ### Known limitations
 

@@ -34,7 +34,7 @@
  *     sixteen play, the scene's total is reached and the other two are
  *     stills, said once in the log.
  *
- * Skipped (exit 0, "skip") without EGL surfaceless / GL 3.3.
+ * Skipped (exit 77) without EGL surfaceless / GL 3.3.
  * WALPE_FEATURES is cleared by meson.build. */
 #include "walpe-build-config.h"
 #include <glib.h>
@@ -684,7 +684,7 @@ int main (void)
 {
     if (!epoxy_has_egl_extension (EGL_NO_DISPLAY, "EGL_MESA_platform_surfaceless")) {
         printf ("skip (no EGL surfaceless platform)\n");
-        return 0;
+        return 77;
     }
     EGLDisplay dpy = eglGetPlatformDisplayEXT (EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL);
     EGLint maj, min, nc = 0;
@@ -695,7 +695,7 @@ int main (void)
     if (dpy == EGL_NO_DISPLAY || !eglInitialize (dpy, &maj, &min) || !eglBindAPI (EGL_OPENGL_API) ||
         !eglChooseConfig (dpy, attr, cfgs, 128, &nc) || nc < 1) {
         printf ("skip (no usable GL config)\n");
-        return 0;
+        return 77;
     }
     cfg = cfgs[0];
     for (int i = 0; i < nc; i++) {   /* an 8-bit window, like a desktop's */
@@ -712,7 +712,7 @@ int main (void)
     EGLSurface surf = eglCreatePbufferSurface (dpy, cfg, pa);
     if (ctx == EGL_NO_CONTEXT || surf == EGL_NO_SURFACE || !eglMakeCurrent (dpy, surf, surf, ctx)) {
         printf ("skip (no GL 3.3 context with a pbuffer)\n");
-        return 0;
+        return 77;
     }
     printf ("GL: %s / %s\n", glGetString (GL_RENDERER), glGetString (GL_VERSION));
     logged = g_string_new (NULL);

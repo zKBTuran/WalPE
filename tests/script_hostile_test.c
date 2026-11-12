@@ -930,7 +930,7 @@ int main (int argc, char **argv)
     WalpeSceneScript *ss = make ();
     if (!ss) {
         printf ("skip: built without QuickJS\n");
-        return 0;
+        return 77;
     }
     walpe_ss_free (ss);
     const char *only = argc > 1 ? argv[1] : NULL;

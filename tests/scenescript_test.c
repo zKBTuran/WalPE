@@ -272,7 +272,7 @@ int main (void)
     WalpeSceneScript *ss = make ();
     if (!ss) {
         printf ("skip: built without QuickJS\n");
-        return 0;
+        return 77;
     }
 
     /* 1. runaway loop: stopped once, the others go on */

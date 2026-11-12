@@ -2007,7 +2007,7 @@ int main (int argc, char **argv)
     tmpdir = g_dir_make_tmp ("walpe-fxhostile-XXXXXX", NULL);
     if (!tmpdir) {
         printf ("skip: no temporary directory\n");
-        return 0;
+        return 77;
     }
     put ("shaders/common.h", COMMON_H);
     put ("shaders/self.h", "#include \"self.h\"\n#include \"./self.h\"\nfloat self() { return 0.0; }\n");
