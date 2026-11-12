@@ -91,6 +91,8 @@ More: [docs/USAGE.md](docs/USAGE.md).
 - [ENVIRONMENT.md](docs/ENVIRONMENT.md): every environment switch
 - [LIMITATIONS.md](docs/LIMITATIONS.md): known limitations, the state of testing
 - [WAYLAND.md](docs/WAYLAND.md): the Wayland backend, what differs from X11
+- [contrib/plasma](contrib/plasma/README.md): optional add-on for KDE Plasma 6 on Wayland
+  (Plasma's desktop icons over the wallpaper); not part of the build
 - [GPU.md](docs/GPU.md): drivers, choosing the GPU, OpenGL ES
 - [GPU-PRESENT.md](docs/GPU-PRESENT.md): `gpu.conf`, swap interval, driver hints
 - [GPU-PROFILING.md](docs/GPU-PROFILING.md): measuring WalPE's GPU use

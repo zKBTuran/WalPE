@@ -17,8 +17,8 @@ change.
 > place, and the wait for a compositor that was killed and started again; the pause rules
 > with stand-ins for logind and for the compositor's idle and window-list protocols.
 > One more thing was looked at on one more compositor: where a video wallpaper lies
-> relative to Plasma's desktop, on a headless KWin 6.8.2 and 5.27.11 with Plasma's shell
-> ([KDE Plasma](#kde-plasma)).
+> relative to Plasma's desktop, without and with the add-on for Plasma, on a headless
+> KWin 6.8.2 (without it also 5.27.11) with Plasma's shell ([KDE Plasma](#kde-plasma)).
 > Nothing on this page has been
 > run on a real Wayland desktop, on a real output, on a GPU, or with any other compositor.
 > What is said below about Hyprland, KDE Plasma, GNOME, COSMIC, labwc, Wayfire, river and
@@ -33,7 +33,7 @@ A compositor that offers the layer shell (protocol `zwlr_layer_shell_v1`), and a
 | Compositor | Layer shell | |
 |---|---|---|
 | sway | yes | tested headless (1.9) |
-| KDE Plasma (KWin) | yes | shown on a headless Plasma 6.8 and 5.27; Plasma's desktop icons are behind the wallpaper: see [KDE Plasma](#kde-plasma) |
+| KDE Plasma (KWin) | yes | shown on a headless Plasma 6.8 and 5.27; Plasma's desktop icons are behind the wallpaper unless the add-on for Plasma is used: see [KDE Plasma](#kde-plasma) |
 | Hyprland, river, labwc, Wayfire, niri, COSMIC | yes | expected to work, not tested |
 | GNOME (Mutter), weston's desktop shell | no | not supported: use an X11 session |
 
@@ -301,52 +301,110 @@ orders the windows of that layer as it orders ordinary windows: the one clicked 
 in front.
 
 WalPE 0.14.0 put its wallpapers on the background layer. On Plasma that gave two
-pictures. Started while an application's window was the active one (the WalPE window, a
-terminal), the wallpaper lay in front of Plasma's desktop and covered its icons until the
-first click on the desktop: KWin then raised Plasma's desktop over the wallpaper, the
-video was gone, and Plasma's own wallpaper and icons were back. Started while Plasma's
-desktop itself was the active window, the wallpaper was behind it from the start and
-never seen (Plasma 6). Either way the daemon went on running and drawing, with nothing in
-its log or status: KWin goes on asking a surface it has covered for frames. A user
-reported the first on Plasma 6.8; a headless Plasma 6.8.2 and a headless Plasma 5.27
-showed the same.
+pictures. Started while an application's window was the active one, the wallpaper lay in
+front of Plasma's desktop and covered its icons until the first click on the desktop:
+KWin then raised Plasma's desktop over the wallpaper, and the video was gone. Started
+while Plasma's desktop itself was the active window, the wallpaper was behind it from the
+start and never seen (Plasma 6). Either way the daemon went on running and drawing, with
+nothing in its log or status: KWin goes on asking a surface it has covered for frames.
 
 From this version on the daemon puts its wallpapers on the layer shell's **bottom** layer
 when the compositor is KWin (told by the protocols `org_kde_plasma_shell` or
 `org_kde_plasma_virtual_desktop_management`, which only KWin offers). KWin stacks that
-layer above Plasma's desktop and below every window, so the wallpaper stays in front of
-Plasma's desktop whatever is clicked. The log says so when the daemon starts (a line
-starting with `wayland: KDE Plasma (KWin):`), and `walpe-ctl status` has `wl_layer`
-(`background` or `bottom`) and `wl_layer_why`.
+layer above Plasma's desktop and below every window, so an opaque desktop can never be in
+front of the wallpaper, whatever is clicked. There are two ways to live with that; the
+daemon is the same in both and its surface stays where it is.
 
-What follows from it on Plasma:
+### Without the add-on: the wallpaper in front of Plasma's desktop
 
 - **Plasma's desktop icons and widgets cannot be seen while WalPE shows a wallpaper.**
-  They are part of the window the wallpaper lies on. The layer shell has no place between
-  Plasma's wallpaper and Plasma's icons, since both are one window, so no wallpaper
-  program that is a Wayland client of its own can draw under the icons there; on Plasma
-  only a wallpaper plugin that runs inside Plasma's shell can, and WalPE has none. The
-  icons are back when the daemon is quit.
+  They are part of the window the wallpaper lies on. They are back when the daemon is
+  quit, and for as long as "Peek at Desktop" (Meta+D) lasts: KWin then hides the
+  wallpaper with the windows and shows Plasma's own desktop.
 - Clicks on the desktop go on reaching Plasma as long as the wallpaper does not use the
   pointer (a video and a picture never do, see "Clicks" in the table above): its
   right-click menu opens, and icons that cannot be seen still take clicks. If that is in
   the way, Plasma's desktop settings ("Desktop and Wallpaper" in the desktop's menu)
   have the layout "Desktop", which shows no icons, next to "Folder View".
-- `WALPE_WL_LAYER=background` in the daemon's environment brings back the placement of
-  0.14.0, `WALPE_WL_LAYER=bottom` asks for the bottom layer on any compositor
-  ([ENVIRONMENT.md](ENVIRONMENT.md)). On the background layer the wallpaper is in front
-  of Plasma's desktop or behind it depending on which window was active when the daemon
-  started, and a click on the desktop hides it.
+- A wallpaper that uses the pointer gets it, clicks included, as on other compositors.
+- The Overview shows Plasma's own desktop picture as the background of the desktop, not
+  the WalPE wallpaper.
+
+### With the add-on: the wallpaper behind Plasma's icons
+
+[`contrib/plasma`](../contrib/plasma/README.md) holds an add-on for Plasma 6.5 or newer:
+a wallpaper type "WalPE" for Plasma's "Desktop and Wallpaper" dialog. It is not part of
+the build and not installed by `meson install`; a Plasma user installs it for himself, no
+root needed:
+
+    contrib/plasma/install.sh install     # from WalPE's source tree
+    contrib/plasma/install.sh select      # or: Desktop and Wallpaper > Wallpaper type: WalPE
+
+The type draws no wallpaper. It makes Plasma's desktop window see-through and loads a
+small script into KWin that keeps this window right above the daemon's surface on the
+same screen. The WalPE wallpaper is then seen behind Plasma's icons and widgets, which
+take clicks as always. What a desktop of that type shows:
+
+| | |
+|---|---|
+| the daemon shows a wallpaper on the screen | the wallpaper, Plasma's icons and widgets over it |
+| the daemon is not running (not started yet, quit, crashed) or shows nothing there | the colour or picture set on the type's page of the dialog, icons over it |
+| "Peek at Desktop" | the same colour or picture, icons over it (KWin hides the wallpaper) |
+| the Overview | the desktop's icons on the Overview's own backdrop; the small pictures of the virtual desktops show the wallpaper |
+| another wallpaper type is chosen for the desktop | as without the add-on, at once |
+| the type on one of two screens | that screen: icons over the wallpaper; the other: the wallpaper in front |
+
+The parts cannot leave a wallpaper that runs unseen or a black desktop: the daemon's
+surface is in front of every desktop window except one the script has verified, with
+Plasma's shell, to be of the type "WalPE"; and such a desktop stays filled until the
+script has told it that a surface of the daemon lies under it. How:
+[contrib/plasma/README.md](../contrib/plasma/README.md).
+
+What the add-on costs: **the wallpaper gets no pointer** on a desktop of the type
+"WalPE". Plasma's desktop window is above it and takes every pointer event. Scenes that
+follow the pointer stand still in that respect, and a web wallpaper cannot be clicked.
+For such a wallpaper choose another wallpaper type on that screen.
+
+### What the daemon says
+
+The log has two lines starting with `wayland: KDE Plasma` when the daemon starts: the
+layer, and, unless the add-on is in use, that Plasma's icons are hidden and which command
+brings them back. `walpe-ctl status` has
+
+| | |
+|---|---|
+| `wl_layer`, `wl_layer_why` | `bottom`, `the compositor is KWin (KDE Plasma)` |
+| `wl_plasma_addon` | `not installed`, `installed, no desktop has the wallpaper type WalPE` or `in use: a desktop has the wallpaper type WalPE` |
+| `wl_plasma_icons` | `hidden behind the wallpaper` or `shown over the wallpaper where the wallpaper type is WalPE` |
+| `wl_plasma_hint` | only while the icons are hidden: the sentence of the log |
+
+The daemon does not talk to the add-on. It reads this from the installed package and
+from the settings file of Plasma's desktops, which Plasma writes a few seconds after a
+change; the three `wl_plasma_*` members are there on KWin only.
+
+`WALPE_WL_LAYER=background` in the daemon's environment brings back the placement of
+0.14.0, `WALPE_WL_LAYER=bottom` asks for the bottom layer on any compositor
+([ENVIRONMENT.md](ENVIRONMENT.md)). On the background layer, a desktop without the
+wallpaper type "WalPE" is in front of the wallpaper or behind it depending on which
+window was active when the daemon started, and a click on the desktop hides the
+wallpaper; the add-on works there as on the bottom layer.
 
 > **State of testing on Plasma.** A headless Plasma 6.8.2 (KWin 6.8.2 on its virtual
-> output, Qt 6.12) and a headless Plasma 5.27 (KWin 5.27.11), each with one 1280 x 800
-> output, Mesa's software renderer, a video wallpaper and clicks from a virtual pointer.
-> With 0.14.0: what is described above. With this version: the wallpaper is in KWin's
-> stacking layer above Plasma's desktop from the start (on 6.8.2 both with Plasma's
-> desktop and with the WalPE window as the active window), it stays there through left
-> clicks on the desktop, and a right click opens Plasma's desktop menu over it. Not run: a
-> real Plasma session, a GPU, more than one monitor, "Peek at Desktop", the Plasma
-> versions in between.
+> outputs, Qt 6.12; the bottom layer also on Plasma 5.27 with KWin 5.27.11), one and two
+> 1280 x 800 outputs, Mesa's software renderer, a video wallpaper, clicks from a virtual
+> pointer. Without the add-on: the wallpaper is in front of Plasma's desktop from the
+> start and stays there through left clicks and a forced raise of the desktop window; a
+> right click opens Plasma's desktop menu over it. With the add-on: the type chosen
+> before the daemon starts, while it runs, and taken away while it runs; the daemon quit,
+> killed and started again; Plasma's shell killed and started again; a forced raise of
+> either window; the type on one of two screens; "Peek at Desktop"; the Overview; the
+> type chosen in the "Desktop and Wallpaper" dialog (there the Apply button stayed grey
+> after leaving the type "Image", for Plasma's own "Plain Color" as well; OK applies).
+> In each of these the wallpaper was seen, or the colour of the type's page where the
+> daemon showed nothing, and never a black desktop; the icons and the desktop menu took
+> clicks. Not run: a real Plasma session, a GPU, NVIDIA's driver, a restart of KWin under
+> the running shell, activities, fractional scales with the add-on, Plasma versions
+> between 6.5 and 6.8.
 
 ## Notes per compositor (expected, not tested)
 

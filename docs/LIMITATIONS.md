@@ -86,15 +86,17 @@ software renderer only ([Known limitations](#known-limitations)).
   later; and a session started with a one-time socket (`WAYLAND_SOCKET`) cannot be
   restarted in place, so the daemon ends at the first change of a monitor there.
   [WAYLAND.md](WAYLAND.md#limits).
-- **KDE Plasma on Wayland: no desktop icons while a wallpaper is shown.** Plasma's
-  wallpaper, its desktop icons and its widgets are one window of Plasma's shell, and the
-  only place a wallpaper program of its own can take is in front of that window or behind
-  it. WalPE takes the place in front (the layer shell's bottom layer; on the background
-  layer, as in 0.14.0, the first click on the desktop put Plasma's desktop over the
-  wallpaper): the wallpaper stays, Plasma's icons and widgets are behind it. Clicks still
-  reach Plasma's desktop. Drawing under the icons would take a wallpaper plugin inside
-  Plasma's shell, which WalPE does not have. Seen on a headless Plasma 6.8.2 and 5.27
-  only. [WAYLAND.md](WAYLAND.md#kde-plasma).
+- **KDE Plasma on Wayland: desktop icons only with the add-on, and then no pointer for
+  the wallpaper.** Plasma's wallpaper, its desktop icons and its widgets are one window of
+  Plasma's shell, and a wallpaper program of its own can only be in front of that window
+  or behind it. WalPE is in front (the layer shell's bottom layer): the wallpaper stays
+  whatever is clicked, Plasma's icons and widgets are behind it. The add-on in
+  `contrib/plasma` (Plasma 6.5 or newer, installed by the user:
+  `contrib/plasma/install.sh install`) shows them over the wallpaper; on a desktop that
+  uses it the wallpaper gets no pointer (scenes that follow it, web wallpapers), and the
+  Overview shows the desktop without the wallpaper. Seen on a headless Plasma 6.8.2 only
+  (the bottom layer also on 5.27); no real session, no GPU.
+  [WAYLAND.md](WAYLAND.md#kde-plasma).
 - **AMD and Intel graphics, GPU choice, OpenGL ES: written, not run on hardware.** The
   list of graphics devices, render offload to another GPU (`gpu=integrated|discrete`),
   the kernel's GPU statistics and the Mesa counterparts of the driver hints were tested
