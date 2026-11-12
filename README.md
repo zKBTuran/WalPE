@@ -86,7 +86,8 @@ ninja -C build programs        # the installed programs (all a plain `ninja -C b
 
 `build.sh` (POSIX sh) runs ninja with as many jobs as the machine has CPUs (`-j <CPUs> -l
 <CPUs + 2>`); `WALPE_JOBS` / `WALPE_LOAD` override `-j` / `-l`, `WALPE_BUILDDIR` the build
-directory (default `build`). `--tuning=<value>` is passed on as `-Dnative_tuning=<value>`,
+directory (default `build` in the source directory; a relative path counts from where the
+script is called). `--tuning=<value>` is passed on as `-Dnative_tuning=<value>`,
 every other argument goes to `meson setup` (`./build.sh -Dweb=disabled`). An existing build
 directory is reconfigured, not wiped, and keeps the options it was set up with.
 `build.sh` builds the installed programs only (the ninja target `programs`). **The tests

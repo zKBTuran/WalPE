@@ -139,6 +139,11 @@ Corrections to "Pause for fullscreen apps" per monitor, which is new in 0.13.0:
   with the option or without. The developer tools (`sceneshot` ...) were never built by
   `meson test`, whatever the section of 0.13.0 says: one is built by its name (`ninja -C
   build sceneshot`), in a directory with `-Dtests=true`.
+- `build.sh`: `WALPE_JOBS=0` meant `ninja -j 0`, which is no limit on parallel jobs; 0
+  now means the default (the number of CPUs). A relative `WALPE_BUILDDIR` is taken from
+  where the script is called; it was taken from the source directory.
+- `walpe-ctl set web_accel=<the value it has>` answers "ok" like every other key; it was
+  an error ("nothing to set", exit status 3).
 - Library window: an arrow, Home, End or Page key pressed anywhere in the window (in the
   search field, for one) ended the rule that gives the wallpaper grid 64 % of the width;
   from then on the grid kept its width in pixels when the window changed size. Only moving
