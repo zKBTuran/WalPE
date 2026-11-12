@@ -82,13 +82,18 @@ static void node_sound_load (SceneNodeContent *s, NodeObj *nv, JsonObject *o)
                  * copy of its sound files yet (pkg.h): the layer gets its
                  * player all the same, with the place the file will have,
                  * and fetches it before it opens it (node_sound_fetch).
-                 * (No such file outstanding and still none on disk? Then
+                 * (No list when it is read and still no file on disk? Then
                  * another monitor's load has just extracted them: once
                  * more.) */
-                p = walpe_pkg_deferred_path (s->dir, f);
+                gboolean first = !s->sound_later_read;
+                if (first) {
+                    s->sound_later_read = TRUE;     /* (once per load, not per name) */
+                    s->sound_later = walpe_pkg_deferred_list (s->dir);
+                }
+                p = walpe_pkg_deferred_in (s->sound_later, f);
                 if (p)
                     later = TRUE;
-                else
+                else if (first && !s->sound_later)
                     p = resolve_asset (s->dir, f);
             }
             if (!p && walpe_we_assets_dir ())
@@ -192,6 +197,8 @@ static void node_sound_set (NodeObj *nv, const char *prop, WalpeSsType t, const 
  * with sound layers explains itself in the log */
 static void scene_sound_report (SceneNodeContent *s)
 {
+    g_clear_pointer (&s->sound_later, walpe_pkg_deferred_list_free);    /* the layers are made */
+    s->sound_later_read = FALSE;
     if (!s->sound_objects)
         return;
     int players = 0;
@@ -246,4 +253,5 @@ static void scene_sound_free (SceneNodeContent *s)
     for (guint i = 0; s->nodes && i < s->nodes->len; i++)
         g_array_index (s->nodes, NodeObj, i).sound = NULL;
     g_clear_pointer (&s->sound_group, walpe_sound_group_free);
+    g_clear_pointer (&s->sound_later, walpe_pkg_deferred_list_free);
 }

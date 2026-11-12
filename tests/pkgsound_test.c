@@ -26,6 +26,7 @@
 #include <epoxy/egl.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "engine/content.h"
 #include "engine/glutil.h"
@@ -358,6 +359,23 @@ static void test_cache (void)
         CHECK (!g_strcmp0 (p, want), "the place of an outstanding file, named \"%s\" (%s)", also[i], p ? p : "none");
         g_free (p);
     }
+    /* a load reads the list once and looks every name up in what it read
+     * (the file is not there for the second and third look) */
+    WalpePkgList *read = walpe_pkg_deferred_list (c);
+    char *lname = g_build_filename (c, ".walpe-pkg-nosound", NULL), *kept = list_of (c);
+    g_unlink (lname);
+    p = walpe_pkg_deferred_in (read, "sounds/one.wav");
+    char *q = walpe_pkg_deferred_in (read, "music/Two.OGG"), *none = walpe_pkg_deferred_in (read, "music/none.ogg");
+    CHECK (read && !g_strcmp0 (p, want) && q && !none, "names are looked up in the list as it was read, once");
+    CHECK (!walpe_pkg_deferred_list (c) && !walpe_pkg_deferred_in (NULL, "sounds/one.wav"),
+           "no list: nothing outstanding");
+    g_file_set_contents (lname, kept, -1, NULL);
+    walpe_pkg_deferred_list_free (read);
+    g_free (p);
+    g_free (q);
+    g_free (none);
+    g_free (lname);
+    g_free (kept);
     g_free (want);
     const char *no[] = { "sounds/planted.wav", "scene.json", "sounds/ONE.wav", "one.wav", "../sounds/one.wav",
                          "music/two.ogg", "sounds/one.wav/", "sounds/one.wav/.", "./", "sounds" };
@@ -719,6 +737,66 @@ static void test_spelt (void)
     make_item (0);
 }
 
+/* ---- E: the wallpaper is replaced while its sound files are being fetched ----
+ * The player's thread outlives its scene and its group; the copy it writes
+ * to is released and may be removed under it. WALPE_PKGSOUND_STRESS=<n>
+ * rounds (3 without it), for a run under a memory checker. */
+static void test_replaced (void)
+{
+    const char *env = g_getenv ("WALPE_PKGSOUND_STRESS");
+    int rounds = env ? CLAMP (atoi (env), 1, 100000) : 3, late = 0;
+    /* a fetch that takes a while */
+    enum { MANY = 255 };
+    static char names[MANY][32];
+    Ent *e = g_new0 (Ent, MANY + 3);
+    e[0] = (Ent) { "scene.json", (const guint8 *) SCENE, strlen (SCENE) };
+    e[1] = (Ent) { "models/solid.json", (const guint8 *) SOLID, strlen (SOLID) };
+    e[2] = (Ent) { "sounds/one.wav", wav->data, wav->len };
+    for (int i = 0; i < MANY; i++) {
+        g_snprintf (names[i], sizeof names[i], "more/%03d/%d.ogg", i % 40, i);
+        e[3 + i] = (Ent) { names[i], (const guint8 *) OGG, strlen (OGG) };
+    }
+    write_pkg (pkg, e, MANY + 3, 0);
+    g_free (e);
+    char *c = cache_of_item ();
+    gboolean loaded = TRUE, ended = TRUE;
+    for (int r = 0; r < rounds && loaded; r++) {
+        rm_rf (c);
+        walpe_sound_set_enabled (FALSE);
+        loaded = run_open (&ra, item);
+        if (!loaded)
+            break;
+        run_frame (&ra);
+        walpe_sound_set_enabled (TRUE);
+        run_frame (&ra);
+        g_usleep ((gulong) (r % 8) * 300);      /* the fetch has not begun / is under way */
+        run_close (&ra);                        /* the scene, its players and its hold on the copy go */
+        late += has (c, ".walpe-pkg-nosound");
+        switch (r % 3) {
+        case 0:     /* the wallpaper that replaces it: the same one, with sound */
+            loaded = run_open (&rb, item);
+            if (loaded)
+                run_frame (&rb);
+            run_close (&rb);
+            break;
+        case 1:     /* its copy is removed (the cache was trimmed) */
+            rm_rf (c);
+            break;
+        default:    /* sound is switched off again at once */
+            walpe_sound_set_enabled (FALSE);
+            break;
+        }
+        ended = wait_for (no_threads, NULL, 20000) && ended;
+    }
+    walpe_sound_set_enabled (FALSE);
+    CHECK (loaded && ended, "%d rounds of replacing a wallpaper whose sound was just switched on: every "
+           "player's thread ended", rounds);
+    printf ("replaced: %d round(s), in %d the scene was gone before its sound files were all there\n", rounds, late);
+    rm_rf (c);
+    g_free (c);
+    make_item (0);
+}
+
 int main (void)
 {
     T = g_dir_make_tmp ("walpe-pkgsound-XXXXXX", NULL);
@@ -768,6 +846,7 @@ int main (void)
         walpe_glutil_init ();
         test_scene ();
         test_spelt ();
+        test_replaced ();
         eglMakeCurrent (dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         eglDestroySurface (dpy, surf);
         eglDestroyContext (dpy, ctx);

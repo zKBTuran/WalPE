@@ -31,9 +31,15 @@ gboolean walpe_pkg_sound_name (const char *entry_path);
  * FALSE: they could not be made (the package is gone or has changed, no
  * room on the disk): the copy is as it was. */
 gboolean walpe_pkg_fetch_sound (const char *cache_dir);
-/* `name` as a scene writes it (looked up as <name> and assets/<name>, like
- * a file on disk, and spelled as the file system would resolve it:
- * "./sounds/a.ogg", "sounds//a.ogg"): where that file of the package will be once
- * walpe_pkg_fetch_sound () has run, or NULL when the copy has no such file
- * outstanding (g_free). */
+/* The files a copy still lacks, read once (NULL: none, or not a copy of
+ * the cache), and one of them by the name a scene has for it - looked up as
+ * <name> and assets/<name>, like a file on disk, and spelled as the file
+ * system would resolve it ("./sounds/a.ogg", "sounds//a.ogg"): where that
+ * file will be once walpe_pkg_fetch_sound () has run, or NULL when no such
+ * file is outstanding (g_free). */
+typedef struct WalpePkgList WalpePkgList;
+WalpePkgList *walpe_pkg_deferred_list (const char *cache_dir);
+char *walpe_pkg_deferred_in (const WalpePkgList *list, const char *name);
+void walpe_pkg_deferred_list_free (WalpePkgList *list);
+/* (the three in one, for a single name) */
 char *walpe_pkg_deferred_path (const char *cache_dir, const char *name);

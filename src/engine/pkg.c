@@ -654,23 +654,6 @@ static gboolean pkg_is_cache_copy (const char *dir)
     return is;
 }
 
-/* is `line` a line of the list? (One pass over the text: a scene may ask
- * for 32 x 64 names, and a package may leave 32768 entries out.) */
-static gboolean pkg_list_has (const char *text, gsize len, const char *line)
-{
-    const gsize want = line ? strlen (line) : 0;
-    const char *end = text + len;
-    for (const char *l = text; want && l < end;) {
-        const char *hit = memmem (l, (gsize) (end - l), line, want);
-        if (!hit)
-            return FALSE;
-        if ((hit == text || hit[-1] == '\n') && (hit + want == end || hit[want] == '\n'))
-            return TRUE;
-        l = hit + 1;
-    }
-    return FALSE;
-}
-
 gboolean walpe_pkg_fetch_sound (const char *cache_dir)
 {
     if (!pkg_is_cache_copy (cache_dir))
@@ -688,30 +671,79 @@ gboolean walpe_pkg_fetch_sound (const char *cache_dir)
     return ok;
 }
 
-char *walpe_pkg_deferred_path (const char *cache_dir, const char *name)
+/* The list of a copy, read once: a scene asks for up to 32 x 64 names and
+ * a package may leave 32768 files out, so the names are looked up in a set
+ * (they point into the list's text). */
+struct WalpePkgList {
+    char *dir;          /* the copy */
+    char *text;
+    GHashTable *names;  /* pkg_path_key of each file */
+};
+
+WalpePkgList *walpe_pkg_deferred_list (const char *cache_dir)
 {
-    if (!name || !*name || !walpe_pkg_sound_name (name) || !pkg_is_cache_copy (cache_dir))
+    if (!pkg_is_cache_copy (cache_dir))
         return NULL;
-    char *list = g_build_filename (cache_dir, PKG_NOSOUND, NULL), *text = NULL, *found = NULL;
+    char *file = g_build_filename (cache_dir, PKG_NOSOUND, NULL), *text = NULL;
     g_mutex_lock (&pkg_lock);
-    gsize len = 0;
-    gboolean have = g_file_get_contents (list, &text, &len, NULL);
+    gboolean have = g_file_get_contents (file, &text, NULL, NULL);
     g_mutex_unlock (&pkg_lock);
-    g_free (list);
+    g_free (file);
     if (!have)
         return NULL;
-    /* The scene's name for the file is compared as the file system would
-     * have resolved it had the file been extracted - "./sounds/a.ogg" and
-     * "sounds//a.ogg" are "sounds/a.ogg", the spelling the list has - and,
-     * as an asset name is looked up on disk, below "assets" too. */
-    char *key = pkg_path_key (name), *alt = g_strconcat ("assets/", key, NULL);
-    if (pkg_list_has (text, len, key))
-        found = g_build_filename (cache_dir, key, NULL);
-    else if (pkg_list_has (text, len, alt))
-        found = g_build_filename (cache_dir, alt, NULL);
-    g_free (alt);
+    WalpePkgList *l = g_new0 (WalpePkgList, 1);
+    l->dir = g_strdup (cache_dir);
+    l->text = text;
+    l->names = g_hash_table_new (g_str_hash, g_str_equal);
+    for (char *c = text; *c;) {
+        char *nl = strchr (c, '\n');
+        if (nl)
+            *nl = 0;
+        if (*c)
+            g_hash_table_add (l->names, c);
+        if (!nl)
+            break;
+        c = nl + 1;
+    }
+    return l;
+}
+
+void walpe_pkg_deferred_list_free (WalpePkgList *l)
+{
+    if (!l)
+        return;
+    g_hash_table_unref (l->names);
+    g_free (l->text);
+    g_free (l->dir);
+    g_free (l);
+}
+
+/* The scene's name for the file is compared as the file system would have
+ * resolved it had the file been extracted - "./sounds/a.ogg" and
+ * "sounds//a.ogg" are "sounds/a.ogg", the spelling the list has - and, as
+ * an asset name is looked up on disk, below "assets" too. */
+char *walpe_pkg_deferred_in (const WalpePkgList *l, const char *name)
+{
+    if (!l || !name || !*name || !walpe_pkg_sound_name (name))
+        return NULL;
+    char *key = pkg_path_key (name), *found = NULL;
+    if (g_hash_table_contains (l->names, key)) {
+        found = g_build_filename (l->dir, key, NULL);
+    } else {
+        char *alt = g_strconcat ("assets/", key, NULL);
+        if (*key && g_hash_table_contains (l->names, alt))
+            found = g_build_filename (l->dir, alt, NULL);
+        g_free (alt);
+    }
     g_free (key);
-    g_free (text);
+    return found;
+}
+
+char *walpe_pkg_deferred_path (const char *cache_dir, const char *name)
+{
+    WalpePkgList *l = walpe_pkg_deferred_list (cache_dir);
+    char *found = walpe_pkg_deferred_in (l, name);
+    walpe_pkg_deferred_list_free (l);
     return found;
 }
 

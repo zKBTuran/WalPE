@@ -293,6 +293,9 @@ typedef struct {
     gboolean sound_live;        /* between the first frame and gl_free */
     gboolean sound_full;        /* more sound layers than players: said once */
     int sound_objects;          /* objects with "sound" */
+    WalpePkgList *sound_later;  /* pkg.h: the sound files the copy lacks, read by the first
+                                 * layer that misses one, freed when the scene is loaded */
+    gboolean sound_later_read;
     GPtrArray *pending_scripts; /* PendingScript, consumed at gl_init */
     WalpeSceneScript *ss;       /* SceneScript runtime (NULL = none) */
     gint64 ss_us;               /* WALPE_PROBE: tick time accumulator */
