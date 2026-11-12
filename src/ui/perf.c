@@ -6,6 +6,7 @@
 #include "common/util.h"
 #include "uiipc.h"
 #include "numfield.h"
+#include "winstate.h"
 
 typedef struct {
     gboolean per_wp;
@@ -18,6 +19,8 @@ typedef struct {
     gboolean mapped;            /* the panel is on screen (its window may be hidden) */
     WalpeQuality q;             /* the knobs shown */
     guint poll_id, scale_id, idle_id;
+    GdkSurface *surface;        /* while mapped: the window's, for notify::state */
+    gulong surface_state_id;
 } Perf;
 
 /* preset selector: per wallpaper the first entry drops its own settings */
@@ -393,10 +396,16 @@ static gboolean perf_poll (gpointer user)
  * and, where it is one line until opened (a wallpaper's own settings),
  * open. It used to run whenever the panel was mapped and do nothing while
  * the line was closed - which is how the library window shows it: one
- * wake-up every 2 s for as long as the window existed. */
+ * wake-up every 2 s for as long as the window existed.
+ *
+ * ... and while its window is on screen (winstate.h). On another workspace
+ * or as an icon the panel stays "mapped" for GTK, and an open panel went
+ * on asking every 2 s - and the engine went on counting pixels for it -
+ * for as long as the window was away. A window that is on screen without
+ * the focus is asked for as before: its numbers can be read. */
 static void perf_poll_update (Perf *P)
 {
-    gboolean want = P->mapped &&
+    gboolean want = P->mapped && !walpe_surface_hidden (P->surface) &&
                     (!P->expander || gtk_expander_get_expanded (GTK_EXPANDER (P->expander)));
     if (want && !P->poll_id) {
         P->poll_id = g_timeout_add_seconds (2, perf_poll, P);
@@ -406,11 +415,38 @@ static void perf_poll_update (Perf *P)
     }
 }
 
+/* the window went off the screen or came back: back, the numbers are old */
+static void on_surface_state (GObject *sf, GParamSpec *ps, gpointer user)
+{
+    (void) sf; (void) ps;
+    Perf *P = user;
+    gboolean polled = P->poll_id != 0;
+    perf_poll_update (P);
+    if (!polled && P->poll_id)
+        perf_request (P);
+}
+
+static void perf_unwatch_surface (Perf *P)
+{
+    if (P->surface) {
+        g_signal_handler_disconnect (P->surface, P->surface_state_id);
+        g_object_remove_weak_pointer (G_OBJECT (P->surface), (gpointer *) &P->surface);
+    }
+    P->surface = NULL;
+    P->surface_state_id = 0;
+}
+
 static void on_map (GtkWidget *w, gpointer user)
 {
-    (void) w;
     Perf *P = user;
     P->mapped = TRUE;
+    GdkSurface *sf = walpe_widget_toplevel_surface (w);
+    walpe_winstate_watch (gtk_widget_get_display (w));
+    if (!P->surface && sf && GDK_IS_TOPLEVEL (sf)) {
+        P->surface = sf;
+        g_object_add_weak_pointer (G_OBJECT (sf), (gpointer *) &P->surface);
+        P->surface_state_id = g_signal_connect (sf, "notify::state", G_CALLBACK (on_surface_state), P);
+    }
     perf_request (P);
     perf_poll_update (P);
 }
@@ -420,6 +456,7 @@ static void on_unmap (GtkWidget *w, gpointer user)
     (void) w;
     Perf *P = user;
     P->mapped = FALSE;
+    perf_unwatch_surface (P);
     perf_poll_update (P);
 }
 
@@ -440,6 +477,7 @@ static void perf_free (gpointer user)
         g_source_remove (P->scale_id);
     if (P->idle_id)
         g_source_remove (P->idle_id);
+    perf_unwatch_surface (P);
     g_free (P->path);
     g_free (P);
 }

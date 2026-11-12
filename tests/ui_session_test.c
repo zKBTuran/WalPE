@@ -8,6 +8,7 @@
  *    (connector name, device pixels). */
 #include "ui/appearance.h"
 #include "ui/monlist.h"
+#include "ui/winstate.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -58,6 +59,35 @@ int main (void)
     CHECK (!strcmp (t, "Monitor 800×600"), "empty connector name: %s", t);
     g_free (t);
     CHECK (walpe_ui_monitors_line (NULL) == NULL, "no display: no line");
+
+    /* ---- on screen or not (winstate.h): the one rule the previews, the
+     * quality panel's timer and the picture cache follow. Without the focus
+     * - a tiled window next to the one in use - is on screen. */
+    CHECK (walpe_toplevel_state_hidden (GDK_TOPLEVEL_STATE_MINIMIZED), "an icon / another workspace");
+    CHECK (walpe_toplevel_state_hidden (GDK_TOPLEVEL_STATE_MINIMIZED | GDK_TOPLEVEL_STATE_FOCUSED),
+           "hidden wins over the focus");
+#if GTK_CHECK_VERSION (4, 12, 0)
+    CHECK (walpe_toplevel_state_hidden (GDK_TOPLEVEL_STATE_SUSPENDED), "suspended by the compositor");
+#endif
+    CHECK (!walpe_toplevel_state_hidden (0), "on screen without the focus: not hidden");
+    CHECK (!walpe_toplevel_state_hidden (GDK_TOPLEVEL_STATE_TILED | GDK_TOPLEVEL_STATE_MAXIMIZED),
+           "tiled, maximised: not hidden");
+    CHECK (!walpe_toplevel_state_hidden (GDK_TOPLEVEL_STATE_FOCUSED | GDK_TOPLEVEL_STATE_FULLSCREEN),
+           "focused: not hidden");
+    CHECK (!walpe_surface_hidden (NULL) && walpe_widget_toplevel_surface (NULL) == NULL,
+           "no window yet: not hidden");
+    /* X11 window managers that hide a window without calling it minimised */
+    CHECK (walpe_wm_state_gone (0), "WM_STATE withdrawn (i3: a workspace that is not shown)");
+    CHECK (walpe_wm_state_gone (3), "WM_STATE iconic");
+    CHECK (!walpe_wm_state_gone (1), "WM_STATE normal: on screen");
+    CHECK (walpe_wm_offscreen (-3840, 0, 1920, 1080, 1920, 1080), "parked left of the screen (dwm)");
+    CHECK (walpe_wm_offscreen (0, 1080, 800, 600, 1920, 1080), "below the screen");
+    CHECK (walpe_wm_offscreen (1920, 0, 800, 600, 1920, 1080), "right of the screen");
+    CHECK (walpe_wm_offscreen (0, -600, 800, 600, 1920, 1080), "above the screen");
+    CHECK (!walpe_wm_offscreen (0, 0, 960, 1080, 1920, 1080), "a tile of the screen");
+    CHECK (!walpe_wm_offscreen (-799, 0, 800, 600, 1920, 1080), "one column still on the screen");
+    CHECK (!walpe_wm_offscreen (1919, 1079, 800, 600, 1920, 1080), "one pixel still on the screen");
+    CHECK (!walpe_wm_offscreen (2, 20, 956, 1058, 1920, 1080), "a position inside a frame");
 
     if (fails) {
         fprintf (stderr, "ui-session: %d check(s) failed\n", fails);

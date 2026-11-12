@@ -1,5 +1,6 @@
 /* thumbs.c - asynchronous, exact-size, cached thumbnails (see thumbs.h) */
 #include "thumbs.h"
+#include "winstate.h"
 #include "common/config.h"   /* WALPE_PREVIEW_* */
 #include "common/gifcheck.h"
 #include "common/util.h"     /* walpe_picture_decode_file */
@@ -637,19 +638,14 @@ static void hook_env (APic *ap)
  * without a window manager - and the previews of a window nobody sees went
  * on playing: the 50 ms timer for as long as the window stayed hidden, with
  * the decoded frames (up to the whole budget) held all that time. */
-static gboolean thumbs_state_hidden (GdkToplevelState st)
+G_GNUC_UNUSED static gboolean thumbs_state_hidden (GdkToplevelState st)
 {
-    GdkToplevelState hidden = GDK_TOPLEVEL_STATE_MINIMIZED;
-#if GTK_CHECK_VERSION (4, 12, 0)
-    hidden |= GDK_TOPLEVEL_STATE_SUSPENDED;
-#endif
-    return (st & hidden) != 0;
+    return walpe_toplevel_state_hidden (st);    /* winstate.h: the one rule */
 }
 
 static gboolean thumbs_toplevel_hidden (GdkSurface *sf)
 {
-    return sf && GDK_IS_TOPLEVEL (sf) &&
-           thumbs_state_hidden (gdk_toplevel_get_state (GDK_TOPLEVEL (sf)));
+    return walpe_surface_hidden (sf);
 }
 
 static gboolean pic_can_play (APic *ap)
