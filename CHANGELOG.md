@@ -37,6 +37,12 @@ copy.
 
 ### Scenes
 
+- A scene with a video layer that was paused before the video had given its first
+  picture - a daemon that starts with the pause saved or the displays asleep, a restart in
+  place while paused - rested on a frame without that picture: a scene whose background
+  is a video was black until the pause ended. The paused monitor is now drawn until the
+  picture is in the frame (three seconds at most for a clip that gives none), then rests
+  as before.
 - A layer with effects that changes its size from frame to frame - one that crosses a
   screen edge while the camera parallax follows the pointer, a camera shake sways the view
   or a script moves it - no longer fills the pool of effect targets. The pool kept one set
