@@ -188,6 +188,12 @@ typedef struct WlSurf {
     gboolean hidden_known;
     guint lost_timer;
     int lost_ticks;
+    /* wp_presentation_feedback.presented of the last frame: its flags (the
+     * protocol's kind bits: 1 vsync, 2 hw clock, 4 hw completion, 8 zero
+     * copy), -1 = none yet. For status only. On KWin the zero-copy bit goes
+     * when something is composited over the surface - also a panel, also
+     * Plasma's desktop: a hint for a bug report, nothing to act on. */
+    int pres_flags;
 } WlSurf;
 
 /* what the main thread still has to tell the daemon */
@@ -1686,6 +1692,7 @@ static void wl_feedback_presented (void *data, struct wp_presentation_feedback *
     g_mutex_lock (&s->lock);
     if (wl_feedback_take_locked (s, fb)) {
         s->stats.presented++;
+        s->pres_flags = (int) flags;
         s->stats.last_presented_us = wl_presentation_to_mono (wl_presented_us (sec_hi, sec_lo, nsec));
         if (refresh)
             s->stats.refresh_hz = wl_refresh_hz_from_ns (refresh);
@@ -3134,6 +3141,7 @@ static void wl_status (JsonBuilder *b)
         g_mutex_lock (&s->lock);
         WlSizeOut sz = s->size;
         int scale120 = s->size_in.scale120, recreated = (int) s->ls.recreated;
+        int pres_flags = s->stats.presented ? s->pres_flags : -1;
         const char *role = s->role == WL_ROLE_NONE ? "none" : wl_ls_state_name (s->ls.state);
         gboolean ptr = s->want_pointer, hidden = s->fs.hidden;
         double fhz = s->stats.refresh_hz;
@@ -3165,6 +3173,8 @@ static void wl_status (JsonBuilder *b)
         json_builder_add_boolean_value (b, hidden);
         json_builder_set_member_name (b, "recreated");
         json_builder_add_int_value (b, recreated);
+        json_builder_set_member_name (b, "presented_flags");
+        json_builder_add_int_value (b, pres_flags);
         json_builder_set_member_name (b, "feedback_refresh_mhz");
         json_builder_add_int_value (b, (gint64) (fhz * 1000.0 + 0.5));
         json_builder_end_object (b);
