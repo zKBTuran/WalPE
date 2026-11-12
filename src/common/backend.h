@@ -9,7 +9,9 @@
  *             is set - but never X11 in the session of a Wayland compositor
  *             that answers and has no layer shell (GNOME): that DISPLAY is
  *             Xwayland, where the wallpaper window lies above every other
- *             window instead of below. The default.
+ *             window instead of below. On GNOME the Wayland backend is
+ *             taken without a layer shell when the WalPE extension for
+ *             GNOME Shell answers (platform/wl_gnome.h). The default.
  *   x11     - X11 only (also inside a Wayland session, through Xwayland:
  *             asked for by name it is taken, whatever it looks like).
  *   wayland - Wayland only; no fallback to X11.
@@ -77,6 +79,12 @@ typedef struct {
      * has none, -1 = no connection could be made */
     int layer_shell;
     gboolean windowed;          /* --windowed: a plain window, no layer shell needed */
+    /* layer_shell == 0 only. desk_windows: something in the session puts
+     * ordinary windows of the daemon on the desktop instead (GNOME Shell
+     * with the WalPE extension: platform/wl_gnome.h). no_shell_hint: one
+     * more sentence for the refusal where it does not (static; NULL = none) */
+    gboolean desk_windows;
+    const char *no_shell_hint;
 } WalpeBackendEnv;
 
 typedef struct {
@@ -167,7 +175,7 @@ static inline void walpe_backend_choose (const WalpeBackendEnv *e, WalpeBackendC
         wl_miss = NULL;         /* not a Wayland session: nothing to say */
     else if (e->layer_shell < 0)
         wl_miss = "WAYLAND_DISPLAY is set but the compositor does not answer";
-    else if (e->layer_shell == 0 && !e->windowed) {
+    else if (e->layer_shell == 0 && !e->windowed && !e->desk_windows) {
         /* The compositor answers and cannot place a wallpaper. A DISPLAY
          * in its session is Xwayland, and the X11 backend's window is not a
          * desktop background there: the compositor shows it above every
@@ -187,12 +195,21 @@ static inline void walpe_backend_choose (const WalpeBackendEnv *e, WalpeBackendC
             out->why = g_strdup_printf ("no display to draw on: %s, and DISPLAY is not set", none);
         else
             out->why = g_strdup_printf ("no display to draw on: %s (built: %s)", none, built);
+        if (e->no_shell_hint && *e->no_shell_hint) {
+            char *more = g_strdup_printf ("%s. %s", out->why, e->no_shell_hint);
+            g_free (out->why);
+            out->why = more;
+        }
         return;
     } else {
         out->backend = WALPE_BACKEND_WAYLAND;
         out->why = g_strdup (e->windowed && e->layer_shell == 0
                                  ? "wayland (auto: WAYLAND_DISPLAY is set; --windowed needs no "
                                    "layer shell)"
+                                 : e->layer_shell == 0
+                                       ? "wayland (auto: WAYLAND_DISPLAY is set; the compositor has "
+                                         "no layer shell, but the WalPE extension for GNOME Shell "
+                                         "answers and keeps the wallpaper's windows on the desktop)"
                                  : "wayland (auto: WAYLAND_DISPLAY is set and the compositor "
                                    "offers the layer shell)");
         return;

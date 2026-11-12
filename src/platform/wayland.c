@@ -8,6 +8,12 @@
  * through a wl_egl_window; frames are paced by the compositor's frame
  * callbacks, not by the EGL swap interval, which is always 0 here.
  *
+ * GNOME Shell has no layer shell. With the WalPE extension for it
+ * (wl_gnome.h, contrib/gnome) each output's surface is an xdg_toplevel
+ * instead, marked by its application id and title, which the extension
+ * makes a desktop window and places on its monitor (W.desk_windows).
+ * Everything else about such a surface is that of a wallpaper.
+ *
  * THREADS AND EVENT QUEUES
  * libwayland delivers an object's events on the event queue the object is
  * assigned to, to whichever thread dispatches that queue. This file uses
@@ -78,6 +84,7 @@
 
 #include "platform/impl.h"
 #include "platform/wayland_logic.h"
+#include "platform/wl_gnome.h"
 
 #ifndef EGL_PLATFORM_WAYLAND_KHR
 #define EGL_PLATFORM_WAYLAND_KHR 0x31D8
@@ -247,6 +254,10 @@ static struct {
     clockid_t pres_clock;
     struct xdg_wm_base *wm_base;
     gboolean wm_base_gone;
+    /* GNOME Shell with the WalPE extension: wallpapers are xdg_toplevels
+     * (wl_gnome.h); set in open (), then only read */
+    gboolean desk_windows;
+    WlGnomeHello gnome;
     /* registry names of the globals bound above (0 = none) */
     guint32 layer_shell_name, xdg_output_name, viewporter_name, frac_name, presentation_name,
             wm_base_name;
@@ -1765,7 +1776,8 @@ static gboolean wl_layer_create_locked (WlSurf *s, gint64 now_us)
     return TRUE;
 }
 
-/* the same for the plain window of --windowed (lock held) */
+/* the same for the plain window of --windowed, and for a wallpaper where
+ * wallpapers are windows (W.desk_windows) (lock held) */
 static gboolean wl_toplevel_create_locked (WlSurf *s, gint64 now_us)
 {
     if (!s->wm_base_rq)
@@ -1776,8 +1788,10 @@ static gboolean wl_toplevel_create_locked (WlSurf *s, gint64 now_us)
     xdg_surface_add_listener (s->xdg, &wl_xdg_listener, s);
     s->toplevel = xdg_surface_get_toplevel (s->xdg);
     xdg_toplevel_add_listener (s->toplevel, &wl_top_listener, s);
+    /* (the application id first: the extension for GNOME Shell looks at a
+     * wallpaper's window when its title is told) */
+    xdg_toplevel_set_app_id (s->toplevel, s->kind == WALPE_SURFACE_WALLPAPER ? WL_GNOME_APP_ID : "walpe");
     xdg_toplevel_set_title (s->toplevel, s->title ? s->title : "WalPE");
-    xdg_toplevel_set_app_id (s->toplevel, "walpe");
     s->role_on_rq = TRUE;
     wl_surface_commit (s->surface);
     wl_ls_event (&s->ls, WL_LS_EV_CREATE, 0, 0, 0, now_us);
@@ -2006,9 +2020,10 @@ static WalpeSurface *wl_surface_new (const WalpeSurfaceSpec *spec, EGLDisplay dp
                        spec->output && spec->output->name ? spec->output->name : "?");
             return NULL;
         }
-        if (!W.layer_shell || W.layer_shell_gone) {
-            g_warning ("wayland: the compositor has no layer shell (zwlr_layer_shell_v1): no "
-                       "wallpaper surface");
+        if (W.desk_windows ? !W.wm_base || W.wm_base_gone : !W.layer_shell || W.layer_shell_gone) {
+            g_warning (W.desk_windows ? "wayland: the compositor has no xdg_wm_base: no wallpaper window"
+                                      : "wayland: the compositor has no layer shell "
+                                        "(zwlr_layer_shell_v1): no wallpaper surface");
             return NULL;
         }
     } else if (spec->kind == WALPE_SURFACE_WINDOW && (!W.wm_base || W.wm_base_gone)) {
@@ -2050,8 +2065,15 @@ static WalpeSurface *wl_surface_new (const WalpeSurfaceSpec *spec, EGLDisplay dp
     s->interval = 1;
 
     if (spec->kind == WALPE_SURFACE_WALLPAPER) {
-        s->role = WL_ROLE_LAYER;
-        s->shell_rq = wl_wrap_on (W.layer_shell, s->rq);
+        if (W.desk_windows) {
+            /* a window the shell's extension puts on this output */
+            s->role = WL_ROLE_TOPLEVEL;
+            s->wm_base_rq = wl_wrap_on (W.wm_base, s->rq);
+            s->title = wl_gnome_title (spec->output->name);
+        } else {
+            s->role = WL_ROLE_LAYER;
+            s->shell_rq = wl_wrap_on (W.layer_shell, s->rq);
+        }
         s->wl_out = o->wo;
         s->out_id = o->name;
         s->out_name = g_strdup (spec->output->name);
@@ -2065,7 +2087,7 @@ static WalpeSurface *wl_surface_new (const WalpeSurfaceSpec *spec, EGLDisplay dp
         /* (a wl_surface too old for set_buffer_scale shows a buffer one
          * to one: its buffers are then made for scale 1) */
         s->size_in.int_scale = wl_surface_has_scale (s->surface) ? wl_out_int_scale (&o->cur) : 1;
-        wl_ls_init (&s->ls, W.recreate_max);
+        wl_ls_init (&s->ls, W.desk_windows ? 0 : W.recreate_max);
         wl_surface_set_input_region (s->surface, s->empty_region);
     } else {
         s->size_in.asked_w = spec->width > 0 ? spec->width : 960;
@@ -2853,15 +2875,22 @@ static void wl_close (void);
 
 static const char *wl_no_layer_shell_text (void)
 {
-    const char *desk = g_getenv ("XDG_CURRENT_DESKTOP");
-    gboolean gnome = wl_global_find ("gtk_shell1") != NULL ||
-                     (desk && (strstr (desk, "GNOME") || strstr (desk, "gnome")));
+    gboolean gnome = wl_gnome_session (wl_global_find ("gtk_shell1") != NULL,
+                                       g_getenv ("XDG_CURRENT_DESKTOP"));
     /* (not "use the X11 backend": through Xwayland its window lies above
      * every other window - common/backend.h) */
-    return gnome
-        ? "this Wayland compositor (GNOME's Mutter) has no layer shell (zwlr_layer_shell_v1), the "
-          "protocol a wallpaper surface needs. On GNOME use an X11 session where there is one (\"GNOME on Xorg\")"
-        : "this Wayland compositor has no layer shell (zwlr_layer_shell_v1), the protocol a "
+    if (gnome) {
+        /* (asked for by name, the automatic choice's probe has not run) */
+        static char *text;
+        WlGnomeExt ext = W.wm_base ? walpe_wl_gnome_find (NULL) : WL_GNOME_EXT_NONE;
+        g_free (text);
+        text = g_strdup_printf (
+            "this Wayland compositor (GNOME's Mutter) has no layer shell (zwlr_layer_shell_v1), the "
+            "protocol a wallpaper surface needs. On GNOME use an X11 session where there is one "
+            "(\"GNOME on Xorg\"). %s", wl_gnome_ext_hint (ext) ? wl_gnome_ext_hint (ext) : "");
+        return text;
+    }
+    return "this Wayland compositor has no layer shell (zwlr_layer_shell_v1), the protocol a "
           "wallpaper surface needs. Use a compositor that offers it (sway, Hyprland, river, "
           "labwc, Wayfire, niri, KDE Plasma, COSMIC) or an X11 session";
 }
@@ -2948,6 +2977,10 @@ static void wl_layer_decide (gboolean say)
 
 /* the connection the probe had to keep (WAYLAND_SOCKET can be used once) */
 static struct wl_display *wl_kept_dpy;
+/* GNOME Shell 46 to 48 (wl_gnome.h): the connection the shell handed over
+ * for the next open (), -1 = none; and whether the open one is such a one */
+static int wl_handed_fd = -1;
+static gboolean wl_handed;
 
 /* One try. *going_down: it failed because the compositor took the
  * connection and closed it, before `deadline` and on a socket that can be
@@ -2962,11 +2995,19 @@ static gboolean wl_open_once (const WalpePlatformOpts *opts, char **err, gint64 
 
     int connect_errno = 0;
     gboolean kept = wl_kept_dpy != NULL;
-    if (wl_kept_dpy) {
+    wl_handed = wl_handed_fd >= 0;
+    if (wl_handed) {
+        W.dpy = wl_display_connect_to_fd (wl_handed_fd);
+        connect_errno = errno;
+        if (!W.dpy)
+            close (wl_handed_fd);
+        wl_handed_fd = -1;
+    } else if (wl_kept_dpy) {
         W.dpy = wl_kept_dpy;
         wl_kept_dpy = NULL;
     }
-    while (!W.dpy) {
+    /* (a connection that was handed over is not to be had by waiting) */
+    while (!W.dpy && !wl_handed) {
         W.dpy = wl_display_connect (NULL);
         if (W.dpy)
             break;
@@ -3001,7 +3042,10 @@ static gboolean wl_open_once (const WalpePlatformOpts *opts, char **err, gint64 
         int r = wl_sync_until (W.dpy, NULL, answer_by);
         if (r < 0) {
             fail = "the Wayland compositor closed the connection during start-up";
-            *going_down = !kept && !g_getenv ("WAYLAND_SOCKET") && g_get_monotonic_time () < deadline;
+            /* (not for a connection GNOME Shell handed over: that one is
+             * tried once, as where it was written) */
+            *going_down = !kept && !wl_handed && !g_getenv ("WAYLAND_SOCKET") &&
+                          g_get_monotonic_time () < deadline;
         } else if (r == 0)
             fail = "the Wayland compositor accepted the connection but did not answer within "
                    G_STRINGIFY (WL_START_ANSWER_S) " seconds";
@@ -3010,13 +3054,50 @@ static gboolean wl_open_once (const WalpePlatformOpts *opts, char **err, gint64 
         fail = "the Wayland compositor offers no wl_compositor";
     if (!fail && opts->windowed && !W.wm_base)
         fail = "the Wayland compositor has no xdg_wm_base (xdg-shell), which --windowed needs";
-    if (!fail && !opts->windowed && !opts->probe && !W.layer_shell)
-        fail = wl_no_layer_shell_text ();
+    char *fail_own = NULL;
+    if (!fail && !opts->windowed && !opts->probe && !W.layer_shell) {
+        /* GNOME Shell with the WalPE extension: wallpapers as windows */
+        if (W.wm_base && wl_gnome_session (wl_global_find ("gtk_shell1") != NULL,
+                                           g_getenv ("XDG_CURRENT_DESKTOP")) &&
+            walpe_wl_gnome_find (&W.gnome) == WL_GNOME_EXT_ACTIVE) {
+            if (W.gnome.socket && !wl_handed) {
+                /* this shell retypes windows only for a client it started:
+                 * the connection comes from it, and this one is given up */
+                char *why = NULL;
+                int fd = walpe_wl_gnome_socket (&why);
+                if (fd >= 0) {
+                    wl_close ();
+                    wl_handed_fd = fd;
+                    return wl_open_once (opts, err, deadline, going_down);
+                }
+                fail = fail_own = g_strdup_printf (
+                    "GNOME Shell %s lets its extension put windows on the desktop only for a "
+                    "client the shell started itself, and that did not work: %s", W.gnome.shell,
+                    why ? why : "?");
+                g_free (why);
+            } else {
+                W.desk_windows = TRUE;
+            }
+        } else {
+            fail = wl_no_layer_shell_text ();
+        }
+    }
     if (fail) {
         if (err)
             *err = g_strdup (fail);
+        g_free (fail_own);
         wl_close ();
+        if (!opts->probe)
+            walpe_wl_gnome_release ();
         return FALSE;
+    }
+    if (!opts->probe)
+        walpe_wl_gnome_release ();      /* (the bus was needed for the questions only) */
+    if (W.desk_windows) {
+        char *mode = wl_gnome_mode_text (&W.gnome, wl_handed);
+        g_message ("wayland: %s. Switching the extension off leaves the windows where they are; "
+                   "a daemon started without it ends with a sentence", mode);
+        g_free (mode);
     }
     const char *e = g_getenv ("XCURSOR_THEME");
     W.cursor_theme_name = e && *e ? g_strdup (e) : NULL;
@@ -3135,7 +3216,9 @@ static void wl_describe_globals (GString *s)
     if (W.layer_shell)
         g_string_append_printf (s, "layer-shell v%u", W.layer_shell_version);
     else
-        g_string_append (s, "no layer-shell");
+        g_string_append (s, W.desk_windows ? "no layer-shell (wallpapers are windows: the WalPE "
+                                             "extension for GNOME Shell)"
+                                           : "no layer-shell");
     if (W.xdg_output_mgr)
         g_string_append_printf (s, ", xdg-output v%u", W.xdg_output_version);
     if (W.viewporter)
@@ -3242,9 +3325,11 @@ static void wl_status (JsonBuilder *b)
     json_builder_add_string_value (b, g->str);
     g_string_free (g, TRUE);
     json_builder_set_member_name (b, "wl_layer");
-    json_builder_add_string_value (b, wl_layer_name (W.layer));
+    json_builder_add_string_value (b, W.desk_windows ? "none" : wl_layer_name (W.layer));
     json_builder_set_member_name (b, "wl_layer_why");
-    json_builder_add_string_value (b, W.layer_why == WL_LAYER_WHY_ASKED ? "WALPE_WL_LAYER"
+    json_builder_add_string_value (b, W.desk_windows ? "no layer shell: the wallpapers are windows "
+                                                       "(GNOME Shell)"
+                                      : W.layer_why == WL_LAYER_WHY_ASKED ? "WALPE_WL_LAYER"
                                       : W.layer_why == WL_LAYER_WHY_KWIN
                                             ? "the compositor is KWin (KDE Plasma)"
                                             : "default");
@@ -3262,6 +3347,15 @@ static void wl_status (JsonBuilder *b)
             json_builder_set_member_name (b, "wl_plasma_hint");
             json_builder_add_string_value (b, hint);
         }
+    }
+    if (W.desk_windows) {
+        /* GNOME Shell: how the wallpaper gets onto the desktop (wl_gnome.h) */
+        char *mode = wl_gnome_mode_text (&W.gnome, wl_handed);
+        json_builder_set_member_name (b, "wl_gnome_extension");
+        json_builder_add_string_value (b, mode);
+        g_free (mode);
+        json_builder_set_member_name (b, "wl_gnome_connection");
+        json_builder_add_string_value (b, wl_handed ? "handed over by the shell" : "the daemon's own");
     }
     json_builder_set_member_name (b, "wl_threading");
     json_builder_add_string_value (b, "queue-per-surface");
@@ -3358,7 +3452,7 @@ const WalpePlatformOps walpe_wayland_ops = {
  * layer shell (wallpapers), an xdg_wm_base (--windowed), and which DRM
  * device does it compose with. A connection of its own. */
 typedef struct {
-    gboolean layer, xdg;
+    gboolean layer, xdg, gtk_shell;
     guint32 dm_name, dm_version;
 } WlProbe;
 
@@ -3372,6 +3466,8 @@ static void wl_probe_global (void *data, struct wl_registry *reg, uint32_t name,
         p->layer = TRUE;
     else if (!strcmp (itf, xdg_wm_base_interface.name))
         p->xdg = TRUE;
+    else if (!strcmp (itf, "gtk_shell1"))
+        p->gtk_shell = TRUE;
     else if (!strcmp (itf, zwp_linux_dmabuf_v1_interface.name)) {
         p->dm_name = name;
         p->dm_version = version;
@@ -3404,6 +3500,14 @@ void walpe_wayland_probe (WalpePlatformProbe *out)
         out->layer_shell = p.layer;
         out->xdg_shell = p.xdg;
         out->display_node = wl_dmabuf_device (dpy, reg, p.dm_name, p.dm_version, answer_by);
+        /* no layer shell on what looks like GNOME's compositor: is the
+         * WalPE extension for GNOME Shell there? (Asked in this one case
+         * only: nothing of it runs on another desktop.) */
+        if (!p.layer && p.xdg && wl_gnome_session (p.gtk_shell, g_getenv ("XDG_CURRENT_DESKTOP"))) {
+            WlGnomeExt ext = walpe_wl_gnome_find (NULL);
+            out->desk_windows = ext == WL_GNOME_EXT_ACTIVE;
+            out->no_shell_hint = wl_gnome_ext_hint (ext);
+        }
     }
     wl_registry_destroy (reg);
     if (once || wl_kept_dpy) {

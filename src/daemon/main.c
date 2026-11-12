@@ -75,6 +75,9 @@
 #include "daemon/vistrack.h"
 #include "platform/platform.h"
 #include "signals/providers.h"        /* logind and the compositor's idle / window-list providers */
+#ifdef HAVE_WAYLAND
+#include "platform/wl_gnome.h"        /* the process GNOME Shell 46 to 48 starts for the connection */
+#endif
 #ifdef HAVE_WEB
 #include "engine/web.h"
 #endif
@@ -10004,6 +10007,8 @@ static gboolean backend_decide (const char *cli, gboolean windowed, gboolean qui
         walpe_platform_probe_wayland (&pr);
         e.layer_shell = !pr.connected ? -1 : pr.layer_shell ? 1 : 0;
         e.windowed = windowed && pr.xdg_shell;
+        e.desk_windows = pr.desk_windows;       /* GNOME Shell with the WalPE extension */
+        e.no_shell_hint = pr.no_shell_hint;
         g_free (Bk.display_node);
         Bk.display_node = pr.display_node;
     }
@@ -10138,6 +10143,14 @@ int main (int argc, char **argv)
     int monitor_idx = 0;
     gboolean windowed = FALSE;
     const char *cli_backend = NULL;     /* --backend NAME */
+#ifdef HAVE_WAYLAND
+    /* GNOME Shell 46 to 48 started this process for a daemon that asked
+     * its extension for a connection to the compositor (platform/
+     * wl_gnome.h): hand that connection on and wait. Nothing of the daemon
+     * is set up in such a process. */
+    if (argc == 3 && !strcmp (argv[1], WL_GNOME_DONOR_OPTION))
+        return wl_gnome_donor_run (getenv ("WAYLAND_SOCKET"), argv[2]);
+#endif
     g_mutex_init (&Sw.lock);
     {
         /* restarted in place: the control socket of the previous image.

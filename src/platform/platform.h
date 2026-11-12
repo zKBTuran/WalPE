@@ -183,6 +183,12 @@ typedef struct {
     gboolean connected;     /* FALSE: no connection (or no Wayland backend in this build) */
     gboolean layer_shell;   /* zwlr_layer_shell_v1 is offered: wallpapers are possible */
     gboolean xdg_shell;     /* xdg_wm_base is offered: --windowed is possible */
+    /* no layer shell, and the compositor looks like GNOME's: the WalPE
+     * extension for GNOME Shell answers and wallpapers are possible as
+     * ordinary windows (wl_gnome.h); where it does not, the sentence that
+     * says how to get it (static; NULL on other compositors) */
+    gboolean desk_windows;
+    const char *no_shell_hint;
     char *display_node;     /* the DRM device the compositor composes with
                              * ("/dev/dri/card1"), NULL = not told (g_free) */
 } WalpePlatformProbe;

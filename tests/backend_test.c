@@ -119,6 +119,30 @@ static void test_auto (void)
     CHECK (picks (&e, WALPE_BACKEND_AUTO, "default", "no layer shell"));
     CHECK (picks (&e, WALPE_BACKEND_AUTO, NULL, "Xwayland"));
     CHECK (picks (&e, WALPE_BACKEND_AUTO, NULL, "--backend x11"));
+    /* ... with one more sentence where the platform has one (GNOME: the
+     * WalPE extension for GNOME Shell and how to install it) ... */
+    e.no_shell_hint = "The extension: install.sh";
+    CHECK (picks (&e, WALPE_BACKEND_AUTO, "default", "--backend x11). The extension: install.sh"));
+    /* ... and Wayland after all where something keeps the daemon's windows
+     * on the desktop (GNOME Shell with that extension): never Xwayland,
+     * and the hint is not said */
+    e.desk_windows = TRUE;
+    CHECK (picks (&e, WALPE_BACKEND_WAYLAND, "default", "extension for GNOME Shell"));
+    {
+        WalpeBackendChoice c;
+        walpe_backend_choose (&e, &c);
+        CHECK (!strstr (c.why, "install.sh") && !strstr (c.why, "Xwayland"));
+        walpe_backend_choice_clear (&c);
+    }
+    e.x_display = FALSE;
+    CHECK (picks (&e, WALPE_BACKEND_WAYLAND, "default", "no layer shell, but"));
+    e.x_display = TRUE;
+    /* (with a layer shell the two say nothing: they are filled only without) */
+    e.layer_shell = 1;
+    CHECK (picks (&e, WALPE_BACKEND_WAYLAND, "default", "offers the layer shell"));
+    e.layer_shell = 0;
+    e.desk_windows = FALSE;
+    e.no_shell_hint = NULL;
     /* ... X11 asked for by name is taken there all the same ... */
     e.cli = "x11";
     CHECK (picks (&e, WALPE_BACKEND_X11, "--backend", "asked for"));

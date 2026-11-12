@@ -273,6 +273,11 @@ endif
 have_wl_cursor = false
 if have_wayland
   deps_wayland = [wayland_client, wayland_egl]
+  # GNOME Shell with the WalPE extension (src/platform/wl_gnome.c): one
+  # descriptor travels in a D-Bus call, which is the gio-unix part of GLib
+  # (its headers come with GLib's own; no further library is linked)
+  gio_unix = dependency('gio-unix-2.0')
+  deps_wayland += gio_unix
   # optional: a pointer image over the wallpaper while it takes pointer input
   wayland_cursor = dependency('wayland-cursor', required: false)
   if wayland_cursor.found()
@@ -303,7 +308,7 @@ if have_wayland
       command: [wl_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
   endforeach
   # (further source files of the Wayland backend are added to this list)
-  wayland_backend_src = files('src/platform/wayland.c')
+  wayland_backend_src = files('src/platform/wayland.c', 'src/platform/wl_gnome.c')
 endif
 
 have_ffmpeg = false
@@ -1427,6 +1432,19 @@ if fs.exists('tests/wayland_logic_test.c')
     include_directories: inc,
     dependencies: [glib, m_lib],
     install: false, build_by_default: false))
+endif
+
+# GNOME Shell (platform/wl_gnome.h, wl_gnome.c): what counts as GNOME's
+# compositor, the wallpaper window's title, Hello's answer, the sentences,
+# a descriptor through a socket pair, the process the shell starts for the
+# connection (on a thread), and the daemon's questions against a stand-in
+# extension on a private bus (GTestDBus; that part is skipped without
+# dbus-daemon). No compositor, no shell.
+if have_wayland
+  test('wl-gnome', executable('wl-gnome-test', 'tests/wl_gnome_test.c', 'src/platform/wl_gnome.c',
+    include_directories: inc,
+    dependencies: [glib, gobject, gio, gio_unix],
+    install: false, build_by_default: false), timeout: 120)
 endif
 
 # the registry of pause-signal providers (platform/signals.c): who starts
