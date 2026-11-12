@@ -331,6 +331,48 @@ static void test_refused (void)
 }
 
 /* ---- a copy is made without 256 sound files at most ---- */
+/* ---- the cache's own project.json ---- */
+static void test_own_file (void)
+{
+    const struct { const char *what; Ent e[2]; } t[] = {
+        { "a sound file in a folder named project.json",
+          { { "scene.json", (const guint8 *) SCENE, strlen (SCENE) },
+            { "project.json/x.ogg", (const guint8 *) OGG, strlen (OGG) } } },
+        { "any file in a folder named project.json",
+          { { "scene.json", (const guint8 *) SCENE, strlen (SCENE) },
+            { "./project.json//x.json", (const guint8 *) SOLID, strlen (SOLID) } } },
+    };
+    char *where = cache_of_item ();
+    for (guint i = 0; i < G_N_ELEMENTS (t); i++) {
+        write_pkg (pkg, t[i].e, 2, 0);
+        for (int with_sound = 1; with_sound >= 0; with_sound--) {
+            GError *err = NULL;
+            rm_rf (where);
+            char *c = walpe_pkg_extract_cached_opts (pkg, item, with_sound, &err);
+            CHECK (!c && err, "%s, sound %s: refused", t[i].what, with_sound ? "on" : "off");
+            CHECK (!g_file_test (where, G_FILE_TEST_EXISTS), "... and nothing of it is in the cache");
+            g_clear_error (&err);
+            if (c)
+                drop_copy (c);
+        }
+    }
+    /* a file of that name is an entry like any other (the wallpaper's own is written over it) */
+    const Ent f[] = {
+        { "scene.json", (const guint8 *) SCENE, strlen (SCENE) },
+        { "project.json", (const guint8 *) SOLID, strlen (SOLID) },
+        { "sounds/one.wav", wav->data, wav->len },
+    };
+    write_pkg (pkg, f, G_N_ELEMENTS (f), 0);
+    rm_rf (where);
+    char *c = cache_copy (FALSE);
+    CHECK (c && same_text (c, "project.json", PROJECT) && walpe_pkg_fetch_sound (c) && same_bytes (c, "sounds/one.wav", wav),
+           "an entry named project.json: accepted, the wallpaper's own file is in the copy");
+    if (c)
+        drop_copy (c);
+    g_free (where);
+    make_item (0);
+}
+
 static void test_many (void)
 {
     enum { MOST = 256 };
@@ -858,6 +900,7 @@ int main (void)
     test_cache ();
     test_kinds ();
     test_refused ();
+    test_own_file ();
     test_many ();
     walpe_sound_allow (TRUE);
     walpe_sound_use_null (TRUE);

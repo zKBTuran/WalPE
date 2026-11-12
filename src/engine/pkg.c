@@ -303,6 +303,14 @@ static gboolean pkg_extract_mode (const char *pkg_path, const char *dest_dir, in
     dirs = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
     files = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
     folders = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+    /* The cache writes the wallpaper's project.json into the copy, a file
+     * like any entry: a package cannot have a FOLDER of that name. With one
+     * the copy never passed for whole (it was made anew at every load, by
+     * every monitor) - and once a copy could be made without its sound
+     * files, a sound file in that folder was the one thing that would have
+     * made it: the copy passed with sound off and its sound files could
+     * never be written. */
+    g_hash_table_add (files, g_strdup ("project.json"));
     if (mode != PKG_ALL)
         kinds = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
 
