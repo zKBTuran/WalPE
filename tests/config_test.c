@@ -65,6 +65,8 @@ static void test_defaults (void)
     /* README "Settings" */
     CHECK (c->fps == 60 && WALPE_FPS_DEFAULT == 60);
     CHECK (c->config_version == 4);
+    /* a video inside a scene is played from a copy of the size shown */
+    CHECK (c->video_scene_convert);
     CHECK (!c->paused && c->pause_fullscreen && c->pause_dpms && c->pause_covered);
     /* a fullscreen window pauses its own monitor only */
     CHECK (!c->pause_fullscreen_all);
@@ -104,6 +106,7 @@ static void test_round_trip (void)
     walpe_config_set_monitor_path (c, "HDMI-0", "/lib/walls/333");
     c->fps = 144;
     c->volume = 0.25;
+    c->video_scene_convert = FALSE;
     c->paused = TRUE;
     c->pause_fullscreen = c->pause_dpms = c->pause_covered = FALSE;
     g_free (c->transparent_windows);
@@ -153,6 +156,7 @@ static void test_round_trip (void)
     CHECK (!g_strcmp0 (walpe_config_monitor_path (c, "HDMI-0"), "/lib/walls/333"));
     CHECK (!g_strcmp0 (walpe_config_monitor_path (c, "eDP-1"), "/lib/walls/111"));
     CHECK (c->fps == 144 && !c->fps_migrated && c->volume == 0.25 && c->paused);
+    CHECK (!c->video_scene_convert);
     CHECK (!c->pause_fullscreen && !c->pause_dpms && !c->pause_covered);
     CHECK (!g_strcmp0 (c->transparent_windows, "st,foot"));
     CHECK (!c->cover_transparent && !c->render_shared && !c->fx_cache && !c->tex_downscale && !c->parallax);

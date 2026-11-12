@@ -1227,6 +1227,17 @@ test('import', executable('import-test', 'tests/import_test.c',
   dependencies: [core_dep],
   install: false, build_by_default: false), timeout: 300)
 
+# the converted copy of a video inside a scene (common/scenevideo.c and the
+# scene conversion of import.c): which clips get one and how large, the
+# copy's name in the cache, the argument vector (no display, no ffmpeg);
+# with ffmpeg / ffprobe in PATH real conversions of a clip made here that
+# sits inside another file: size, picture count, tags, priority of the child,
+# clips that are left alone, a stopped run.
+test('scenevideo', executable('scenevideo-test', 'tests/scenevideo_test.c',
+  include_directories: inc,
+  dependencies: [core_dep],
+  install: false, build_by_default: false), timeout: 600)
+
 # the window system the daemon draws on (common/backend.h): the setting's
 # names, --backend / WALPE_BACKEND / config precedence, the automatic rule
 # with a made-up environment, builds with one backend, output name
@@ -1591,6 +1602,23 @@ if lifecheck_py.found() and have_x11
     depends: [daemon, ctl],
     is_parallel: false,
     timeout: 900)
+  # a video inside a scene that is larger than the scene shows it, through a
+  # real daemon (own Xvfb, private XDG dirs; scenes and clips made there with
+  # the ffmpeg program, skipped without one or without the video module): the
+  # copy is made in the cache and played, status says what happens, the
+  # picture with the copy against the picture with the original, the switch,
+  # a start with the copy there, a conversion that is stopped when its
+  # wallpaper goes or the daemon quits, scenes that need no copy, two monitors
+  # of different size with the same clip
+  if have_ffmpeg
+    test('daemon-scene-video', lifecheck_py,
+      args: ['-I', meson.current_source_dir() / 'scripts/scenevideocheck.py',
+             '--build', meson.current_build_dir()],
+      env: ['WALPE_BACKEND=x11'],
+      depends: [daemon, ctl, video_mod],
+      is_parallel: false,
+      timeout: 900)
+  endif
 endif
 
 # ------------------------------------------------- the daemon on Wayland

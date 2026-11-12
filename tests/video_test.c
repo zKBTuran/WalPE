@@ -30,7 +30,17 @@
  *    afterwards.
  * 5. With a GL context (EGL device or Mesa surfaceless; skipped without):
  *    the plane textures hold exactly the queued frame after an upload, and a
- *    scene-like viewer polled at 30 Hz is measured as such. */
+ *    scene-like viewer polled at 30 Hz is measured as such.
+ * 6. A scene's clip played from a converted copy (videotex.h; `video-test
+ *    --copy` runs this part alone): a half-size copy of the clip is made
+ *    here the way the daemon makes one. A clip that is playing changes
+ *    over to the copy, and back, exactly where it starts again - every
+ *    pass is complete and of one size, every picture is queued once, is
+ *    byte-identical to a plain decode of the file it comes from, and
+ *    follows the one before it after one frame interval, across the
+ *    changes too. A file that is not the clip again (fewer pictures) is
+ *    not played; a new source starts from the copy without opening the
+ *    clip's decoder; the status line says what is played. */
 #include "walpe-build-config.h"
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -791,6 +801,259 @@ static void test_hw_fake (const char *clip)
     g_free (note);
 }
 
+/* --------------------------------- 6. played from a converted copy */
+
+/* the clip scaled to w x h with ffmpeg, every picture (frames > 0: only
+ * the first so many - a file that is not the clip again) */
+static char *make_copy (const char *dir, const char *clip, const char *name, int w, int h, int frames)
+{
+    char *ff = g_find_program_in_path ("ffmpeg");
+    if (!ff)
+        return NULL;
+    char *out = g_build_filename (dir, name, NULL);
+    char *vf = g_strdup_printf ("scale=%d:%d:flags=bicubic,setsar=1,format=yuv420p", w, h);
+    char *nf = g_strdup_printf ("%d", frames > 0 ? frames : 1000000);
+    const char *argv[] = { ff, "-nostdin", "-hide_banner", "-loglevel", "error", "-i", clip, "-vf", vf,
+                           "-frames:v", nf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "19",
+                           "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart", "-y", out, NULL };
+    int status = -1;
+    gboolean ok = g_spawn_sync (NULL, (char **) argv, NULL, G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL,
+                                NULL, NULL, NULL, NULL, &status, NULL);
+    g_free (ff);
+    g_free (vf);
+    g_free (nf);
+    if (!ok || status != 0 || !g_file_test (out, G_FILE_TEST_IS_REGULAR))
+        g_clear_pointer (&out, g_free);
+    return out;
+}
+
+/* wait until the module has queued a picture w wide at or after record
+ * `from` (w 0: until `count` records exist); the index of that record,
+ * -1 = not within the time */
+static int wait_rec (guint from, int w, guint count)
+{
+    gint64 until = g_get_monotonic_time () + (gint64) 60 * slow * G_USEC_PER_SEC;
+    while (g_get_monotonic_time () < until) {
+        int hit = -1;
+        g_mutex_lock (&rec_lock);
+        for (guint i = from; w && i < recs->len && hit < 0; i++)
+            if (g_array_index (recs, Rec, i).w == w)
+                hit = (int) i;
+        if (!w && recs->len >= count)
+            hit = (int) recs->len - 1;
+        g_mutex_unlock (&rec_lock);
+        if (hit >= 0)
+            return hit;
+        g_usleep (10000);
+    }
+    return -1;
+}
+
+static void test_copy (const char *clip, const char *dir)
+{
+    const int cw = ref_w / 2, ch = ref_h / 2;
+    char *copy = make_copy (dir, clip, "copy.mp4", cw, ch, 0);
+    char *cut = make_copy (dir, clip, "cut.mp4", cw / 2, ch / 2, (int) refs->len / 2);
+    GArray *copy_refs = NULL;
+    if (!copy || !cut) {
+        CHECK (FALSE, "copy: ffmpeg made the clip but not its copies");
+        goto out;
+    }
+    /* the plain decode of the copy, next to the clip's */
+    GArray *clip_refs = refs;
+    const guint clip_ts = ref_timescale, npic = refs->len;
+    const int clip_w = ref_w, clip_h = ref_h, clip_nonref = ref_nonref;
+    refs = g_array_new (FALSE, TRUE, sizeof (Ref));
+    gboolean ok = ref_decode (copy);
+    copy_refs = refs;
+    CHECK (ok && ref_w == cw && ref_h == ch && copy_refs->len == npic,
+           "copy: the copy made here is %dx%d with %u pictures, the clip %dx%d with %u", ref_w, ref_h,
+           copy_refs->len, clip_w, clip_h, npic);
+    refs = clip_refs;
+    ref_timescale = clip_ts;
+    ref_w = clip_w;
+    ref_h = clip_h;
+    ref_nonref = clip_nonref;
+    if (!ok || copy_refs->len != npic)
+        goto out;
+
+    GError *err = NULL;
+    recs_clear ();
+    WalpeVideoTex *v = cv_tex_new_copy (clip, 0, 0, NULL, &err);
+    if (!v) {
+        CHECK (FALSE, "copy: %s", err ? err->message : "no viewer");
+        g_clear_error (&err);
+        goto out;
+    }
+    CvSource *src = v->vw->src;
+    const double iv = src->clip_iv;
+    WalpeVideoTexInfo in;
+    cv_tex_info (v, &in);
+    CHECK (in.clip_w == clip_w && in.clip_h == clip_h && in.clip_frames == npic && in.play_w == clip_w &&
+           !in.from_copy && fabs (in.clip_fps - 60.0) < 0.01, "copy: what the module says about the clip "
+           "(%dx%d, %u pictures, %.2f fps, played %dx%d)", in.clip_w, in.clip_h, in.clip_frames, in.clip_fps,
+           in.play_w, in.play_h);
+    /* a third of a pass in: the copy is asked for */
+    CHECK (wait_rec (0, 0, npic / 3) >= 0, "copy: the clip does not play");
+    cv_tex_info (v, &in);
+    CHECK (in.format == 1 && in.matrix == 1, "copy: the clip's pictures are format %d, matrix %d (8-bit 4:2:0 "
+           "limited range and BT.709 expected)", in.format, in.matrix);
+    const WalpeVideoTexCopy want = { WALPE_VTEX_COPY_READY, copy, cw, ch };
+    cv_tex_set_copy (v, &want);
+    char *note = cv_scene_note (NULL, NULL);
+    CHECK (note && strstr (note, "clip.mp4: source 1280x720 60.00 fps, played 1280x720 60.00 fps, copy: ready "
+                                 "(played from where the clip starts again)"),
+           "copy: status while the change waits for the clip's end: %s", note ? note : "(none)");
+    g_free (note);
+    int first_copy = wait_rec (0, cw, 0);
+    CHECK (first_copy >= 0, "copy: no picture of the copy was queued");
+    /* two passes of the copy and a bit; then a file that is not the clip
+     * again is asked for (not played), then the clip itself */
+    CHECK (wait_rec (0, 0, (guint) MAX (first_copy, 0) + 2 * npic + npic / 4) >= 0, "copy: the copy does not play on");
+    cv_tex_info (v, &in);
+    CHECK (in.from_copy && in.play_w == cw && in.play_h == ch && in.clip_w == clip_w && in.format == 1 &&
+           in.matrix == 1, "copy: what the module says while the copy plays (%dx%d, from a copy %d, format %d, "
+           "matrix %d)", in.play_w, in.play_h, in.from_copy, in.format, in.matrix);
+    note = cv_scene_note (NULL, NULL);
+    CHECK (note && strstr (note, "source 1280x720 60.00 fps, played 640x360 60.00 fps, copy: ready") &&
+           !strstr (note, "starts again"), "copy: status while the copy plays: %s", note ? note : "(none)");
+    g_free (note);
+    {
+        char *st = walpe_video_decoder_note ();
+        CHECK (st && strstr (st, "640x360 60.00 fps: software"), "copy: \"video_decoder\" is %s", st ? st : "(none)");
+        g_free (st);
+    }
+    const WalpeVideoTexCopy bad = { WALPE_VTEX_COPY_READY, cut, cw / 2, ch / 2 };
+    cv_tex_set_copy (v, &bad);
+    g_mutex_lock (&src->lock);
+    CHECK (src->alt_bad && strstr (src->alt_bad, "pictures") && !g_atomic_int_get (&src->alt_pending) &&
+           !g_strcmp0 (src->alt_path, copy), "copy: a file with half the pictures: %s",
+           src->alt_bad ? src->alt_bad : "(taken)");
+    g_mutex_unlock (&src->lock);
+    guint mark = recs_len ();
+    CHECK (wait_rec (0, 0, mark + npic + npic / 4) >= 0, "copy: playback stopped after a file was refused");
+    const WalpeVideoTexCopy waits = { WALPE_VTEX_COPY_WAITING, cut, cw / 2, ch / 2 };
+    cv_tex_set_copy (v, &waits);    /* the clip itself, and what a scene says while it waits */
+    note = cv_scene_note (NULL, NULL);
+    CHECK (note && strstr (note, "copy: wanted"), "copy: status of a copy that is asked for: %s", note ? note : "(none)");
+    g_free (note);
+    mark = recs_len ();
+    int back = wait_rec (mark, clip_w, 0);
+    CHECK (back >= 0, "copy: the clip itself did not come back");
+    CHECK (wait_rec (0, 0, (guint) MAX (back, 0) + npic + npic / 4) >= 0, "copy: the clip does not play on");
+    cv_tex_info (v, &in);
+    CHECK (!in.from_copy && in.play_w == clip_w, "copy: back on the clip the module says %dx%d, from a copy %d",
+           in.play_w, in.play_h, in.from_copy);
+    /* a change that is taken back before the clip's end never happens */
+    cv_tex_set_copy (v, &want);
+    cv_tex_set_copy (v, NULL);
+    g_mutex_lock (&src->lock);
+    CHECK (!g_atomic_int_get (&src->alt_pending) && !src->alt_demux && !src->alt_next,
+           "copy: a change that was taken back is still pending");
+    g_mutex_unlock (&src->lock);
+    mark = recs_len ();
+    CHECK (wait_rec (0, 0, mark + npic + npic / 4) >= 0, "copy: playback stopped after a change was taken back");
+    walpe_video_tex_set_paused (v, TRUE);    /* (nothing more is queued while the records are looked at) */
+    g_usleep (100000);
+    const guint passes_counted = (guint) g_atomic_int_get (&src->passes);
+
+    g_mutex_lock (&rec_lock);
+    guint n = recs->len, same = 0, bad_ts = 0, in_pass = 0, pass_no = 0, gaps = 0, mixed = 0, short_pass = 0;
+    int pass_w = 0;
+    GString *order = g_string_new (NULL);
+    for (guint i = 0; i < n; i++) {
+        const Rec *r = &g_array_index (recs, Rec, i);
+        GArray *set = r->w == cw ? copy_refs : clip_refs;
+        const Ref *ref = NULL;
+        for (guint k = 0; k < set->len && !ref; k++)
+            if (g_array_index (set, Ref, k).ticks == r->ticks)
+                ref = &g_array_index (set, Ref, k);
+        if (!ref || (r->w != cw && r->w != clip_w)) {
+            bad_ts++;
+            continue;
+        }
+        same += !strcmp (ref->md5[r->kind == CV_NV ? V_NV_FULL : V_FULL], r->md5);
+        const Rec *p = i ? &g_array_index (recs, Rec, i - 1) : NULL;
+        if (p && fabs (r->play - p->play - iv) > 1e-4)
+            gaps++;
+        if (!p || r->ticks < p->ticks) {
+            /* a new pass: the one before was complete */
+            if (p && in_pass != npic)
+                short_pass++;
+            if (!p || r->w != pass_w)
+                g_string_append_printf (order, "%s%d", order->len ? " " : "", r->w);
+            pass_no++;
+            in_pass = 0;
+            pass_w = r->w;
+        } else if (r->w != pass_w) {
+            mixed++;
+        }
+        in_pass++;
+    }
+    CHECK (bad_ts == 0, "copy: %u queued pictures carry a time stamp or a size neither file has", bad_ts);
+    CHECK (same == n, "copy: %u of %u queued pictures are byte-identical to the plain decode of their file", same, n);
+    CHECK (gaps == 0, "copy: %u pictures do not follow the one before after one frame interval", gaps);
+    CHECK (mixed == 0, "copy: %u pictures of another size inside a pass", mixed);
+    CHECK (short_pass == 0, "copy: %u passes with another number of pictures than the clip has", short_pass);
+    CHECK (!strcmp (order->str, "1280 640 1280"), "copy: the sizes that were played, in order: %s (1280 640 1280 "
+           "expected)", order->str);
+    /* (the pass that is being played is not counted yet) */
+    CHECK (passes_counted + 1 == pass_no || passes_counted == pass_no, "copy: %u passes counted by the module, "
+           "%u seen", passes_counted, pass_no);
+    printf ("played from a copy: %u pictures in %u passes, sizes in order: %s; %u identical to the plain decode, "
+            "%u breaks in the presentation times\n", n, pass_no, order->str, same, gaps);
+    g_string_free (order, TRUE);
+    g_mutex_unlock (&rec_lock);
+    walpe_video_tex_set_paused (v, FALSE);
+    cvv_free (&v->vw->base);
+    g_free (v);
+
+    /* a new source: it starts from the copy (the clip's decoder is never
+     * opened: its first picture is the copy's), or from the clip when the
+     * file is not the clip again */
+    for (int round = 0; round < 2; round++) {
+        recs_clear ();
+        const WalpeVideoTexCopy *c = round ? &bad : &want;
+        v = cv_tex_new_copy (clip, 0, 0, c, &err);
+        CHECK (v != NULL, "copy: a source that starts from %s: %s", c->path, err ? err->message : "?");
+        g_clear_error (&err);
+        if (!v)
+            continue;
+        CHECK (wait_rec (0, 0, 5) >= 0, "copy: a source that starts from %s does not play", c->path);
+        g_mutex_lock (&rec_lock);
+        const int w0 = recs->len ? g_array_index (recs, Rec, 0).w : 0;
+        g_mutex_unlock (&rec_lock);
+        cv_tex_info (v, &in);
+        note = cv_scene_note (NULL, NULL);
+        if (!round)
+            CHECK (w0 == cw && in.from_copy && in.clip_w == clip_w && in.clip_frames == npic && note &&
+                   strstr (note, "played 640x360 60.00 fps, copy: ready"), "copy: started from the copy, the "
+                   "first picture is %d wide; status: %s", w0, note ? note : "(none)");
+        else
+            CHECK (w0 == clip_w && !in.from_copy && note && strstr (note, "played 1280x720 60.00 fps, copy: not "
+                   "usable (it has"), "copy: started with a file that is not the clip again, the first picture "
+                   "is %d wide; status: %s", w0, note ? note : "(none)");
+        g_free (note);
+        cvv_free (&v->vw->base);
+        g_free (v);
+    }
+    note = cv_scene_note (NULL, NULL);
+    CHECK (note == NULL, "copy: a status line without a scene video: %s", note);
+    g_free (note);
+out:
+    for (guint i = 0; copy_refs && i < copy_refs->len; i++)
+        for (int k = 0; k < V_N; k++)
+            g_free (g_array_index (copy_refs, Ref, i).md5[k]);
+    if (copy_refs)
+        g_array_free (copy_refs, TRUE);
+    if (copy)
+        g_remove (copy);
+    if (cut)
+        g_remove (cut);
+    g_free (copy);
+    g_free (cut);
+}
+
 /* ----------------------------------------------------------- 5. GL part */
 
 static const char *gl_clip;
@@ -1127,9 +1390,10 @@ int main (int argc, char **argv)
      *   video-test <file.mp4>      (8-bit 4:2:0 H.264 in MP4) */
     char *dir = g_dir_make_tmp ("walpe-video-test-XXXXXX", NULL);
     only_upload = argc > 1 && !strcmp (argv[1], "--upload");
+    const gboolean only_copy = argc > 1 && !strcmp (argv[1], "--copy");
     if (g_getenv ("VIDEO_TEST_SLOW"))
         slow = CLAMP (atoi (g_getenv ("VIDEO_TEST_SLOW")), 1, 100);
-    gboolean own = argc > 1 && !only_upload;
+    gboolean own = argc > 1 && !only_upload && !only_copy;
     char *clip = own ? g_strdup (argv[1]) : dir ? make_clip (dir) : NULL;
     if (!clip) {
         printf ("video-test: ffmpeg with libx264 is not here: the decode, frame limit, hardware and GL "
@@ -1141,6 +1405,8 @@ int main (int argc, char **argv)
             test_hw (clip);
         } else if (only_upload) {
             test_gl (clip);
+        } else if (only_copy) {
+            test_copy (clip, dir);
         } else {
             static const Case cases[] = {
                 { "default, full size", FALSE, 0, 0, FALSE, 0 },
@@ -1155,6 +1421,7 @@ int main (int argc, char **argv)
                 run_case (clip, &cases[i]);
             test_hw (clip);
             test_hw_fake (clip);
+            test_copy (clip, dir);
             test_gl (clip);
         }
     }
