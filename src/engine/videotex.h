@@ -48,7 +48,8 @@ enum {
     WALPE_VTEX_COPY_NOT_NEEDED,     /* the clip is not (much) larger than it is shown */
     WALPE_VTEX_COPY_NO_LIMIT,       /* "video_resolution" is none */
     WALPE_VTEX_COPY_FULL_TEX,       /* the scene keeps its textures at file size */
-    WALPE_VTEX_COPY_UNSUITED,       /* not 8-bit 4:2:0 in limited range: a copy would not be the same */
+    WALPE_VTEX_COPY_UNSUITED,       /* not 8-bit 4:2:0 in limited range: a copy would not be the same;
+                                     * or stored rotated: its copy would not be played */
     WALPE_VTEX_COPY_WAITING,        /* asked of the daemon: `path` will be the copy */
     WALPE_VTEX_COPY_READY,          /* `path` is the copy to play */
 };
@@ -71,8 +72,10 @@ typedef struct {
     double play_fps;
     gboolean from_copy;
     /* what the decoder gave: 0 = no picture yet, 1 = 8-bit 4:2:0 in
-     * limited range, 2 = anything else; and the colour matrix the player
-     * converts it with (1 BT.709, 6 BT.601, 9 BT.2020) */
+     * limited range, 2 = anything else, 3 = like 1 in a clip that is stored
+     * rotated (its copy would be stored rotated too and never played: none
+     * is made); and the colour matrix the player converts it with (1
+     * BT.709, 6 BT.601, 9 BT.2020) */
     int format;
     int matrix;
 } WalpeVideoTexInfo;

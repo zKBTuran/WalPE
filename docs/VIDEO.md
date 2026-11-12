@@ -39,7 +39,9 @@ background, into a copy of the size it is needed at, and the scene plays the cop
   monitor shows depends on settings that change while the copy stays (`fps`, the battery
   and focus limits), and `video_limit` already leaves out the pictures nobody sees. Only a
   clip that is 8-bit 4:2:0 H.264 in limited range - what the copy is - gets one; full range,
-  10 bit, 4:2:2 and 4:4:4 clips play as they are. The copy says which colour matrix its
+  10 bit, 4:2:2 and 4:4:4 clips play as they are, and so does a clip that is stored rotated
+  (ffmpeg hands the rotation on to the copy, and a copy that is stored rotated is never
+  played: `not made (the clip is stored rotated)`, nothing is converted). The copy says which colour matrix its
   samples are in (the one the player uses for the clip: an untagged clip's is decided by its
   size, and the copy is smaller), so the colours are the clip's. H.264 has no alpha channel:
   video layers are opaque with and without a copy.
@@ -76,7 +78,10 @@ background, into a copy of the size it is needed at, and the scene plays the cop
   made and taken into use. A copy whose file cannot be read any more (cut short when the
   machine lost power, damaged) is removed when its scene is loaded and made again; `not
   usable` is what a copy gets that can be read but is not the clip (another number of
-  pictures, another rate): that one is kept, making it again would give the same file.
+  pictures, another rate - what ffmpeg makes of a clip with a variable frame rate or with
+  an edit list that cuts its start): making it again would give the same file, so it is
+  kept, but it does not count as played and goes with the copies nothing has played for 90
+  days; the conversion is then tried once more.
 * **The switch.** `walpe-ctl set video_scene_convert=off` (window: Engine settings, "Smaller
   copies of videos in scenes"; `WALPE_VIDEO_SCENE_CONVERT=0|1` in front of `walpe-daemon`
   overrides): the clip itself again, from where it starts next; nothing is converted. The

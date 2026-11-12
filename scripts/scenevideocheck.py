@@ -30,6 +30,14 @@ monitor does not depend on the moment it is read.
   damaged  the copy in the cache is cut short (the machine lost power before the file
            had reached the disk): the daemon that starts with the scene removes it,
            plays the clip as it is, makes the copy again - once - and plays that.
+  stale    a file under the copy's name that can be read but is not the clip (fewer
+           pictures: what ffmpeg makes of a clip with a variable frame rate): "not
+           usable", the clip plays as it is, and the file's time stamp is NOT refreshed,
+           so that the rule for unused copies takes it away; the copy that is played
+           has its time stamp refreshed when its scene is loaded.
+  refused  a clip that is stored rotated: its copy would be stored rotated too and is
+           never played, so none is made - status "not made (the clip is stored
+           rotated)", no ffmpeg and no ffprobe is started, the clip plays as it is.
   cancel   another wallpaper while the copy of a long clip is being made: the ffmpeg
            child (which runs at nice 19) ends, its partial file goes, status forgets
            the video; the same when the daemon quits.
@@ -90,6 +98,24 @@ def gen_clip(path, size, seconds, rate=30):
     except (OSError, subprocess.TimeoutExpired):
         return False
     return p.returncode == 0 and os.path.exists(path) and os.path.getsize(path) > 1000
+
+
+def gen_rotated(src, dst):
+    """src again with a display matrix of 90 degrees and the same pictures; False when this ffmpeg cannot"""
+    for args in (["-display_rotation:v:0", "90", "-i", src, "-c", "copy"],
+                 ["-i", src, "-c", "copy", "-metadata:s:v:0", "rotate=90"]):
+        try:
+            p = subprocess.run(["ffmpeg", "-v", "error", "-y"] + args + [dst], stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120 * PATIENCE)
+            q = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                                "stream_side_data=rotation:stream_tags=rotate", "-of", "csv=p=0", dst],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                               timeout=120 * PATIENCE)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        if p.returncode == 0 and "90" in q.stdout.decode():
+            return True
+    return False
 
 
 def gen_video_scene(out, clip, w, h):
@@ -403,6 +429,105 @@ def case_damaged(env, W):
         env.stop_daemon()
 
 
+# -------------------------------------------------------------------- stale
+def case_stale(env, W):
+    cs = copies(env)
+    other = os.path.join(env.tmp, "clips", "other.mp4")
+    if len(cs) != 1 or not gen_clip(other, "640x360", 1):
+        print("skip  stale: the copy of case `copy` is not there", flush=True)
+        return
+    good = open(cs[0], "rb").read()
+    old = time.time() - 10 * 86400
+    rc.jdump(env.config, {"config_version": 4, "fps": 30, "pause_covered": False, "pause_dpms": False,
+                          "video_resolution": "auto", "current": W["vid"]})
+    try:
+        # 640x360 as the copy, but 30 pictures where the clip has 60
+        shutil.copyfile(other, cs[0])
+        os.utime(cs[0], (old, old))
+        mark = env.mark()
+        if not check(start(env), "stale: daemon started with the scene, another clip under its copy's name"):
+            return
+        lc.loaded(env, W["vid"])
+        lc.wait_for(lambda: "not usable" in scene_videos(env) or "copy: ready" in scene_videos(env), 30, 0.2)
+        time.sleep(1.5)
+        sv = scene_videos(env)
+        check(sv == "v.tex: source 1280x720 30.00 fps, played 1280x720 30.00 fps, copy: not usable (it has 30 "
+                    "pictures, the clip 60)", "stale: status says why the file is not played; the clip plays", sv)
+        check(os.path.exists(cs[0]) and abs(os.stat(cs[0]).st_mtime - old) < 2 and "making a" not in env.since(mark),
+              "stale: the file is kept, nothing is converted, and its time stamp is not refreshed (the rule for "
+              "unused copies removes it)", (os.path.exists(cs[0]) and time.time() - os.stat(cs[0]).st_mtime,
+                                            [ln for ln in env.since(mark).splitlines() if "video:" in ln][-4:]))
+        check(bars_ok(picture(env)), "stale: the monitor shows the clip's picture")
+        env.stop_daemon()
+    finally:
+        env.stop_daemon()
+        with open(cs[0], "wb") as f:
+            f.write(good)
+        os.utime(cs[0], (old, old))
+    # the copy itself: played, and so marked as in use
+    if check(start(env), "stale: daemon started with the copy back in its place"):
+        lc.loaded(env, W["vid"])
+        lc.wait_for(lambda: "copy: ready" in scene_videos(env), 30, 0.2)
+        ok = lc.wait_for(lambda: time.time() - os.stat(cs[0]).st_mtime < 3600, 15, 0.2)
+        check(scene_videos(env).endswith("played 640x360 30.00 fps, copy: ready") and bool(ok),
+              "stale: the copy that is played has its time stamp refreshed", (scene_videos(env),
+                                                                               time.time() - os.stat(cs[0]).st_mtime))
+        env.stop_daemon()
+
+
+# ------------------------------------------------------------------ refused
+def counted_programs(env):
+    """a folder for the front of PATH whose ffmpeg and ffprobe note that they were started -> (folder, list file)"""
+    d, calls = os.path.join(env.tmp, "counted"), os.path.join(env.tmp, "counted.txt")
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(d)
+    if os.path.exists(calls):
+        os.unlink(calls)
+    for tool in ("ffmpeg", "ffprobe"):
+        with open(os.path.join(d, tool), "w") as f:
+            f.write("#!/bin/sh\necho %s >> '%s'\nexec '%s' \"$@\"\n" % (tool, calls, shutil.which(tool)))
+        os.chmod(os.path.join(d, tool), 0o755)
+    return d, calls
+
+
+def case_refused(env, W):
+    if not os.path.exists(os.path.join(W["rot"], "scene.json")):
+        print("skip  refused: this ffmpeg writes no clip that is stored rotated", flush=True)
+        return
+    d, calls = counted_programs(env)
+    before = copies(env)
+    if not check(start(env, extra={"PATH": d + os.pathsep + os.environ.get("PATH", "")}, cfg={}),
+                 "refused: daemon started"):
+        return
+    mark = env.mark()
+    env.open(W["rot"])
+    check(lc.loaded(env, W["rot"]), "refused: the scene with the rotated clip is loaded", rc.brief(env.monitors()))
+    lc.wait_for(lambda: "copy: not made" in scene_videos(env) or "copy: not usable" in scene_videos(env) or
+                "copy: failed" in scene_videos(env), 120, 0.25)
+    time.sleep(2.0)
+    sv = scene_videos(env)
+    check(sv == "v.tex: source 1280x720 30.00 fps, played 1280x720 30.00 fps, copy: not made (the clip is stored "
+                "rotated)", "refused: status says that no copy is made, and why", sv)
+    started = open(calls).read().split() if os.path.exists(calls) else []
+    check(not started and "making a" not in env.since(mark), "refused: no ffmpeg and no ffprobe was started",
+          (started, [ln for ln in env.since(mark).splitlines() if "video:" in ln][-4:]))
+    check(copies(env) == before and not copies(env, ".part"), "refused: no file was written to the cache",
+          os.listdir(cache_dir(env)) if os.path.isdir(cache_dir(env)) else None)
+    check(bars_ok(picture(env)), "refused: the monitor shows the clip's picture (as it is stored)")
+    # a clip that is not rotated still gets its copy from this daemon (the programs are the counted ones)
+    env.open(W["fit2"])
+    lc.loaded(env, W["fit2"])
+    lc.wait_for(lambda: "played 640x360 30.00 fps, copy: ready" in scene_videos(env) or
+                "failed" in scene_videos(env) or "not usable" in scene_videos(env), 300, 0.25)
+    started = open(calls).read().split() if os.path.exists(calls) else []
+    check(scene_videos(env) == "v.tex: source 1280x720 30.00 fps, played 640x360 30.00 fps, copy: ready" and
+          "ffmpeg" in started, "refused: the same clip without the rotation gets its copy", (scene_videos(env), started))
+    env.stop_daemon()
+    for c in copies(env):       # (the cases after this one count the copies)
+        if c not in before:
+            os.unlink(c)
+
+
 # ------------------------------------------------------------------- cancel
 def case_cancel(env, W):
     # at the lowest priority, as it runs for a user (nice 19 is checked here)
@@ -656,7 +781,7 @@ def case_webunload(env, W):
 
 
 CASES = [("copy", case_copy), ("switch", case_switch), ("restart", case_restart), ("damaged", case_damaged),
-         ("cancel", case_cancel), ("exits", case_exits),
+         ("stale", case_stale), ("refused", case_refused), ("cancel", case_cancel), ("exits", case_exits),
          ("small", case_small), ("monitors", case_monitors), ("webunload", case_webunload)]
 
 
@@ -695,7 +820,7 @@ def main():
             print(f"scenevideocheck: {env.sock} is too long for a socket: pass --tmp <a short directory>")
             return 2
         wp = os.path.join(env.tmp, "wallpapers")
-        W = {k: os.path.join(wp, k) for k in ("red", "vid", "long", "fit")}
+        W = {k: os.path.join(wp, k) for k in ("red", "vid", "long", "fit", "rot", "fit2")}
         clips = os.path.join(env.tmp, "clips")
         if not (gen_clip(f"{clips}/big.mp4", "1280x720", 2) and gen_clip(f"{clips}/long.mp4", "1280x720", 90) and
                 gen_clip(f"{clips}/fit.mp4", "640x360", 2)):
@@ -705,6 +830,11 @@ def main():
         gen_video_scene(W["vid"], f"{clips}/big.mp4", 1280, 720)
         gen_video_scene(W["long"], f"{clips}/long.mp4", 1280, 720)
         gen_video_scene(W["fit"], f"{clips}/fit.mp4", 640, 360)
+        # the 1280x720 clip once more, stored rotated (the display matrix only: the pictures are the same),
+        # and a second scene with the clip as it is (another path: a copy of its own)
+        if gen_rotated(f"{clips}/big.mp4", f"{clips}/rot.mp4"):
+            gen_video_scene(W["rot"], f"{clips}/rot.mp4", 1280, 720)
+        gen_video_scene(W["fit2"], f"{clips}/big.mp4", 1280, 720)
         if not env.start_x(1920, 720):
             print("scenevideocheck: skipped (Xvfb did not start)")
             return displayenv.SKIP

@@ -436,6 +436,7 @@ struct _CvSource {
     int orig_w, orig_h;         /* the clip's own size, pictures and frame rate (set */
     guint orig_n;               /*  when the source is made, then only read) */
     double orig_fps;
+    int orig_rot;               /* ... and its display matrix (mp4demux.h rotation; 0 = none) */
     int play_w, play_h;         /* src->lock: what `demux` is, for the readers that */
     double play_fps;            /*  are not the decode thread */
     char *alt_path;             /* src->lock (written by the decode thread): the copy
@@ -3294,7 +3295,11 @@ static void cv_note_format (CvSource *src)
     const gboolean plain = (fr->format == AV_PIX_FMT_YUV420P || fr->format == AV_PIX_FMT_NV12) &&
                            !(mode & WALPE_YUV_FULL);
     g_atomic_int_set (&src->pic_matrix, (mode & WALPE_YUV_BT2020) ? 9 : (mode & WALPE_YUV_BT709) ? 1 : 6);
-    g_atomic_int_set (&src->pic_format, plain ? 1 : 2);
+    /* (a clip that is stored rotated: ffmpeg, told to leave the pictures as
+     * they are stored, hands the display matrix on to the copy, and a copy
+     * with one is never played - cv_alt_fits. Said here, before anything
+     * is converted for nothing.) */
+    g_atomic_int_set (&src->pic_format, !plain ? 2 : src->orig_rot ? 3 : 1);
 }
 
 /* decode thread: demux sample -> libavcodec -> frame queue
@@ -5242,6 +5247,7 @@ static CvSource *cv_source_create (const char *key, const char *path, guint64 of
     src->orig_h = src->demux->height;
     src->orig_n = src->demux->nsamples;
     src->orig_fps = cv_clip_fps (src->demux);
+    src->orig_rot = src->demux->rotation;
     if (alt) {
         /* a converted copy of the clip: played from the start when it is
          * the clip again (the clip's own table of pictures was read above
@@ -5492,7 +5498,9 @@ static char *cv_scene_note (WalpeVideoJobText job, gpointer user)
                                  : st == WALPE_VTEX_COPY_FULL_TEX
                                    ? "not made (the scene keeps its textures at file size)"
                                  : st == WALPE_VTEX_COPY_UNSUITED
-                                   ? "not made (the clip is not 8-bit 4:2:0 in limited range)"
+                                   ? (g_atomic_int_get (&src->pic_format) == 3
+                                      ? "not made (the clip is stored rotated)"
+                                      : "not made (the clip is not 8-bit 4:2:0 in limited range)")
                                  : "not decided yet");
             }
         }

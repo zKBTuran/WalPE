@@ -591,10 +591,10 @@ static gboolean attach_video (SceneNodeContent *s, NodeObj *nv, const char *path
                                             &tw, &th)) {
             id = walpe_scene_video_id (path, off, len);
             copy_path = walpe_scene_video_cache_file (id, tw, th);
-            if (scene_video_copy_there (copy_path, &copy_removed)) {
+            /* (its time stamp is refreshed when it is known to be played:
+             * scene_video_plan) */
+            if (scene_video_copy_there (copy_path, &copy_removed))
                 copy = (WalpeVideoTexCopy) { WALPE_VTEX_COPY_READY, copy_path, tw, th };
-                g_utime (copy_path, NULL);  /* in use: the daemon removes copies unused for months */
-            }
         }
         if (dm)
             mp4_demux_free (dm);
@@ -677,8 +677,15 @@ static void scene_video_plan (SceneNodeContent *s, SceneVideo *sv, guint gen)
         walpe_scene_video_want (&w, TRUE);
         sv->wanted = TRUE;
     }
-    if (st == WALPE_VTEX_COPY_READY)
-        g_utime (copy, NULL);       /* in use */
+    /* In use: the daemon removes copies nothing has played for months. Only
+     * a copy the module plays counts - one that it refuses ("not usable":
+     * it can be read but is not the clip, as the copy of a clip with a
+     * variable frame rate is) was refreshed at every load of its scene too
+     * and so stayed in the cache for ever. Left alone it goes with the
+     * others; removing it at once would have it made again, for nothing,
+     * at the next load. (A copy made in this run is new anyway.) */
+    if (st == WALPE_VTEX_COPY_READY && in.from_copy)
+        g_utime (copy, NULL);
     if (!sv->plan_made || st != sv->plan_state || g_strcmp0 (copy, sv->plan_copy)) {
         const WalpeVideoTexCopy c = { st, copy, tw, th };
         walpe_video_tex_set_copy (sv->v, &c);
