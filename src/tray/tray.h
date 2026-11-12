@@ -45,11 +45,15 @@ typedef enum {
 
 typedef struct TrayItem TrayItem;
 struct TrayItem {
-    int id;                /* unique in one tree (dbusmenu item id; 0 = root) */
+    int id;                /* dbusmenu item id (0 = root): the same item has the
+                            * same id in every tree, and no other item ever
+                            * gets it (trayids.h; set when a tree becomes the menu) */
     TrayItemKind kind;
     char *label;           /* plain text, no mnemonics */
     char *action;          /* dispatched to tray_dispatch () */
     char *arg;             /* action argument (a wallpaper path) or NULL */
+    const char *name;      /* static text or NULL: tells an item from its siblings
+                            * of the same kind when action and arg do not (submenus) */
     gboolean enabled;
     gboolean visible;
     gboolean checked;      /* CHECK / RADIO */

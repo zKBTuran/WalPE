@@ -20,6 +20,7 @@
 
 #include "walpe-build-config.h"   /* WALPE_VERSION, WALPE_CODENAME: from meson.build */
 #include "tray.h"
+#include "trayids.h"
 #include "traysel.h"
 #include "trayipc.h"
 #include "trayconf.h"
@@ -110,12 +111,12 @@ static void res_update (JsonObject *st);
 
 /* ================================================================ menu tree */
 
-static int next_id;
+/* the items' ids: by what an item is, not by where it stands (trayids.h) */
+static TrayIds menu_ids = TRAY_IDS_INIT;
 
 TrayItem *tray_item_new (TrayItemKind kind, const char *label, const char *action)
 {
     TrayItem *it = g_new0 (TrayItem, 1);
-    it->id = ++next_id;
     it->kind = kind;
     it->label = g_strdup (label ? label : "");
     it->action = g_strdup (action);
@@ -1113,9 +1114,7 @@ static const char *mon_label (MonInfo *m, char *buf, gsize n)
 
 static TrayItem *build_menu (void)
 {
-    next_id = 0;
     TrayItem *root = tray_item_new (TRAY_ITEM_SUBMENU, "WalPE", NULL);
-    root->id = 0;
     gboolean busy = in_transition ();
     gboolean live = T.alive && !busy;
 
@@ -1153,6 +1152,7 @@ static TrayItem *build_menu (void)
     /* per-monitor submenus (status "monitors" array, version 0.11.1) */
     if (live && T.mons && T.mons->len >= 2) {
         TrayItem *ms = add (root, TRAY_ITEM_SUBMENU, "Monitors", NULL);
+        ms->name = "monitors";
         for (guint i = 0; i < T.mons->len; i++) {
             MonInfo *m = T.mons->pdata[i];
             char nb[96];
@@ -1193,6 +1193,7 @@ static TrayItem *build_menu (void)
         TrayItem *rs = add (root, TRAY_ITEM_SUBMENU,
                             T.mons && T.mons->len >= 2 ? "Recent (all monitors)" : "Recent wallpapers",
                             NULL);
+        rs->name = "recent";
         rs->enabled = live;
         int shown = 0;
         for (GList *l = T.recent.head; l && shown < 8; l = l->next, shown++) {
@@ -1287,6 +1288,7 @@ static void rebuild (void)
     sig_item (s, m);
     if (g_strcmp0 (s->str, T.menu_sig)) {
         tray_item_free (T.menu);
+        tray_ids_number (&menu_ids, m);
         T.menu = m;
         g_free (T.menu_sig);
         T.menu_sig = g_string_free (s, FALSE);

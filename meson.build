@@ -2151,6 +2151,13 @@ if have_tray
     include_directories: inc,
     dependencies: [glib],
     install: false, build_by_default: false))
+  # the ids of the menu's items (trayids.h): across the menus of every
+  # state an id is one item and never another kind of item, "Quit WalPE"
+  # keeps its id. No display, no bus.
+  test('tray-ids', executable('tray-ids-test', 'tests/tray_ids_test.c',
+    include_directories: inc,
+    dependencies: [glib, dependency('cairo')],
+    install: false, build_by_default: false))
   # walpe-tray next to a real daemon (scripts/lifecheck.py, case tray: own
   # Xvfb, private XDG dirs): what it writes while the engine sends status
   # lines. Skipped (77) without Xvfb.
