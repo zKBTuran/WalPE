@@ -274,6 +274,7 @@ Not for daily use: test hooks, measuring aids and names the programs set for the
 | `WALPE_CHECK_STRICT=1` | the end-to-end checks | a check that cannot run for a missing program, or whose display does not start, fails instead of being skipped; a build without the backend still skips |
 | `WALPE_CHECK_WL_RENDERER=gles2` | the end-to-end checks | run the headless compositor on GLES 2 instead of pixman (needs a DRM render node) |
 | `WALPE_LOAD_DELAY_MS=n` | daemon | every wallpaper load takes at least `n` ms more (what must hold while a load runs) |
+| `WALPE_SWAP_FAIL=n[,always][,0xERROR]` | daemon | every monitor's buffer swaps fail from its `n`th frame on, with `EGL_CONTEXT_LOST` or the EGL error given (what the daemon does when a GL context is lost: status `swap_error`, one restart in place); not in the process restarted for it unless `always` |
 | `WALPE_WEB_UNLOAD_GAP_S=n` | daemon | the least time between two restarts in place that unload the web module (`web_unload`; default 60 seconds) |
 | `WALPE_WS_API_BASE=http://127.0.0.1:PORT/` | Workshop client | a loopback stand-in for the Steam Web API; nothing but that spelling is accepted, so the variable cannot send the key elsewhere |
 | `WALPE_WS_TOTAL_TIMEOUT=n` | Workshop client | seconds one Workshop request may take in all (default 120) |
@@ -285,7 +286,7 @@ Not for daily use: test hooks, measuring aids and names the programs set for the
 | `WALPE_FX_PASS_DUMP=dir` / `WALPE_FX_SPEC_DUMP=dir` | engine | with `WALPE_FX_COST`: write what every pass of that frame drew / write the specialised shader sources as compiled |
 | `WALPE_CPU_PHASES=1` / `=2` | engine | CPU time of a scene frame by phase, read by `build/scenecpu`; `2` adds hashes of the particle state |
 | `WALPE_PROP_PROBE=dir` / `WALPE_PROP_PROBE_FRAME=n` | engine | scenes record which user-property values they consumed and write a digest of their state at frame `n` (default 6); used by the option-coverage tool |
-| `WALPE_IPC_FD`, `WALPE_LAYOUT_RESTARTED`, `WALPE_WEB_UNLOADED`, `WALPE_GL_HINTS_SET`, `WALPE_WEB_ENV_OURS`, `WALPE_WEB_PROBED`, `WALPE_WEB_PROBE_ACCEL`, `WALPE_WEB_PROBE_PARENT` | daemon | set by the daemon for its own restart in place and for its WebKit start-up test and web acceleration probe; never set them by hand |
+| `WALPE_IPC_FD`, `WALPE_LAYOUT_RESTARTED`, `WALPE_SWAP_RESTARTED`, `WALPE_WEB_UNLOADED`, `WALPE_GL_HINTS_SET`, `WALPE_WEB_ENV_OURS`, `WALPE_WEB_PROBED`, `WALPE_WEB_PROBE_ACCEL`, `WALPE_WEB_PROBE_PARENT` | daemon | set by the daemon for its own restart in place and for its WebKit start-up test and web acceleration probe; never set them by hand |
 | `WALPE_UI_SET_GSK`, `WALPE_UI_SET_GDK` | GUI | set by the GUI to remember that a GTK renderer variable is its own choice, not yours |
 | `WALPE_WS_FIXTURES=dir`, `WALPE_WS_LIVE=1` | `workshop-test` | another fixture directory / also run the calls against Steam's servers |
 | `WALPE_FX_HOSTILE_CORPUS=dir`, `WALPE_FX_HOSTILE_VERBOSE=1`, `WALPE_SCENE_HOSTILE_VERBOSE=1`, `WALPE_TEST_VERBOSE=1` | test programs | extra shader corpus and verbose output |

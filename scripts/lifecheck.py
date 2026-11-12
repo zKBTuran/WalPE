@@ -103,6 +103,14 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             screen stays through all of it, and a daemon built to look for
             leaks ends with status 0 afterwards. Needs the ffmpeg program;
             skipped without it.
+  swaplost  eglSwapBuffers fails from some frame on (WALPE_SWAP_FAIL, a
+            switch for this check). With the error of a lost GL context:
+            status names it per monitor ("swap_error"), the log has ONE
+            line, the daemon restarts in place once and presents again; a
+            loss the restart does not cure: one more line, no second
+            restart, the daemon answers and quits. With an error that says
+            nothing of the kind: no restart, and its log line at most once
+            in five seconds per monitor.
   video     a video's load ends with its first picture: a clip the decoder
             cannot do anything with (its container reads well) is a failed
             load with a reason in status, and the wallpaper from before
@@ -2122,6 +2130,115 @@ def case_convert(env, W):
     env.stop_daemon()
 
 
+# ----------------------------------------------------------------- swaplost
+def case_swaplost(env, W):
+    """Swaps that fail. A lost GL context (a suspend, a GPU reset) made every
+    swap fail from then on: a line per frame in the log, a monitor that
+    showed nothing new, and a status that said all was well."""
+    A, B = ("A", 640, 360, 0, 0), ("B", 640, 360, 640, 0)
+
+    def mons():
+        return env.state().get("monitors") or []
+
+    def lost():
+        return [m.get("swap_error") for m in mons() if m.get("swap_error")]
+
+    def frames():
+        return [m.get("frames") or 0 for m in mons()]
+
+    def begin(what, spec, shared=False):
+        rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False,
+                              "render_shared": shared, "current": W["anim"]})
+        return check(env.start_daemon([A, B], extra={"WALPE_SWAP_FAIL": spec}), f"swaplost: {what}: daemon started")
+
+    # 1. a loss the restart cures
+    if not begin("lost once", "40"):
+        return
+    pid, mark = env.daemon.pid, env.mark()
+    seen = wait_for(lambda: lost(), 40, 0.05)
+    check(bool(seen) and "EGL_CONTEXT_LOST" in (seen or [""])[0],
+          "swaplost: lost once: status names the lost context on the monitor (swap_error)", seen)
+    check(bool(wait_for(lambda: "restarting to follow it" in env.since(mark), 30, 0.1)),
+          "swaplost: lost once: the daemon restarts in place", env.since(mark)[-400:])
+    ok = wait_for(lambda: len(mons()) == 2 and not lost() and all(m.get("type") == "scene" and not m.get("loading")
+                                                                 for m in mons()), 60, 0.2)
+    check(bool(ok), "swaplost: lost once: both monitors show the scene again, without swap_error", rc.brief(mons()))
+    f0 = frames()
+    time.sleep(2.0 * PATIENCE)
+    f1 = frames()
+    check(len(f0) == 2 and all(b > a + 3 for a, b in zip(f0, f1)), "swaplost: lost once: and present frames",
+          (f0, f1))
+    txt = env.since(mark)
+    check(txt.count("restarting in place to make them again") == 1 and txt.count("restarting to follow it") == 1,
+          "swaplost: lost once: one line about it, one restart",
+          (txt.count("restarting in place to make them again"), txt.count("restarting to follow it")))
+    check(txt.count("eglSwapBuffers fail") <= 2, "swaplost: lost once: no line per failed swap",
+          txt.count("eglSwapBuffers fail"))
+    check(env.daemon.poll() is None and os.path.exists(f"/proc/{pid}"), "swaplost: lost once: same process")
+    env.stop_daemon()
+
+    # 2. a loss the restart does not cure
+    if not begin("lost for good", "40,always"):
+        return
+    mark = env.mark()
+    said = wait_for(lambda: "does not do so again" in env.since(mark), 60, 0.2)
+    check(bool(said), "swaplost: lost for good: after one restart the daemon says that it stays as it is",
+          env.since(mark)[-400:])
+    size = env.mark()
+    time.sleep(14.0)        # longer than the ten seconds between two restarts for a layout
+    txt = env.since(mark)
+    check(txt.count("restarting to follow it") == 1, "swaplost: lost for good: one restart, no second one",
+          txt.count("restarting to follow it"))
+    quiet = [ln for ln in env.since(size).splitlines() if ln.strip()]
+    check(len(quiet) <= 2, "swaplost: lost for good: the log stays quiet while the swaps go on failing",
+          (len(quiet), quiet[:3]))
+    check(len(lost()) == 2, "swaplost: lost for good: status names it on both monitors", rc.brief(mons()))
+    rep = env.ipc({"cmd": "quit"})
+    try:
+        st = env.daemon.wait(timeout=20 * PATIENCE)
+    except subprocess.TimeoutExpired:
+        st = None
+    if st is not None:
+        env.daemon = None
+    check(bool(rep and rep.get("ok")) and st == 0, "swaplost: lost for good: the daemon quits when told to", (rep, st))
+    env.stop_daemon()
+
+    # 3. an error that does not say "gone" (EGL_BAD_ALLOC)
+    if not begin("another error", "40,always,0x3003"):
+        return
+    mark = env.mark()
+    wait_for(lambda: "eglSwapBuffers failed: 0x3003" in env.since(mark), 40, 0.1)
+    time.sleep(7.0)
+    txt = env.since(mark)
+    n = txt.count("eglSwapBuffers failed: 0x3003")
+    check(2 <= n <= 6, "swaplost: another error: its line at most once in five seconds per monitor "
+          "(two monitors, seven seconds)", n)
+    check("restarting" not in txt and not lost(), "swaplost: another error: no restart, no swap_error",
+          (txt[-300:], lost()))
+    env.stop_daemon()
+
+    # 4. the first case where one monitor presents the frames the other renders
+    if not begin("shared rendering", "40", shared=True):
+        return
+    mark = env.mark()
+    check(bool(wait_for(lambda: "restarting to follow it" in env.since(mark), 60, 0.1)),
+          "swaplost: shared rendering: the daemon restarts in place", env.since(mark)[-400:])
+    ok = wait_for(lambda: len(mons()) == 2 and not lost() and all(m.get("type") == "scene" and not m.get("loading")
+                                                                 for m in mons()), 60, 0.2)
+    check(bool(ok) and any(m.get("follows") is not None for m in mons()),
+          "swaplost: shared rendering: both monitors show the scene again, one follows the other", rc.brief(mons()))
+    f0 = frames()
+    time.sleep(2.0 * PATIENCE)
+    f1 = frames()
+    check(len(f0) == 2 and all(b > a + 3 for a, b in zip(f0, f1)), "swaplost: shared rendering: and present frames",
+          (f0, f1))
+    txt = env.since(mark)
+    check(txt.count("restarting in place to make them again") == 1 and txt.count("restarting to follow it") == 1 and
+          txt.count("eglSwapBuffers fail") <= 2, "swaplost: shared rendering: one line about it, one restart",
+          (txt.count("restarting in place to make them again"), txt.count("eglSwapBuffers fail")))
+    env.stop_daemon()
+
+
 # ------------------------------------------------------------------ winlost
 def case_winlost(env, W):
     """Another X client destroys a wallpaper window. The daemon drew into a
@@ -2359,7 +2476,8 @@ def case_scan(env, W):
 CASES = [("logcap", case_logcap), ("pointer", case_pointer), ("reload", case_reload), ("restart", case_restart),
          ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("scan", case_scan), ("tray", case_tray), ("window", case_window), ("panel", case_panel), ("busy", case_busy), ("probe", case_probe),
          ("fullscreen", case_fullscreen), ("video", case_video), ("webunload", case_webunload),
-         ("winlost", case_winlost), ("convert", case_convert)]
+         ("winlost", case_winlost), ("convert", case_convert),
+         ("swaplost", case_swaplost)]
 
 
 

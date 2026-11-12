@@ -110,6 +110,13 @@ typedef struct Mon {
     WalpeRect geom;          /* monitor geometry (read-only after init) */
     float mx, my;            /* parallax mouse, written by main, read by thread */
     guint render_count;      /* rendered frames (diagnostics) */
+    /* swaps that fail (mon_swap_failed): render thread, except swap_lost */
+    guint swap_fails;        /* failed swaps in a row (0 = the last one went through) */
+    gint64 swap_warn_us;     /* when the last "eglSwapBuffers failed" line was written */
+    EGLint swap_err;         /* a failure made by WALPE_SWAP_FAIL: the error it stands for */
+    gint swap_lost;          /* atomic, main reads it: the EGL error of SWAP_LOST_AFTER
+                              * failed swaps in a row that say the context or the
+                              * surface is gone (0 = none): status "swap_error" */
     int last_w, last_h;      /* last rendered size (diagnostics) */
     gboolean covered;        /* main thread: client windows hide this monitor */
     gboolean focus_app;      /* main: the focused window is an application's, on this monitor */
@@ -344,6 +351,9 @@ static struct {
     int first_frame_ticks;   /* WALPE_FIRST_FRAME_S in quarter seconds: how long a video
                               * may take for its first picture (0 = not waited for) */
     gboolean restart;        /* main: the monitor layout changed, re-exec after shutdown */
+    guint swap_fail_at;      /* WALPE_SWAP_FAIL (tests): every monitor's swaps fail from
+                              * this one on (0 = off) ... */
+    EGLint swap_fail_err;    /* ... with this EGL error */
     double fpslog_s;         /* WALPE_FPS_LOG interval, 0 = off */
     gint64 fpslog_us;        /* main: time of the last line */
     WalpeVisTrack *vis;      /* main: "Skip hidden areas" tracker (NULL = off) */
@@ -393,6 +403,8 @@ static gboolean web_accel_restart (gpointer user);
 static gboolean web_unload_due (gboolean changed);
 static gboolean web_unload_restart;     /* main: the restart under way is that one */
 static gint64 web_unloaded_us;          /* monotonic time of the last one (main (), 0 = none) */
+static gboolean swap_restart;           /* main: the restart under way follows swaps that fail */
+static gint64 swap_restarted_us;        /* monotonic time of the last such restart (main (), 0 = none) */
 static void pointer_update (void);
 static void pointer_repace (void);
 static void follow_pace_update (void);
@@ -803,6 +815,10 @@ static void mon_present_apply (Mon *m)
 static EGLBoolean mon_swap (Mon *m)
 {
     mon_present_apply (m);
+    if (G_UNLIKELY (D.swap_fail_at) && m->render_count + 1 >= D.swap_fail_at) {
+        m->swap_err = D.swap_fail_err;      /* WALPE_SWAP_FAIL (tests): this swap "fails" */
+        return EGL_FALSE;
+    }
     walpe_surface_pre_swap (m->ps);
     if (P.swap_damage && P.has_damage) {
         EGLint r[4] = { 0, 0, m->geom.width, m->geom.height };
@@ -810,6 +826,90 @@ static EGLBoolean mon_swap (Mon *m)
                             : eglSwapBuffersWithDamageEXT (D.egl_dpy, m->surf, r, 1);
     }
     return eglSwapBuffers (D.egl_dpy, m->surf);
+}
+
+/* A swap that fails.
+ *
+ * eglSwapBuffers fails once in a while for reasons that pass. It also fails
+ * for good: after a suspend / resume or a reset of the GPU the driver may
+ * take the GL context away (EGL_CONTEXT_LOST), and a window or surface that
+ * is gone gives EGL_BAD_NATIVE_WINDOW / EGL_BAD_SURFACE. Every frame then
+ * wrote "eglSwapBuffers failed" (as fast as the log's rate limit lets
+ * through), the monitor kept its last picture or went black, and status
+ * said nothing.
+ *
+ * Now: the line of a failure that may pass is written at most once in
+ * SWAP_WARN_S seconds per monitor.
+ * When SWAP_LOST_AFTER swaps in a row have failed with one of the three
+ * errors above, the monitor is "lost": status carries "swap_error" for it
+ * (until a swap goes through again), ONE line says so, and the daemon
+ * restarts in place - the way it follows a surface the window system took
+ * away (layout_surface_lost: not during an import or a download, restarts
+ * ten seconds apart) - and makes its contexts and surfaces anew. Not when
+ * it has restarted for this less than SWAP_RESTART_GAP_S ago: a loss the
+ * restart does not cure must not make the daemon restart for ever. The
+ * line then says that it stays as it is.
+ *
+ * Nothing of this is on the path of a swap that goes through, save one
+ * test of swap_fails. WALPE_SWAP_FAIL=N[,always][,0xERROR] (tests): every
+ * monitor's swaps fail from its N-th on, with EGL_CONTEXT_LOST or the error
+ * given; without "always" only in an image that has not been restarted for
+ * it (a loss the restart cures). */
+#define SWAP_WARN_S 5
+#define SWAP_LOST_AFTER 3
+#define SWAP_RESTART_GAP_S 60
+
+static gboolean swap_lost_cb (gpointer user);
+static gboolean content_note_cb (gpointer user);
+
+static const char *swap_err_name (EGLint e)
+{
+    return e == EGL_CONTEXT_LOST ? "EGL_CONTEXT_LOST"
+         : e == EGL_BAD_SURFACE ? "EGL_BAD_SURFACE"
+         : e == EGL_BAD_NATIVE_WINDOW ? "EGL_BAD_NATIVE_WINDOW" : "an EGL error";
+}
+
+/* render thread: mon_swap () returned EGL_FALSE */
+static void mon_swap_failed (Mon *m)
+{
+    EGLint err = m->swap_err ? m->swap_err : eglGetError ();
+    m->swap_err = 0;
+    const gboolean gone = err == EGL_CONTEXT_LOST || err == EGL_BAD_SURFACE ||
+                          err == EGL_BAD_NATIVE_WINDOW;
+    const gint64 now = g_get_monotonic_time ();
+    if (m->swap_fails < G_MAXUINT)
+        m->swap_fails++;
+    if (g_atomic_int_get (&m->swap_lost))
+        return;     /* said, and in status */
+    if (gone && m->swap_fails >= SWAP_LOST_AFTER) {
+        g_atomic_int_set (&m->swap_lost, (gint) err);
+        g_idle_add (swap_lost_cb, m);   /* the one line, and the restart: main */
+        return;
+    }
+    if (gone) {
+        /* is it gone for good? A wallpaper that stands still would not swap
+         * again for hours: the next frames now, drawn in full, paused or
+         * not. (No line yet: the one about the loss follows at once, or the
+         * swaps work again.) */
+        m->needs_first_frame = TRUE;
+        g_mutex_lock (&m->lock);
+        m->render_req = TRUE;
+        g_mutex_unlock (&m->lock);
+    } else if (!m->swap_warn_us || now - m->swap_warn_us >= SWAP_WARN_S * G_USEC_PER_SEC) {
+        m->swap_warn_us = now;
+        g_warning ("monitor %d (%s): eglSwapBuffers failed: 0x%x", m->index, m->name, (guint) err);
+    }
+}
+
+/* render thread: a swap went through after one that had not */
+static void mon_swap_recovered (Mon *m)
+{
+    m->swap_fails = 0;
+    if (g_atomic_int_get (&m->swap_lost)) {
+        g_atomic_int_set (&m->swap_lost, 0);
+        g_message ("monitor %d (%s): eglSwapBuffers works again", m->index, m->name);
+        g_idle_add (content_note_cb, NULL);     /* status changed: subscribers */
+    }
 }
 
 /* ------------------------------------------------- shared rendering
@@ -1082,12 +1182,16 @@ static gboolean sf_present (Mon *m, guint64 need)
      * blit and the fence rf; the leader waits on rf at the earliest with
      * its next frame). One flush per presented frame. */
     if (!mon_swap (m)) {
-        g_warning ("eglSwapBuffers failed: 0x%x", eglGetError ());
+        mon_swap_failed (m);
         glFlush ();   /* the fence must still reach the GPU */
-    } else {
-        mon_swapped (m);   /* after a swap that went through only: a backend that paces
-                            * itself would wait here for a frame it was never given */
+        if (prof)
+            walpe_prof_frame_end (FALSE);        /* GPUPROF */
+        return FALSE;   /* nothing was presented: the frame is still owed */
     }
+    if (G_UNLIKELY (m->swap_fails))
+        mon_swap_recovered (m);
+    mon_swapped (m);   /* after a swap that went through only: a backend that paces
+                        * itself would wait here for a frame it was never given */
     if (prof)
         walpe_prof_frame_end (TRUE);             /* GPUPROF */
     g_atomic_int_inc (&m->render_count);
@@ -1612,10 +1716,12 @@ static void mon_do_render_frame (Mon *m, gboolean paused, gboolean force, gboole
     }
     WALPE_PROF_STAGE (WALPE_PROF_ST_SWAP);   /* GPUPROF: no GPU timer over the vsync wait */
     if (!mon_swap (m)) {
-        g_warning ("eglSwapBuffers failed: 0x%x", eglGetError ());
+        mon_swap_failed (m);
         m->win_has_frame = FALSE;
         return;
     }
+    if (G_UNLIKELY (m->swap_fails))
+        mon_swap_recovered (m);
     m->win_has_frame = TRUE;
     mon_swapped (m);
     if (m->content->swapped)
@@ -5694,6 +5800,17 @@ static void ipc_status (JsonBuilder *b)
             jb_str (b, "load_restored", m->restored);
         if (m->leader)
             jb_int (b, "follows", m->leader->index);
+        {
+            /* its swaps fail and say that the GL context or the surface is
+             * gone (mon_swap_failed); absent while it presents */
+            const EGLint se = (EGLint) g_atomic_int_get (&m->swap_lost);
+            if (se) {
+                char *t = g_strdup_printf ("%s (0x%x): the GL context or the window's surface is "
+                                           "gone, nothing is presented", swap_err_name (se), (guint) se);
+                jb_str (b, "swap_error", t);
+                g_free (t);
+            }
+        }
         /* presentation: its mode and the swap interval in effect */
         jb_str (b, "present", walpe_present_mode_name (m->present_mode));
         jb_int (b, "swap_interval", g_atomic_int_get (&m->present_iv));
@@ -8489,6 +8606,12 @@ static void restart_exec (gboolean layout_stamp)
         g_snprintf (now, sizeof now, "%" G_GINT64_FORMAT, g_get_monotonic_time ());
         env = g_environ_setenv (env, "WALPE_LAYOUT_RESTARTED", now, TRUE);
     }
+    if (swap_restart) {
+        /* swaps failed for good: when (swap_lost_cb) */
+        char now[32];
+        g_snprintf (now, sizeof now, "%" G_GINT64_FORMAT, g_get_monotonic_time ());
+        env = g_environ_setenv (env, "WALPE_SWAP_RESTARTED", now, TRUE);
+    }
     if (web_unload_restart) {
         /* the web module was left behind: when (web_unload_due) */
         char now[32];
@@ -8812,6 +8935,43 @@ static void layout_surface_lost (void)
 {
     layout_force = TRUE;
     layout_schedule ();
+}
+
+/* main, from a render thread whose swaps fail and say that its GL context
+ * or surface is gone (mon_swap_failed): the one line about it, and the
+ * restart in place that makes them anew - unless the daemon restarted for
+ * this a moment ago (then the restart did not cure it and another one would
+ * not either), or runs in a window (nothing follows a surface there). */
+static gboolean swap_lost_cb (gpointer user)
+{
+    Mon *m = user;
+    const EGLint e = (EGLint) g_atomic_int_get (&m->swap_lost);
+    if (!e)
+        return G_SOURCE_REMOVE;     /* (it presents again) */
+    const gint64 now = g_get_monotonic_time ();
+    const gboolean again = swap_restarted_us > 0 && now >= swap_restarted_us &&
+                           now - swap_restarted_us < (gint64) SWAP_RESTART_GAP_S * G_USEC_PER_SEC;
+    if (swap_restart || D.restart) {
+        /* (another monitor got there first, or another restart is on its way) */
+    } else if (again) {
+        g_warning ("monitor %d (%s): eglSwapBuffers fails with %s (0x%x): its GL context or surface "
+                   "is gone. walpe-daemon restarted for this %d s ago and does not do so again (at "
+                   "most once in %d s): the monitor stays as it is until the daemon is started again "
+                   "(walpe-ctl status: swap_error)", m->index, m->name, swap_err_name (e), (guint) e,
+                   (int) ((now - swap_restarted_us) / G_USEC_PER_SEC), SWAP_RESTART_GAP_S);
+    } else if (!layout_watch) {
+        g_warning ("monitor %d (%s): eglSwapBuffers fails with %s (0x%x): its GL context or surface "
+                   "is gone (walpe-ctl status: swap_error); start walpe-daemon again", m->index,
+                   m->name, swap_err_name (e), (guint) e);
+    } else {
+        g_warning ("monitor %d (%s): eglSwapBuffers fails with %s (0x%x): its GL context or surface "
+                   "is gone; restarting in place to make them again", m->index, m->name,
+                   swap_err_name (e), (guint) e);
+        swap_restart = TRUE;
+        layout_surface_lost ();
+    }
+    state_touch ();     /* status has "swap_error" now: subscribers */
+    return G_SOURCE_REMOVE;
 }
 
 #ifdef HAVE_WEB
@@ -9441,6 +9601,9 @@ int main (int argc, char **argv)
          * restart hands on) */
         const char *wu = g_getenv ("WALPE_WEB_UNLOADED");
         web_unloaded_us = wu && *wu ? g_ascii_strtoll (wu, NULL, 10) : 0;
+        /* ... or because swaps failed for good (swap_lost_cb; likewise) */
+        const char *sr = g_getenv ("WALPE_SWAP_RESTARTED");
+        swap_restarted_us = sr && *sr ? g_ascii_strtoll (sr, NULL, 10) : 0;
         if (Bk.lost && Bk.ipc_fd >= 0) {
             /* this image may wait a long time for its display: which file
              * the handed-over socket is now, for a start that fails later */
@@ -9568,6 +9731,22 @@ int main (int argc, char **argv)
     {
         const char *ld = g_getenv ("WALPE_LOAD_DELAY_MS");
         D.load_delay_us = ld && *ld ? (gulong) CLAMP (g_ascii_strtoll (ld, NULL, 10), 0, 60000) * 1000 : 0;
+        /* WALPE_SWAP_FAIL=N[,always][,0xERROR] (tests): mon_swap_failed () */
+        const char *sf = g_getenv ("WALPE_SWAP_FAIL");
+        if (sf && *sf) {
+            char **p = g_strsplit (sf, ",", -1);
+            gboolean always = FALSE;
+            D.swap_fail_err = EGL_CONTEXT_LOST;
+            for (int i = 1; p[i]; i++) {
+                if (!strcmp (p[i], "always"))
+                    always = TRUE;
+                else if (g_str_has_prefix (p[i], "0x"))
+                    D.swap_fail_err = (EGLint) g_ascii_strtoll (p[i], NULL, 16);
+            }
+            if (always || swap_restarted_us <= 0)
+                D.swap_fail_at = (guint) CLAMP (g_ascii_strtoll (p[0], NULL, 10), 0, 1000000);
+            g_strfreev (p);
+        }
         const char *ff = g_getenv ("WALPE_FIRST_FRAME_S");
         D.first_frame_ticks = 4 * (ff && *ff ? (int) CLAMP (g_ascii_strtoll (ff, NULL, 10), 0, 3600) : 20);
     }

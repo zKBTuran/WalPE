@@ -1652,6 +1652,7 @@ test('restore', executable('restore-test', 'tests/restore_test.c',
 # EWMH properties of a focused fullscreen one),
 # a wallpaper window that another X client destroys, a video conversion
 # that cannot start or is cancelled,
+# buffer swaps that fail (a lost GL context: one restart in place, no more),
 # a video the decoder refuses (the clip is made with the ffmpeg program:
 # that case is skipped where there is none).
 # Skipped (77) without Xvfb. `meson test -C build daemon-life`
