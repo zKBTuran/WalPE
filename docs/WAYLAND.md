@@ -19,11 +19,15 @@ change.
 > One more thing was looked at on one more compositor: where a video wallpaper lies
 > relative to Plasma's desktop, without and with the add-on for Plasma, on a headless
 > KWin 6.8.2 (without it also 5.27.11) with Plasma's shell ([KDE Plasma](#kde-plasma)).
+> On 2026-11-12 six more compositors were run, headless and on the software renderer
+> again, from Arch Linux's packages of that day: sway 1.12, labwc 0.20.2, Wayfire 0.11.0,
+> river 0.3.17 and 0.5.0, niri 26.04 and COSMIC's compositor 1.11.0. What was run on
+> each, and what could not be, is in [Compositors that were run](#compositors-that-were-run).
+> Hyprland did not start without a graphics device and stays "expected".
 > Nothing on this page has been
-> run on a real Wayland desktop, on a real output, on a GPU, or with any other compositor.
-> What is said below about Hyprland, KDE Plasma, GNOME, COSMIC, labwc, Wayfire, river and
-> niri follows from the protocols they are documented to offer; it is marked "expected".
-> Reports are welcome.
+> run on a real Wayland desktop, on a real output or on a GPU.
+> What is said below about Hyprland and GNOME follows from the protocols they are
+> documented to offer; it is marked "expected". Reports are welcome.
 
 ## What it needs
 
@@ -32,9 +36,14 @@ A compositor that offers the layer shell (protocol `zwlr_layer_shell_v1`), and a
 
 | Compositor | Layer shell | |
 |---|---|---|
-| sway | yes | tested headless (1.9) |
+| sway | yes | tested headless (1.9 and 1.12) |
 | KDE Plasma (KWin) | yes | shown on a headless Plasma 6.8 and 5.27; Plasma's desktop icons are behind the wallpaper unless the add-on for Plasma is used: see [KDE Plasma](#kde-plasma) |
-| Hyprland, river, labwc, Wayfire, niri, COSMIC | yes | expected to work, not tested |
+| labwc | yes | tested headless (0.20.2) |
+| Wayfire | yes | tested headless (0.11.0) |
+| river | yes | tested headless (0.3.17, now "river-classic"; 0.5.0 with a stand-in for the window manager it needs: see [below](#compositors-that-were-run)) |
+| niri | yes | tested headless (26.04, as a window on another compositor) |
+| COSMIC | yes | tested headless (cosmic-comp 1.11.0, as a window on another compositor; nothing there reports a fullscreen window: see [Pause rules](#pause-rules)) |
+| Hyprland | yes | expected to work, not tested (0.57.2 does not start without a graphics device) |
 | GNOME (Mutter), weston's desktop shell | no | not supported: use an X11 session |
 
 Without the layer shell the daemon says so, names the protocol and ends with status 1,
@@ -157,7 +166,12 @@ false` means the setting has no effect in this session, whether it is on or off,
 KWin and GNOME Shell offer other programs no window list. On GNOME the fullscreen and
 focus rules have no source, and of the covered rule the "no longer shown" part is left;
 `pause_rules` says so in the rule's `note`, and the settings window prints it under the
-switch.
+switch. COSMIC's compositor lists windows without their state
+(`ext_foreign_toplevel_list_v1`; the state is in a protocol of its own,
+`zcosmic_toplevel_info_v1`, which WalPE does not speak), so the fullscreen and focus
+rules have no source there either, and `pause_rules` says so. A fullscreen window pauses
+the wallpaper on COSMIC all the same, through "pause when covered": cosmic-comp 1.11.0
+stops asking a surface behind a fullscreen window for frames (run headless).
 
 **On KDE Plasma the three rules work through a script in KWin.** KWin goes on asking a
 wallpaper surface for frames while a window hides it (frame callbacks and presentation
@@ -301,8 +315,8 @@ A page cannot read, replace or clear what you copied or selected, on either host
   panel with a tray is there. Panels: waybar needs its `tray` module, swaybar a
   `tray_output` other than `none`, xfce4-panel its "Status Tray" plugin, GNOME Shell the
   extension "AppIndicator and KStatusNotifierItem Support"; KDE Plasma needs nothing
-  (all expected; with waybar only the registration and the actions were tested, the icon's
-  picture and menu were not looked at). For a panel that only reports the click, and for
+  (waybar 0.16 was run on sway, labwc, Wayfire, river and niri: the icon is shown, a right
+  click opens the menu, "Pause all wallpapers" pauses; the others are expected). For a panel that only reports the click, and for
   `walpe-tray --menu`, the tray opens its own menu as a small window the compositor places.
   `walpe-tray --backend=sni|xembed`, `WALPE_TRAY_BACKEND` or `backend=` in `tray.ini` force
   a protocol.
@@ -314,9 +328,12 @@ A page cannot read, replace or clear what you copied or selected, on either host
 ## Starting with the session
 
 XDG autostart entries (the installed `walpe-autostart.desktop`, `walpe-tray.desktop`) are
-run by desktops such as GNOME, KDE and Xfce. sway, Hyprland, river and labwc do not run
-them by themselves; start the engine from the compositor's configuration (sway: `exec
-walpe-daemon`, `exec walpe-tray`; Hyprland: `exec-once = ...`). With the systemd user unit
+run by desktops such as GNOME, KDE and Xfce. sway, Hyprland, river, niri, Wayfire and
+labwc do not run them by themselves; start the engine from the compositor's configuration
+(sway: `exec walpe-daemon`, `exec walpe-tray`; Hyprland: `exec-once = ...`; niri:
+`spawn-at-startup "walpe-daemon"`; labwc: a line in `~/.config/labwc/autostart`;
+Wayfire: its `autostart` plugin; river: its `init` script, from 0.4 on after the window
+manager, see [below](#compositors-that-were-run)). With the systemd user unit
 (`data/walpe.service`) the user manager must know the display: compositors started outside
 systemd need, once per session, `systemctl --user import-environment WAYLAND_DISPLAY
 XDG_CURRENT_DESKTOP`.
@@ -462,14 +479,77 @@ wallpaper; the add-on works there as on the bottom layer.
 > the running shell, activities, fractional scales with the add-on, Plasma versions
 > between 6.5 and 6.8.
 
-## Notes per compositor (expected, not tested)
+## Compositors that were run
+
+All of this is from one day, 2026-11-12, on one machine without a graphics device: each
+compositor headless, drawing with Mesa's software renderer or wlroots' pixman renderer,
+from Arch Linux's packages (GTK 4.24, Mesa 26.2), with a picture, a generated video and
+generated scenes. "The checks" are `scripts/waylandcheck.py --display <compositor>`
+([DEVELOPMENT.md](DEVELOPMENT.md)): start, layer, two outputs, a mode / scale / transform
+that changes, outputs that come and go, a pointer device, an output switched off, a
+fullscreen window, a compositor without layer shell, a compositor that goes away (the
+case that compares the Wayland backend with the X11 one was not run there: that
+installation had no Xvfb). By
+hand, where a row does not say otherwise: the tray on waybar, the library window, clicks
+on the desktop, the daemon's CPU time with a still picture and with the output off, the
+compositor's "reload configuration" where it has one, and the compositor killed and
+started again with and without `wayland_reconnect`.
+
+| Compositor | How it was run | What was seen |
+|---|---|---|
+| sway 1.12 | wlroots' headless backend | all checks pass, as on 1.9. `swaymsg reload` leaves the daemon alone |
+| labwc 0.20.2 | wlroots' headless backend | all checks pass. A right click on the desktop opens labwc's menu over a wallpaper that does not use the pointer, and not over one that does (as the table above says). `SIGHUP` (reconfigure) leaves the daemon alone. labwc keeps a window on its output when the window list asks for fullscreen on another one |
+| Wayfire 0.11.0 | wlroots' headless backend, as a user that is not root | all checks pass. A rewritten `wayfire.ini` (it reloads by itself) leaves the daemon alone |
+| river 0.3.17 (river-classic) | wlroots' headless backend | all checks pass |
+| river 0.5.0 | wlroots' headless backend, with a 150-line stand-in for a window manager | see "river" below; only the wallpaper, a window above it and a fullscreen window were looked at |
+| niri 26.04 | as a window on a headless sway (its only way to run without a seat) | wallpaper shown, below windows; a fullscreen window pauses it (niri's window list names state and output); the pointer is followed; scale 1.5 and 2; tray on waybar, which niri's default configuration starts; configuration reload; restart with `wayland_reconnect`. Not possible that way: more than one output, an output that is off, rotation. The checks were not run (they need outputs that can be made) |
+| cosmic-comp 1.11.0 | as a window on a headless sway | wallpaper shown, below windows; a fullscreen window pauses it through "pause when covered" only; the pointer is followed; scale 1.5 and 2; waybar shows the tray icon (its menu did not open on a simulated click and was not followed up); restart with `wayland_reconnect`. Not possible that way: more than one output, an output that is off. The checks were not run; COSMIC's own panel and its wallpaper program were not installed |
+| Hyprland 0.57.2 | did not start | its backend library ends with "Cannot open backend: no allocator available": it needs a graphics device (DRM) also for a headless or nested session, and the test machine has none |
+
+On sway, labwc, Wayfire, river 0.3, niri and cosmic-comp: the wallpaper is on the
+background layer; with a still picture the daemon used no CPU time that could be measured
+(0 hundredths of a second in 10 seconds), and the same with the output off where an
+output can be switched off (sway, labwc, Wayfire, river); the daemon ends in order when
+the compositor is killed, and comes back with its wallpaper when `wayland_reconnect` is
+set and the compositor is started again on the same socket; nothing restarts the daemon
+when the compositor reloads its configuration (sway, labwc, Wayfire, niri).
+
+Three faults showed there and are repaired in this version: a still wallpaper kept its
+old size for seconds when an output's scale changed (seen on niri, cosmic-comp and sway);
+a daemon waiting with `wayland_reconnect` gave up at once when the old compositor took
+one more connection on its way out (cosmic-comp); and the library window said another
+application id than its dialogs in a session without a D-Bus session bus.
+
+## Notes per compositor
 
 - **sway**: remove `output * bg ...` from its configuration (or stop swaybg): that is
   another background surface, and the one created last lies on top. The layer namespace of
   WalPE's surfaces is `walpe`.
-- **Hyprland**: do not run hyprpaper / swww at the same time.
+- **river**: from 0.4 on river has no window management of its own; a separate program
+  does it, and river shows a layer-shell surface only once a window manager that
+  supports the layer shell (`river_layer_shell_v1`) is connected. Run on 0.5.0: with no
+  window manager, or with one that does not bind that protocol, the wallpaper's surface is
+  never configured; the daemon says `NO WALLPAPER SURFACE` after three seconds, keeps
+  running and **does not try again**, also when the window manager arrives later. Start
+  `walpe-daemon` after the window manager (in river's `init`: the window manager first,
+  then `walpe-daemon`; if the wallpaper is missing, `walpe-ctl quit` and start it again).
+  With a stand-in window manager that supports the layer shell the wallpaper was shown
+  below windows, and a fullscreen window paused it through "pause when covered"; river's
+  window list named neither the window's output nor its fullscreen state there, which may
+  be the stand-in's doing. No real window manager for river 0.5 was run. river up to 0.3
+  ("river-classic") needs none of this.
+- **niri**: without further configuration the wallpaper belongs to each workspace and is
+  scaled down with it in the overview, on niri's plain backdrop. niri's layer rule
+  `place-within-backdrop true` for `namespace="^walpe$"` puts it on the backdrop instead;
+  then the workspaces' own background hides it outside the overview unless that is made
+  transparent in niri's configuration (seen that far; a transparent workspace background
+  was not tried).
+- **labwc**: its desktop menu (right click) goes on working over wallpapers that do not
+  use the pointer; `wayland_pointer=off` keeps it for all wallpapers.
+- **Hyprland** (expected, not run): do not run hyprpaper / swww at the same time.
 - **KDE Plasma**: see [KDE Plasma](#kde-plasma) above.
-- **COSMIC**: its own wallpaper program is a background-layer surface too.
+- **COSMIC**: its own wallpaper program is a background-layer surface too (expected: it
+  was not installed in the run above).
 - **Desktop-icon programs** on a layer above the background stay visible, and hide the
   wallpaper where they paint an opaque background.
 - **NVIDIA's driver** needs its Wayland EGL library (`egl-wayland`).
@@ -477,7 +557,9 @@ wallpaper; the add-on works there as on the bottom layer.
 ## Limits
 
 - Nothing above has been confirmed on a real compositor session, a real output or a GPU.
-  That includes web wallpapers on the private page host.
+  That includes web wallpapers on the private page host, which were run on sway only.
+- On river 0.4 and later a daemon that is started before the window manager shows
+  nothing and does not try again ([Notes per compositor](#notes-per-compositor)).
   Not seen at all: `linux-dmabuf`, a hardware EGL on Wayland, connector names of real
   outputs, DPMS on a real connector, presentation feedback with a real refresh period.
 - 8 bits per channel, sRGB; no HDR, no colour management protocol.

@@ -106,6 +106,16 @@ renders on a laptop's discrete GPU where there is one (under Graphics cards;
   close it ("the Wayland compositor closed the connection during start-up"; COSMIC's
   compositor does that for a moment after it is told to end). It waits on now, for the
   time that was set, as it does for a socket that is not there yet.
+- More compositors than sway and KWin have been run now, all headless on the software
+  renderer: sway 1.12, labwc 0.20.2, Wayfire 0.11.0, river 0.3.17 and 0.5.0, niri 26.04
+  and COSMIC's compositor 1.11.0. [WAYLAND.md](docs/WAYLAND.md#compositors-that-were-run)
+  says per compositor what was run, what was seen and what could not be run; the three
+  entries above this one and the application id under "Library window" come from there.
+  Hyprland did not start on the test machine (it needs a graphics device) and is still
+  "expected to work". Two things to know: on river 0.4 and later start `walpe-daemon`
+  after the window manager, or it shows nothing and does not try again; on COSMIC nothing
+  reports a fullscreen window, the wallpaper behind one pauses through "pause when
+  covered" (on by default) only.
 
 ### Sound
 
