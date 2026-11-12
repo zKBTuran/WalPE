@@ -116,6 +116,72 @@ static void test_keys (void)
         CHECK (!strcmp (k, "-:x"));
         g_free (k);
     }
+    /* names longer than a key has room for (a key: WALPE_LAYER_KEY_MAX
+     * bytes; a name in scene.json: any length). The key holds the first
+     * WALPE_LAYER_KEY_NAME_MAX bytes of such a name, cut between two
+     * characters: it fits, parses and finds its layer, and the count
+     * behind "~" tells apart the layers whose names begin alike. Such a
+     * layer used to be listed with a key that nothing accepted. A name
+     * that fits is in its key whole, as it always was. */
+    {
+        enum { M = WALPE_LAYER_KEY_NAME_MAX };
+        char *at = g_strnfill (M, 'a');             /* just fits */
+        char *over = g_strnfill (M + 1, 'a');       /* one byte more */
+        char *lng = g_strnfill (5000, 'a');
+        char *lng2 = g_strnfill (5000, 'a');        /* differs far behind the cut */
+        lng2[4000] = 'b';
+        char *other = g_strnfill (600, 'c');
+        GString *u = g_string_new (NULL);           /* a two-byte character across the cut */
+        for (int i = 0; i < M - 1; i++)
+            g_string_append_c (u, 'u');
+        for (int i = 0; i < 40; i++)
+            g_string_append (u, "\xc3\xbc");
+        char *ucut = g_strnfill (M - 1, 'u'), *ccut = g_strnfill (M, 'c');
+        const WalpeLayerRef lg[] = { { 5, at }, { 5, over }, { 5, lng }, { 5, lng2 }, { 6, lng }, { -1, lng },
+                                     { -1, other }, { 999999999, other }, { 7, u->str }, { 8, "short" } };
+        const guint ln = G_N_ELEMENTS (lg);
+        char *lwant[] = { g_strconcat ("5:", at, NULL), g_strconcat ("5~2:", at, NULL), g_strconcat ("5~3:", at, NULL),
+                          g_strconcat ("5~4:", at, NULL), g_strconcat ("6:", at, NULL), g_strconcat ("-:", at, NULL),
+                          g_strconcat ("-:", ccut, NULL), g_strconcat ("999999999:", ccut, NULL),
+                          g_strconcat ("7:", ucut, NULL), g_strdup ("8:short") };
+        char *keys[G_N_ELEMENTS (lg)];
+        for (guint i = 0; i < ln; i++) {
+            keys[i] = walpe_layer_key_for (lg, ln, i);
+            CHECK (!strcmp (keys[i], lwant[i]));
+            CHECK (strlen (keys[i]) <= WALPE_LAYER_KEY_MAX && g_utf8_validate (keys[i], -1, NULL));
+            CHECK (walpe_layer_key_parse (keys[i], NULL, NULL, NULL));
+            CHECK (walpe_layer_find (lg, ln, keys[i]) == (int) i);
+            for (guint j = 0; j < i; j++)
+                CHECK (strcmp (keys[i], keys[j]) != 0);
+            /* what a person types (walpe-ctl) may be the key as well */
+            GArray *out = g_array_new (FALSE, FALSE, sizeof (int));
+            CHECK (walpe_layer_select (lg, ln, keys[i], out, NULL) && out->len == 1 &&
+                   g_array_index (out, int, 0) == (int) i);
+            g_array_unref (out);
+        }
+        for (guint i = 0; i < ln; i++) {
+            g_free (keys[i]);
+            g_free (lwant[i]);
+        }
+        /* a key that was saved with the whole of a name between the two
+         * limits (it fitted, and it worked) still means its layer */
+        char *mid = g_strnfill (M + 10, 'd'), *saved = g_strconcat ("9:", mid, NULL);
+        const WalpeLayerRef one[] = { { 4, "x" }, { 9, mid } };
+        CHECK (strlen (saved) <= WALPE_LAYER_KEY_MAX && walpe_layer_find (one, 2, saved) == 1);
+        k = walpe_layer_key_for (one, 2, 1);
+        CHECK (strlen (k) == 2 + M && walpe_layer_find (one, 2, k) == 1);
+        g_free (k);
+        g_free (mid);
+        g_free (saved);
+        g_free (at);
+        g_free (over);
+        g_free (lng);
+        g_free (lng2);
+        g_free (other);
+        g_free (ucut);
+        g_free (ccut);
+        g_string_free (u, TRUE);
+    }
     /* renamed layer: the id decides */
     CHECK (walpe_layer_find (sc, n, "20:Album Art") == 1);
     CHECK (walpe_layer_find (sc, n, "21~2:renamed") == 3);

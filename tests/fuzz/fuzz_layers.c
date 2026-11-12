@@ -57,9 +57,11 @@ int LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
         int id = 0, nth = 0;
         const char *kn = NULL;
         gboolean ok = walpe_layer_key_parse (key, &id, &nth, &kn);
-        if (g_utf8_validate (name, -1, NULL) && strlen (name) <= WALPE_LAYER_KEY_MAX - 32) {
-            FUZZ_CHECK (ok);
-            FUZZ_CHECK (!strcmp (kn, name) && nth >= 0);
+        if (g_utf8_validate (name, -1, NULL)) {
+            /* (a name of any length: the key holds what fits of it) */
+            FUZZ_CHECK (ok && strlen (key) <= WALPE_LAYER_KEY_MAX);
+            FUZZ_CHECK (strlen (name) <= WALPE_LAYER_KEY_NAME_MAX ? !strcmp (kn, name) : g_str_has_prefix (name, kn));
+            FUZZ_CHECK (nth >= 0);
             FUZZ_CHECK (walpe_layer_find (refs, n, key) == (int) i);
         }
         for (guint j = 0; j < i; j++) {     /* and no two layers share a key */

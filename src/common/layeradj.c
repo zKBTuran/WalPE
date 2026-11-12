@@ -114,6 +114,26 @@ static int key_id (int id)
     return id >= 0 && id <= 999999999 ? id : -1;
 }
 
+/* The name of an object as its key holds it: all of it up to
+ * WALPE_LAYER_KEY_NAME_MAX bytes, of a longer one that many (cut between
+ * two characters). A key has at most WALPE_LAYER_KEY_MAX bytes and a name
+ * in scene.json any length: an object with a longer name was listed with
+ * a key that every reader of keys refuses - the layer could be seen in the
+ * list and not be moved, scaled or hidden. Names are compared as keys hold
+ * them (name_is), in the count behind "~2" as in the search, so the key
+ * that is listed finds its layer; two objects whose long names begin alike
+ * are told apart by that count. The length of what a key holds: */
+static gsize key_name_len (const char *name)
+{
+    gsize n = strnlen (name, WALPE_LAYER_KEY_NAME_MAX + 1);
+    if (n <= WALPE_LAYER_KEY_NAME_MAX)
+        return n;
+    n = WALPE_LAYER_KEY_NAME_MAX;
+    while (n > 0 && ((guchar) name[n] & 0xc0) == 0x80)
+        n--;
+    return n;
+}
+
 char *walpe_layer_key_make (int id, int nth, const char *name)
 {
     GString *s = g_string_new (NULL);
@@ -125,7 +145,8 @@ char *walpe_layer_key_make (int id, int nth, const char *name)
     if (nth > 0)
         g_string_append_printf (s, "~%d", nth + 1);
     g_string_append_c (s, ':');
-    g_string_append (s, name ? name : "");
+    if (name)
+        g_string_append_len (s, name, (gssize) key_name_len (name));
     return g_string_free (s, FALSE);
 }
 
@@ -174,9 +195,12 @@ gboolean walpe_layer_key_parse (const char *key, int *id, int *nth, const char *
     return TRUE;
 }
 
+/* (as a key holds them: key_name_len) */
 static gboolean name_is (const WalpeLayerRef *r, const char *name)
 {
-    return !strcmp (r->name ? r->name : "", name ? name : "");
+    const char *a = r->name ? r->name : "", *b = name ? name : "";
+    const gsize la = key_name_len (a);
+    return la == key_name_len (b) && !memcmp (a, b, la);
 }
 
 char *walpe_layer_key_for (const WalpeLayerRef *l, guint n, guint i)

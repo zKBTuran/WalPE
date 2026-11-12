@@ -40,6 +40,10 @@ typedef enum {
 #define WALPE_LAYER_SCALE_MIN  0.01
 #define WALPE_LAYER_SCALE_MAX  100.0
 #define WALPE_LAYER_KEY_MAX    512        /* bytes */
+/* of an object's name in its key (the rest of a key: an id of at most nine
+ * digits, "~" and a count, ":"); a longer name is in the key with its
+ * first bytes */
+#define WALPE_LAYER_KEY_NAME_MAX (WALPE_LAYER_KEY_MAX - 32)
 #define WALPE_LAYER_MAX        4096       /* adjustments per wallpaper */
 
 typedef struct {
@@ -68,7 +72,10 @@ const char    *walpe_layer_vis_name (int vis);
  * too) */
 typedef struct { int id; const char *name; } WalpeLayerRef;
 
-/* "<id>[~n]:<name>"; nth = 0 for the first layer with this id and name */
+/* "<id>[~n]:<name>"; nth = 0 for the first layer with this id and name
+ * (of a name longer than WALPE_LAYER_KEY_NAME_MAX the key holds that many
+ * bytes, and names are the same when those are: every layer has a key
+ * that fits and finds it) */
 char    *walpe_layer_key_make (int id, int nth, const char *name);
 /* FALSE = not a key. *name points into key. */
 gboolean walpe_layer_key_parse (const char *key, int *id, int *nth, const char **name);
