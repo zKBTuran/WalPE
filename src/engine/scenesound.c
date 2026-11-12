@@ -1413,13 +1413,16 @@ char *walpe_sound_status (void)
 {
     if (!walpe_sound_allowed ())
         return g_strdup ("not available in this program");
-    int own_on = 0, speaking = 0;
+    int own_on = 0, speaking = 0, held = 0;
     char *why = NULL;
     g_mutex_lock (&reg_lock);
     for (guint i = 0; groups && i < groups->len; i++) {
         WalpeSoundGroup *g = groups->pdata[i];
         own_on += g->sw == 1;
         speaking += g->speaking;
+        /* sound is on for it and it has players, but it is paused (or not
+         * shown yet): the one reason for silence the line did not name */
+        held += !g->active && g->players->len > 0 && group_on_locked (g);
     }
     g_mutex_unlock (&reg_lock);
     g_mutex_lock (&err_lock);
@@ -1442,12 +1445,17 @@ char *walpe_sound_status (void)
         else if (real > 0)
             r = g_strdup_printf ("%s: %d stream(s) through PulseAudio, %d wallpaper(s) with sound shown",
                                  scope, real, speaking);
+        else if (held > 0 && !speaking)
+            r = g_strdup_printf ("%s: nothing is playing: %d wallpaper(s) with sound paused - sound stops while its "
+                                 "wallpaper is paused (windows cover the monitor, a fullscreen window, the display "
+                                 "sleeps, walpe-ctl pause)", scope, held);
         else
             r = g_strdup_printf ("%s: nothing is playing (%d wallpaper(s) with sound shown)", scope, speaking);
 #else
         (void) real;
         (void) nowhere;
         (void) speaking;
+        (void) held;
         r = g_strdup_printf ("%s, but built without libpulse: nothing can be heard", scope);
 #endif
         if (g_atomic_int_get (&n_streams) >= WALPE_SOUND_MAX_STREAMS) {

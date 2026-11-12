@@ -30,6 +30,7 @@ off (walpe-ctl set scene_sound=on; for one wallpaper: walpe-ctl setprop walpe_so
 on, but the volume setting is 0: silent (walpe-ctl set volume=0.5)
 on: 2 stream(s) through PulseAudio, 1 wallpaper(s) with sound shown
 on: 2 stream(s) play into nothing, no sound server (Connection refused); 0 heard
+on: nothing is playing: 1 wallpaper(s) with sound paused - sound stops while its wallpaper is paused (...)
 ```
 
 The log has one line per scene with sound layers and one line for every file that is

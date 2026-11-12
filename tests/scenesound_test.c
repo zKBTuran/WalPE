@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include "walpe-build-config.h"   /* HAVE_PULSE: the wording of the status line */
 #include "engine/scenesound.h"
 
 static int fails;
@@ -386,6 +387,26 @@ static void test_gates (const char *sine)
            "the wallpaper's switch off, setting on: silent");
     char *line = walpe_sound_status ();
     CHECK (line && g_str_has_prefix (line, "on"), "status: %s", line ? line : "(null)");
+    g_free (line);
+    /* every wallpaper with sound is paused (a covered monitor, a fullscreen
+     * window): the status line says that this is why nothing is heard, and
+     * stops saying it when one of them is shown again */
+    walpe_sound_group_set_active (g, FALSE);
+    walpe_sound_group_set_active (on, FALSE);
+    WAIT (!stats_of (s).running && !stats_of (sn).running, 5000);
+    line = walpe_sound_status ();
+#ifdef HAVE_PULSE
+    CHECK (line && strstr (line, "2 wallpaper(s) with sound paused"), "status, all paused: %s", line ? line : "(null)");
+#else
+    CHECK (line && g_str_has_prefix (line, "on"), "status, all paused: %s", line ? line : "(null)");
+#endif
+    g_free (line);
+    f = stats_of (s).frames;
+    walpe_sound_group_set_active (g, TRUE);
+    WAIT (stats_of (s).frames > f, 5000);
+    line = walpe_sound_status ();
+    CHECK (stats_of (s).frames > f && line && !strstr (line, "paused"), "status, one shown again: %s",
+           line ? line : "(null)");
     g_free (line);
     walpe_sound_group_free (g);
     walpe_sound_group_free (off);
