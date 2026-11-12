@@ -647,14 +647,6 @@ a key), `--action=next|random|pause-toggle` runs a menu entry.
 - **"Skip hidden areas" under a compositing manager** (`skip_hidden=always`) cannot know
   which windows the compositor itself makes see-through: behind those the wallpaper
   stands still; see SETTINGS.md.
-- **One scene's picture depends on reused effect targets.** In Workshop item 3465215190 a
-  small area (about 66 x 40 pixels of a 960 x 540 frame, by up to 18 of 255) looks
-  different depending on whether an effect target was just made or taken back from the
-  pool: a layer with an opacity below 100 % is drawn with or without its effects,
-  depending on that. Unused targets are freed after 5 s
-  (`WALPE_FX_POOL_IDLE_MS`), so the other picture shows after the wallpaper was paused or
-  hidden that long. `WALPE_FX_ALPHA=after` does not have it. It is the only one of the 91
-  scenes of the test library that behaves so.
 - **Two monitors.** The leading monitor of a shared scene does not apply its own
   "application focused" limit to its own window; a scene that only follows the pointer
   still ticks (drawing nothing) while the pointer rests; a pointer moved by a program while
