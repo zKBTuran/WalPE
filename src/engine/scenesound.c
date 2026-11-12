@@ -1420,6 +1420,7 @@ char *walpe_sound_status (void)
 #else
         (void) real;
         (void) nowhere;
+        (void) speaking;
         r = g_strdup_printf ("%s, but built without libpulse: nothing can be heard", scope);
 #endif
         if (g_atomic_int_get (&n_streams) >= WALPE_SOUND_MAX_STREAMS) {
