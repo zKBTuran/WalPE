@@ -30,7 +30,9 @@ not what the daemon believes it drew. Each case starts its own daemon:
             process id stays.
   scale     output scale 2 and 1.5: the picture is right and is drawn in the
             output's own pixels (a sharp colour edge), not enlarged from
-            the scaled size.
+            the scaled size. Then the scale alone changes, at a moment at
+            which the daemon cannot restart for it yet: the still picture
+            fills the output all the same.
   noviewport  the same scales with the compositor's viewporter ignored
             (WALPE_WL_IGNORE=wp_viewporter): the picture is right, nothing
             the compositor objects to.
@@ -489,6 +491,31 @@ def scales(env, W, what, extra, edge):
                   f"{what} {scale}: the surface's buffer is the mode, its logical size 640x360", sf)
         else:
             check(sf.get("viewport") is False, f"{what} {scale}: no viewport is used", sf)
+    if extra is None:
+        # The scale alone changes now, so the output's size in the layout does (320x180),
+        # and right after the restart for the step before: the daemon does not restart
+        # again for some seconds (restarts in place are 10 s apart). A still wallpaper
+        # draws no frame meanwhile with which the new size could travel, and has to fill
+        # the output nevertheless (it showed its top left quarter, enlarged).
+        m = env.mark()
+        if check(env.display.output(name, scale=2), f"{what}: scale 2 on the same mode (320x180 in the layout)"):
+            bad, good, lk, t0 = 0, False, None, time.time()
+            while time.time() - t0 < 8 * PATIENCE:
+                restarted = "restarts in place" in env.since(m)
+                lk = look(env, name)
+                if restarted:
+                    break
+                if lk["middle"] == QUAD and lk["corners"] == QUAD and lk["size"] == (640, 360):
+                    good = True
+                    break
+                bad += 1
+                time.sleep(0.2)
+            if good or bad:
+                check(good, f"{what}: the still picture fills the output before the daemon restarts for "
+                      "the new layout", lk)
+            else:
+                note(f"{what}: the daemon restarted before a picture could be taken: the time before the "
+                     "restart was not looked at")
     healthy(env, mark, what)
     env.stop_daemon()
 

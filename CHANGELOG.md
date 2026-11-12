@@ -95,6 +95,13 @@ renders on a laptop's discrete GPU where there is one (under Graphics cards;
   it pauses for and that a window covering the wallpaper is not known in this session;
   the settings window prints it under the switch.
 
+- A still wallpaper (a picture, a scene in which nothing moves, anything paused) on an
+  output whose scale or resolution changes: until the daemon had restarted for the new
+  layout - two to ten seconds - it was shown at its old size: its top left quarter
+  enlarged, the picture in a quarter of the screen, or nothing (sway). It fills the
+  output at once now, a little soft until the restart draws it anew; an animated
+  wallpaper always did. Seen on niri, COSMIC and sway.
+
 ### Sound
 
 - Wallpaper sound is on by default, at half volume: a new configuration has `scene_sound`

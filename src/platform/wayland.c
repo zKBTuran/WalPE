@@ -1544,6 +1544,9 @@ static void wl_ls_apply_locked (WlSurf *s, guint act)
 
 /* ---- role listeners: either thread (see the top of the file) */
 
+static void wl_role_ack_locked (WlSurf *s);
+static void wl_surface_apply_locked (WlSurf *s);
+
 static void wl_layer_configure (void *data, struct zwlr_layer_surface_v1 *ls, uint32_t serial,
                                 uint32_t w, uint32_t h)
 {
@@ -1557,6 +1560,20 @@ static void wl_layer_configure (void *data, struct zwlr_layer_surface_v1 *ls, ui
         s->size_in.conf_h = s->ls.conf_h;
         wl_surface_resized_locked (s);
         wl_ls_apply_locked (s, act);
+        /* The output's scale or mode changed under a wallpaper that is
+         * shown. The size it is shown at goes out with the next frame's
+         * commit - and a still wallpaper draws no next frame: it stayed
+         * at its old size (a quarter of the output after scale 2 -> 1,
+         * cut off after 1 -> 2) until the daemon restarted for the new
+         * layout, which is 2 to 10 seconds later. Committed now, as the
+         * top of this file says for a change that has to arrive although
+         * no frame is drawn; while a swap is in progress swapped () does
+         * it. */
+        if (s->size_dirty && s->egl_window && !s->in_swap && wl_surf_ready_locked (s) && !wl_is_dead ()) {
+            wl_role_ack_locked (s);
+            wl_surface_apply_locked (s);
+            wl_surface_commit (s->surface);
+        }
     }
     g_mutex_unlock (&s->lock);
     wl_attention ();
@@ -2261,9 +2278,11 @@ static void wl_surface_swapped (WalpeSurface *ws)
         return;
     g_mutex_lock (&s->lock);
     s->in_swap = FALSE;
-    /* what the main thread wanted while the swap was in progress, and no
-     * further frame may come for a long time */
-    if (s->input_dirty && wl_surf_ready_locked (s)) {
+    /* what the main thread wanted while the swap was in progress (pointer
+     * input), or what a configure brought meanwhile (the size the surface
+     * is shown at), and no further frame may come for a long time */
+    if ((s->input_dirty || s->size_dirty) && wl_surf_ready_locked (s)) {
+        wl_role_ack_locked (s);
         wl_surface_apply_locked (s);
         wl_surface_commit (s->surface);
         /* sent now: the wait below returns without flushing when no frame
