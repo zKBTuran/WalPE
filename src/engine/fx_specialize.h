@@ -404,8 +404,10 @@ static void fxs_prog_put (FxsProg *e, gpointer pass)
         e->owner = NULL;
     if (--e->refs > 0)
         return;
-    if (e->program)
+    if (e->program) {
+        fx_prog_user_forget (e->program);   /* (this thread's table: the program's own, see above) */
         glDeleteProgram (e->program);
+    }
     e->program = 0;
     if (e->table != fxs_progs)
         return;

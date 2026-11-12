@@ -1191,6 +1191,9 @@ static gboolean gl_run (EGLDisplay dpy)
     hold_fuse_checks (in, other);
     held_prefix_checks (in, other);
     kept_output_checks (in, other);
+    /* which pass last used a program (fx_prog_user): entries while the
+     * sets that drew are alive, see the end */
+    guint users_live = fx_prog_user ? g_hash_table_size (fx_prog_user) : 0;
     fx_free_for_object (other);
     verify_checks (in);
     constant_checks (in);
@@ -1205,6 +1208,12 @@ static gboolean gl_run (EGLDisplay dpy)
     fx_targets_stats (&tb, &tn);
     char *d = g_strdup_printf ("targets left: %d = %" G_GINT64_FORMAT " bytes", tn, tb);
     result (tn == 0 && tb == 0, "no effect target is left when the sets are freed and the pool is released", d);
+    g_free (d);
+    /* ... and no program is remembered: an entry goes with its program
+     * (they stayed, one per pass program of every set the thread drew) */
+    guint users = fx_prog_user ? g_hash_table_size (fx_prog_user) : 0;
+    d = g_strdup_printf ("%u while sets were alive, %u left", users_live, users);
+    result (users_live > 0 && users == 0, "a deleted program is forgotten as the last user's program", d);
     g_free (d);
     rm_rf (tmpdir);
     g_clear_pointer (&tmpdir, g_free);

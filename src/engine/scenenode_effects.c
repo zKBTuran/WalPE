@@ -1419,6 +1419,17 @@ static void fx_gls_end (void)
 static __thread GHashTable *fx_prog_user;
 static void fx_thread_mark (void);   /* this thread has tables to free when it ends */
 
+/* A program is about to be deleted: its entry goes with it. The entries
+ * used to stay until the render thread ended: one per pass program of
+ * every scene the thread ever drew, on a driver that hands out new names
+ * instead of the ones that became free (Mesa). (The pass kept there is
+ * only compared, never followed: the table's growth was all of it.) */
+static void fx_prog_user_forget (GLuint program)
+{
+    if (fx_prog_user && program)
+        g_hash_table_remove (fx_prog_user, GUINT_TO_POINTER (program));
+}
+
 /* the value a per-frame uniform was last sent with (EffPass.dyn_last,
  * parallel to EffPass.dyn) */
 typedef struct {
@@ -1924,8 +1935,10 @@ static int fx_rt_format_id (const char *name);   /* fbos[].format -> FxRtFormat 
 static void fx_chain_free (EffectChain *ch)
 {
     for (int i = 0; i < ch->n_passes; i++) {
-        if (ch->passes[i].program && !fxs_release (&ch->passes[i]))
+        if (ch->passes[i].program && !fxs_release (&ch->passes[i])) {
+            fx_prog_user_forget (ch->passes[i].program);
             glDeleteProgram (ch->passes[i].program);
+        }
         g_free (ch->passes[i].dyn);
         g_free (ch->passes[i].dyn_last);
         g_free (ch->passes[i].consts);
