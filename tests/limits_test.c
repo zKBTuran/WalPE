@@ -8,6 +8,9 @@
  *     are on the size the FILE declares, not on the reduced size: checked
  *     when the wallpaper is created, again in gl_init (the file may have
  *     been replaced) and before every later decode at another size.
+ *     A file of another kind under a picture's name (an SVG document, XPM
+ *     or PNM text, a Windows icon or cursor) is refused in the same three
+ *     places, as a picture and as a GIF wallpaper.
  *  3. MPRIS cover art (media.c): the decode refuses what is too large or
  *     not a regular file, and the cache of decoded covers holds at most
  *     two thumbnails of bounded size, never the input.
@@ -249,6 +252,134 @@ static void test_image (void)
     g_free (pic);
     g_free (wide);
     g_free (many);
+}
+
+/* ------------------------------- 2b. a file that is no picture format */
+
+/* files gdk-pixbuf has a decoder for that is none of a wallpaper's: text
+ * ones as they are, a Windows icon of one 1 x 1 picture, and an animated
+ * cursor around that icon */
+static const guint8 ico_1x1[] = {
+    0, 0, 1, 0, 1, 0,   1, 1, 0, 0, 1, 0, 32, 0, 48, 0, 0, 0, 22, 0, 0, 0,
+    40, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 32, 0, 0, 0, 0, 0, 4, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0xff, 0xff,   0, 0, 0, 0,
+};
+
+static void put_le32 (GByteArray *a, guint32 v)
+{
+    const guint8 b[4] = { (guint8) v, (guint8) (v >> 8), (guint8) (v >> 16), (guint8) (v >> 24) };
+    g_byte_array_append (a, b, 4);
+}
+
+static GByteArray *ani_of_ico (void)
+{
+    GByteArray *a = g_byte_array_new ();
+    const guint32 anih[9] = { 36, 1, 1, 0, 0, 0, 0, 10, 1 };
+    g_byte_array_append (a, (const guint8 *) "RIFF", 4);
+    put_le32 (a, 4 + 8 + 36 + 8 + 4 + 8 + sizeof ico_1x1);
+    g_byte_array_append (a, (const guint8 *) "ACONanih", 8);
+    put_le32 (a, 36);
+    for (int i = 0; i < 9; i++)
+        put_le32 (a, anih[i]);
+    g_byte_array_append (a, (const guint8 *) "LIST", 4);
+    put_le32 (a, 4 + 8 + sizeof ico_1x1);
+    g_byte_array_append (a, (const guint8 *) "framicon", 8);
+    put_le32 (a, sizeof ico_1x1);
+    g_byte_array_append (a, ico_1x1, sizeof ico_1x1);
+    return a;
+}
+
+static void test_other_kinds (void)
+{
+    static const char svg[] = "<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" "
+                              "height=\"36\"><rect width=\"64\" height=\"36\" fill=\"red\"/></svg>\n";
+    static const char xpm[] = "/* XPM */\nstatic char *x[] = {\n\"2 2 1 1\",\n\". c #FF0000\",\n\"..\",\n\"..\"\n};\n";
+    static const char pnm[] = "P3\n2 2\n255\n255 0 0 255 0 0 255 0 0 255 0 0\n";
+    GByteArray *ani = ani_of_ico ();
+    const struct { const char *kind; const guint8 *d; gsize n; } other[] = {
+        { "svg", (const guint8 *) svg, sizeof svg - 1 },
+        { "xpm", (const guint8 *) xpm, sizeof xpm - 1 },
+        { "pnm", (const guint8 *) pnm, sizeof pnm - 1 },
+        { "ico", ico_1x1, sizeof ico_1x1 },
+        { "ani", ani->data, ani->len },
+    };
+    const char *const not_one = "not a picture format a wallpaper can be";
+    char *good = save_pic ("kind-good.png", 64, 48, "png");
+    int tried = 0;
+    for (guint i = 0; i < G_N_ELEMENTS (other); i++) {
+        char *png = P ("kind.png"), *gif = P ("kind.gif"), *pic = P ("kind-pic.png");
+        CHECK (g_file_set_contents (png, (const char *) other[i].d, (gssize) other[i].n, NULL));
+        CHECK (g_file_set_contents (gif, (const char *) other[i].d, (gssize) other[i].n, NULL));
+        int w = 0, h = 0;
+        GdkPixbufFormat *fmt = gdk_pixbuf_get_file_info (png, &w, &h);
+        char *name = fmt ? gdk_pixbuf_format_get_name (fmt) : NULL;
+        if (g_strcmp0 (name, other[i].kind)) {
+            /* this gdk-pixbuf has no decoder for it: nothing to refuse */
+            g_print ("limits-test: no %s loader, that kind is not tried\n", other[i].kind);
+        } else {
+            GError *err = NULL;
+            tried++;
+            /* as a picture wallpaper: when it is created */
+            CHECK (walpe_image_new (png, &err) == NULL);
+            CHECK (err && strstr (err->message, not_one) && strstr (err->message, other[i].kind));
+            g_clear_error (&err);
+            /* a picture that became such a file afterwards: in gl_init,
+             * before any GL call (none is possible here) */
+            copy_over (good, pic);
+            WalpeContent *c = walpe_image_new (pic, &err);
+            CHECK (c != NULL && !err);
+            if (c) {
+                copy_over (png, pic);
+                CHECK (!c->gl_init (c, &err));
+                CHECK (err && strstr (err->message, not_one));
+                g_clear_error (&err);
+                c->gl_free (c);
+                c->free (c);
+            }
+            g_clear_error (&err);
+            /* as a GIF wallpaper: when the shared source is opened */
+            c = walpe_gif_new (gif, &err);
+            CHECK (c != NULL);
+            if (c) {
+                CHECK (!c->gl_init (c, &err));
+                CHECK (err && strstr (err->message, not_one));
+                g_clear_error (&err);
+                c->gl_free (c);
+                c->free (c);
+            }
+            g_clear_error (&err);
+        }
+        g_free (name);
+        g_unlink (png);
+        g_unlink (gif);
+        g_unlink (pic);
+        g_free (png);
+        g_free (gif);
+        g_free (pic);
+    }
+    /* (every system this is built for has a loader for one of them at least) */
+    CHECK (tried > 0);
+    /* the formats a wallpaper can be are not refused: by this check, a
+     * picture of each kind this gdk-pixbuf writes */
+    static const char *const kinds[] = { "png", "jpeg", "bmp", "tiff" };
+    for (guint i = 0; i < G_N_ELEMENTS (kinds); i++) {
+        char *n = g_strdup_printf ("kind-ok.%s", kinds[i]);
+        GdkPixbuf *pb = gdk_pixbuf_new (GDK_COLORSPACE_RGB, FALSE, 8, 8, 6);
+        gdk_pixbuf_fill (pb, 0x102030ff);
+        char *f = P (n);
+        GError *err = NULL;
+        if (gdk_pixbuf_save (pb, f, kinds[i], NULL, NULL)) {
+            CHECK (walpe_picture_size_ok (f, &err) && !err);
+            g_clear_error (&err);
+        }
+        g_object_unref (pb);
+        g_unlink (f);
+        g_free (f);
+        g_free (n);
+    }
+    g_byte_array_unref (ani);
+    g_free (good);
 }
 
 /* with a GL context: the good paths, and the refusal of a later decode */
@@ -534,6 +665,27 @@ static void test_art (void)
             g_unlink (f);
             g_free (f);
         }
+        /* ... a Windows icon, an animated cursor (RIFF, as WebP is, but
+         * not WEBP), a TIFF and a TGA: formats a wallpaper's own pictures
+         * may have and a cover may not; and no bytes at all */
+        GByteArray *ani = ani_of_ico ();
+        char *tiff = save_pic ("cover-other.tiff", 8, 6, "tiff");
+        char *tga = P ("cover-other.tga");
+        static const guint8 tga_2x2[] = { 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 2, 0, 24, 0,
+                                          0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255 };
+        char *ico = P ("cover-other.ico"), *cur = P ("cover-other.ani"), *none = P ("cover-none.png");
+        CHECK (g_file_set_contents (tga, (const char *) tga_2x2, sizeof tga_2x2, NULL));
+        CHECK (g_file_set_contents (ico, (const char *) ico_1x1, sizeof ico_1x1, NULL));
+        CHECK (g_file_set_contents (cur, (const char *) ani->data, (gssize) ani->len, NULL));
+        CHECK (g_file_set_contents (none, "", 0, NULL));
+        CHECK (!walpe_media_art_probe (tiff, &w, &h, &n, &bytes));
+        CHECK (!walpe_media_art_probe (tga, &w, &h, &n, &bytes));
+        CHECK (!walpe_media_art_probe (ico, &w, &h, &n, &bytes));
+        CHECK (!walpe_media_art_probe (cur, &w, &h, &n, &bytes));
+        CHECK (!walpe_media_art_probe (none, &w, &h, &n, &bytes));
+        g_byte_array_unref (ani);
+        g_unlink (tiff); g_unlink (tga); g_unlink (ico); g_unlink (cur); g_unlink (none);
+        g_free (tiff); g_free (tga); g_free (ico); g_free (cur); g_free (none);
     }
 
     /* a cover whose file changed is not served from the cache */
@@ -754,6 +906,7 @@ int main (void)
 #endif
     test_gif ();
     test_image ();
+    test_other_kinds ();
     test_art ();
     test_gl ();
 
