@@ -730,10 +730,45 @@ static void http_cb (SoupServer *srv, SoupServerMessage *msg, const char *path,
     soup_message_headers_set_content_type (h, mime ? mime : "application/octet-stream", NULL);
     soup_message_headers_replace (h, "Cache-Control", "no-store");
     GBytes *b = g_mapped_file_get_bytes (mf);
+    guint status = SOUP_STATUS_OK;
+    {
+        /* A request for a part of the file (WebKit's media player asks for
+         * "bytes=N-" to play and to seek). Left to libsoup, the part is cut
+         * out of a copy of the WHOLE file made in memory for it: every such
+         * request cost the daemon the file's size for as long as its answer
+         * was on its way - a page with a 200 MB clip, 200 MB a request; a
+         * page that keeps a few such answers waiting, that many times its
+         * largest file - and the copy is the one place where this process
+         * itself reads the mapped file: a file that shrinks under it (an
+         * update of the wallpaper) ends the daemon with SIGBUS. One range
+         * is answered here, from the mapping itself: the kernel reads it
+         * when it sends, and a file cut short then is a failed send. */
+        SoupMessageHeaders *rq = soup_server_message_get_request_headers (msg);
+        const goffset total = (goffset) g_bytes_get_size (b);
+        SoupRange *ranges = NULL;
+        int n_ranges = 0;
+        if (soup_message_headers_get_ranges (rq, total, &ranges, &n_ranges)) {
+            if (n_ranges == 1 && ranges[0].start < total && ranges[0].end >= ranges[0].start) {
+                const goffset start = MAX (ranges[0].start, 0), end = MIN (ranges[0].end, total - 1);
+                GBytes *part = g_bytes_new_from_bytes (b, (gsize) start, (gsize) (end - start + 1));
+                g_bytes_unref (b);
+                b = part;
+                soup_message_headers_set_content_range (h, start, end, total);
+                status = SOUP_STATUS_PARTIAL_CONTENT;
+            } else if (n_ranges != 1) {
+                /* several parts in one answer (no player asks): the whole
+                 * file, which a server may always send instead */
+                soup_message_headers_remove (rq, "Range");
+            }
+            /* (one range that begins behind the end: libsoup answers 416
+             * without looking at the body) */
+            soup_message_headers_free_ranges (rq, ranges);
+        }
+    }
     soup_message_body_append_bytes (soup_server_message_get_response_body (msg), b);
     g_bytes_unref (b);
     g_mapped_file_unref (mf);
-    soup_server_message_set_status (msg, SOUP_STATUS_OK, NULL);
+    soup_server_message_set_status (msg, status, NULL);
     g_free (ct);
     g_free (mime);
     g_free (file);

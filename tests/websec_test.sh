@@ -32,7 +32,10 @@
 #  9. a frame whose server answers "401, name and password": the page
 #     still finishes loading - it never did: WebKit's own dialog sat in
 #     the page (on the desktop, when the page was shown already) and
-#     waited for an answer nobody can type.
+#     waited for an answer nobody can type;
+# 10. a part of a large file of the page (Range: bytes=0-, what a media
+#     player sends) with the answer left waiting does not cost the daemon
+#     the file's size in memory - it did, once for every such request.
 #
 # Skipped (exit 77) without Xvfb / python3 / the web module, or when WebKit
 # does not come up here. Run: meson test -C build websec -v
@@ -103,6 +106,7 @@ PORT=$(cat "$T/port")
 echo "own file" > "$T/wp/own.txt"
 printf 'not a web type' > "$T/wp/own.bin"
 printf '{ "type": "web", "title": "websec", "file": "index.html" }\n' > "$T/wp/project.json"
+head -c 67108864 /dev/zero > "$T/wp/big.bin"    # 64 MiB, asked for in part further down
 cat > "$T/wp/index.html" <<PAGE
 <!doctype html><html><body style="background:#223"><p id="p">text of the page</p><input id="i" value="PAGE-TEXT">
 <script>
@@ -123,6 +127,9 @@ new Image().src = O + '/img';
 // lines that carry the page's address: a frame that would be a download, the console
 var fr = document.createElement('iframe'); fr.src = 'own.bin'; document.body.appendChild(fr);
 log('my address is ' + location.href);
+// (for the test's own request further down: the token with dashes in it, which is
+// not the spelling the log may not show)
+var tm = location.pathname.match(/^\/([0-9a-f]{32})\//); log('tok ' + (tm ? tm[1].split('').join('-') : 'none'));
 setTimeout(fin, 2500);
 // selections: PRIMARY on a timer, CLIPBOARD on a click
 setInterval(function () { var i = document.getElementById('i'); i.focus(); i.select();
@@ -220,6 +227,32 @@ time.sleep(8)
     wait "$HPID"
 fi
 
+# --- a part of a large file of the page ("Range: bytes=0-", as a media
+# player asks), with the answer left waiting: the daemon made a copy of the
+# whole file in memory for every such request
+RANGE_KB= RANGE_ST=
+TOK=$(sed -n 's/.*NP tok \([0-9a-f-]*\).*/\1/p' "$T/daemon.log" | head -1 | tr -d '-')
+anon_kb () { sed -n 's/^RssAnon:[^0-9]*\([0-9]*\).*/\1/p' "/proc/$DPID/status" 2>/dev/null; }
+if [ -n "$HPORT" ] && [ ${#TOK} = 32 ]; then
+    A0=$(anon_kb)
+    python3 -I -c '
+import socket, sys, time
+port = int(sys.argv[1])
+s = socket.create_connection(("127.0.0.1", port), timeout=20)
+s.sendall(("GET /%s/big.bin HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nRange: bytes=0-\r\n\r\n" % (sys.argv[2], port)).encode())
+d = s.recv(4096)                # the head of the answer; the rest is not taken
+open(sys.argv[3], "w").write(d.split(b"\r\n")[0].decode("latin1") + "\n")
+time.sleep(5)
+' "$HPORT" "$TOK" "$T/range" &
+    RPID=$!
+    i=0; while [ ! -s "$T/range" ] && [ $i -lt 60 ]; do sleep 0.25; i=$((i+1)); done
+    sleep 1
+    A1=$(anon_kb)
+    RANGE_ST=$(cat "$T/range" 2>/dev/null)
+    [ -n "$A0" ] && [ -n "$A1" ] && RANGE_KB=$((A1 - A0))
+    wait "$RPID"
+fi
+
 # --- another client's selections while the page selects, and two clicks
 "$B/websec-selown" 6 > "$T/sel.log" 2>&1 &
 SPID=$!
@@ -274,6 +307,13 @@ if [ "${CONN_HELD:-0}" -lt 300 ]; then
 elif [ "$CONN_GROW" -gt 220 ]; then
     bad "$CONN_HELD connections that sent nothing were $CONN_GROW open files of the daemon"
 fi
+case "$RANGE_ST" in
+"HTTP/1.1 206"*)
+    [ -n "$RANGE_KB" ] && [ "$RANGE_KB" -le 32768 ] ||
+        bad "an answer to \"Range: bytes=0-\" on a 64 MiB file of the page, left waiting, cost the daemon $((${RANGE_KB:-0} / 1024)) MiB of its own memory" ;;
+"") echo "note: the page's token was not found in the log (the Range request was not made)" ;;
+*) bad "a part of a file of the page was asked for (Range: bytes=0-) and the answer was: $RANGE_ST" ;;
+esac
 [ "$CONN_STATUS" = ok ] || bad "the daemon did not answer on its control socket while $CONN_HELD connections to the page's file server were open"
 grep -q 'NP mousedown trusted=true' "$T/daemon.log" || echo "note: no trusted click reached the page here (CLIPBOARD part not exercised)"
 grep -q 'NP my address is' "$T/daemon.log" || bad "the page's console line is missing from the log"
