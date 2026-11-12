@@ -9156,6 +9156,8 @@ static gboolean web_accel_restart (gpointer user)
  *    WEB_UNLOAD_GAP_S ago (wallpapers tried one after the other, a script
  *    that alternates between a page and a scene): the module then stays
  *    until a later change of wallpapers finds the time over;
+ *  - when the settings cannot be saved (the new image would read the
+ *    wallpapers of before the change);
  *  - while an import, a video conversion or a Workshop download runs (the
  *    restart would end it), or the copy of a scene's video is being made
  *    (sv_converting: it would be started again from nothing);
@@ -9222,9 +9224,23 @@ static gboolean web_unload_due (gboolean changed)
         said = TRUE;
         return FALSE;
     }
+    /* the new image reads the wallpapers from the saved settings. When
+     * those cannot be written (a full disk, a home that is read-only) it
+     * would come back with the wallpapers of before this change - the web
+     * wallpaper that was just replaced - and the one that was chosen would
+     * be gone: no restart then, this image carries the change out, as with
+     * the setting off */
+    if (!walpe_config_save (D.cfg)) {
+        static gboolean said_unsaved;
+        if (!said_unsaved)
+            g_message ("no web wallpaper is shown any more; the web module stays loaded this time "
+                       "(the settings could not be saved, and a restart would bring back the "
+                       "wallpapers that are saved)");
+        said_unsaved = TRUE;
+        return FALSE;
+    }
     g_message ("no web wallpaper is shown any more: restarting in place to unload the web module "
                "(WebKitGTK, GTK); `walpe-ctl set web_unload=off` keeps it loaded instead");
-    walpe_config_save (D.cfg);      /* the new image reads the wallpapers from it */
     web_unload_pending = TRUE;
     /* after the reply to the request that changed the wallpaper went out */
     g_idle_add (web_unload_cb, NULL);

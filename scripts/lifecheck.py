@@ -1569,6 +1569,40 @@ def case_webunload(env, W):
           "webunload (off): the wallpaper of that change is shown, the setting was kept", rc.brief(env.monitors()))
     env.stop_daemon()
 
+    # ---- 3. the settings cannot be saved (a full disk, a read-only home): the image after a
+    # restart would read the wallpapers of before the change and bring the page back
+    cfgdir = os.path.dirname(env.config)
+    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False,
+                          "current": W["red"]})
+    os.chmod(cfgdir, 0o500)
+    locked = not os.access(cfgdir, os.W_OK)
+    os.chmod(cfgdir, 0o700)
+    if not locked:
+        print("skip webunload (unsaved): this user writes into a folder without write permission (root)")
+        return
+    if not check(env.start_daemon([A], extra={"WALPE_WEB_UNLOAD_GAP_S": "0"}), "webunload (unsaved): daemon started"):
+        return
+    pid = env.daemon.pid
+    env.open(web)
+    check(web_shown(), "webunload (unsaved): a web wallpaper", (rc.brief(env.monitors()), modules()))
+    os.chmod(cfgdir, 0o500)
+    try:
+        mark = env.mark()
+        rep = env.ipc({"cmd": "open", "path": W["blue"]})
+        check(bool(rep and rep.get("ok") and rep.get("save_error")),
+              "webunload (unsaved): the request is carried out and says that the settings were not saved", rep)
+        check(loaded(env, W["blue"]), "webunload (unsaved): the wallpaper of that change is shown, not the page again",
+              rc.brief(env.monitors()))
+        time.sleep(1.0)
+        check(SAID not in env.since(mark) and env.daemon.poll() is None and env.daemon.pid == pid and
+              "the settings could not be saved" in env.since(mark),
+              "webunload (unsaved): no restart (the log says why)", env.since(mark)[-300:])
+        c = colour_is(env, A, lambda c: rc.name_of(c) == "blue")
+        check(rc.name_of(c) == "blue", "webunload (unsaved): and it is on screen", c)
+    finally:
+        os.chmod(cfgdir, 0o700)
+    env.stop_daemon()
+
 
 # --------------------------------------------------------------- fullscreen
 class XClient:
