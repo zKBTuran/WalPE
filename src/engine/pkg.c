@@ -365,15 +365,21 @@ static gboolean pkg_extract_mode (const char *pkg_path, const char *dest_dir, in
             if (mode != PKG_ALL) {
                 gboolean snd = FALSE;
                 if (walpe_pkg_sound_name (path)) {
+                    /* (listed under the one spelling of its name, and once:
+                     * the first of its entries marks it 3) */
                     char *key = pkg_path_key (path);
-                    snd = GPOINTER_TO_INT (g_hash_table_lookup (kinds, key)) == 2;
-                    g_free (key);
+                    int kind = GPOINTER_TO_INT (g_hash_table_lookup (kinds, key));
+                    snd = kind >= 2;
+                    if (mode == PKG_BUT_SOUND && kind == 2) {
+                        if (left)
+                            g_string_append_printf (left, "%s\n", key);
+                        g_hash_table_replace (kinds, key, GINT_TO_POINTER (3));
+                    } else {
+                        g_free (key);
+                    }
                 }
-                if (mode == PKG_BUT_SOUND && snd) {
-                    if (left)
-                        g_string_append_printf (left, "%s\n", path);
+                if (mode == PKG_BUT_SOUND && snd)
                     continue;
-                }
                 if (mode == PKG_ONLY_SOUND && !snd)
                     continue;
             }
@@ -694,12 +700,17 @@ char *walpe_pkg_deferred_path (const char *cache_dir, const char *name)
     g_free (list);
     if (!have)
         return NULL;
-    char *alt = g_build_filename ("assets", name, NULL);   /* as an asset name is looked up on disk */
-    if (pkg_list_has (text, len, name))
-        found = g_build_filename (cache_dir, name, NULL);
+    /* The scene's name for the file is compared as the file system would
+     * have resolved it had the file been extracted - "./sounds/a.ogg" and
+     * "sounds//a.ogg" are "sounds/a.ogg", the spelling the list has - and,
+     * as an asset name is looked up on disk, below "assets" too. */
+    char *key = pkg_path_key (name), *alt = g_strconcat ("assets/", key, NULL);
+    if (pkg_list_has (text, len, key))
+        found = g_build_filename (cache_dir, key, NULL);
     else if (pkg_list_has (text, len, alt))
         found = g_build_filename (cache_dir, alt, NULL);
     g_free (alt);
+    g_free (key);
     g_free (text);
     return found;
 }

@@ -254,7 +254,7 @@ static void test_kinds (void)
         CHECK (!has (c, "sounds/one.wav") && !has (c, "twice/a.ogg"), "sound off: the sound files are not");
         CHECK (same_text (c, "twice/b.ogg", SOLID),
                "a file named twice whose last entry is no sound file: in the copy, the last entry's bytes");
-        CHECK (!g_strcmp0 (list, "sounds/one.wav\ntwice/a.ogg\ntwice/a.ogg\n"), "the list: \"%s\"",
+        CHECK (!g_strcmp0 (list, "sounds/one.wav\ntwice/a.ogg\n"), "the list (a file named twice is in it once): \"%s\"",
                list ? list : "(none)");
         g_free (list);
         CHECK (walpe_pkg_fetch_sound (c), "the outstanding files are fetched");
@@ -350,9 +350,17 @@ static void test_cache (void)
     char *p = walpe_pkg_deferred_path (c, "sounds/one.wav");
     CHECK (!g_strcmp0 (p, want), "the place of an outstanding file (%s)", p ? p : "none");
     g_free (p);
+    /* the name as a scene may spell it: whatever the file system resolves
+     * to that file */
+    const char *also[] = { "./sounds/one.wav", "sounds//one.wav", "sounds/./one.wav", ".//sounds///./one.wav" };
+    for (guint i = 0; i < G_N_ELEMENTS (also); i++) {
+        p = walpe_pkg_deferred_path (c, also[i]);
+        CHECK (!g_strcmp0 (p, want), "the place of an outstanding file, named \"%s\" (%s)", also[i], p ? p : "none");
+        g_free (p);
+    }
     g_free (want);
     const char *no[] = { "sounds/planted.wav", "scene.json", "sounds/ONE.wav", "one.wav", "../sounds/one.wav",
-                         "music/two.ogg" };
+                         "music/two.ogg", "sounds/one.wav/", "sounds/one.wav/.", "./", "sounds" };
     for (guint i = 0; i < G_N_ELEMENTS (no); i++) {
         p = walpe_pkg_deferred_path (c, no[i]);
         CHECK (!p, "no place for \"%s\" (%s)", no[i], p ? p : "");
@@ -659,6 +667,58 @@ static void test_scene (void)
     g_free (c);
 }
 
+/* ---- D: names the file system resolves, the scene's and the package's ---- */
+#define SCENE_SPELT \
+    ",{\"id\":3,\"name\":\"m1\",\"sound\":[\"./sounds//one.wav\"],\"playbackmode\":\"loop\",\"visible\":true}" \
+    ",{\"id\":4,\"name\":\"m2\",\"sound\":[\"extra/three.wav\"],\"playbackmode\":\"loop\",\"visible\":true}" \
+    ",{\"id\":5,\"name\":\"m3\",\"sound\":[\".//four.wav\"],\"playbackmode\":\"loop\",\"visible\":true}"
+static const char SPELT[] = SCENE_HEAD SCENE_SPELT SCENE_TAIL;
+
+static void test_spelt (void)
+{
+    const Ent e[] = {
+        { "scene.json", (const guint8 *) SPELT, strlen (SPELT) },
+        { "models/solid.json", (const guint8 *) SOLID, strlen (SOLID) },
+        { "sounds/one.wav", wav->data, wav->len },
+        { "./extra//three.wav", wav->data, wav->len },
+        { "assets/./four.wav", wav->data, wav->len },
+    };
+    write_pkg (pkg, e, G_N_ELEMENTS (e), 0);
+    char *c = cache_of_item ();
+    for (int on_first = 0; on_first < 2; on_first++) {
+        rm_rf (c);
+        walpe_sound_set_enabled (on_first);
+        if (!run_open (&ra, item)) {
+            CHECK (FALSE, "the scene with spelled names loads");
+            break;
+        }
+        run_frame (&ra);
+        if (!on_first) {
+            char *list = list_of (c);
+            CHECK (!g_strcmp0 (list, "sounds/one.wav\nextra/three.wav\nassets/four.wav\n") &&
+                   !has (c, "sounds/one.wav"), "the list has each file under one spelling: \"%s\"",
+                   list ? list : "(none)");
+            g_free (list);
+            walpe_sound_set_enabled (TRUE);     /* ... while the scene is shown */
+        }
+        gboolean all = FALSE;
+        for (int i = 0; i < 500 && !all; i++) {
+            run_frame (&ra);
+            g_usleep (10000);
+            all = walpe_sound_threads () == 3 && has (c, "assets/four.wav") && !has (c, ".walpe-pkg-nosound");
+        }
+        CHECK (all && same_bytes (c, "sounds/one.wav", wav) && same_bytes (c, "extra/three.wav", wav) &&
+               same_bytes (c, "assets/four.wav", wav) && !has (c, ".walpe-pkg-nosound"),
+               "sound %s: each of the three layers has its player and its file (%d players)",
+               on_first ? "on at the load" : "switched on while the scene is shown", walpe_sound_threads ());
+        run_close (&ra);
+        walpe_sound_set_enabled (FALSE);
+        CHECK (wait_for (no_threads, NULL, 5000), "... and the players end with the scene");
+    }
+    g_free (c);
+    make_item (0);
+}
+
 int main (void)
 {
     T = g_dir_make_tmp ("walpe-pkgsound-XXXXXX", NULL);
@@ -707,6 +767,7 @@ int main (void)
     if (ctx != EGL_NO_CONTEXT && surf != EGL_NO_SURFACE && eglMakeCurrent (dpy, surf, surf, ctx)) {
         walpe_glutil_init ();
         test_scene ();
+        test_spelt ();
         eglMakeCurrent (dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         eglDestroySurface (dpy, surf);
         eglDestroyContext (dpy, ctx);

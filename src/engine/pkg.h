@@ -32,7 +32,8 @@ gboolean walpe_pkg_sound_name (const char *entry_path);
  * room on the disk): the copy is as it was. */
 gboolean walpe_pkg_fetch_sound (const char *cache_dir);
 /* `name` as a scene writes it (looked up as <name> and assets/<name>, like
- * a file on disk): where that file of the package will be once
+ * a file on disk, and spelled as the file system would resolve it:
+ * "./sounds/a.ogg", "sounds//a.ogg"): where that file of the package will be once
  * walpe_pkg_fetch_sound () has run, or NULL when the copy has no such file
  * outstanding (g_free). */
 char *walpe_pkg_deferred_path (const char *cache_dir, const char *name);
