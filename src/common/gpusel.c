@@ -783,6 +783,16 @@ int walpe_gpu_auto_target (GPtrArray *devs, int display, char **why)
     const WalpeGpuDev *dd = g_ptr_array_index (devs, display);
     if (dd->klass != WALPE_GPU_INTEGRATED)
         return -1;
+    /* A device no kernel driver is bound to renders nothing. Where the list
+     * has such a one as the displays' GPU - the processor's graphics of a
+     * laptop, the firmware's primary device, left without a driver, while
+     * the card's driver runs without its DRM module - the window system
+     * does not draw with it, and which GPU it uses is not known from here:
+     * nothing is tried and nothing is said. ("NVIDIA ... has a driver but
+     * no DRM device: rendering stays on Intel ..." stood in the log and in
+     * status there, about a machine on which the NVIDIA card renders.) */
+    if (!dd->driver || !*dd->driver)
+        return -1;
     int first = -1, boot = -1, unusable = -1, n_unusable = 0;
     for (guint i = 0; i < devs->len; i++) {
         const WalpeGpuDev *d = g_ptr_array_index (devs, i);

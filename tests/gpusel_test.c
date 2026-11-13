@@ -586,6 +586,22 @@ static void test_auto (void)
         why = NULL;
         n->render_node = rn;
         CHECK (walpe_gpu_auto_target (a, 0, NULL) == 1);
+        /* The processor's graphics has no driver at all (the firmware's
+         * primary device of a laptop that runs on its card alone) and the
+         * card's driver is there without its DRM module: the list names
+         * the Intel device as the displays', and it renders nothing. Not
+         * "rendering stays on" it: nothing is tried, nothing is said. */
+        char *drv = dev (a, 0)->driver;
+        dev (a, 0)->driver = g_strdup ("");
+        n->card = -1;
+        why = (char *) 1;
+        CHECK (walpe_gpu_auto_target (a, 0, &why) == -1 && why == NULL);
+        n->card = card;
+        why = (char *) 1;
+        CHECK (walpe_gpu_auto_target (a, 0, &why) == -1 && why == NULL);    /* (a card that could render, too) */
+        why = NULL;
+        g_free (dev (a, 0)->driver);
+        dev (a, 0)->driver = drv;
         g_ptr_array_unref (a);
         g_free (root);
     }

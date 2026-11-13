@@ -163,6 +163,8 @@ gboolean walpe_gpu_value_is_display (const char *value);
  * is set. `display`: the device that renders for the window system when
  * nothing is set (walpe_gpu_default_renderer; -1 = not known).
  *   not known, or not an integrated GPU (a card, a virtual adapter): -1;
+ *   an integrated GPU no kernel driver is bound to (it renders nothing,
+ *   so the window system uses another one): -1, and no *why;
  *   an integrated GPU, and no discrete device beside it: -1;
  *   an integrated GPU and discrete devices: the first of them that can be
  *   rendered on from here - a kernel driver is bound, it has a DRM device
