@@ -834,6 +834,34 @@ static void test_dir_as_written (void)
         walpe_config_free (c);
     }
     {
+        /* A relative path names a folder only together with the directory
+         * the program was started in. The save writes that folder, as it
+         * did before the words of the file were kept: left as "walls", the
+         * next start from another directory - the daemon from a session's
+         * autostart, the window from a terminal - had another library. */
+        static const char *const rel[] = { "walls", "./walls", "a/../walls" };
+        char *cwd = g_get_current_dir ();
+        char *abs = g_build_filename (cwd, "walls", NULL);
+        for (guint i = 0; i < G_N_ELEMENTS (rel); i++) {
+            char *json = g_strdup_printf ("{\"config_version\":4,\"wallpapers_dir\":\"%s\"}", rel[i]);
+            put_config (json);
+            g_free (json);
+            WalpeConfig *c = walpe_config_load ();
+            CHECK (!g_strcmp0 (c->wallpapers_dir, abs));
+            CHECK (walpe_config_save (c));
+            char *d = saved_dir ();
+            if (g_strcmp0 (d, abs)) {
+                fails++;
+                g_printerr ("FAIL: the relative wallpapers_dir \"%s\" was saved as \"%s\", not as \"%s\"\n",
+                            rel[i], d ? d : "(none)", abs);
+            }
+            g_free (d);
+            walpe_config_free (c);
+        }
+        g_free (abs);
+        g_free (cwd);
+    }
+    {
         /* no file at all: the default is an absolute path in memory too
          * (it was "~/.local/..." as it stands, and a path built from it
          * without expanding it began with a folder named "~"), and the

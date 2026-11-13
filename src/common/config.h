@@ -35,7 +35,8 @@ int walpe_skip_hidden_parse (const char *s, int dflt);
 typedef struct WalpeConfig_ {
     char   *wallpapers_dir;   /* library root, an absolute path */
     char   *wallpapers_dir_written;   /* the same as the file names it ("~/walls"): what a save
-                                       * writes while it still names wallpapers_dir */
+                                       * writes while it still names wallpapers_dir (a
+                                       * relative path is saved as the folder it named) */
     char   *current;          /* active wallpaper path ("" = none): the default for
                                * every monitor without an entry in monitor_current */
     GHashTable *monitor_current; /* output name (e.g. "HDMI-0") -> wallpaper path

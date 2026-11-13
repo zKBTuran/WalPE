@@ -112,10 +112,16 @@ void walpe_config_quality_sync (WalpeConfig *c)
  * the folder in use, else the folder. The loader makes the path absolute,
  * and the save used to write that: the first change of any setting after
  * a start turned "~/..." in the file into "/home/<name>/...", in a file
- * that is only ever edited by hand for this key. (g_free) */
+ * that is only ever edited by hand for this key. Words that are no "~..."
+ * and no absolute path ("walls", "./walls") name a folder only together
+ * with the directory the program was started in: for those the save
+ * writes the folder, as it always did - kept as written, the daemon, the
+ * library window and the tray would each look below the directory they
+ * were started in, at every start. (g_free) */
 static char *config_dir_text (const WalpeConfig *c)
 {
-    if (c->wallpapers_dir_written) {
+    const char *w = c->wallpapers_dir_written;
+    if (w && (w[0] == '~' || w[0] == '/')) {
         char *abs = walpe_expand_path (c->wallpapers_dir_written);
         gboolean same = !g_strcmp0 (abs, c->wallpapers_dir);
         g_free (abs);
