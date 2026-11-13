@@ -180,7 +180,9 @@ it was). A bare window manager on X11 - dwm, i3, openbox - gets the window of 0.
   setting on, a monitor that went and came back kept the names of its last one or two
   wallpapers in memory, some tens of bytes each time, and for the first moments on its
   new output it could have been taken for a monitor whose render thread does not come
-  back from a load, which restarts the daemon.)
+  back from a load, which restarts the daemon. And an output that came back while its
+  render thread was in a frame that does not end stayed without a wallpaper: the restart
+  in place that was to follow after twenty seconds never came. It comes now.)
 - A monitor that got no wallpaper surface when the daemon started is tried again. A
   compositor that was not ready to show wallpapers yet - river 0.4 and later before its
   window manager is connected, a session still starting - left the daemon running with an
@@ -777,6 +779,20 @@ microphone.
 - GNOME on Wayland: only with the extension for GNOME Shell (`contrib/gnome`, under
   Wayland above), which GNOME Shell loads on the two versions it was run on, 46 and 51;
   on 47 to 50 the version has to be added to its `metadata.json` by hand.
+- Sound on PipeWire 1.0 (seen on 1.0.5, Ubuntu 24.04's; `pipewire --version` says which):
+  after a pause the sound of a scene or a video can stay silent, about once in 20 to 30
+  pauses, and a window that covers the desktop is a pause. Not seen in 340 pauses on
+  PipeWire 1.6.11, never on PulseAudio; 0.14.0 has it too, where sound was off by
+  default. `walpe-ctl open <the same wallpaper>` brings the sound back (pause and resume,
+  mute and unmute do not), and `walpe-ctl set covered=off` avoids the pause under
+  windows. The repair is written and waits for its review.
+- Arch and CachyOS (gdk-pixbuf 2.44, which decodes through glycin): the size limits for
+  a wallpaper's pictures are looked at after the picture has been decoded there, not
+  before. A wallpaper file made up for it can make the system's picture decoder use
+  gigabytes of memory for up to 45 seconds; 0.14.0 has this too. A TGA picture with a
+  colour map it does not use is not loaded there, and a `project.json` with a second
+  value behind its first one is refused. The repair is written and waits for its
+  review.
 - Video sound: videos imported with 0.14.0 or earlier have no sound track - the import
   dropped it - and have to be imported again from the original file. A video layer
   inside a scene is silent. A video's track is kept as a FLAC file in
