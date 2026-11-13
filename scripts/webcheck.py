@@ -29,7 +29,8 @@ that into the daemon's log). Nothing of the user's is read or written.
             get the same time stamp in the order they were asked for, a cancelled one
             is not run, one that throws does not stop the next and its error reaches
             window.onerror with its message, requestAnimationFrame(null) is a
-            TypeError where it is called.
+            TypeError where it is called. A new limit (`walpe-ctl set fps=12`) is
+            kept at once, by the page and by a frame inside it.
   props     the Wallpaper Engine listener: applyUserProperties with the option values
             on load, with the changed one after `walpe-ctl setprop` (and the picture
             follows), applyGeneralProperties with the frame rate limit.
@@ -674,10 +675,16 @@ def case_snapshot(env, W):
 
 # ----------------------------------------------------------------- raflimit
 RAF_LIMIT = 24      # not 60 and no part of it: no WebKit paces this by itself
+RAF_LOWER = 12      # the limit it is changed to while the page runs
 RAFPAGE = """<!doctype html><html><head><meta charset="utf-8"></head><body style="background:#203040">
 <script>
-var S = {raf: 0, errs: [], done: false}, ts = [], c = [0, 0, 0], late;
+var S = {raf: 0, ifr: 0, errs: [], done: false}, ts = [], c = [0, 0, 0], late;
 window.addEventListener('error', function (e) { S.errs.push(String(e.message)); });
+window.addEventListener('message', function (e) { if (e.data && e.data.wcraf !== undefined) S.ifr = e.data.wcraf; });
+var fr = document.createElement('iframe');   /* a frame of the page's origin with a loop of its own */
+fr.srcdoc = '<script>var n=0;function f(){n++;parent.postMessage({wcraf:n},"*");requestAnimationFrame(f)}' +
+            'requestAnimationFrame(f)<\\/script>';
+document.body.appendChild(fr);
 function loop() { S.raf++; requestAnimationFrame(loop); }
 requestAnimationFrame(loop);
 requestAnimationFrame(function () { S.self = this === window; });
@@ -739,6 +746,22 @@ def case_raflimit(env, W):
           (b.get("after"), b.get("errs")))
     check(b.get("nul") == "TypeError", "raflimit: requestAnimationFrame(null) is a TypeError where it is called",
           b.get("nul"))
+    # a new limit while the page runs: the page and the frame inside it
+    frate = (b.get("ifr", 0) - a.get("ifr", 0)) / dt if dt > 0 else 0
+    check(1 <= frate <= RAF_LIMIT * 1.15, "raflimit: a frame inside the page runs at the limit too (%d)" % RAF_LIMIT,
+          "%.1f a second" % frate)
+    env.ctl("set", "fps=%d" % RAF_LOWER)
+    time.sleep(1.0)
+    a = state(env, "raf", fresh=True)
+    time.sleep(3.0)
+    b = state(env, "raf", fresh=True)
+    dt = (b.get("t", 0) - a.get("t", 0)) / 1000.0
+    rate = (b.get("raf", 0) - a.get("raf", 0)) / dt if dt > 0 else 0
+    frate = (b.get("ifr", 0) - a.get("ifr", 0)) / dt if dt > 0 else 0
+    check(1 <= rate <= RAF_LOWER * 1.15, "raflimit: `set fps=%d` is the page's limit at once" % RAF_LOWER,
+          "%.1f a second over %.1f s" % (rate, dt))
+    check(1 <= frate <= RAF_LOWER * 1.15, "raflimit: and the limit of the frame inside it",
+          "%.1f a second over %.1f s" % (frate, dt))
     healthy(env, mark, "raflimit")
 
 

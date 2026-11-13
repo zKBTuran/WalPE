@@ -2797,7 +2797,8 @@ static const char *WE_API_JS =
  * was caught and thrown again from a timer, which made it a "Script
  * error." without message, file or line for the page - the script is not
  * of the page's origin - and null was taken and failed later.)
- * __walpeRaf(n) sets the limit (walpe-ctl set fps=N).
+ * __walpeRaf(n) sets the limit (walpe-ctl set fps=N), of the frame it is
+ * called in and of the frames inside it.
  *
  * WebKit's own throttle (WEBKIT_DISPLAY_REFRESH_THROTTLE_FPS, which the
  * daemon sets for a limit that divides 60) counts as its rate only in a
@@ -2837,7 +2838,12 @@ static char *raf_limit_js (int lim)
         "if(window.webkitRequestAnimationFrame)window.webkitRequestAnimationFrame=raf;"
         "if(window.webkitCancelAnimationFrame)window.webkitCancelAnimationFrame=caf;"
         "if(window.webkitCancelRequestAnimationFrame)window.webkitCancelRequestAnimationFrame=caf;"
-        "window.__walpeRaf=function(n){if(n!==undefined)lim=n;return lim;};})();",
+        /* (a new limit is handed on to the frames of the page: each has
+         * this script and a limit of its own, read from the top frame when
+         * it was made. A frame of another origin cannot be told) */
+        "window.__walpeRaf=function(n){if(n!==undefined){lim=n;"
+        "for(var i=0;i<window.frames.length;i++){try{window.frames[i].__walpeRaf(n);}catch(e){}}}"
+        "return lim;};})();",
         lim, nat);
 }
 
