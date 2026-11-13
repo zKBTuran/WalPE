@@ -181,11 +181,15 @@ renders on a laptop's discrete GPU where there is one (under Graphics cards;
 
 - Wallpaper sound is on by default, at half volume: a new configuration has `scene_sound`
   on and `volume` 0.5 (0.14.0: off and 0, so a wallpaper with sound was silent until two
-  settings were found). A configuration from 0.14.0 or older that holds volume 0 without
-  sound switched on takes the new defaults, once, and the daemon says so in its log;
-  sound on with volume 0, or sound off with a volume above 0, was somebody's doing and
-  is kept, and so is whatever is set from now on, "off, 0" included. A wallpaper without
-  sound costs nothing for it: no stream, no thread, no connection to the sound server.
+  settings were found). A configuration written by 0.14.0 or older in which sound is not
+  switched on gets it switched on at the first start, once, and the daemon says so in
+  its log: at volume 0.5 when it holds volume 0, at its own volume when one was set
+  there (the settings window's slider, or the tray's "Unmute", which set it to 1) - so a
+  volume that was turned up in 0.14.0 without effect is heard now. Sound that was on with
+  volume 0 is kept, and so is whatever is set from now on: switch it off in Engine
+  settings ("Wallpaper sound") or with `walpe-ctl set scene_sound=off`; that is kept. A
+  wallpaper without sound costs nothing for it: no stream, no thread, no connection to
+  the sound server.
 - Engine settings, "Audio": a switch "Wallpaper sound" above the volume, with a line
   under it that says what is heard now and why not (off, muted, the volume is 0, no sound
   server, the wallpaper is paused), and a switch "Mute". Until now the only way to switch

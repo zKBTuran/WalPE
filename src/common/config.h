@@ -56,9 +56,10 @@ typedef struct WalpeConfig_ {
     gboolean scene_sound;     /* wallpaper sound: scenes play their sound layers
                                * (engine/scenesound.h). On by default; a wallpaper's
                                * own switch (its option "walpe_sound") wins over it */
-    gboolean sound_migrated;  /* this load replaced the sound defaults of versions up
-                               * to 0.14.0 (walpe_config_migrate_sound); the daemon
-                               * says so and saves */
+    int     sound_migrated;   /* this load switched wallpaper sound on in a file of
+                               * a version up to 0.14.0 (walpe_config_migrate_sound,
+                               * WALPE_SOUND_MIGRATE_*; 0 = no); the daemon says so
+                               * and saves */
     gboolean mute;            /* wallpaper sound is silent; `volume` keeps its value */
     gboolean paused;
     gboolean pause_fullscreen; /* pause the monitor a focused fullscreen window is on */
@@ -310,16 +311,30 @@ typedef struct WalpeConfig_ {
  * before version 0.12, 30) on purpose gets the default once and has to set it
  * again. */
 int walpe_config_migrate_fps (int version, int fps);
-/* A file of sound_defaults < 2. Every config.json a daemon has saved holds
- * "volume" (since 0.12) and "scene_sound" (0.14.0) whether the user set them
- * or not, so a missing key cannot say "never chosen". What says it is the
- * old default itself: volume 0 without sound switched on - 0.14.0's untouched
- * pair (off, 0), and a file from before 0.14.0 that has no switch at all and
- * a volume of 0. TRUE: that is what the file holds, and the new defaults
- * replace it. Everything else was somebody's doing and is kept: sound on
- * with volume 0 (silent, and the settings window says so), sound off with a
- * volume above 0. has_switch: the file has "scene_sound". */
-gboolean walpe_config_migrate_sound (int sound_defaults, gboolean has_switch, gboolean scene_sound, double volume);
+/* A file of sound_defaults < 2: written by a version up to 0.14.0, where
+ * wallpaper sound was off by default at volume 0 and both values were in
+ * every config.json a daemon had saved ("volume" since 0.12, "scene_sound"
+ * in 0.14.0), set by the user or not. "Off" in such a file is never a choice
+ * made in the settings window or the tray: 0.14.0 had the volume slider and
+ * the tray's "Unmute" (which set the volume to 1), and nothing but `walpe-ctl
+ * set scene_sound=on` switched the sound on - so the user who turned the
+ * volume up there and heard nothing has "off" with a volume above 0. What
+ * the file becomes, once (the daemon saves it with sound_defaults 2, and what
+ * is set from then on is kept, "off" and "off at volume 0" included):
+ *   WALPE_SOUND_MIGRATE_NONE      nothing: a file of this version; sound
+ *                                 switched on (also on at volume 0: silent,
+ *                                 and the settings window says so); a file
+ *                                 from before 0.14.0 with a volume above 0
+ *                                 (no switch there: it is on by default)
+ *   WALPE_SOUND_MIGRATE_DEFAULTS  volume 0 and sound not switched on - the
+ *                                 untouched pair of 0.14.0, and a file from
+ *                                 before 0.14.0 at volume 0: on, at
+ *                                 WALPE_VOLUME_DEFAULT
+ *   WALPE_SOUND_MIGRATE_ON        0.14.0's "off" with a volume above 0: on,
+ *                                 the volume stays as it was set
+ * has_switch: the file has "scene_sound". */
+enum { WALPE_SOUND_MIGRATE_NONE = 0, WALPE_SOUND_MIGRATE_DEFAULTS, WALPE_SOUND_MIGRATE_ON };
+int walpe_config_migrate_sound (int sound_defaults, gboolean has_switch, gboolean scene_sound, double volume);
 
 /* focus_action ("run" / "limit" / "pause" in config.json and IPC) */
 enum { WALPE_FOCUS_RUN, WALPE_FOCUS_LIMIT, WALPE_FOCUS_PAUSE };

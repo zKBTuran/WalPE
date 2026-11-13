@@ -482,9 +482,14 @@ guint walpe_config_save_count (void)
     return (guint) g_atomic_int_get (&save_count);
 }
 
-gboolean walpe_config_migrate_sound (int sound_defaults, gboolean has_switch, gboolean scene_sound, double volume)
+int walpe_config_migrate_sound (int sound_defaults, gboolean has_switch, gboolean scene_sound, double volume)
 {
-    return sound_defaults < WALPE_SOUND_DEFAULTS && volume == 0.0 && !(has_switch && scene_sound);
+    if (sound_defaults >= WALPE_SOUND_DEFAULTS || (has_switch && scene_sound))
+        return WALPE_SOUND_MIGRATE_NONE;
+    if (volume == 0.0)
+        return WALPE_SOUND_MIGRATE_DEFAULTS;
+    /* (a file from before 0.14.0 has no switch: with a volume it is on already) */
+    return has_switch ? WALPE_SOUND_MIGRATE_ON : WALPE_SOUND_MIGRATE_NONE;
 }
 
 int walpe_config_migrate_fps (int version, int fps)
@@ -712,13 +717,16 @@ WalpeConfig *walpe_config_load (void)
         c->volume = CLAMP (wpj_num (o, "volume", c->volume), 0.0, 1.0);
         c->scene_sound = wpj_bool (o, "scene_sound", c->scene_sound);
         c->mute = wpj_bool (o, "mute", c->mute);
-        if (walpe_config_migrate_sound ((int) CLAMP (wpj_num (o, "sound_defaults", 1), 1.0, 1000.0),
-                                        json_object_has_member (o, "scene_sound"), c->scene_sound, c->volume)) {
-            /* the defaults of versions up to 0.14.0, written by them and
-             * never chosen: this version's */
+        c->sound_migrated = walpe_config_migrate_sound ((int) CLAMP (wpj_num (o, "sound_defaults", 1), 1.0, 1000.0),
+                                                        json_object_has_member (o, "scene_sound"),
+                                                        c->scene_sound, c->volume);
+        if (c->sound_migrated) {
+            /* "off" as versions up to 0.14.0 wrote it, where nothing but
+             * walpe-ctl could switch it on: this version's default. A
+             * volume the user set there is his; 0 was their default too */
             c->scene_sound = TRUE;
-            c->volume = WALPE_VOLUME_DEFAULT;
-            c->sound_migrated = TRUE;
+            if (c->sound_migrated == WALPE_SOUND_MIGRATE_DEFAULTS)
+                c->volume = WALPE_VOLUME_DEFAULT;
         }
         c->paused = wpj_bool (o, "paused", c->paused);
         { JsonObject *mc = wpj_obj (o, "monitor_current");

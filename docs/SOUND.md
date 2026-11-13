@@ -40,10 +40,13 @@ no such rows. Both apply to the running wallpaper at once: it is not loaded agai
 sound goes on where it is.
 
 A configuration from 0.14.0 or older: "off, volume 0" was the default there and was
-written into every `config.json`, so a file that still holds exactly that - volume 0 and
-sound not switched on - takes the new defaults at the first start (the log says so, once).
-Sound switched on with volume 0, or switched off with a volume above 0, was somebody's
-choice and stays as it is. What is set from now on is kept, "off" included.
+written into every `config.json`, and nothing but `walpe-ctl set scene_sound=on` switched
+sound on - the settings window had only the volume slider, and the tray's "Unmute" only
+set the volume to 1. "Off" in such a file is therefore the old default, not a choice, and
+at the first start it becomes "on" (the log says so, once): at volume 0.5 when the file
+holds volume 0, at the volume the file holds otherwise - **a volume that was turned up in
+0.14.0 without effect is heard now, at that level**. Sound that was switched on there is
+kept as it is, volume 0 included. What is set from now on is kept, "off" included.
 
 `walpe-ctl status` has `scene_sound`, `mute`, `volume` and one line `sound`, for example:
 

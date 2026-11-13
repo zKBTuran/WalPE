@@ -50,7 +50,7 @@ is stored only, and `backend` in status is the video backend that plays, always 
 | `volume` | 0.5 | | volume of wallpaper sound, 0-1 ([SOUND.md](SOUND.md)); nothing is heard at 0 |
 | `scene_sound` | true | | wallpaper sound ("Wallpaper sound" in the settings window): scenes play their sound layers, video wallpapers their sound track, web pages their own sound; one wallpaper's own switch and volume: `walpe-ctl setprop walpe_sound=on\|off`, `walpe_volume=0..1` (rows of its options in the library window) |
 | `mute` | false | | wallpaper sound silent, the volume value stays |
-| `sound_defaults` | 2 | (file only) | written by WalPE: the file was saved by a version in which wallpaper sound is on by default. A file without it that holds volume 0 and no `scene_sound: true` (the defaults up to 0.14.0) takes the new defaults once |
+| `sound_defaults` | 2 | (file only) | written by WalPE: the file was saved by a version in which wallpaper sound is on by default. A file without it (versions up to 0.14.0, where "off" was the default and only `walpe-ctl` switched it on) in which sound is not switched on gets it switched on once: at volume 0.5 when it holds volume 0, at its own volume otherwise ([SOUND.md](SOUND.md)) |
 | `parallax` | true | | scenes follow the pointer where they are made to |
 | `video_backend` | `ffmpeg` | | stored only: FFmpeg is the one video backend. `mpv`, from a file or a client of an earlier version, is still taken, kept as written and means the same; any other word is refused |
 | `vsync`, `audio` | true, false | (file only) | stored only (presentation is set in `gpu.conf`) |

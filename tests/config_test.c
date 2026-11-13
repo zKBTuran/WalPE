@@ -673,34 +673,75 @@ static void test_save_failure (void)
 
 /* Wallpaper sound is on by default, at half volume; up to 0.14.0 it was
  * off at volume 0, and those versions wrote both values into every
- * config.json. A file of theirs that still holds the old defaults takes the
- * new ones once; every pair that was somebody's choice is kept. */
+ * config.json. "Off" in a file of theirs is the default, not a choice -
+ * nothing but walpe-ctl switched it on there, while the settings window's
+ * slider and the tray's "Unmute" set a volume - so it becomes "on", once:
+ * at this version's volume when the file holds 0, at the volume that was
+ * set otherwise. Sound that was switched on is kept as it is. */
 static void test_sound_defaults (void)
 {
-    static const struct { const char *json; gboolean on; double vol; gboolean migrated; const char *what; } k[] = {
-        { "{\"config_version\":4,\"volume\":0.0,\"scene_sound\":false,\"mute\":false}", TRUE, 0.5, TRUE,
+    enum { NO = WALPE_SOUND_MIGRATE_NONE, DEF = WALPE_SOUND_MIGRATE_DEFAULTS, ON = WALPE_SOUND_MIGRATE_ON };
+    static const struct { const char *json; gboolean on; double vol; int migrated; gboolean mute; const char *what; } k[] = {
+        { "{\"config_version\":4,\"volume\":0.0,\"scene_sound\":false,\"mute\":false}", TRUE, 0.5, DEF, FALSE,
           "0.14.0, nothing set: this version's defaults" },
-        { "{\"config_version\":2,\"volume\":0.0}", TRUE, 0.5, TRUE,
+        { "{\"config_version\":2,\"volume\":0.0}", TRUE, 0.5, DEF, FALSE,
           "0.12 (no switch yet), volume 0 as it wrote it: this version's defaults" },
-        { "{\"config_version\":2,\"volume\":0.3}", TRUE, 0.3, FALSE,
+        { "{\"config_version\":2,\"volume\":0.4}", TRUE, 0.4, NO, FALSE,
           "0.12 with a volume: kept, and sound is on" },
-        { "{\"config_version\":4,\"volume\":0.0,\"scene_sound\":true}", TRUE, 0.0, FALSE,
+        { "{\"config_version\":4,\"volume\":0.0,\"scene_sound\":true}", TRUE, 0.0, NO, FALSE,
           "0.14.0, switched on, volume 0: kept (on, silent)" },
-        { "{\"config_version\":4,\"volume\":0.8,\"scene_sound\":false}", FALSE, 0.8, FALSE,
-          "0.14.0, off with a volume: stays off" },
-        { "{\"config_version\":4,\"volume\":0.0,\"scene_sound\":false,\"sound_defaults\":2}", FALSE, 0.0, FALSE,
+        { "{\"config_version\":4,\"volume\":0.3,\"scene_sound\":true}", TRUE, 0.3, NO, FALSE,
+          "0.14.0, switched on with a volume: kept" },
+        { "{\"config_version\":4,\"volume\":0.3,\"scene_sound\":false}", TRUE, 0.3, ON, FALSE,
+          "0.14.0, off, the volume turned up in its settings window: on, at that volume" },
+        { "{\"config_version\":4,\"volume\":1.0,\"scene_sound\":false}", TRUE, 1.0, ON, FALSE,
+          "0.14.0, off, volume 1 as its tray's Unmute set it: on, at that volume" },
+        { "{\"config_version\":4,\"volume\":0.0001,\"scene_sound\":false}", TRUE, 0.0001, ON, FALSE,
+          "0.14.0, off, a volume just above 0: on, the volume is the user's" },
+        { "{\"config_version\":4,\"volume\":0.0,\"scene_sound\":false,\"mute\":true}", TRUE, 0.5, DEF, TRUE,
+          "0.14.0, nothing set but mute: this version's defaults, mute stays" },
+        { "{\"config_version\":4,\"volume\":0.3,\"scene_sound\":false,\"mute\":true}", TRUE, 0.3, ON, TRUE,
+          "0.14.0, off with a volume and mute: on, mute stays" },
+        { "{\"config_version\":4,\"volume\":0.0,\"scene_sound\":false,\"sound_defaults\":2}", FALSE, 0.0, NO, FALSE,
           "this version, switched off and turned down: a choice, kept" },
-        { "{\"config_version\":4}", TRUE, 0.5, FALSE, "neither key: the defaults, nothing migrated" },
+        { "{\"config_version\":4,\"volume\":0.3,\"scene_sound\":false,\"sound_defaults\":2}", FALSE, 0.3, NO, FALSE,
+          "this version, switched off: a choice, kept" },
+        { "{\"config_version\":4,\"volume\":0.3,\"scene_sound\":false,\"sound_defaults\":3}", FALSE, 0.3, NO, FALSE,
+          "a later version's file, switched off: kept" },
+        { "{\"config_version\":4}", TRUE, 0.5, NO, FALSE, "neither key: the defaults, nothing migrated" },
     };
     for (guint i = 0; i < G_N_ELEMENTS (k); i++) {
         put_config (k[i].json);
         WalpeConfig *c = walpe_config_load ();
-        if (!(c->scene_sound == k[i].on && c->volume == k[i].vol && c->sound_migrated == k[i].migrated && !c->mute)) {
-            printf ("FAIL sound defaults, %s: scene_sound %d volume %g migrated %d\n", k[i].what, c->scene_sound,
-                    c->volume, c->sound_migrated);
+        if (!(c->scene_sound == k[i].on && c->volume == k[i].vol && c->sound_migrated == k[i].migrated &&
+              c->mute == k[i].mute)) {
+            printf ("FAIL sound defaults, %s: scene_sound %d volume %g migrated %d mute %d\n", k[i].what,
+                    c->scene_sound, c->volume, c->sound_migrated, c->mute);
             fails++;
         }
         walpe_config_free (c);
+    }
+    /* 0.14.0's "off" with a volume: once, like the pair of defaults - the
+     * saved file is this version's, and "off" set afterwards stays, at any
+     * volume; a version up to 0.14.0 that saves the file again keeps the
+     * mark (it carries members it does not know) */
+    put_config ("{\"config_version\":4,\"volume\":0.3,\"scene_sound\":false}");
+    {
+        WalpeConfig *c = walpe_config_load ();
+        CHECK (c->sound_migrated == ON);
+        walpe_config_save (c);
+        walpe_config_free (c);
+        c = walpe_config_load ();
+        CHECK (c->scene_sound && c->volume == 0.3 && !c->sound_migrated);
+        c->scene_sound = FALSE;
+        walpe_config_save (c);
+        walpe_config_free (c);
+        c = walpe_config_load ();
+        CHECK (!c->scene_sound && c->volume == 0.3 && !c->sound_migrated);
+        walpe_config_free (c);
+        char *text = NULL;
+        CHECK (g_file_get_contents (cfg_path, &text, NULL, NULL) && text && strstr (text, "\"sound_defaults\""));
+        g_free (text);
     }
     /* once: the daemon saves a migrated configuration, and what the user
      * sets afterwards - also back to "off, 0" - stays */
@@ -717,9 +758,11 @@ static void test_sound_defaults (void)
     c = walpe_config_load ();
     CHECK (!c->scene_sound && c->volume == 0.0 && !c->sound_migrated);
     walpe_config_free (c);
-    CHECK (walpe_config_migrate_sound (1, TRUE, FALSE, 0.0) && walpe_config_migrate_sound (1, FALSE, TRUE, 0.0));
-    CHECK (!walpe_config_migrate_sound (2, TRUE, FALSE, 0.0) && !walpe_config_migrate_sound (1, TRUE, TRUE, 0.0) &&
-           !walpe_config_migrate_sound (1, TRUE, FALSE, 0.5));
+    CHECK (walpe_config_migrate_sound (1, TRUE, FALSE, 0.0) == DEF && walpe_config_migrate_sound (1, FALSE, TRUE, 0.0) == DEF);
+    CHECK (walpe_config_migrate_sound (1, TRUE, FALSE, 0.5) == ON && walpe_config_migrate_sound (1, TRUE, FALSE, 1.0) == ON);
+    CHECK (!walpe_config_migrate_sound (2, TRUE, FALSE, 0.0) && !walpe_config_migrate_sound (2, TRUE, FALSE, 0.5) &&
+           !walpe_config_migrate_sound (1, TRUE, TRUE, 0.0) && !walpe_config_migrate_sound (1, TRUE, TRUE, 0.5) &&
+           !walpe_config_migrate_sound (1, FALSE, TRUE, 0.5));
 }
 
 /* "wallpapers_dir" is the one key that is only ever written by hand. The

@@ -10296,13 +10296,17 @@ int main (int argc, char **argv)
         walpe_config_save (D.cfg);
     }
     if (D.cfg->sound_migrated) {
-        /* config.h walpe_config_migrate_sound: sound off at volume 0 was the
-         * default up to 0.14.0, written into every config.json. Saved now,
-         * so it happens once and a choice made from now on is kept. */
-        g_message ("config: wallpaper sound was off at volume 0, the default of versions up to 0.14.0, "
-                   "not a choice: it is on now, at volume %s (the GUI's Engine settings, \"Wallpaper "
-                   "sound\", or walpe-ctl set scene_sound=off, switches it off; that is kept)",
-                   G_STRINGIFY (WALPE_VOLUME_DEFAULT));
+        /* config.h walpe_config_migrate_sound: "off" was the default up to
+         * 0.14.0, written into every config.json, and only walpe-ctl could
+         * switch it on. Saved now, so it happens once and a choice made
+         * from now on is kept. */
+        char vol[G_ASCII_DTOSTR_BUF_SIZE];
+        g_ascii_formatd (vol, sizeof vol, "%.2f", D.cfg->volume);
+        g_message ("config: wallpaper sound was off%s, the default of versions up to 0.14.0, not a choice: "
+                   "it is on now, at volume %s%s (the GUI's Engine settings, \"Wallpaper sound\", or "
+                   "walpe-ctl set scene_sound=off, switches it off; that is kept)",
+                   D.cfg->sound_migrated == WALPE_SOUND_MIGRATE_DEFAULTS ? " at volume 0" : "", vol,
+                   D.cfg->sound_migrated == WALPE_SOUND_MIGRATE_ON ? ", the volume that was set" : "");
         walpe_config_save (D.cfg);
     }
     present_settings_load ();   /* gpu.conf / WALPE_*: before any thread, before EGL */
