@@ -142,3 +142,12 @@ gboolean walpe_module_file_trusted (const char *path, char **why);
  * directory has to be on GST_PLUGIN_PATH before WebKit starts a process. */
 #define WALPE_WEB_SOUND_SINK_FILE "libgstwalpesound.so"
 char *walpe_web_sound_sink_dir (void);
+/* The directory of GStreamer's plugin list for the page processes (main.c
+ * web_env_gst_registry: GST_REGISTRY names a file in it). It is made when
+ * the web module has been loaded, before the module starts WebKit - whose
+ * sandbox binds the directory into a page process only if it exists then -
+ * and not at the daemon's start: a daemon that never shows a web wallpaper
+ * leaves no directory behind. Called once, by main () before any thread
+ * exists (the variable is set there, where setting it is safe; the mkdir
+ * can wait). NULL: none of WalPE's, nothing is made. */
+void walpe_web_registry_dir (const char *dir);

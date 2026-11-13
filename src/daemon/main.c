@@ -10755,18 +10755,36 @@ static void web_env_sound_sink (void)
  * It also ends a quarrel over the shared file: GStreamer rewrites it (1 MB)
  * whenever a program with another plugin path than the last one starts,
  * and WalPE's pages have a path of their own (web_env_sound_sink).
- * A value the user set, under either name, is the user's. Costs a mkdir at
- * start; the file is written by the first page that plays media. */
+ * A value the user set, under either name, is the user's.
+ *
+ * The variable is set here, at start, before any thread exists: later a
+ * setenv would race every getenv of the render, sound and media threads and
+ * of the GL driver (web.c says what that did). The directory is not made
+ * here (it was, at every start, also for a user who never shows a web
+ * wallpaper): the module loader makes it when the web module has been
+ * loaded, before WebKit starts its first process (walpe_web_registry_dir) -
+ * WebKit's sandbox binds it only if it exists by then. A variable that
+ * names a file in a directory that is not there yet costs nothing: nothing
+ * but a page process reads it in WalPE (ffmpeg, pactl and steamcmd do not
+ * use GStreamer), and a GStreamer outside a sandbox makes the directory of
+ * its registry file itself. The file is written by the first page that
+ * plays media.
+ *
+ * The WebKit start-up test (`walpe-daemon --web-probe`) is a child that
+ * keeps its parent's environment: there the variable is the daemon's own
+ * already, and only the directory is handed to the loader. */
 static void web_env_gst_registry (void)
 {
-    if (g_getenv ("GST_REGISTRY") || g_getenv ("GST_REGISTRY_1_0"))
-        return;
     char *dir = g_build_filename (g_get_user_cache_dir (), "walpe", "gstreamer", NULL);
-    if (g_mkdir_with_parents (dir, 0700) == 0) {
-        char *file = g_build_filename (dir, "registry.bin", NULL);
+    char *file = g_build_filename (dir, "registry.bin", NULL);
+    const char *have = g_getenv ("GST_REGISTRY");
+    if (!have && !g_getenv ("GST_REGISTRY_1_0")) {
         g_setenv ("GST_REGISTRY", file, TRUE);
-        g_free (file);
+        walpe_web_registry_dir (dir);
+    } else if (have && !strcmp (have, file)) {
+        walpe_web_registry_dir (dir);   /* set by the daemon this process was started by */
     }
+    g_free (file);
     g_free (dir);
 }
 
@@ -11626,6 +11644,11 @@ int main (int argc, char **argv)
      * environment its parent gave it. */
     for (int i = 1; i < argc; i++)
         if (!g_strcmp0 (argv[i], "--web-probe")) {
+            /* (no thread yet. The daemon's GST_REGISTRY is in the environment
+             * already; this hands its directory to the loader, which makes
+             * it before the test's page process is started - the daemon
+             * itself has not made it if no web wallpaper was loaded yet) */
+            web_env_gst_registry ();
             int rc = walpe_web_probe_run ();
             fflush (NULL);
             _exit (rc);

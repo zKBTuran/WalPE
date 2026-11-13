@@ -12,6 +12,7 @@
 #include "common/config.h"
 #include "common/util.h"
 #include <dlfcn.h>
+#include <errno.h>
 #include <string.h>
 #include <gio/gio.h>
 #include <sys/stat.h>
@@ -160,6 +161,15 @@ static char *web_err;
 static gint web_sound_q16;      /* atomic: walpe_web_sound's master, 0..65536 */
 static gint web_sound_on;       /* atomic: ... and its `enabled` */
 static char *web_sink_note;     /* walpe_web_sound_sink_dir: what it found (said once, at the load) */
+static char *web_registry_dir;  /* walpe_web_registry_dir: made at the load */
+
+void walpe_web_registry_dir (const char *dir)
+{
+    g_mutex_lock (&mod_lock);
+    g_free (web_registry_dir);
+    web_registry_dir = g_strdup (dir);
+    g_mutex_unlock (&mod_lock);
+}
 
 /* The directory itself, beyond its one file. GStreamer does not load a file
  * by name as the module loader does: it loads every plugin it finds in a
@@ -248,6 +258,13 @@ const WalpeWebModule *walpe_web_module (gboolean load)
         if (m && m->abi == WALPE_MODULE_ABI) {
             web_mod = m;
             mod_note_loaded (&web_note, "the WebKit start-up test");
+            /* GStreamer's plugin list of the page processes: its directory
+             * has to be there before WebKit starts a process (modules.h
+             * walpe_web_registry_dir), and nothing has been started yet */
+            if (web_registry_dir && g_mkdir_with_parents (web_registry_dir, 0700) != 0)
+                g_warning ("web: %s could not be made (%s): the page processes cannot keep GStreamer's list "
+                           "of plugins, a page that plays media starts more slowly",
+                           walpe_log_str (web_registry_dir), g_strerror (errno));
             if (web_sink_note)
                 g_message ("%s", web_sink_note);
             /* before the module makes its first page (still under

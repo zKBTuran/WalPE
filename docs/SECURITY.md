@@ -172,6 +172,9 @@ What it gets and what it does not, as the code is today:
     names a file of its own for that list, `~/.cache/walpe/gstreamer/registry.bin`
     (`GST_REGISTRY`, for its page processes only), and the page process gets that one
     directory. A `GST_REGISTRY` or `GST_REGISTRY_1_0` you set yourself is left as it is.
+    The variable is set when the daemon starts (later it could not be set safely); the
+    directory is made when the first web wallpaper is loaded, before WebKit starts a
+    process, so a daemon that never shows one leaves no `~/.cache/walpe/gstreamer`.
   - With the X11 page host that is the X server's socket, on X11 and under Xwayland
     alike: such a process has what any X client has.
   - With the private page host WebKit would give it the session compositor's socket

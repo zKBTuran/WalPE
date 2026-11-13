@@ -464,10 +464,19 @@ def env_names(pid):
 
 # -------------------------------------------------------------------- start
 def case_start(env, W):
+    # GStreamer's plugin list of the page processes has a directory of WalPE's own (GST_REGISTRY,
+    # set at the daemon's start). The directory is made when the web module is loaded - before
+    # WebKit starts a process, whose sandbox binds it only if it is there - and not by a daemon
+    # that shows no web wallpaper
+    gdir = os.path.join(env.env["XDG_CACHE_HOME"], "walpe", "gstreamer")
+    had = os.path.isdir(gdir)
     if not start(env, [("A", 1280, 720, 0, 0)], "start"):
         return
     mark = env.mark()
     mon = env.mons[0]
+    if not had:
+        check(not os.path.exists(gdir), "start: a daemon that has shown no web wallpaper has made no directory "
+              "for GStreamer's plugin list", gdir)
     if env.display.kind == "sway":
         names = env_names(env.daemon.pid)
         check(names is not None and "DISPLAY" not in names and "WAYLAND_DISPLAY" in names,
@@ -476,6 +485,8 @@ def case_start(env, W):
     st = open_page(env, W["still"], "still", "start")
     if not st:
         return
+    check(os.path.isdir(gdir) and (os.stat(gdir).st_mode & 0o777) == 0o700,
+          "start: with a page shown that directory is there, for the owner alone", gdir)
     ws = web_status(env)
     check(str(ws.get("web_host", "")) == want_host(env), "start: status says the page is on the %s page host"
           % want_host(env), ws)
@@ -1694,6 +1705,14 @@ def case_sound(env, W):
           "sound: the volume setting reached the element; the page reads back its own value",
           (vc0, st.get("vc"), st.get("v")))
     note("sound: the AudioContext is %s" % st.get("ctx"))
+    # the page process has played a file: GStreamer has written its plugin list where the
+    # daemon's GST_REGISTRY says (the variable reached the process WebKit started)
+    reg = os.path.join(env.env["XDG_CACHE_HOME"], "walpe", "gstreamer", "registry.bin")
+    wait_for(lambda: os.path.isfile(reg), 20)
+    if os.path.isfile(reg):
+        check(True, "sound: GStreamer's plugin list of the page process is the file GST_REGISTRY names")
+    else:
+        note("sound: no %s after the page played (GStreamer of the page process wrote no plugin list)" % reg)
     for on, off in (("mute=on", "mute=off"), ("scene_sound=off", "scene_sound=on")):
         env.ctl("set", on)
         st = wait_state(env, "sound", lambda s: s.get("dp") is True, 20, env.mark())
