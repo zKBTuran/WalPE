@@ -182,7 +182,10 @@ void walpe_sound_set_prepare (WalpeSound *s, void (*prepare) (const char *arg), 
 /* For a prepare function that takes long (a video's sound track is taken
  * out of the video: seconds, with a long one minutes): TRUE once the player
  * it is called for has been told to end - its wallpaper was replaced or
- * closed. The function then gives up and returns; nothing is opened after
+ * closed - and no other player that lives has the same function with the
+ * same argument (the same video on another monitor: what the function
+ * makes is that player's too, and it would begin the work again). The
+ * function then gives up and returns; nothing is opened after
  * it. FALSE on every thread that is not inside a prepare function. */
 gboolean walpe_sound_prepare_stop (void);
 void walpe_sound_play (WalpeSound *s);    /* start, or go on after pause */

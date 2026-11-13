@@ -25,7 +25,9 @@
  *  7. Freeing a group while its players run returns at once; the threads
  *     end by themselves. A player that is still inside its prepare
  *     function then (a video's sound track being taken out) is told so
- *     there, and opens nothing afterwards.
+ *     there, and opens nothing afterwards - unless another instance of
+ *     the wallpaper waits for what the function makes: then it is told
+ *     when the last of them is freed.
  *  8. The process's streams: of more players than WALPE_SOUND_MAX_STREAMS,
  *     over two wallpapers, that many sound and the others wait; a waiting
  *     one gets its output when another falls silent.
@@ -862,6 +864,19 @@ static void slow_prepare (const char *arg)
     g_atomic_int_set (&prep_state, walpe_sound_prepare_stop () ? 2 : 3);
 }
 
+/* the same for a function two players share: how many calls are or were
+ * inside, how many left because they were told to */
+static gint share_in, share_told;
+static void share_prepare (const char *arg)
+{
+    (void) arg;
+    g_atomic_int_inc (&share_in);
+    for (int i = 0; i < 10000 && !walpe_sound_prepare_stop (); i++)
+        g_usleep (1000);
+    if (walpe_sound_prepare_stop ())
+        g_atomic_int_inc (&share_told);
+}
+
 static void log_missing (const gchar *domain, GLogLevelFlags level, const gchar *msg, gpointer user)
 {
     (void) domain; (void) level; (void) user;
@@ -936,6 +951,60 @@ static void test_free_running (const char *dir)
                "freed inside its prepare function, the file there: opened %d time(s), %d frames decoded (wanted: "
                "0, 0)", g_atomic_int_get (&seek_opens), g_atomic_int_get (&seek_decoded));
         walpe_sound_set_decoder (NULL);
+        /* Two instances of one wallpaper (the same video on two monitors)
+         * and a third wallpaper that prepares something else. The instance
+         * that speaks is freed inside its prepare function: what the
+         * function makes is the other instance's file too, so it is not
+         * told to stop - it was, and the other one began the same work
+         * again from nothing (ffmpeg killed and started again: the sound
+         * of a ten minute video came 11 to 33 s later). It is told when
+         * the last instance that waits for the same thing is freed; a
+         * player that prepares something else keeps nothing alive. */
+        {
+            g_atomic_int_set (&share_in, 0);
+            g_atomic_int_set (&share_told, 0);
+            g_atomic_int_set (&prep_state, 0);
+            WalpeSoundGroup *a = group_on ("/w/prepare3"), *b = group_on ("/w/prepare3");
+            WalpeSoundGroup *c = group_on ("/w/prepare4");
+            WalpeSound *sa = snd_new (a, later, NULL, WALPE_SOUND_LOOP, 1.0f);
+            WalpeSound *sb = snd_new (b, later, NULL, WALPE_SOUND_LOOP, 1.0f);
+            WalpeSound *sc = snd_new (c, later, NULL, WALPE_SOUND_LOOP, 1.0f);
+            walpe_sound_set_prepare (sa, share_prepare, "one");
+            walpe_sound_set_prepare (sb, share_prepare, "one");
+            walpe_sound_set_prepare (sc, slow_prepare, "other");
+            walpe_sound_play (sa);
+            walpe_sound_play (sb);
+            walpe_sound_play (sc);
+            WAIT (g_atomic_int_get (&share_in) == 1 && g_atomic_int_get (&prep_state) == 1, 5000);
+            g_usleep (30000);
+            CHECK (g_atomic_int_get (&share_in) == 1 && walpe_sound_threads () == 2,
+                   "one of two instances prepares: %d inside, %d threads (wanted: 1, and 2 with the other "
+                   "wallpaper's)", g_atomic_int_get (&share_in), walpe_sound_threads ());
+            walpe_sound_group_free (a);
+            /* (the other instance speaks now and comes to the function too) */
+            WAIT (g_atomic_int_get (&share_in) == 2, 3000);
+            g_usleep (300000);
+            CHECK (g_atomic_int_get (&share_in) == 2 && g_atomic_int_get (&share_told) == 0,
+                   "the speaking instance is freed inside its prepare function, the other instance waits for "
+                   "the same: %d call(s) told to stop (wanted: 0), %d inside (wanted: 2)",
+                   g_atomic_int_get (&share_told), g_atomic_int_get (&share_in));
+            t0 = g_get_monotonic_time ();
+            walpe_sound_group_free (b);
+            WAIT (g_atomic_int_get (&share_told) == 2, 3000);
+            ms = (g_get_monotonic_time () - t0) / 1e3;
+            CHECK (g_atomic_int_get (&share_told) == 2 && ms < 2000.0 && g_atomic_int_get (&prep_state) == 1,
+                   "the last instance is freed: %d call(s) told to stop after %.0f ms (wanted: 2); the other "
+                   "wallpaper's function %s", g_atomic_int_get (&share_told), ms,
+                   g_atomic_int_get (&prep_state) == 1 ? "runs on" : "was stopped too");
+            WAIT (walpe_sound_threads () == 1, 3000);
+            walpe_sound_group_free (c);
+            WAIT (walpe_sound_threads () == 0, 3000);
+            CHECK (walpe_sound_threads () == 0 && g_atomic_int_get (&prep_state) == 2 &&
+                   !g_atomic_int_get (&said_missing),
+                   "all freed: %d thread(s) left, the other wallpaper's function %s, %d line(s) about a missing "
+                   "file", walpe_sound_threads (), g_atomic_int_get (&prep_state) == 2 ? "was told" : "was not told",
+                   g_atomic_int_get (&said_missing));
+        }
         g_log_remove_handler (NULL, h);
         g_remove (there);
         g_free (there);

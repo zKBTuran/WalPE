@@ -176,7 +176,9 @@ named after the wallpaper.
   sound is switched on in the middle - is found without decoding what lies in front of it.
   A wallpaper that is replaced before its `ffmpeg` is done takes it along, and leaves
   nothing in the cache: the track is taken out from the start the next time the video is
-  shown (and kept once the video stays for as long as that takes).
+  shown (and kept once the video stays for as long as that takes). The same video on a
+  second monitor keeps that `ffmpeg`: it ends when the last monitor that shows the video
+  has got another wallpaper.
 - **With sound off nothing of this happens**: no ffmpeg, no file, no thread, no stream.
 - **Where the clip starts again nothing is heard of it.** One pass of the track is one pass
   of the clip, to the sample, and the track loops by itself in one stream: the file's first

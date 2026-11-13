@@ -236,7 +236,10 @@ typedef struct {
  * stream, no file opened, ffmpeg never started. The track is taken out by
  * the player's own thread when it is about to be heard for the first time
  * (walpe_sound_set_prepare); the picture never waits for it, and a wallpaper
- * that is replaced before ffmpeg is done takes its ffmpeg with it.
+ * that is replaced before ffmpeg is done takes its ffmpeg with it - unless
+ * another monitor still shows the same video: then that ffmpeg runs to its
+ * end and the other monitor's player, which speaks from then on, plays what
+ * it made (walpe_sound_prepare_stop).
  *
  * One pass of the track is one pass of the clip, to the sample. The track
  * loops by itself (walpe_sound_set_period: the clip's own length, which
@@ -281,7 +284,8 @@ static void vc_sound_prepare (const char *media)
     }
     char *err = NULL;
     const gint64 t0 = g_get_monotonic_time ();
-    /* (given up when the wallpaper is replaced meanwhile: ffmpeg ran on to
+    /* (given up when the wallpaper is replaced meanwhile and no other
+     * monitor shows it: ffmpeg ran on to
      * the end of the track of a video nobody looked at any more, minutes
      * for a long one, and the next video's track waited for its turn) */
     int r = walpe_video_sound_extract_stoppable (media, file, vc_sound_prepare_stop, NULL, &err);

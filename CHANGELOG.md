@@ -422,7 +422,8 @@ it was). A bare window manager on X11 - dwm, i3, openbox - gets the window of 0.
   hours is back as fast as a clip. A wallpaper that is replaced while its track is still
   being taken out gives that work up (ffmpeg is ended, nothing stays in the cache), and
   the next video's sound does not wait for it; the track is taken out from the start the
-  next time that video is shown. The first time, a long video's sound comes only when
+  next time that video is shown. While another monitor still shows the same video the
+  work goes on to its end, for that monitor. The first time, a long video's sound comes only when
   its whole track has been taken out (two hours: about half a minute on an idle
   machine). [SOUND.md](docs/SOUND.md#video-wallpapers).
 - **An imported video keeps its sound track** (AAC in the MP4 the import writes). Up to

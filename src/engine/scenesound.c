@@ -11,7 +11,9 @@
  *    What a player was created with (files, mode, name) never changes.
  * Lock order: reg_lock, then a player's lock. A player's thread takes its
  * own lock only, for a few instructions at a time: never while it decodes,
- * writes to the sound server or sleeps. The thread holds a reference to
+ * writes to the sound server or sleeps (and, asked from inside a prepare
+ * function whether to stop, holding none: reg_lock and the other players'
+ * locks, walpe_sound_prepare_stop). The thread holds a reference to
  * its player and is detached: whoever frees a group only sets `quit`. */
 #include "walpe-build-config.h"
 #include "scenesound.h"
@@ -983,8 +985,36 @@ gboolean walpe_sound_prepare_stop (void)
     if (!s)
         return FALSE;
     g_mutex_lock (&s->lock);
-    const gboolean quit = s->quit;
+    gboolean quit = s->quit;
+    void (*const prepare) (const char *) = s->prepare;
+    char *arg = quit && prepare ? g_strdup (s->prepare_arg) : NULL;
     g_mutex_unlock (&s->lock);
+    if (!arg)
+        return quit;
+    /* Told to end - but what the function makes is also another player's:
+     * the same video on a second monitor, whose player has the same
+     * function and argument and comes here next (its group speaks once
+     * this one is gone, and its call waits for this one's, import.c). Then
+     * the work goes on to its end. It was given up here and begun again
+     * there: ffmpeg killed and started from nothing, the other monitor's
+     * sound later by all that had been done. The groups in the registry
+     * are the live ones (walpe_sound_group_free takes a group out before
+     * its players are told), so this ends with the last of them. */
+    g_mutex_lock (&reg_lock);
+    for (guint i = 0; quit && groups && i < groups->len; i++) {
+        const WalpeSoundGroup *g = groups->pdata[i];
+        for (guint j = 0; quit && j < g->players->len; j++) {
+            WalpeSound *o = g->players->pdata[j];
+            if (o == s)
+                continue;
+            g_mutex_lock (&o->lock);
+            if (!o->quit && !o->broken && o->prepare == prepare && !g_strcmp0 (o->prepare_arg, arg))
+                quit = FALSE;
+            g_mutex_unlock (&o->lock);
+        }
+    }
+    g_mutex_unlock (&reg_lock);
+    g_free (arg);
     return quit;
 }
 
