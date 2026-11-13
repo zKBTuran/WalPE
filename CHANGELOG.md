@@ -904,19 +904,15 @@ microphone.
   Wayland above), which GNOME Shell loads on the two versions it was run on, 46 and 51;
   on 47 to 50 the version has to be added to its `metadata.json` by hand.
 - Sound on PipeWire 1.0 (seen on 1.0.5, Ubuntu 24.04's; `pipewire --version` says which):
-  after a pause the sound of a scene or a video can stay silent, about once in 20 to 30
-  pauses, and a window that covers the desktop is a pause. Not seen in 340 pauses on
-  PipeWire 1.6.11, never on PulseAudio; 0.14.0 has it too, where sound was off by
-  default. `walpe-ctl open <the same wallpaper>` brings the sound back (pause and resume,
-  mute and unmute do not), and `walpe-ctl set covered=off` avoids the pause under
-  windows. The repair is written and waits for its review.
-- Arch and CachyOS (gdk-pixbuf 2.44, which decodes through glycin): the size limits for
-  a wallpaper's pictures are looked at after the picture has been decoded there, not
-  before. A wallpaper file made up for it can make the system's picture decoder use
-  gigabytes of memory for up to 45 seconds; 0.14.0 has this too. A TGA picture with a
-  colour map it does not use is not loaded there, and a `project.json` with a second
-  value behind its first one is refused. The repair is written and waits for its
-  review.
+  where the sound server leaves a stream standing after a pause, the stream is given up
+  and replaced (under Sound above), and from then on a video's sound is 0.13 to 0.29
+  seconds behind its picture and stays behind - still 75, 176 and 215 ms after a minute
+  in the three cases that were watched; what puts it back in step was not measured. By
+  its review the sound also begins at full level there, without the short fade-in. Not
+  repaired.
+- An animated AVIF (an AVIF image sequence) is not shown, as a wallpaper, a layer
+  picture or a preview: its frames are as large as its AV1 data says whatever the file
+  declares (under Security above). A still AVIF is shown as before.
 - Video sound: videos imported with 0.14.0 or earlier have no sound track - the import
   dropped it - and have to be imported again from the original file. A video layer
   inside a scene is silent. A video's track is kept as a FLAC file in
