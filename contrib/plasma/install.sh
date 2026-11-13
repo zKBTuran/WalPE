@@ -96,6 +96,9 @@ system_copy() {
 		while [ "${dir%/}" != "$dir" ]; do dir=${dir%/}; done
 		case "$dir" in /*) ;; *) continue ;; esac
 		[ "$dir" != "${data%/}" ] || continue
+		# (nor that directory under another name - a home directory reached through a link,
+		# "//" or "/." in the entry: it is the user's own and only copy, not one that stays)
+		if [ "$dir" -ef "$data" ] 2>/dev/null; then continue; fi
 		if [ -f "$dir/plasma/wallpapers/$type_id/metadata.json" ]; then
 			printf '%s\n' "$dir/plasma/wallpapers/$type_id"
 			return 0

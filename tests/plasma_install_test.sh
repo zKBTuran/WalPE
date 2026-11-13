@@ -273,6 +273,31 @@ mv "$sysdir" "$tmp/sys-gone"
 run "install (4)" 0 -- install
 run "status, the user's copy only" 0 FAKE_SHELL=down -- status
 want "$tmp/out" "installed, your own copy, version $ours ($pkg)" "status, the user's copy only"
+# ... also where the entry names that directory another way (a home directory reached
+# through a link, a doubled slash, "/."): it is one copy, the user's only one. `uninstall`
+# must not take it for a package's copy that "stays": with a desktop that has the type
+# and no shell to take it off nothing is removed, and in the session the type is taken
+# off the desktops first
+ln -s "$home" "$tmp/homelink"
+sysdirs_was=$sysdirs
+for other in "$tmp/homelink/.local/share" "$home/.local//share" "$home/.local/share/."; do
+    sysdirs="$tmp/none:$other"
+    run "status, the user's directory named $other" 0 FAKE_SHELL=down -- status
+    want "$tmp/out" "installed, your own copy, version $ours ($pkg)" "status, the user's directory named $other"
+    lacks "$tmp/out" "installed twice" "status, the user's directory named $other"
+done
+sysdirs="$tmp/none:$tmp/homelink/.local/share"
+printf '[Containments][1]\nwallpaperplugin=%s\n' "$type_id" > "$rc_file"
+run "uninstall, the user's directory under another name, type in use, no shell" 1 FAKE_SHELL=down -- uninstall
+want "$tmp/err" "would be black" "uninstall, the user's directory under another name, no shell"
+is "uninstall, the user's directory under another name, no shell: nothing removed" -f "$pkg/metadata.json"
+: > "$tmp/log"
+run "uninstall, the user's directory under another name" 0 -- uninstall
+want "$tmp/log" "readConfig('Previous'" "uninstall, the user's directory under another name: the type is taken off the desktops"
+want "$tmp/out" "Removed. walpe-daemon" "uninstall, the user's directory under another name"
+is "uninstall, the user's directory under another name: the package is gone" ! -e "$pkg"
+sysdirs=$sysdirs_was
+run "install (5)" 0 -- install
 mkdir -p "$tmp/cwd/relative/share/plasma/wallpapers"
 cp -R "$src" "$tmp/cwd/relative/share/plasma/wallpapers/$type_id"
 cd "$tmp/cwd" || exit 1
