@@ -1,0 +1,5 @@
+# what makepkg leaves next to the PKGBUILD
+/src/
+/pkg/
+/*.pkg.tar*
+/*.log

@@ -1,0 +1,182 @@
+# Maintainer: left for the project's owner
+#
+# WalPE for Arch Linux and the distributions built on it (CachyOS, EndeavourOS, Manjaro ...).
+# The recipe builds the source tree it lies in, a git checkout or an unpacked archive:
+#
+#     cd contrib/packaging/arch
+#     makepkg -si                       # build, install the dependencies and the package
+#     makepkg -si _scenescript=0        # the same without SceneScript (no QuickJS needed)
+#
+# makepkg writes src/, pkg/ and the package files next to this file (the .gitignore here
+# names them; BUILDDIR and PKGDEST in /etc/makepkg.conf put them elsewhere) and nothing else
+# into the source tree: the build works on a copy.
+# docs/BUILDING.md, "Installing on Arch-based systems", says what the package holds and what
+# each optional package is for.
+#
+# The build is the project's own (buildtype release, link-time optimisation, hardening;
+# meson.build) with every optional part asked for by name, so a part whose development
+# files are missing stops the build instead of being left out without a word; the parts
+# meson finds by themselves (XInput2, RandR, the pointer image and the two page hosts of
+# web wallpapers, the sound plugin of web wallpapers) are checked after the configure step.
+# The compiler flags of /etc/makepkg.conf are used as makepkg hands them out, after the
+# project's: with Arch's own file that means -O2 where ./build.sh gives -O3.
+
+# SceneScript (the scripts of scene wallpapers: clocks, toggles, values that follow the
+# sound) runs in QuickJS, which WalPE links statically. Arch's repositories have no package
+# of it: `quickjs` is in the AUR (libquickjs.a in /usr/lib/quickjs, quickjs/quickjs.h).
+# extra/quickjs-ng is another library (other file names, a changed interface) and is not
+# what the build looks for. 1 = build with SceneScript and need `quickjs` at build time,
+# 0 = build without: scripted values of scenes then keep their start values.
+: "${_scenescript:=1}"
+
+pkgname=walpe
+# The version is the tree's own (meson.build), read here so that it is stated in one place
+# only. (Builtins only: tools that read a PKGBUILD in a restricted shell can read this one.)
+_walpe_dir=${BASH_SOURCE[0]%/*}
+[[ $_walpe_dir != "${BASH_SOURCE[0]}" ]] || _walpe_dir=.
+_walpe_src=${WALPE_SRC:-$_walpe_dir/../../..}
+[[ $_walpe_src == /* ]] || _walpe_src=$PWD/$_walpe_src
+pkgver=
+if [[ -r $_walpe_src/meson.build ]]; then
+  while IFS= read -r _walpe_line; do
+    if [[ $_walpe_line =~ ^[[:space:]]*version:[[:space:]]*\'([0-9][0-9A-Za-z._+]*)\' ]]; then
+      pkgver=${BASH_REMATCH[1]}
+      break
+    fi
+  done < "$_walpe_src/meson.build"
+fi
+unset _walpe_line _walpe_dir
+pkgrel=1
+pkgdesc='Live wallpapers for X11 and Wayland: plays Wallpaper Engine scenes, videos and web wallpapers'
+arch=('x86_64' 'aarch64')
+url='https://github.com/Fired-Cloud/walpe'
+# WalPE itself is BSD-3-Clause. The binaries hold code generated from the Wayland protocol
+# descriptions in protocols/ (MIT and HPND-sell-variant notices) and, with SceneScript,
+# QuickJS (MIT); the three texts are installed into /usr/share/licenses/walpe.
+license=('BSD-3-Clause AND MIT AND HPND-sell-variant')
+depends=(
+  # what the programs and the modules are linked with (readelf -d on each installed file)
+  'glibc' 'libgcc' 'glib2' 'json-glib' 'gdk-pixbuf2' 'pango' 'cairo' 'fontconfig' 'libepoxy'
+  'lz4' 'gtk4' 'graphene'
+  'libx11' 'libxext' 'libxinerama' 'libxi' 'libxrandr' 'libxrender' # the X11 backend, the XEmbed tray
+  'wayland'                  # the Wayland backend, the private page host of web wallpapers
+  'libpulse'                 # audio-reactive wallpapers; wallpaper sound (loaded with the first stream)
+  'ffmpeg'                   # walpe-video.so (libavcodec, libavutil); ffmpeg and ffprobe import videos
+  'webkitgtk-6.0' 'libsoup3' # walpe-web.so: web wallpapers
+  'gstreamer'                # libgstwalpesound.so: the sound output of a web wallpaper's page
+  # what is loaded or started by name
+  'libglvnd'                 # libEGL.so.1, through libepoxy
+  'sh'                       # walpe-collect, walpe-gpu-report
+  'hicolor-icon-theme'
+  # What WebKitGTK asks GStreamer for when a page plays sound or video, and Arch's
+  # webkitgtk-6.0 names as optional only. Without gst-plugins-good (autoaudiosink, pulsesink)
+  # the page process of a web wallpaper ends at its first sound and the wallpaper is given
+  # up; the other two are the decoders of the media web wallpapers ship (Ogg Vorbis, Opus;
+  # H.264, AAC), under 1 MiB together: a page without them stays silent or without its
+  # video. All three are loaded by WebKit's page process only, when a page plays media
+  'gst-plugins-good' 'gst-plugins-base' 'gst-libav'
+)
+makedepends=('meson' 'ninja')
+((_scenescript)) && makedepends+=('quickjs')
+checkdepends=('desktop-file-utils')
+optdepends=(
+  'pipewire-pulse: a sound server with the PulseAudio protocol (or pulseaudio): wallpaper sound, audio-reactive wallpapers'
+  'plasma-workspace: KDE Plasma 6.5 or newer on Wayland: the wallpaper type "WalPE" shows the desktop icons over the wallpaper'
+  'gnome-shell-extension-appindicator: GNOME: the tray icon'
+  'libxss: X11: pause while the screen saver is on'
+  'xdg-utils: open the Workshop page of a wallpaper in the browser'
+  'steamcmd: download Workshop wallpapers (AUR)'
+  'nvidia-utils: NVIDIA: GPU figures of walpe-ctl gpu-stats and walpe-gpu-report (nvidia-smi); NVDEC'
+)
+# the two entries start walpe-daemon and walpe-tray with every desktop session that runs
+# XDG autostart; an administrator's change to them (Hidden=true) survives an update
+backup=('etc/xdg/autostart/walpe-autostart.desktop' 'etc/xdg/autostart/walpe-tray.desktop')
+source=()
+
+# what the configure step must have found: a define of walpe-build-config.h each
+_walpe_parts=(HAVE_X11 HAVE_WAYLAND HAVE_WL_CURSOR HAVE_XI2 HAVE_XRANDR HAVE_PULSE HAVE_FFMPEG
+  HAVE_WEB HAVE_WEB_SOUND_SINK HAVE_WEBHOST_X11 HAVE_WEBHOST_WL HAVE_SOUP)
+((_scenescript)) && _walpe_parts+=(HAVE_QUICKJS)
+
+prepare() {
+  # a copy of what the build reads (not the tests, not build directories that lie in the
+  # tree): the sources are then below $srcdir like any package's
+  local tree
+  tree=$(cd -- "$_walpe_src" && pwd -P) && [[ -f $tree/meson.build && -n $pkgver ]] || {
+    echo "PKGBUILD: no WalPE source tree at $_walpe_src (WALPE_SRC names another one)" >&2
+    return 1
+  }
+  # (and no build directory of an earlier run: meson would go on with the options of then)
+  rm -rf "$srcdir/$pkgname" "$srcdir/build"
+  mkdir -p "$srcdir/$pkgname"
+  local f
+  for f in meson.build meson_options.txt LICENSE README.md CHANGELOG.md \
+    src gst data protocols scripts licenses docs; do
+    cp -a "$tree/$f" "$srcdir/$pkgname/"
+  done
+  # (not all of contrib/: makepkg's own directories lie in it when it is run here)
+  mkdir -p "$srcdir/$pkgname/contrib"
+  cp -a "$tree/contrib/plasma" "$srcdir/$pkgname/contrib/"
+}
+
+build() {
+  local js=disabled
+  ((_scenescript)) && js=enabled
+  meson setup "$srcdir/build" "$srcdir/$pkgname" \
+    --prefix=/usr --sysconfdir=/etc --libdir=lib --libexecdir=lib \
+    --wrap-mode=nodownload \
+    -Dx11=enabled -Dwayland=enabled \
+    -Dvideo=enabled -Dweb=enabled -Daudio=enabled -Dtray=enabled \
+    -Dscenescript=$js \
+    -Dnative_tuning=generic -Dtests=false
+  local part
+  for part in "${_walpe_parts[@]}"; do
+    grep -q "^#define $part\$" "$srcdir/build/walpe-build-config.h" || {
+      echo "PKGBUILD: the configure step did not find what $part needs: this package would lack a part (see the summary above)" >&2
+      return 1
+    }
+  done
+  if grep -q '^#define WALPE_QUICKJS_OLD$' "$srcdir/build/walpe-build-config.h"; then
+    echo "PKGBUILD: the installed QuickJS is older than the 2024-01-13 release (docs/SECURITY.md): wallpaper scripts would run in it" >&2
+    return 1
+  fi
+  # as many compile jobs as ./build.sh would start: WALPE_JOBS, else the -j of MAKEFLAGS
+  # (/etc/makepkg.conf), else ninja's own choice
+  local jobs=${WALPE_JOBS:-}
+  [[ -n $jobs || ! ${MAKEFLAGS:-} =~ (^|[[:space:]])-j[[:space:]]*([0-9]+) ]] || jobs=${BASH_REMATCH[2]}
+  [[ $jobs =~ ^[1-9][0-9]*$ ]] || jobs=
+  meson compile -C "$srcdir/build" ${jobs:+-j "$jobs"}
+}
+
+check() {
+  # the programs start, and the entries are what desktops accept (the project's test suite
+  # needs a display and -Dtests=true: docs/DEVELOPMENT.md)
+  "$srcdir/build/walpe-ctl" help > /dev/null
+  "$srcdir/build/walpe-tray" --version
+  desktop-file-validate "$srcdir/$pkgname"/data/*.desktop
+}
+
+package() {
+  meson install -C "$srcdir/build" --destdir "$pkgdir" --no-rebuild
+
+  # the systemd user unit of the tree, for sessions without XDG autostart (sway, Hyprland
+  # ...): not enabled by the package, and not for a session that runs the autostart entry
+  # too (a second walpe-daemon ends with status 1, which the unit takes for a failure).
+  # The tree's file names the program in ~/.local/bin
+  sed 's|^ExecStart=.*|ExecStart=/usr/bin/walpe-daemon|' "$srcdir/$pkgname/data/walpe.service" |
+    install -Dm644 /dev/stdin "$pkgdir/usr/lib/systemd/user/walpe.service"
+
+  # the add-on for KDE Plasma 6 on Wayland (contrib/plasma): the wallpaper type, where
+  # Plasma looks for the types of every user. Nothing loads it until a user chooses the
+  # type "WalPE" in Plasma's "Desktop and Wallpaper" dialog; it is the engine's own version
+  local plasma=$pkgdir/usr/share/plasma/wallpapers/io.github.walpe.plasma
+  install -d "$plasma"
+  cp -r --no-preserve=mode,ownership "$srcdir/$pkgname/contrib/plasma/wallpaper/." "$plasma/"
+
+  # the documents the programs' messages name (docs/WAYLAND.md, docs/SOUND.md ...), with
+  # the directories the links between them need
+  local doc=$pkgdir/usr/share/doc/$pkgname
+  install -Dm644 -t "$doc" "$srcdir/$pkgname/README.md" "$srcdir/$pkgname/CHANGELOG.md"
+  install -Dm644 -t "$doc/docs" "$srcdir/$pkgname"/docs/*.md
+  install -Dm644 -t "$doc/contrib/plasma" "$srcdir/$pkgname/contrib/plasma/README.md"
+}
