@@ -632,7 +632,20 @@ static void encode_wait_cb (GObject *o, GAsyncResult *res, gpointer user)
  * (import_watch). A child that went on after its daemon was killed wrote a
  * file nobody would ever use, for as long and as much as the source made
  * it, and the next daemon removed that file by name at its start while the
- * child still filled it. */
+ * child still filled it.
+ *
+ * And it leads a process group of its own, which is what is killed when
+ * the child is to end (child_kill, proc_kill): `ffmpeg` in PATH may be a
+ * script that starts the real program without `exec` - distributions and
+ * users have such wrappers - and a signal for the process that was started
+ * here ended the script alone. The real ffmpeg then ran on as nobody's
+ * child after a cancel, a limit or a replaced wallpaper: to the end of its
+ * source, into a ".part" file that had been removed (or, when it had not
+ * opened its output yet, into a new one that stayed). The group holds the
+ * child and what it starts, and nothing of this process. (What the kernel
+ * does for a parent that dies - the lines below - still reaches the
+ * started process only: behind such a wrapper the real ffmpeg outlives a
+ * daemon that is killed, until its source ends.) */
 typedef struct {
     gboolean background;    /* the lowest priority (a scene's copy) */
     gint64 parent;          /* the process that starts the child */
@@ -643,9 +656,51 @@ gboolean walpe_import_child_of (gint64 parent)
     return (gint64) getppid () == parent;
 }
 
+static void background_child_setup (gpointer user);
+
+/* ends a child that was started with background_child_setup, and all it
+ * started: its process group (which it leads; the spawn call returns after
+ * the child's exec, so the group is there), then the child itself in case
+ * it could not make one */
+static void child_kill (pid_t pid)
+{
+    if (pid <= 1)
+        return;
+    if (kill (-pid, SIGKILL) != 0) {
+        /* no such group */
+    }
+    kill (pid, SIGKILL);
+}
+
+/* the same for a GSubprocess (which knows its child until it is collected) */
+static void proc_kill (GSubprocess *proc)
+{
+    const char *id = g_subprocess_get_identifier (proc);
+    const gint64 pid = id ? g_ascii_strtoll (id, NULL, 10) : 0;
+    if (pid > 1 && kill ((pid_t) -pid, SIGKILL) != 0) {
+        /* no such group */
+    }
+    g_subprocess_force_exit (proc);
+}
+
+/* a child that reads or writes a video: started with background_child_setup */
+static GSubprocess *proc_spawn (const char *const *argv, GSubprocessFlags flags, gboolean background, GError **err)
+{
+    GSubprocessLauncher *l = g_subprocess_launcher_new (flags);
+    /* (read by the child between fork and exec, inside spawnv) */
+    ChildSetup cs = { background, (gint64) getpid () };
+    g_subprocess_launcher_set_child_setup (l, background_child_setup, &cs, NULL);
+    GSubprocess *p = g_subprocess_launcher_spawnv (l, argv, err);
+    g_object_unref (l);
+    return p;
+}
+
 static void background_child_setup (gpointer user)
 {
     const ChildSetup *cs = user;
+    if (setpgid (0, 0) != 0) {
+        /* stays in the daemon's group: only the child itself can be ended */
+    }
     if (cs->background) {
         if (setpriority (PRIO_PROCESS, 0, 19) != 0) {
             /* stays at the daemon's */
@@ -688,14 +743,10 @@ static void start_encode (WalpeImport *imp)
                               &imp->box, imp->is_scene ? &imp->scene : NULL, imp->keep_sound);
     GError *err = NULL;
     {
-        GSubprocessLauncher *l = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE |
-                                                            G_SUBPROCESS_FLAGS_STDERR_MERGE);
         const char *bg = g_getenv ("WALPE_CONVERT_BACKGROUND");
-        /* (read by the child between fork and exec, inside spawnv) */
-        ChildSetup cs = { imp->is_scene && !(bg && *bg == '0'), (gint64) getpid () };
-        g_subprocess_launcher_set_child_setup (l, background_child_setup, &cs, NULL);
-        imp->proc = g_subprocess_launcher_spawnv (l, (const char *const *) argv, &err);
-        g_object_unref (l);
+        imp->proc = proc_spawn ((const char *const *) argv,
+                                G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_MERGE,
+                                imp->is_scene && !(bg && *bg == '0'), &err);
     }
     g_strfreev (argv);
     if (!imp->proc) {
@@ -743,8 +794,8 @@ static void start_thumb (WalpeImport *imp)
                            "-ss", ss, "-i", in, "-frames:v", "1",
                            "-vf", "scale=440:-2", "-q:v", "3", "-f", "image2", "-update", "1",
                            out, NULL };
-    imp->proc = g_subprocess_newv (argv, G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
-                                         G_SUBPROCESS_FLAGS_STDERR_SILENCE, NULL);
+    imp->proc = proc_spawn (argv, G_SUBPROCESS_FLAGS_STDOUT_SILENCE | G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+                            FALSE, NULL);
     g_free (in);
     g_free (out);
     if (!imp->proc) {
@@ -855,14 +906,8 @@ static void start_probe (WalpeImport *imp)
                                  "-show_format", "-show_streams", "-select_streams", "v:0",
                                  in, NULL };
     GError *err = NULL;
-    {
-        GSubprocessLauncher *l = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE |
-                                                            G_SUBPROCESS_FLAGS_STDERR_PIPE);
-        ChildSetup cs = { FALSE, (gint64) getpid () };
-        g_subprocess_launcher_set_child_setup (l, background_child_setup, &cs, NULL);
-        imp->proc = g_subprocess_launcher_spawnv (l, imp->is_scene ? argv_scene : argv, &err);
-        g_object_unref (l);
-    }
+    imp->proc = proc_spawn (imp->is_scene ? argv_scene : argv,
+                            G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE, FALSE, &err);
     g_free (in);
     if (!imp->proc) {
         finish (imp, FALSE, err->message);
@@ -955,7 +1000,7 @@ static gboolean import_watch (gpointer user)
             return G_SOURCE_CONTINUE;
         }
         imp->limit_msg = why;
-        g_subprocess_force_exit (imp->proc);    /* its wait callback reports limit_msg */
+        proc_kill (imp->proc);      /* its wait callback reports limit_msg */
     }
     imp->watch_id = 0;
     imp_unref (imp);
@@ -1218,7 +1263,7 @@ int walpe_video_sound_extract_stoppable (const char *src, const char *dst, gbool
             }
             stopped = !timed_out && !low_disk && stop && stop (user);
             if (timed_out || low_disk || stopped) {
-                kill (pid, SIGKILL);
+                child_kill (pid);   /* (and the real ffmpeg behind a wrapper script) */
                 while (waitpid (pid, &status, 0) < 0 && errno == EINTR)
                     ;
                 break;
@@ -1404,8 +1449,8 @@ static WalpeImport *import_start (const char *src, const char *dest_dir, const c
     } else {
         imp->stage = ST_ENCODERS;
         const char *argv[] = { "ffmpeg", "-hide_banner", "-encoders", NULL };
-        imp->proc = g_subprocess_newv (argv, G_SUBPROCESS_FLAGS_STDOUT_PIPE |
-                                             G_SUBPROCESS_FLAGS_STDERR_SILENCE, NULL);
+        imp->proc = proc_spawn (argv, G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+                                FALSE, NULL);
         if (imp->proc)
             g_subprocess_communicate_utf8_async (imp->proc, NULL, imp->cancel,
                                                  encoders_cb, imp_ref (imp));
@@ -1489,7 +1534,7 @@ void walpe_import_cancel (WalpeImport *imp)
     imp->cancelled = TRUE;
     g_cancellable_cancel (imp->cancel);
     if (imp->proc)
-        g_subprocess_force_exit (imp->proc);
+        proc_kill (imp->proc);
     g_remove (imp->dst_part);
     if (imp->proc && imp->stage == ST_ENCODE && g_subprocess_get_identifier (imp->proc)) {
         /* the encoder may still make the file: once more when it has ended */

@@ -16,6 +16,11 @@
  *    given up when its caller says so: ffmpeg is gone, nothing is left, and
  *    a second caller does not wait for its turn longer than it wants to
  *    (a stand-in "ffmpeg" that never ends; runs without the real one);
+ *  - an "ffmpeg" that is a script which starts the real program without
+ *    `exec` (a wrapper of a distribution or of the user): the program it
+ *    started ends too when the track is given up and when an import is
+ *    cancelled - the child leads a process group of its own, and that is
+ *    what is killed;
  *  - the unfinished outputs of a killed daemon are removed
  *    (walpe_import_tidy_parts), and only those;
  *  - the ffmpeg of a conversion does not outlive the process that started
@@ -51,6 +56,9 @@ static char *P (const char *rel)
 {
     return g_build_filename (tmp, rel, NULL);
 }
+
+static long stat_field (long pid, int which, char *state);
+static gboolean pid_runs (long pid);
 
 /* ---- a sound track given up (walpe_video_sound_extract_stoppable) ---- */
 static gint stop_a, stop_b;     /* what the two callers' stop functions say */
@@ -121,6 +129,55 @@ static void test_sound_stop (const char *any_file)
     g_rmdir (dir);
     g_free (dir); g_free (fake); g_free (pidf); g_free (dst_a); g_free (dst_b); g_free (part_a); g_free (text);
     g_free (q_pid); g_free (sh); g_free (old_path); g_free (path);
+}
+
+/* `ffmpeg` is a script that does not `exec`: it starts the program (here:
+ * sleep) as its child and waits for it. Given up, the program is gone too
+ * - it ran on as nobody's child, to the end of the video, writing into a
+ * file that had been removed - and it never was in this process's group. */
+static void test_sound_stop_wrapper (const char *any_file)
+{
+    char *dir = P ("wrap"), *fake = P ("wrap/ffmpeg"), *pidf = P ("wrap/pid"), *pidt = P ("wrap/pid.tmp"),
+         *dst_a = P ("wrap/a-sound.flac"), *part_a = P ("wrap/a-sound.flac.part"), *text = NULL;
+    char *q_pid = g_shell_quote (pidf), *q_tmp = g_shell_quote (pidt);
+    char *sh = g_strdup_printf ("#!/bin/sh\nsleep 60 &\necho $! > %s\nmv %s %s\nwait $!\nexit $?\n", q_tmp, q_tmp, q_pid);
+    char *old_path = g_strdup (g_getenv ("PATH")), *path = g_strconcat (dir, ":", old_path, NULL);
+    g_mkdir_with_parents (dir, 0700);
+    if (!g_file_set_contents (fake, sh, -1, NULL) || g_chmod (fake, 0700)) {
+        CHECK (!"the stand-in ffmpeg could not be written");
+    } else {
+        g_setenv ("PATH", path, TRUE);
+        g_atomic_int_set (&stop_a, 0);
+        Extract a = { any_file, dst_a, 99, NULL };
+        GThread *t = g_thread_new ("extract", extract_thread, &a);
+        for (int i = 0; i < 5000 && !g_file_get_contents (pidf, &text, NULL, NULL); i++)
+            g_usleep (1000);
+        const long real = text ? atol (text) : 0;       /* what the script started */
+        const long script = real > 1 ? stat_field (real, 1, NULL) : 0;
+        CHECK (real > 1 && pid_runs (real) && script > 1 && script != (long) getpid ());
+        /* a group of its own, led by what was started here */
+        CHECK (real > 1 && stat_field (real, 2, NULL) == script && stat_field (script, 2, NULL) == script &&
+               script != (long) getpgrp ());
+        g_atomic_int_set (&stop_a, 1);
+        g_thread_join (t);
+        CHECK (a.res == -2 && !a.err);
+        gboolean gone = real <= 1;
+        for (int i = 0; real > 1 && i < 200 && !(gone = !pid_runs (real)); i++)
+            g_usleep (10000);
+        CHECK (gone);       /* the program behind the script has ended with it */
+        if (real > 1 && !gone)
+            kill ((pid_t) real, SIGKILL);       /* not left behind by a failing run */
+        CHECK (!g_file_test (dst_a, G_FILE_TEST_EXISTS) && !g_file_test (part_a, G_FILE_TEST_EXISTS));
+        g_free (a.err);
+        g_atomic_int_set (&stop_a, 0);
+        g_setenv ("PATH", old_path, TRUE);
+    }
+    g_remove (fake);
+    g_remove (pidf);
+    g_remove (pidt);
+    g_rmdir (dir);
+    g_free (dir); g_free (fake); g_free (pidf); g_free (pidt); g_free (dst_a); g_free (part_a); g_free (text);
+    g_free (q_pid); g_free (q_tmp); g_free (sh); g_free (old_path); g_free (path);
 }
 
 /* The stop of the caller next to the floor of free disk (WALPE_CONVERT_FREE_MB),
@@ -493,7 +550,8 @@ static void result_clear (Result *r)
 }
 
 /* the first process whose parent is pid (0 = none), and whether a process
- * still runs (a zombie does not) */
+ * still runs (a zombie does not). stat_field: which 0 = is it there, 1 = its
+ * parent, 2 = its process group */
 static long stat_field (long pid, int which, char *state)
 {
     char *path = g_strdup_printf ("/proc/%ld/stat", pid), *txt = NULL;
@@ -501,9 +559,9 @@ static long stat_field (long pid, int which, char *state)
     if (g_file_get_contents (path, &txt, NULL, NULL)) {
         const char *p = strrchr (txt, ')');     /* (the name may hold spaces) */
         char st = 0;
-        long ppid = 0;
-        if (p && sscanf (p + 1, " %c %ld", &st, &ppid) == 2) {
-            v = which ? ppid : 0;
+        long ppid = 0, pgrp = 0;
+        if (p && sscanf (p + 1, " %c %ld %ld", &st, &ppid, &pgrp) == 3) {
+            v = which == 2 ? pgrp : which ? ppid : 0;
             if (state)
                 *state = st;
         }
@@ -848,6 +906,57 @@ static void test_runs (void)
         g_free (part);
         g_free (dst);
     }
+    /* the same with an "ffmpeg" in front of the real one that starts it
+     * without `exec`: the real one is gone when the import is cancelled */
+    {
+        char *real = g_find_program_in_path ("ffmpeg"), *wdir = P ("in/w"), *fake = P ("in/w/ffmpeg"),
+             *pidf = P ("in/w/pid"), *pidt = P ("in/w/pid.tmp"), *text = NULL;
+        char *q_real = g_shell_quote (real), *q_pid = g_shell_quote (pidf), *q_tmp = g_shell_quote (pidt);
+        char *sh = g_strdup_printf ("#!/bin/sh\n%s \"$@\" &\necho $! > %s\nmv %s %s\nwait $!\nexit $?\n", q_real,
+                                    q_tmp, q_tmp, q_pid);
+        char *old_path = g_strdup (g_getenv ("PATH")), *path = g_strconcat (wdir, ":", old_path, NULL);
+        char *part = g_build_filename (lib, "long.mp4.part", NULL), *dst = g_build_filename (lib, "long.mp4", NULL);
+        g_mkdir_with_parents (wdir, 0700);
+        if (g_file_set_contents (fake, sh, -1, NULL) && !g_chmod (fake, 0700)) {
+            Result c = { 0 };
+            g_setenv ("PATH", path, TRUE);
+            WalpeImport *imp = walpe_import_start (lng, lib, "libx264", &hd, done_cb, &c, NULL);
+            CHECK (imp != NULL);
+            for (int i = 0; imp && i < 600 && !c.called && !g_file_test (part, G_FILE_TEST_EXISTS); i++) {
+                g_timeout_add (100, stop_loop, NULL);
+                g_main_loop_run (loop);
+            }
+            if (imp && !c.called) {
+                const long enc = g_file_get_contents (pidf, &text, NULL, NULL) ? atol (text) : 0;
+                CHECK (enc > 1 && pid_runs (enc) && stat_field (enc, 2, NULL) != (long) getpgrp ());
+                walpe_import_cancel (imp);
+                gboolean gone = enc <= 1;
+                for (int i = 0; enc > 1 && i < 20 && !(gone = !pid_runs (enc)); i++) {
+                    g_timeout_add (25, stop_loop, NULL);
+                    g_main_loop_run (loop);
+                }
+                CHECK (gone);
+                if (enc > 1 && !gone)
+                    kill ((pid_t) enc, SIGKILL);
+                g_timeout_add (1000, stop_loop, NULL);      /* the callbacks, and what was removed late */
+                g_main_loop_run (loop);
+                CHECK (!c.called && count_suffix (lib, ".part") == 0 && !g_file_test (dst, G_FILE_TEST_EXISTS));
+            } else {
+                g_print ("import-test: the long encode finished before it could be cancelled (wrapper)\n");
+            }
+            walpe_import_free (imp);
+            result_clear (&c);
+            g_setenv ("PATH", old_path, TRUE);
+        } else {
+            CHECK (!"the stand-in ffmpeg could not be written");
+        }
+        g_remove (fake);
+        g_remove (pidf);
+        g_remove (pidt);
+        g_rmdir (wdir);
+        g_free (real); g_free (wdir); g_free (fake); g_free (pidf); g_free (pidt); g_free (text); g_free (q_real);
+        g_free (q_pid); g_free (q_tmp); g_free (sh); g_free (old_path); g_free (path); g_free (part); g_free (dst);
+    }
     /* the daemon is killed in the middle of a conversion: its ffmpeg ends
      * with it (only the daemon names the output and watches its limits).
      * The "daemon" is this program started again as a helper. */
@@ -918,6 +1027,7 @@ int main (int argc, char **argv)
         g_file_set_contents (any, "stands for a video\n", -1, NULL);
         test_sound_stop (any);
         test_sound_stop_floor (any);
+        test_sound_stop_wrapper (any);
         g_remove (any);
         g_free (any);
     }

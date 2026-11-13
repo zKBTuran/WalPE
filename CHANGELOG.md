@@ -658,6 +658,14 @@ microphone.
   becomes 274 MB of FLAC in half a minute, six hours up to 2 GB. It now has the floor
   every conversion has - not begun, and stopped, when less than 256 MB are free
   (`WALPE_CONVERT_FREE_MB`, new, for both).
+- Where `ffmpeg` in `PATH` is a wrapper script that starts the real program without
+  `exec`: an import that was cancelled, a conversion that reached one of its limits and a
+  sound track that was given up ended the script only, and the real ffmpeg ran on to the
+  end of its source as nobody's child. Every ffmpeg and ffprobe the daemon starts now
+  leads a process group of its own, and the group is what is ended. (Behind such a
+  wrapper the real ffmpeg still outlives a daemon that is killed or crashes; its
+  unfinished file is removed at the next start.) Imports and conversions of 0.14.0 have
+  this too.
 - The cache of converted videos and sound tracks (`~/.cache/walpe/video`) can be given a
   size: `WALPE_VIDEO_CACHE_MB=<MiB>` in the daemon's environment removes, when the daemon
   starts, what was not played for the longest time until the rest fits. Without it
