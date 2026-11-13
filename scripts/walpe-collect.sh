@@ -244,8 +244,27 @@ start_detached () {     # LOGFILE COMMAND...
 status_value () {       # FILE KEY: the value of a number / true / false member
     sed -n "s/.*\"$2\":\\([-0-9.eE+a-z]*\\).*/\\1/p" "$1" 2> /dev/null | head -n 1
 }
-status_first () {       # FILE KEY: the first string member of that name (the reply's own, not a monitor's)
-    awk -v k="\"$2\":\"" '{ i = index($0, k); if (i) { s = substr($0, i + length(k)); j = index(s, "\""); print substr(s, 1, j - 1); exit } }' "$1" 2> /dev/null
+# FILE KEY: the first string member of that name (the reply's own, not a monitor's), as the
+# text it stands for: the string ends at its closing quotation mark, not at one inside it
+# (\" - the sentence about a web wallpaper's sound has some), and JSON's escapes are undone
+# (\" \\ \/; a line break or tab becomes a space; \uXXXX stays as it is written)
+status_first () {
+    awk -v k="\"$2\"[ \t]*:[ \t]*\"" '{
+        if (!match($0, k)) next
+        s = substr($0, RSTART + RLENGTH)
+        out = ""
+        while (match(s, /["\\]/)) {
+            out = out substr(s, 1, RSTART - 1)
+            if (substr(s, RSTART, 1) == "\"") { s = ""; break }
+            e = substr(s, RSTART + 1, 1)
+            s = substr(s, RSTART + 2)
+            if (e == "n" || e == "r" || e == "t") out = out " "
+            else if (e == "u") out = out "\\u"
+            else if (e != "b" && e != "f") out = out e
+        }
+        print out s
+        exit
+    }' "$1" 2> /dev/null
 }
 onoff () { if [ "$1" = true ]; then echo on; else echo off; fi; }
 
@@ -278,9 +297,9 @@ cpu_sample () {         # LABEL
 # ---- a video wallpaper: does its file have a sound track? (codec names only, no file name)
 video_probe () {        # STATUSFILE LABEL
     [ "$(status_first "$1" type)" = video ] || return 0
-    _vp=$(status_first "$1" path | sed 's#\\/#/#g')
+    _vp=$(status_first "$1" path)
     if [ -d "$_vp" ] && [ -f "$_vp/project.json" ]; then
-        _vf=$(sed -n 's/.*"file"[ ]*:[ ]*"\([^"]*\)".*/\1/p' "$_vp/project.json" | head -n 1)
+        _vf=$(status_first "$_vp/project.json" file)
         _vp=$_vp/$_vf
     fi
     echo "=== $2: the streams of the video wallpaper shown ($(stamp)) ===" >> "$R/video-streams.txt"
@@ -429,7 +448,7 @@ tray_round () {         # PREFIX LABEL
     sleep 1
     tray_menu "$_px-menu.txt" "$2: while paused (walpe-ctl pause)"
     "$CTL" resume > /dev/null 2>&1
-    _cur=$(status_first "$R/$_px-status.json" path | sed 's#\\/#/#g')
+    _cur=$(status_first "$R/$_px-status.json" path)
     if [ -n "$_cur" ]; then
         if "$CTL" open "$_cur" > /dev/null 2>&1; then note "$_px: the same wallpaper was opened again (a wallpaper change for the menu)"; fi
     fi
