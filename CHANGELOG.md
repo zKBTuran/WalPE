@@ -20,8 +20,9 @@ were run on a headless Plasma 6.8.2 (the layer also on a headless Plasma 5.27): 
 one and two virtual outputs, software renderer, a virtual pointer; a real Plasma session,
 a graphics card there and a restart of KWin have not been run. The sound of video and web
 wallpapers and the audio capture were measured against private sound servers with null
-sinks (PulseAudio 16.1; PipeWire 1.0.5 with WirePlumber 0.4.17): nobody has heard it,
-no sound card and no microphone was there, and WirePlumber 0.5 was not run. The new
+sinks (PulseAudio 16.1; PipeWire 1.0.5 with WirePlumber 0.4.17; the sound of web
+wallpapers also PipeWire 1.6.11 with WirePlumber 0.5.19): nobody has heard it, and no
+sound card and no microphone was there. The new
 choice of a laptop's discrete GPU has never run on a machine with two GPUs: what was run
 is the decision, on made-up machines, and the way back when the GPU's test fails.** Two
 defaults change: wallpaper sound is on, at half volume (under Sound), and `gpu=auto`
@@ -332,6 +333,23 @@ comes from and what it costs).
   drivers' own variables (`DRI_PRIME`, `__NV_PRIME_RENDER_OFFLOAD`, ...) in the daemon's
   environment, nothing is set and no test process is started. This has not run on a
   machine with two GPUs ([GPU.md](docs/GPU.md)).
+- `gpu=auto` on X11 asks the X server before it tests a GPU. The list of devices is all
+  `auto` has on X11 when it decides, and a machine whose X server runs on its NVIDIA card
+  alone, with the kernel's driver for the unused processor graphics loaded, has the list
+  of a laptop that renders on its integrated GPU: there `auto` would have started its
+  test at every start of the daemon, to learn that nothing is to be set. Where a card
+  run by NVIDIA's own driver is in the list, the daemon now asks the X server for the
+  names of its RandR providers first, on one short connection of its own. NVIDIA's X
+  driver names the provider of a screen it draws `NVIDIA-0`: with such a name in the
+  answer `auto` is `display` - no test process, nothing set, no note, no line in the
+  log. Any other answer, none, or a build without libXrandr: the test, as described
+  above. Nothing is asked with one GPU, with `gpu=display` or a named device, or on
+  Wayland. The names are those of NVIDIA's documentation; no X server with providers
+  was at hand (`xrandr --listproviders` shows them).
+- `gpu=auto` says nothing about a display GPU that has no driver. With NVIDIA's driver
+  loaded without its DRM module and the processor's graphics left without a kernel
+  driver, the log and `gpu_note` said that rendering "stays on" the Intel device, which
+  renders nothing there. Nothing was tested or set; the sentence was wrong and is gone.
 - `gpu=display` is new and is what `auto` was: nothing is set, and the GPU of the X
   server or the compositor renders, whatever the machine. It is the value for a laptop
   on which the second GPU should stay asleep: rendering on the discrete GPU copies every
@@ -460,8 +478,13 @@ microphone.
   another disk, or a file opened from `/tmp` or a stick, that sentence held the whole
   path. It now reads `LOAD ERROR: noscene: scene.json not found in noscene`: the folders
   the daemon knows are taken out, and any other absolute path is cut down to
-  `.../<last part>`. Below the home directory it is `~/...` as before. `walpe-ctl status`
-  is unchanged.
+  `.../<last part>`. Below the home directory it is `~/...` as before, also where GLib
+  puts a file name between its own quotation marks (“...”). `walpe-ctl status` is
+  unchanged.
+- `walpe-ctl diag` has a line `sound server:` under `sound:`, the sentence of
+  `walpe-ctl soundcheck` (under Sound): whether the sound server holds a web
+  wallpaper's stream muted or at 0 %. Only the text that is asked for has it; the
+  summary the daemon writes into its log at start does not ask the sound server.
 
 ### Settings and walpe-ctl
 
@@ -471,16 +494,20 @@ microphone.
   did not say so. The whole request is checked first, as it already was for an unknown
   key, and every refusal ends with "nothing was changed". A request that is accepted is
   applied as before.
-- `wallpapers_dir` in `config.json` stays as you wrote it. The first change of any
-  setting after a start had turned `~/.local/share/walpe/workshop` into
-  `/home/<name>/.local/share/walpe/workshop`.
+- `wallpapers_dir` in `config.json` stays as you wrote it where it begins with `~` or is
+  an absolute path. The first change of any setting after a start had turned
+  `~/.local/share/walpe/workshop` into `/home/<name>/.local/share/walpe/workshop`. A
+  relative path (`walls`) is still saved as the folder it named when it was first read,
+  as before: kept as written, the daemon and the library window would each look below
+  the directory they were started in.
 - `walpe-ctl status`: `backend` is the video backend that plays, `ffmpeg`, also after
   `walpe-ctl set video_backend=mpv` (that word is still stored for configurations of
   earlier versions and means the same; the reply now says so). It showed `mpv`.
 - `walpe-ctl pause`, `resume`, `status`, `quit`, `cancel-import` and `steam-libraries`
   with an argument, and `add` with a second file, end with status 1 and a sentence. The
   argument was dropped and the command carried out (`walpe-ctl pause 1` paused every
-  monitor).
+  monitor). `walpe-ctl status --json` is still the status: JSON is what status prints,
+  and six other commands take `--json`. `walpe-ctl soundcheck` takes no argument either.
 - A restart in place no longer waits without limit for a child process that does not end
   (WebKit's processes): one second after asking, two more after killing it, then the
   restart goes on and the log names the process.
