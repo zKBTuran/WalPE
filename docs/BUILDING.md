@@ -32,8 +32,12 @@ tuning**: the binaries run on any CPU of the architecture they were built for.
 
 ## Dependencies
 
-A C compiler (GCC or clang), meson and ninja. Package names are Gentoo's; the pkg-config
-module is what `meson setup` looks for, to map them to another distribution.
+A C compiler (GCC or clang), meson, ninja and pkg-config, and GLib's `glib-compile-resources`
+(the window's stylesheet is compiled into the program; Debian and Ubuntu have it in
+`libglib2.0-dev-bin`, which `libglib2.0-dev` asks for, Arch in `glib2`). Package names are
+Gentoo's; the pkg-config module is what `meson setup` looks for, to map them to another
+distribution. The names of Debian and Ubuntu are listed [below](#64-bit-arm-aarch64), the
+ones of Arch in [Installing on Arch-based systems](#installing-on-arch-based-systems).
 
 | pkg-config module | Gentoo package | Needed for |
 |---|---|---|
@@ -59,6 +63,14 @@ build needs are in the source tree (`protocols/`, see [Licence](#licence)), so n
 `wayland-protocols` package is needed. The GPU, OpenGL ES, resolution and hardware decoding
 parts need no new library: graphics devices are read from sysfs, and VA-API, DRM and Vulkan
 devices go through FFmpeg's own interface.
+
+Three libraries are not linked: the daemon loads them by name when they are installed, and
+without one nothing but its use is missing, with no message. `libpulse-simple.so.0` plays
+wallpaper sound; it is part of the libpulse the `audio` option needs. `libXss.so.1` tells
+the X11 backend that the X screen saver is on, which pauses like a sleeping display
+(Debian and Ubuntu: `libxss1`, Arch: `libxss`). `libXfixes.so.3` reports the start and the
+end of a compositing manager to "pause when covered" on X11, which otherwise asks when a
+window comes or goes (`libxfixes3`, `libxfixes`; GTK 4 depends on it on both).
 
 Optional parts (meson `auto`; each takes `-D<option>=enabled|disabled`):
 
@@ -228,6 +240,17 @@ libquickjs                              # SceneScript
 Ubuntu 24.04's `libquickjs` for arm64 is the 2021-03-27 release, the one `meson setup`
 warns about ([SECURITY.md](SECURITY.md)).
 
+The list is what the build needs, on x86-64 as on arm64: on Ubuntu 24.04 (x86-64) every
+pkg-config module and program `meson.build` asks for is in one of these packages
+(`wayland-scanner` and `glib-compile-resources` come with `libwayland-dev` and
+`libglib2.0-dev`). At run time on Debian and Ubuntu: `ffmpeg` (importing and converting
+videos, the sound track of video wallpapers), a sound server with the PulseAudio protocol
+(`pipewire-pulse` or `pulseaudio`), and `gstreamer1.0-tools`: it has `gst-inspect-1.0`,
+without which the daemon cannot tell which GStreamer element a web wallpaper's media lack
+(`web_missing_gst` stays empty). Ubuntu 24.04's `libwebkitgtk-6.0-4` depends on
+`gstreamer1.0-plugins-base` and `gstreamer1.0-plugins-good`, so the sound output of web
+wallpapers is installed with it; `gstreamer1.0-libav` (H.264, AAC) is only suggested.
+
 **What is different on ARM.**
 
 - *Graphics.* Most ARM GPUs have OpenGL ES and no desktop OpenGL. With `gl_api=auto`
@@ -287,6 +310,14 @@ is the first thing to run on a real ARM machine: a failure there is a portabilit
 meson install -C build               # binaries to <prefix>/bin, modules to <prefix>/<libdir>/walpe
 ```
 
+The two XDG autostart entries go to `<sysconfdir>/xdg/autostart`, and desktops read
+`/etc/xdg/autostart` and `~/.config/autostart`. With meson's defaults only the prefix
+`/usr` gives `/etc`: the default prefix puts them into `/usr/local/etc/xdg/autostart` and
+`--prefix=$HOME/.local` into `~/.local/etc/xdg/autostart`, where no session looks. For an
+installation for all users add `--sysconfdir=/etc` at setup time; for one in your home
+directory copy `data/walpe-autostart.desktop` and `data/walpe-tray-autostart.desktop` (as
+`walpe-tray.desktop`) to `~/.config/autostart/` if you want them.
+
 `meson install` first runs a plain `ninja`. In a build directory without the tests that
 builds nothing `build.sh` has not built. In one set up with `-Dtests=true` it builds
 every test program as well: `meson install -C build --no-rebuild` installs without that.
@@ -314,6 +345,92 @@ This also puts WalPE into the desktop's application menu. Seen on KDE Plasma 5.2
 X11 needs neither file.
 
 Starting the daemon with your session: [USAGE.md](USAGE.md#starting-with-the-session).
+
+## Installing on Arch-based systems
+
+For Arch Linux and the distributions built on it (CachyOS, EndeavourOS, Manjaro) the tree
+has a package recipe, [contrib/packaging/arch/PKGBUILD](../contrib/packaging/arch/PKGBUILD).
+It builds the tree it lies in, a git checkout or an unpacked archive, and makes one
+package, `walpe`:
+
+```sh
+cd contrib/packaging/arch
+makepkg -si                  # pacman installs what is missing; build; install
+makepkg -si _scenescript=0   # without SceneScript, when there is no QuickJS (below)
+```
+
+`pacman -R walpe` removes it again; settings, the library and caches in your home directory
+stay. The package is the build of this file with the prefix `/usr`, and differs from
+`./build.sh` and `meson install` in this:
+
+- **Nothing is left out without a word.** Every optional part is asked for by name, and
+  the parts meson finds by themselves (XInput2, RandR, the pointer image, both page hosts
+  of web wallpapers, `libgstwalpesound.so`) are checked after the configure step: a
+  missing development file stops the build. On Arch the headers are in the same packages
+  as the libraries (`gstreamer` has GStreamer's), so `makepkg -s` installs all of them.
+- **It starts with the session.** The autostart entries are in `/etc/xdg/autostart`:
+  after the next login `walpe-daemon` and `walpe-tray` run on every desktop that runs XDG
+  autostart (KDE Plasma, GNOME, Xfce), for every user. To stop that for yourself, put a
+  file of the same name with the line `Hidden=true` under `[Desktop Entry]` into
+  `~/.config/autostart/` (the window's tray switch does it for `walpe-tray.desktop`).
+  For sway, Hyprland and the like, which run no autostart entries, the package has the
+  systemd user unit, not switched on: `systemctl --user enable --now walpe.service`. Use
+  one of the two: a second `walpe-daemon` ends with status 1, and the unit starts it again
+  every three seconds.
+- **The add-on for KDE Plasma is installed for all users**, as the wallpaper type "WalPE"
+  in `/usr/share/plasma/wallpapers`. Nothing uses it until you choose it: right-click the
+  desktop, "Desktop and Wallpaper", wallpaper type **WalPE**
+  ([WAYLAND.md](WAYLAND.md#kde-plasma)). It is always the version of the engine; after an
+  update of the package Plasma's shell keeps the version it has loaded until the next
+  login. `contrib/plasma/install.sh` is not needed and does not know this copy (`select`
+  and `status` look into your home directory only). A copy it has put into
+  `~/.local/share/plasma/wallpapers` earlier is found first by Plasma and stays the old
+  version: remove it with `contrib/plasma/install.sh uninstall`, then choose the type
+  again.
+- **The documents are in `/usr/share/doc/walpe`**, the licence texts in
+  `/usr/share/licenses/walpe`.
+- **The compiler flags are those of `/etc/makepkg.conf`**, after the project's own: Arch's
+  file says `-O2` where `./build.sh` builds with `-O3`.
+
+QuickJS, which runs the scripts of scene wallpapers and is linked statically, is in none
+of Arch's repositories: `quickjs` is in the AUR and has to be installed before `makepkg`
+(an AUR helper does both). `quickjs-ng` from `extra` is another library, with other file
+names, and is not what the build looks for. `_scenescript=0` builds without: scripted
+values of scenes (clocks, switches, values that follow the sound) then keep their start
+values.
+
+| Package | Installed with `walpe` | What for |
+|---|---|---|
+| `gtk4`, `glib2`, `json-glib`, `gdk-pixbuf2`, `pango`, `cairo`, `fontconfig`, `libepoxy`, `libglvnd`, `lz4`, `graphene` | yes | everything |
+| `libx11`, `libxext`, `libxinerama`, `libxi`, `libxrandr`, `libxrender` | yes | the X11 backend, the tray on X11 |
+| `wayland` | yes | the Wayland backend |
+| `ffmpeg` | yes | video wallpapers and video textures; `ffmpeg` and `ffprobe` import and convert videos and take out the sound track of a video wallpaper |
+| `webkitgtk-6.0`, `libsoup3`, `gstreamer` | yes | web wallpapers and the sound output of their pages |
+| `gst-plugins-good` | yes | web wallpapers: Arch's `webkitgtk-6.0` names it as optional, and without its `autoaudiosink` the page of a web wallpaper ends at its first sound; also WAV, MP3, MP4, WebM |
+| `gst-plugins-base`, `gst-libav` | yes | web wallpapers: Ogg Vorbis and Opus; H.264 and AAC |
+| `libpulse` | yes | wallpaper sound, audio-reactive wallpapers |
+| `pipewire-pulse` or `pulseaudio` | no | the sound server for both; without one WalPE is silent and spectra stay 0 |
+| `quickjs` (AUR) | at build time | SceneScript |
+| `plasma-workspace` | no | KDE Plasma 6.5 or newer on Wayland: the wallpaper type "WalPE" |
+| `gnome-shell-extension-appindicator` | no | GNOME: the tray icon |
+| `libxss` | no | X11: pause while the X screen saver is on |
+| `xdg-utils` | no | open the Workshop page of a wallpaper in the browser |
+| `steamcmd` (AUR) | no | download Workshop wallpapers |
+| `nvidia-utils` | no | NVIDIA: `nvidia-smi` for `walpe-ctl gpu-stats` and `walpe-gpu-report`; NVDEC |
+
+How far this was tried: the package was built with `makepkg` by an unprivileged user in an
+Arch Linux root that held `base`, `base-devel` and the packages the recipe names, nothing
+else, and `namcap` has no error for the recipe or the package. Installed with `pacman`
+into a root with nothing but its dependencies, the daemon showed a scene, a scene with a
+script and a video on X11 (Xvfb) and on Wayland (headless sway), loaded its modules from
+`/usr/lib/walpe`, and `tests/websound_rig.sh` passed with a private PipeWire, the sound
+plugin found in `/usr/lib/walpe/gst`; in a Plasma 6.8 session with a virtual display the
+wallpaper type from `/usr/share` was chosen and KWin kept Plasma's desktop over the
+daemon's surface. Not tried: CachyOS itself, a graphics card (the software renderer drew),
+a real login with its autostart, the systemd unit under a running user manager, and the
+AUR's `quickjs` (the build used QuickJS 2026-06-04 as its own Makefile installs it). With
+GTK 4.24, gdk-pixbuf 2.44 and GLib 2.90 the compiler warns about functions those releases
+have deprecated (31 lines); the build has no other warning.
 
 ## Licence
 
