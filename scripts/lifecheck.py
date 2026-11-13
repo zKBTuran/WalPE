@@ -3868,7 +3868,11 @@ def case_diag(env, W):
         first = []
     check(bool(first) and first[0].rstrip().endswith(", source %s)" % built),
           "diag: the daemon's first line in the log ends with the source id", first[:1])
-    for prog in ("walpe-daemon", "walpe-ctl"):
+    # (the tray and the window say theirs the same way: looked at where the build has them -
+    # this check's test builds the daemon and walpe-ctl only)
+    for prog in ("walpe-daemon", "walpe-ctl", "walpe-tray", "walpe"):
+        if prog in ("walpe-tray", "walpe") and not os.path.exists(os.path.join(env.build, prog)):
+            continue
         p = subprocess.run([os.path.join(env.build, prog), "--version"], env=env.env, stdin=subprocess.DEVNULL,
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60 * PATIENCE)
         out = p.stdout.decode(errors="replace")

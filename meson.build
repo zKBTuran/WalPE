@@ -948,7 +948,7 @@ endif
 # release tarball, a test build's zip: .gitattributes export-subst), from git in a
 # checkout, "unknown" otherwise. The step runs with every build (a new commit has to
 # be seen) and rewrites its header only when the id changed; the header is read by
-# sourceid.c alone, which is compiled into the three programs that show the id. So an
+# sourceid.c alone, which is compiled into the four programs that show the id. So an
 # unchanged tree builds the same bytes again and compiles nothing, and a new commit
 # compiles that one file and links those programs. Nothing of the build - no date, no
 # host - is in the id, and the version stays what meson.build's project() says.
@@ -1041,7 +1041,7 @@ ui = executable('walpe', 'src/ui/main.c', 'src/ui/store.c', 'src/ui/props.c', 's
   'src/ui/perf.c', 'src/ui/appearance.c', 'src/ui/winstate.c',
   'src/ui/resmodel.c', 'src/ui/resdialog.c',   # render resolution per monitor
   'src/ui/uiipc.c', 'src/ui/thumbs.c', 'src/ui/uistats.c', 'src/ui/workshop_page.c',
-  'src/tray/trayconf.c', 'src/ui/delete.c', 'src/ui/wlappid.c', ui_res,
+  'src/tray/trayconf.c', 'src/ui/delete.c', 'src/ui/wlappid.c', ui_res, source_id_src,
   include_directories: inc,
   c_args: ['-DWALPE_HAVE_WORKSHOP_PAGE'] + ui_x11_args + ui_wl_args,
   dependencies: [core_dep, gtk4] + (ui_x11_args.length() > 0 ? [ui_x11_dep, x11] : []) +

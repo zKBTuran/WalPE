@@ -815,9 +815,10 @@ microphone.
   with changed files; `unknown` where neither git nor the files say) is the member
   `source_id` of `walpe-ctl status`, the line `source:` of `walpe-ctl diag`, in the
   daemon's first line in its log, and in what `walpe-collect` prints and writes down.
-  `walpe-daemon --version`, `walpe-ctl --version` and `walpe-tray --version` print it of
-  their own file without a running daemon (`walpe-daemon --version` was no option: it
-  started a daemon). It is found when the program is built: in a tree made by `git
+  `walpe-daemon --version`, `walpe-ctl --version`, `walpe-tray --version` and `walpe
+  --version` print it of their own file without a running daemon (`walpe-daemon
+  --version` was no option: it started a daemon; the window `walpe` answered "Unknown
+  option --version"). It is found when the program is built: in a tree made by `git
   archive` (a release tarball, a test build's zip) from the file `SOURCE-ID`, which git
   fills in there, in a checkout from git. The version stays the released one, nothing of
   the build's time or machine is in the id - the same tree builds the same programs - and

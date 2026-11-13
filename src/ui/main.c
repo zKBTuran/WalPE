@@ -42,7 +42,9 @@
 #ifdef WALPE_HAVE_WORKSHOP_PAGE
 #include "workshop_page.h"   /* GtkWidget *walpe_workshop_page_new (void); */
 #endif
+#include "walpe-build-config.h"   /* WALPE_VERSION, WALPE_CODENAME: --version */
 #include "common/config.h"
+#include "common/sourceid.h"      /* --version: which tree it was built from */
 #include "common/ipcsub.h"
 #include "common/util.h"
 #include "common/uitext.h"
@@ -4103,6 +4105,15 @@ static gint on_local_options (GApplication *app, GVariantDict *opts, gpointer u)
 
 int main (int argc, char **argv)
 {
+    /* --version: this program's version and the commit it was built from, in
+     * the words of walpe-daemon, walpe-ctl and walpe-tray. Answered before
+     * anything else: no display is opened, no window, and no instance that
+     * runs is asked (it was "Unknown option --version", status 1). */
+    for (int i = 1; i < argc; i++)
+        if (!g_strcmp0 (argv[i], "--version")) {
+            g_print ("walpe %s \"%s\" (source %s)\n", WALPE_VERSION, WALPE_CODENAME, walpe_source_id ());
+            return 0;
+        }
     /* the browser needs no GPU: cairo avoids GL context trouble on drivers
      * where GSK's GL renderer misbehaves. A user GSK_RENDERER wins; the
      * renderer in use is logged at startup. */
