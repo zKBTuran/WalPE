@@ -3425,6 +3425,31 @@ static void test_pichead (void)
         CHECK (ph_size ("jpeg", jpg, 26, 0, 0));        /* ends inside the frame header */
         static const guint8 noframe[] = { 0xff, 0xd8, 0xff, 0xda, 0, 8, 1, 1, 0, 0, 63, 0, 0xff, 0xd9 };
         CHECK (ph_size ("jpeg", noframe, sizeof noframe, 0, 0));
+        /* Where libjpeg and zune-jpeg (the decoder behind glycin) walk differently, there is
+         * no size. A restart marker in front of the scan has no segment for the one and a
+         * length for the other, which skips with it a frame header of 16 x 16 and decodes
+         * the next, 9000 x 9000 */
+        #define SOF_16 0, 11, 8, 0, 16, 0, 16, 1, 1, 0x11, 0
+        #define SOF_9000 0, 11, 8, 0x23, 0x28, 0x23, 0x28, 1, 1, 0x11, 0
+        #define SCAN 0xff, 0xda, 0, 8, 1, 1, 0, 0, 63, 0
+        static const guint8 behind_rst[] = { 0xff, 0xd8, 0xff, 0xd0, 0, 15, 0xff, 0xc0, SOF_16, 0xff, 0xc0, SOF_9000, SCAN };
+        CHECK (ph_size ("jpeg", behind_rst, sizeof behind_rst, 0, 0));
+        static const guint8 behind_tem[] = { 0xff, 0xd8, 0xff, 0x01, 0, 15, 0xff, 0xc0, SOF_16, 0xff, 0xc0, SOF_9000, SCAN };
+        CHECK (ph_size ("jpeg", behind_tem, sizeof behind_tem, 0, 0));
+        /* a frame header of a kind zune-jpeg skips (lossless) and then one it decodes; two of one kind */
+        static const guint8 two_kinds[] = { 0xff, 0xd8, 0xff, 0xc3, SOF_16, 0xff, 0xc0, SOF_9000, SCAN };
+        CHECK (ph_size ("jpeg", two_kinds, sizeof two_kinds, 0, 0));
+        static const guint8 two[] = { 0xff, 0xd8, 0xff, 0xc0, SOF_16, 0xff, 0xc4, 0, 2, 0xff, 0xc0, SOF_9000, SCAN };
+        CHECK (ph_size ("jpeg", two, sizeof two, 0, 0));
+        /* one frame header of any kind and the scan behind it: the size, as before */
+        static const guint8 lossless[] = { 0xff, 0xd8, 0xff, 0xc3, SOF_9000, 0xff, 0xdd, 0, 4, 0, 0, SCAN };
+        CHECK (ph_size ("jpeg", lossless, sizeof lossless, 9000, 9000));
+        CHECK (ph_size ("jpeg", lossless, sizeof lossless - 10, 0, 0));     /* (no scan: no picture) */
+        static const guint8 ended[] = { 0xff, 0xd8, 0xff, 0xc0, SOF_9000, 0xff, 0xd9 };
+        CHECK (ph_size ("jpeg", ended, sizeof ended, 0, 0));
+        #undef SOF_16
+        #undef SOF_9000
+        #undef SCAN
     }
     {   /* TIFF: both byte orders; of a tag that is there twice the larger value; not the 64-bit kind */
         static const guint8 le[] = { 'I', 'I', 42, 0, 8, 0, 0, 0, 3, 0,

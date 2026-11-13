@@ -204,10 +204,25 @@ static gboolean webp_size (Src *s, int *w, int *h)
     return FALSE;
 }
 
-/* JPEG: the first frame header, found the way libjpeg's marker reader
- * walks (util.c, jpeg_coding). 0: found; 1: there is none to find (a scan
- * or the end before it, a marker the walk does not know); 2: the bytes end
- * before the answer */
+/* JPEG: the frame header, found the way libjpeg's marker reader walks
+ * (util.c, jpeg_coding) - on a walk that zune-jpeg, the decoder behind
+ * glycin, makes the same way. The two differ: to libjpeg a restart marker
+ * or TEM in front of the first scan is a marker without a segment, to
+ * zune-jpeg one with a length that is skipped; a frame header of a kind
+ * zune-jpeg does not decode (lossless, hierarchical, arithmetic: all but
+ * C0, C1, C2) is a frame header to libjpeg and a segment to skip to
+ * zune-jpeg. A small frame header behind FF D0 00 0F was the size here and
+ * skipped there, and the picture decoded was the one of the next frame
+ * header (9000 x 9000 for "16 x 16"). So:
+ *   - RSTn and TEM before the first scan: no answer;
+ *   - the walk goes on to the first scan, every segment by its length,
+ *     and a second frame header of any kind on the way: no answer
+ *     (libjpeg refuses such a file as well, "duplicate SOF").
+ * What is left is read alike by both: fill bytes, bytes between segments,
+ * the segments by their lengths (zune-jpeg stops at a length below 2 and
+ * at DNL and DAC, where this goes on as libjpeg does).
+ * 0: found; 1: there is none to find (the end, a marker the walk does not
+ * know, one of the cases above); 2: the bytes end before the answer */
 static int jpeg_frame (const guint8 *d, gsize len, int *w, int *h)
 {
     if (len < 2)
@@ -215,6 +230,8 @@ static int jpeg_frame (const guint8 *d, gsize len, int *w, int *h)
     if (d[0] != 0xFF || d[1] != 0xD8)
         return 1;
     gsize i = 2;
+    gboolean have = FALSE;
+    int fw = 0, fh = 0;
     for (;;) {
         guint8 m;
         for (;;) {
@@ -228,19 +245,25 @@ static int jpeg_frame (const guint8 *d, gsize len, int *w, int *h)
             if (m)
                 break;
         }
-        if (m == 0x01 || (m >= 0xD0 && m <= 0xD7))
-            continue;
-        if (m == 0xDA || m == 0xD9)
-            return 1;
+        if (m == 0xDA) {
+            if (!have)
+                return 1;
+            *w = fw;
+            *h = fh;
+            return 0;
+        }
         if (m >= 0xC0 && m <= 0xCF && m != 0xC4 && m != 0xC8 && m != 0xCC) {
+            if (have)
+                return 1;
             if (len - i < 7)
                 return 2;
-            return dims_set (((guint) d[i + 5] << 8) | d[i + 6], ((guint) d[i + 3] << 8) | d[i + 4], w, h)
-                   ? 0 : 1;
+            if (!dims_set (((guint) d[i + 5] << 8) | d[i + 6], ((guint) d[i + 3] << 8) | d[i + 4], &fw, &fh))
+                return 1;
+            have = TRUE;
+        } else if (m != 0xC4 && m != 0xCC && m != 0xDB && m != 0xDD && m != 0xDC && m != 0xFE &&
+                   !(m >= 0xE0 && m <= 0xEF)) {
+            return 1;       /* (0x01, D0 to D7, D9 and every marker without a known segment) */
         }
-        if (m != 0xC4 && m != 0xCC && m != 0xDB && m != 0xDD && m != 0xDC && m != 0xFE &&
-            !(m >= 0xE0 && m <= 0xEF))
-            return 1;
         if (len - i < 2)
             return 2;
         gsize seg = ((gsize) d[i] << 8) | d[i + 1];
@@ -256,9 +279,9 @@ static gboolean jpeg_size (Src *s, int *w, int *h)
 {
     if (!s->f)
         return jpeg_frame (s->d, s->len, w, h) == 0;
-    /* the frame header comes behind the tables and the application
-     * segments: read in growing steps, at most 32 MiB (as util.c does for
-     * the same file) */
+    /* the frame header and the first scan's start come behind the tables
+     * and the application segments: read in growing steps, at most 32 MiB
+     * (as util.c does for the same file) */
     const gsize head_max = (gsize) 32 << 20;
     GByteArray *buf = g_byte_array_new ();
     gsize want = 64 * 1024;

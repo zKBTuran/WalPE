@@ -52,6 +52,10 @@ gboolean walpe_pichead_is_bigtiff (const guint8 *d, gsize len);
  * For "png", "jpeg", "gif", "bmp", "webp" and "tga" the header is in one
  * fixed place and these are the numbers the decoder goes by; a file for
  * which this says FALSE is one no decoder shows (walpe_pichead_exact ()).
+ * A JPEG has a size when its markers up to the first scan read the same to
+ * libjpeg and to zune-jpeg (the decoder behind glycin) and hold one frame
+ * header: not with a restart marker or TEM in front of the scan, not with
+ * two frame headers of any kinds, not without a scan (pichead.c).
  * For "tiff" (first directory; of a tag that is there twice the larger
  * value), "avif" (the largest "ispe" property) and "jxl" (the codestream's
  * size header) TRUE is an upper bound good for a limit, and FALSE means
