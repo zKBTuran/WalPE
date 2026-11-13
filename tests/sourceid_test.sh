@@ -20,7 +20,10 @@
 #   checkout (run with bash where there is one);
 # Then the tree under test itself, where it is a git checkout with git at hand: `git
 # archive HEAD` of it - the way a release tarball and a test build's zip are made -
-# names HEAD. Skipped (77) without git.
+# names HEAD. Where the tree is such an archive, unpacked (its SOURCE-ID holds a commit):
+# the file has the commit whole, the word is its first seven digits, and walpe-ctl of the
+# build says that word (the build directory `meson test` runs this in, or a second
+# argument: the program). Skipped (77) without git.
 src=$1
 script=$src/scripts/source-id.sh
 fails=0
@@ -40,16 +43,32 @@ is () {     # what, got, wanted
 id_of () { sh "$script" "$1"; }
 seven () { git -C "$1" rev-parse "${2:-HEAD}" | cut -c 1-7; }
 
+# The repositories made here are given SOURCE-ID as a checkout has it, with the
+# placeholder. The tree under test has it so where it is a checkout; in a tree `git
+# archive` made, the commit stands there instead (the tree of a test build's zip: every
+# check below read that commit) and the placeholder is written here.
+placeholder='$Format:%H$'
+own=
+[ ! -r "$src/SOURCE-ID" ] || IFS= read -r own < "$src/SOURCE-ID" || true
+seed () {   # DIR: the tree's .gitattributes, SOURCE-ID with the placeholder
+    cp "$src/.gitattributes" "$1/"
+    if [ "$own" = "$placeholder" ]; then
+        cp "$src/SOURCE-ID" "$1/"
+    else
+        printf '%s\n' "$placeholder" > "$1/SOURCE-ID"
+    fi
+}
+
 # a repository with the two files that make the id work in an archive
 repo=$tmp/repo
 mkdir -p "$repo/scripts"
-cp "$src/SOURCE-ID" "$src/.gitattributes" "$repo/"
+seed "$repo"
 echo one > "$repo/file"
 git -C "$repo" init -q
 git -C "$repo" add -A
 git -C "$repo" commit -q -m one
 c1=$(seven "$repo")
-is "the placeholder is in the checkout's SOURCE-ID" "$(cat "$repo/SOURCE-ID")" '$Format:%H$'
+is "the placeholder is in the checkout's SOURCE-ID" "$(cat "$repo/SOURCE-ID")" "$placeholder"
 is "a checkout" "$(id_of "$repo")" "$c1"
 echo two >> "$repo/file"
 is "a checkout with a changed file" "$(id_of "$repo")" "$c1+"
@@ -149,7 +168,7 @@ if command -v bash > /dev/null 2>&1 && [ -f "$recipe" ]; then
     printf "project('walpe', 'c',\n  version: '0.0.1')\n" > "$pk/tree/meson.build"
     echo x > "$pk/tree/contrib/plasma/x"
     cp "$script" "$pk/tree/scripts/"
-    cp "$src/SOURCE-ID" "$src/.gitattributes" "$pk/tree/"
+    seed "$pk/tree"
     cp "$recipe" "$pk/tree/contrib/packaging/arch/"
     git -C "$pk/tree" init -q
     git -C "$pk/tree" add -A
@@ -177,8 +196,30 @@ else
     echo "(no bash, or no contrib/packaging/arch/PKGBUILD: the Arch recipe's copy was not looked at)"
 fi
 
-# the tree under test: an archive of its HEAD names HEAD
-if [ -e "$src/.git" ] && head=$(seven "$src" 2> /dev/null) && [ -n "$head" ]; then
+# the tree under test. Made by git archive (SOURCE-ID holds something that is not the
+# placeholder; git is not asked then, whatever repository the tree was put into since):
+# the commit is there whole, the word is its first seven digits, the build says the word
+if [ -n "$own" ] && [ "$own" != "$placeholder" ]; then
+    case "$own" in
+    *[!0-9a-f]*) digits="not a commit" ;;
+    *) digits=${#own} ;;
+    esac
+    is "this tree, made by git archive: the digits of the commit in SOURCE-ID (\"$own\")" "$digits" 40
+    word=$(printf '%.7s' "$own")
+    is "this tree, made by git archive: the id" "$(id_of "$src")" "$word"
+    ctl=${2:-}
+    [ -n "$ctl" ] || [ ! -f build.ninja ] || ctl=./walpe-ctl
+    if [ -n "$ctl" ] && [ -x "$ctl" ]; then
+        said=$("$ctl" --version 2>&1)
+        case "$said" in
+        *"(source $word)"*) ;;
+        *) fails=$((fails + 1)); echo "FAIL: this tree, made by git archive: $ctl says '$said', expected (source $word)" ;;
+        esac
+    else
+        echo "(no walpe-ctl of this tree's build at hand: what the programs say was not looked at)"
+    fi
+# a checkout: an archive of its HEAD names HEAD
+elif [ -e "$src/.git" ] && head=$(seven "$src" 2> /dev/null) && [ -n "$head" ]; then
     mkdir "$tmp/export"
     if git -C "$src" cat-file -e HEAD:SOURCE-ID 2> /dev/null && git -C "$src" cat-file -e HEAD:scripts/source-id.sh 2> /dev/null; then
         git -C "$src" archive HEAD SOURCE-ID .gitattributes scripts/source-id.sh | tar -x -C "$tmp/export"
@@ -192,7 +233,7 @@ if [ -e "$src/.git" ] && head=$(seven "$src" 2> /dev/null) && [ -n "$head" ]; th
     *) fails=$((fails + 1)); echo "FAIL: this tree: '$(id_of "$src")', expected $head or $head+" ;;
     esac
 else
-    # no checkout: then the tree was made by git archive, or its files do not say
+    # no checkout and no commit in SOURCE-ID: the files do not say
     case "$(id_of "$src")" in
     unknown) echo "(this tree is no git checkout and its SOURCE-ID names no commit: \"unknown\")" ;;
     *[!0-9a-f]* | '') fails=$((fails + 1)); echo "FAIL: this tree: '$(id_of "$src")' is no commit and not \"unknown\"" ;;
