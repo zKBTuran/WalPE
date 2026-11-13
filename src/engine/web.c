@@ -79,6 +79,7 @@
 /* the private page host */
 #if defined (GDK_WINDOWING_WAYLAND) && defined (HAVE_WEBHOST_WL)
 #define WEB_HAVE_PRIVATE 1
+#include "webgtkinit.h"
 #include "webhost_wl.h"
 #endif
 #include <dlfcn.h>
@@ -3033,11 +3034,8 @@ static void web_private_screen (int w, int h)
     walpe_webhost_output_size (max_w, max_h);
 }
 
-/* GTK on the module's own Wayland display. The display has to be GTK's
- * default one before anything of WebKit asks for "the" display, and it
- * must not come from the environment (WAYLAND_DISPLAY is the session's
- * compositor, and the environment cannot be changed once threads run):
- * it is opened by name. */
+/* GTK on the module's own Wayland display: opened by name, in the order
+ * GTK asks for (webgtkinit.h). */
 static gboolean gtk_init_private (void)
 {
     char *sock = NULL, *why = NULL;
@@ -3046,34 +3044,16 @@ static gboolean gtk_init_private (void)
         g_free (why);
         return FALSE;
     }
-    gdk_set_allowed_backends ("wayland");
-    if (!gtk_is_initialized ())
-        gtk_disable_setlocale ();
-    /* opened before gtk_init: GTK then takes it as the default display
-     * instead of opening the session's */
-    GdkDisplay *d = gdk_display_open (sock);
-    gboolean ok = d != NULL && gtk_init_check ();
-    if (!d && gtk_init_check ()) {
-        /* a GTK that wants to be initialised first: that opened the
-         * session's display; ours replaces it as the default */
-        GdkDisplay *first = gdk_display_get_default ();
-        d = gdk_display_open (sock);
-        ok = d != NULL;
-        if (d && first && first != d) {
-            gdk_display_manager_set_default_display (gdk_display_manager_get (), d);
-            gdk_display_close (first);
-        }
-    }
+    gboolean gtk_failed = FALSE;
+    GdkDisplay *d = web_gtk_init_on (sock, &gtk_failed);
     g_free (sock);
-    if (!ok || !d) {
+    if (!d) {
         walpe_webhost_abandon ();
         g_warning ("web: GTK could not use the private page host%s",
-                   d ? " (gtk_init failed)" : " (its Wayland backend did not connect; GDK_BACKEND "
-                                              "set to something else?)");
+                   gtk_failed ? " (gtk_init failed)" : " (its Wayland backend did not connect; GDK_BACKEND "
+                                                       "set to something else?)");
         return FALSE;
     }
-    if (gdk_display_get_default () != d)
-        gdk_display_manager_set_default_display (gdk_display_manager_get (), d);
     g_message ("web: pages live on a private Wayland display inside the daemon (no window on the "
                "desktop, no X; the session's clipboard and selections are out of their reach)");
     return TRUE;

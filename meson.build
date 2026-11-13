@@ -886,6 +886,21 @@ if have_wl_scan and wl_server_dep.found() and wl_client_dep.found()
     dependencies: [glib, wl_server_dep, wl_client_dep],
     install: false, build_by_default: false), timeout: 60)
 endif
+# GTK brought up on the private page host the way web.c does it
+# (src/engine/webgtkinit.h), with the real GTK and the real page host, no
+# WebKit: no display is opened before GTK is initialised (GTK from 4.18 on
+# ends the process there - the test says so on an older GTK too), GTK's
+# default display is the page host's, the display the environment names
+# is never connected to, the locale stays. No compositor, no display.
+if have_webhost_wl
+  test('webgtkinit', executable('webgtkinit-test', 'tests/webgtkinit_test.c',
+    'src/engine/webhost_wl.c', wl_gen['xdg-shell'][1], wl_gen['xdg-shell'][2],
+    include_directories: inc,
+    dependencies: [glib, gtk4, gtk4_wayland_dep, wl_server_dep, wl_client_dep, cc.find_library('dl', required: false)],
+    install: false, build_by_default: false),
+    env: ['GTK_A11Y=none', 'GSETTINGS_BACKEND=memory', 'GDK_DEBUG=', 'GTK_DEBUG='],
+    timeout: 60)
+endif
 endif  # with_tests
 if have_ffmpeg
   video_mod = shared_module('walpe-video', 'src/engine/video_custom.c', 'src/engine/sounddec.c',

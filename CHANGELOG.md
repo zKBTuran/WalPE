@@ -280,6 +280,20 @@ it was). A bare window manager on X11 - dwm, i3, openbox - gets the window of 0.
   Hyprland did not start on the test machine (it needs a graphics device) and is still
   "expected to work". One thing to know: on COSMIC nothing reports a fullscreen window,
   the wallpaper behind one pauses through "pause when covered" (on by default) only.
+- Web wallpapers in a session without an X display work with GTK 4.18 and later (Arch,
+  Fedora 42, Debian 13, Ubuntu 25.04 and newer). With 0.14.0 every web wallpaper stayed
+  off there: the page's hidden window is then on the Wayland display inside the daemon
+  (the "private page host"), the web module opened that display before it initialised
+  GTK, and GTK from 4.18 on ends the process for that. The daemon lived - it tries
+  WebKit in a process of its own first - and its log said `gdk_display_open() was called
+  before gtk_init()` and `web wallpapers are disabled in this daemon`. GTK is initialised
+  first now, without a display, and the page host's display is opened after it; the
+  session's own display is still never opened. A session with Xwayland (`DISPLAY` set:
+  KDE Plasma, GNOME, sway by default) was not affected unless `WALPE_WEB_HOST=private`
+  was set; sway with `xwayland disable`, niri and labwc without Xwayland were, and so was
+  a session with `DISPLAY` left over and no X server behind it. Found by running the
+  checks on Arch (GTK 4.24.1, WebKitGTK 2.54.2); Ubuntu 24.04 has GTK 4.14, which allowed
+  the old order.
 
 ### X11 desktops
 
