@@ -664,8 +664,34 @@ static char *window_class_name (Window w)
     return name ? name : g_strdup ("?");
 }
 
+/* a wallpaper window back to where it was made: the lowest child of the
+ * root, mapped, only its Expose events asked for */
+static void desk_to_root (X11Surface *s)
+{
+    XSelectInput (X.xd, s->xid, ExposureMask);
+    XReparentWindow (X.xd, s->xid, X.root, s->geom.x, s->geom.y);
+    XMapWindow (X.xd, s->xid);
+    XLowerWindow (X.xd, s->xid);
+    X.stack_dirty = TRUE;
+    s->host = None;
+}
+
+static void cover_schedule (void);
+
 /* second half of a wallpaper window's way into a desktop window
- * (desk_apply unmapped it a moment ago) */
+ * (desk_apply unmapped it a moment ago).
+ * The desktop window may be gone by now (a file manager that makes its
+ * window twice when it starts, one that was closed in this fifth of a
+ * second): the request to become its child fails then, and the window is
+ * still where it was. So the server is asked where it is before anything
+ * is said or believed - one request, on a desktop with a desktop window
+ * only - and the window is mapped without being raised: a window that is
+ * made a child of another one is on top of that one's children as it is
+ * (the X protocol's ReparentWindow), and one that stayed on the root was
+ * raised above every window of the screen, where it lay until the next
+ * scan of the windows put it back - a tenth of a second of wallpaper over
+ * everything, with a line in the log that said it was in the desktop
+ * window. */
 static gboolean desk_adopt_cb (gpointer user)
 {
     X11Surface *s = user;
@@ -676,8 +702,23 @@ static gboolean desk_adopt_cb (gpointer user)
     /* its own DestroyNotify: it dies with the window it is a child of */
     XSelectInput (X.xd, s->xid, ExposureMask | StructureNotifyMask);
     XReparentWindow (X.xd, s->xid, host, s->host_x, s->host_y);
+    Window r, parent = None, *kids = NULL;
+    guint n = 0;
+    if (!XQueryTree (X.xd, s->xid, &r, &parent, &kids, &n))
+        parent = None;
+    if (kids)
+        XFree (kids);
+    if (parent != host) {
+        g_debug ("mon%d: the desktop window 0x%lx went before the wallpaper window was in it: "
+                 "the wallpaper window stays the lowest window of the root", s->index,
+                 (unsigned long) host);
+        desk_to_root (s);
+        s->host_want = None;
+        XFlush (X.xd);
+        cover_schedule ();  /* (what is there now) */
+        return G_SOURCE_REMOVE;
+    }
     XMapWindow (X.xd, s->xid);
-    XRaiseWindow (X.xd, s->xid);    /* above what the file manager has in it */
     XFlush (X.xd);
     s->host = host;
     char *cls = window_class_name (host);
@@ -743,16 +784,11 @@ static void desk_apply (void)
                 XUnmapWindow (X.xd, s->xid);
                 s->adopt_id = g_timeout_add (200, desk_adopt_cb, s);
             } else {
-                XSelectInput (X.xd, s->xid, ExposureMask);
-                XReparentWindow (X.xd, s->xid, X.root, s->geom.x, s->geom.y);
-                XMapWindow (X.xd, s->xid);
-                XLowerWindow (X.xd, s->xid);
-                X.stack_dirty = TRUE;
                 if (s->host != None)
                     g_message ("mon%d: the desktop window 0x%lx the wallpaper window was a child of "
                                "is not over this monitor any more: the wallpaper window is the "
                                "lowest window of the root again", s->index, (unsigned long) s->host);
-                s->host = None;
+                desk_to_root (s);
             }
         }
         /* asked to stay on the root, behind a window nothing is seen
