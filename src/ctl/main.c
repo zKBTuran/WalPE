@@ -1303,6 +1303,23 @@ static int run (int argc, char **argv)
         return gpustat_main (argc, argv);
     if (!g_strcmp0 (cmd, "mem"))
         return mem_main (argc, argv);
+    {
+        /* The commands that take no argument. One that was given was
+         * dropped without a word and the command carried out: `walpe-ctl
+         * pause 1` paused every monitor and ended with 0, as if a monitor
+         * could be named. (diag, backend, open and resetprops refused what
+         * they did not take already.) */
+        static const char *const bare[] = { "pause", "resume", "status", "quit", "cancel-import",
+                                            "steam-libraries", NULL };
+        if (argc > 2 && cmd && g_strv_contains (bare, cmd)) {
+            g_printerr ("%s takes no argument, not '%s'; nothing was done\n", cmd, argv[2]);
+            return 1;
+        }
+        if (argc > 3 && !g_strcmp0 (cmd, "add")) {
+            g_printerr ("add takes one video, not also '%s'; nothing was done\n", argv[3]);
+            return 1;
+        }
+    }
     if (!g_strcmp0 (cmd, "diag") && argc == 2)
         return diag_show ();
     if (!g_strcmp0 (cmd, "backend") && argc == 2)

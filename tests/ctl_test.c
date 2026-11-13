@@ -1041,6 +1041,23 @@ int main (int argc, char **argv)
     CHECK (run_ctl (NULL, "help", NULL) == 0);
     CHECK (run_ctl (NULL, "--help", NULL) == 0);
     CHECK (run_ctl (NULL, "frobnicate", NULL) == 1);
+    {
+        /* a command that takes no argument says so when it is given one,
+         * before it looks for a daemon (`walpe-ctl pause 1` paused every
+         * monitor and ended with 0; here, without a daemon, it ended with 2) */
+        static const char *const bare[] = { "pause", "resume", "status", "quit", "cancel-import",
+                                            "steam-libraries" };
+        for (guint i = 0; i < G_N_ELEMENTS (bare); i++) {
+            char *e = NULL;
+            CHECK (run_ctl (&e, bare[i], "1", NULL) == 1);
+            CHECK (e && strstr (e, "takes no argument, not '1'") && strstr (e, bare[i]));
+            g_free (e);
+        }
+        char *e = NULL;
+        CHECK (run_ctl (&e, "add", "a.mp4", "b.mp4", NULL) == 1);
+        CHECK (e && strstr (e, "add takes one video, not also 'b.mp4'"));
+        g_free (e);
+    }
     if (g_file_test ("/dev/full", G_FILE_TEST_EXISTS)) {
         /* output that cannot be written is a failure (it ended with 0 and
          * said nothing): status 1, a sentence on stderr; a command that
