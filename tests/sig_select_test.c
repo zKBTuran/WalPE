@@ -383,9 +383,10 @@ static void test_real_unavailable (void)
                sp && sp->why ? sp->why : "(nothing)");
     }
     /* the provider for GNOME Shell asks no bus where the compositor is not
-     * Mutter, and gives no reason: the window list's stands */
+     * Mutter, and its reason is the empty one: the registry then has no
+     * line about it and status does not name it */
     sp = stub_prov (&walpe_sig_gnome);
-    CHECK (sp && sp->failed && !sp->started && !sp->why, "gnome declines without a word");
+    CHECK (sp && sp->failed && !sp->started && sp->why && !*sp->why, "gnome declines without a word");
     CHECK (walpe_sig_gnome_state () == NULL, "and has nothing for the status");
     CHECK (Stub.n_val == 0 || !walpe_signal_get (WALPE_SIG_IDLE, 0), "nothing is reported as on");
     CHECK (*walpe_signal_sources (WALPE_SIG_FULLSCREEN) == 0, "no source for fullscreen");

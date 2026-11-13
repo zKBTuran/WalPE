@@ -10,7 +10,8 @@ typedef struct {
     gboolean fits;                      /* its backends mask holds the running backend */
     gboolean running;                   /* start () answered TRUE */
     gboolean tried;                     /* start () was called */
-    char *why;                          /* start () answered FALSE: its reason (may be NULL) */
+    char *why;                          /* start () answered FALSE: its reason (may be NULL;
+                                         * "" = not for this desktop, never named) */
     gboolean global[WALPE_SIG_N];       /* what it reported last */
     GHashTable *per_output[WALPE_SIG_N]; /* output id -> set: ids it reports TRUE for */
 } Slot;
@@ -100,8 +101,9 @@ static void slot_start (Slot *s)
             g_clear_pointer (&s->per_output[k], g_hash_table_unref);
         }
         s->why = why;
-        g_message ("pause signals: %s is not available here%s%s", s->p->name ? s->p->name : "?",
-                   why && *why ? ": " : "", why && *why ? why : "");
+        if (!why || *why)
+            g_message ("pause signals: %s is not available here%s%s", s->p->name ? s->p->name : "?",
+                       why ? ": " : "", why ? why : "");
         return;
     }
     g_free (why);
@@ -251,7 +253,7 @@ const char *walpe_signal_missing (WalpeSignal sig)
     GString *g = g_string_new (NULL);
     for (int i = 0; i < R.n; i++) {
         Slot *s = &R.slot[i];
-        if (s->tried && !s->running && (s->p->signals & WALPE_SIG_BIT (sig)))
+        if (s->tried && !s->running && !(s->why && !*s->why) && (s->p->signals & WALPE_SIG_BIT (sig)))
             g_string_append_printf (g, "%s%s%s%s", g->len ? "; " : "", s->p->name ? s->p->name : "?",
                                     s->why && *s->why ? ": " : "", s->why && *s->why ? s->why : "");
     }

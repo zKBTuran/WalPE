@@ -67,7 +67,9 @@ struct WalpeSignalProvider {
      * FALSE = not available in this session: *why (g_free, may be left
      * NULL) names what is missing, e.g. "the compositor has no
      * ext_idle_notifier_v1". A provider that fails to start is not asked
-     * again and reports nothing. */
+     * again and reports nothing. *why set to an empty string: the provider
+     * is for another desktop than this one, where nothing is missing -
+     * the log has no line about it and status does not name it. */
     gboolean (*start) (const WalpeSignalProvider *self, char **why);
     /* release everything; values it reported are dropped by the registry
      * (it may also take them back itself: the sink is not told any more) */

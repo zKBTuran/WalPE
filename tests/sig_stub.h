@@ -163,7 +163,7 @@ const char *walpe_signal_missing (WalpeSignal sig)
     GString *s = g_string_new (NULL);
     for (guint i = 0; i < Stub.n_prov; i++) {
         StubProv *sp = &Stub.prov[i];
-        if (sp->failed && (sp->p->signals & WALPE_SIG_BIT (sig)))
+        if (sp->failed && !(sp->why && !*sp->why) && (sp->p->signals & WALPE_SIG_BIT (sig)))
             g_string_append_printf (s, "%s%s", s->len ? "; " : "",
                                     sp->why ? sp->why : sp->p->name);
     }

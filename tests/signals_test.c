@@ -114,6 +114,27 @@ static const WalpeSignalProvider p_idle = {
     .signals = BIT (WALPE_SIG_IDLE),
     .start = start_fails, .stop = stop_count,
 };
+/* for another desktop than this one: declines with the empty reason */
+static gboolean start_elsewhere (const WalpeSignalProvider *self, char **why)
+{
+    g_string_append_printf (order, "%s ", self->name);
+    *why = g_strdup ("");
+    return FALSE;
+}
+static const WalpeSignalProvider p_elsewhere = {
+    .name = "elsewhere", .backends = 1u << WALPE_BACKEND_WAYLAND,
+    .signals = BIT (WALPE_SIG_IDLE) | BIT (WALPE_SIG_FULLSCREEN) | BIT (WALPE_SIG_FOCUS_APP),
+    .start = start_elsewhere, .stop = stop_count,
+};
+static guint elsewhere_lines;
+static GLogWriterOutput count_elsewhere (GLogLevelFlags level, const GLogField *fields, gsize n, gpointer user)
+{
+    (void) user;
+    for (gsize i = 0; i < n; i++)
+        if (!strcmp (fields[i].key, "MESSAGE") && strstr (fields[i].value, "elsewhere"))
+            elsewhere_lines++;
+    return g_log_writer_default (level, fields, n, NULL);
+}
 static const WalpeSignalProvider p_tidy = {
     .name = "tidy", .backends = 0, .signals = BIT (WALPE_SIG_ASLEEP),
     .start = start_ok, .stop = stop_reporting,
@@ -244,6 +265,7 @@ static void test_wayland (void)
     walpe_signals_register (&p_wl);             /* the backend's own first */
     walpe_signals_register (&p_x);
     walpe_signals_register (&p_idle);
+    walpe_signals_register (&p_elsewhere);
     walpe_signals_register (&p_any);
     /* said before the registry runs: does not count, and does not hide
      * the same value reported when the provider starts (start_reporting) */
@@ -252,7 +274,12 @@ static void test_wayland (void)
     walpe_signal_set (&p_wl, WALPE_SIG_COVERED, 8, TRUE);
     CHECK (told == 0 && !walpe_signal_get (WALPE_SIG_FULLSCREEN, 0));
     walpe_signals_start (WALPE_BACKEND_WAYLAND, &sink, &told);
-    CHECK (!strcmp (order->str, "wl idle any "));       /* registration order; "x" does not fit */
+    CHECK (!strcmp (order->str, "wl idle elsewhere any "));     /* registration order; "x" does not fit */
+    /* the one for another desktop was asked, and is named nowhere: not in
+     * the log, not among what is missing for a signal nobody else reports */
+    CHECK (elsewhere_lines == 0);
+    CHECK (!strstr (walpe_signal_missing (WALPE_SIG_IDLE), "elsewhere"));
+    CHECK (!strcmp (walpe_signal_missing (WALPE_SIG_FOCUS_APP), ""));
     /* what the providers found while starting arrives as one piece of news
      * (the mask may also name the signal of the provider that reported
      * and then gave up: its value is read as off again) */
@@ -274,9 +301,9 @@ static void test_wayland (void)
     CHECK (told == 0 && !walpe_signal_get (WALPE_SIG_IDLE, 0));
     /* started once only */
     walpe_signals_start (WALPE_BACKEND_WAYLAND, &sink, &told);
-    CHECK (!strcmp (order->str, "wl idle any "));
+    CHECK (!strcmp (order->str, "wl idle elsewhere any "));
     walpe_signals_stop ();
-    CHECK (stops == 2);                         /* "wl" and "any"; not the one that failed */
+    CHECK (stops == 2);                         /* "wl" and "any"; not the two that declined */
     /* after a stop the registry is empty: the same providers can be used again */
     walpe_signals_register (&p_any);
     walpe_signals_start (WALPE_BACKEND_WAYLAND, NULL, NULL);    /* no sink: values can still be read */
@@ -403,6 +430,7 @@ int main (void)
 {
     /* the "not available here" lines are expected */
     g_log_set_always_fatal (G_LOG_LEVEL_ERROR);
+    g_log_set_writer_func (count_elsewhere, NULL, NULL);
     test_names ();
     test_x11 ();
     test_wayland ();

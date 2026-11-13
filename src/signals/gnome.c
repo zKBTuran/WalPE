@@ -13,7 +13,8 @@
  *   - Nothing unless the compositor is Mutter (told by a global of the
  *     providers' Wayland session; WALPE_GNOME_EXT=0 switches the provider
  *     off, =1 takes Mutter for granted) and the extension owns its name on
- *     the session bus when the provider starts.
+ *     the session bus when the provider starts. On another compositor the
+ *     provider is not even named in the log or in status.
  *   - Then: a connection of its own to the session bus, a watch on the
  *     name and one signal subscription. The extension leaving the bus
  *     (switched off) drops the answers; coming back, it is asked again.
@@ -240,8 +241,13 @@ static gboolean gnome_start (const WalpeSignalProvider *self, char **why)
             walpe_wlsess_unref (s);
         }
     }
-    if (!mutter)
-        return FALSE;       /* another compositor: no reason to give, the window list's stands */
+    if (!mutter) {
+        /* another compositor: nothing is missing there, and its users are
+         * not told about GNOME (an empty reason: platform/signals.h) */
+        if (why)
+            *why = g_strdup ("");
+        return FALSE;
+    }
     char *addr = gnome_bus_address ();
     GError *e = NULL;
     if (addr)
