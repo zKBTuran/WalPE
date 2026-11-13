@@ -1342,6 +1342,45 @@ static void audit_checks (void)
         g_string_append (s, "#define B6 1.0\nvoid main () {\n\tvec3 v = B0;\n\tfloat f = B0 + B0;\n}\n");
         survives ("statements over macros with fan-out 16, 6 levels", s->str, 5);
         result (!fx_expansion_ok (s->str), "fan-out 16 over 6 levels: expansion size refused", NULL);
+        /* The same macros in a source whose lines end in a carriage return
+         * (and in the pairs with a line feed, in both orders): the driver
+         * reads eleven lines there. A reader of line feeds saw one line - a
+         * single "#define" that swallowed the others - or, for LF CR, lines
+         * that begin with a carriage return and are no directives. */
+        {
+            static const char *const eol[] = { "\r", "\r\n", "\n\r" };
+            static const char *const eol_name[] = { "CR", "CR LF", "LF CR" };
+            for (guint k = 0; k < G_N_ELEMENTS (eol); k++) {
+                g_string_assign (s, "");
+                for (int i = 0; i < 8; i++) {
+                    g_string_append_printf (s, "#define D%d (", i);
+                    for (int j = 0; j < 8; j++)
+                        g_string_append_printf (s, "%sD%d", j ? "+" : "", i + 1);
+                    g_string_append_printf (s, ")%s", eol[k]);
+                }
+                g_string_append_printf (s, "#define D8 1.0%svoid main () {%s\tfloat a = D0;%s}%s", eol[k], eol[k], eol[k],
+                                        eol[k]);
+                char *what = g_strdup_printf ("fan-out 8 over 8 levels, lines ending in %s: expansion size refused",
+                                              eol_name[k]);
+                result (!fx_expansion_ok (s->str), what, NULL);
+                g_free (what);
+                /* an ordinary source with those line ends: the statements it has with line feeds */
+                char *lf = g_strdup ("#define TWO(x) ((x) + (x))\nuniform float u;\nvoid main () {\n"
+                                     "\tfloat a = TWO(u) \\\n\t\t* 2.0;\n\tfloat b = a;\n}\n");
+                char **parts = g_strsplit (lf, "\n", -1);
+                char *other = g_strjoinv (eol[k], parts);
+                gint64 st_lf = 0, st_other = -1;
+                gboolean ok_lf = fx_expansion_sizes (lf, &st_lf), ok_other = fx_expansion_sizes (other, &st_other);
+                what = g_strdup_printf ("an ordinary source with lines ending in %s: counted as with line feeds", eol_name[k]);
+                char *detail = g_strdup_printf ("longest statement %" G_GINT64_FORMAT " (LF) / %" G_GINT64_FORMAT, st_lf, st_other);
+                result (ok_lf && ok_other && st_lf == st_other && st_lf == 14, what, detail);
+                g_free (detail);
+                g_free (what);
+                g_free (other);
+                g_strfreev (parts);
+                g_free (lf);
+            }
+        }
         /* function-like: F(F(F(...))) with 10 uses of the parameter, 8 deep;
          * a chain of 300 macros in front of a bomb; 70 parameters */
         g_string_assign (s, "#define F(x) x x x x x x x x x x\nfloat a = F(F(F(F(F(F(F(F(1.0))))))));\n");

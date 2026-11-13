@@ -2306,15 +2306,22 @@ static gboolean fx_expansion_sizes (const char *src, gint64 *statement)
     gint64 total = 0, run = 0, longest = 0;
     GString *ln = g_string_new (NULL);
     for (const char *p = src; *p && total <= FX_MAX_EXPANSION && m.work <= FX_MAX_EXPANSION;) {
-        /* one logical line (backslash-newline joined) */
+        /* one logical line (backslash-newline joined). A line ends where it
+         * ends for the driver: at a line feed, at a carriage return, or at
+         * the two together in either order (GLSL 3.30, 3.1: "terminated by
+         * carriage-return or line-feed; if both are used together, it will
+         * count as only a single line termination"). Looking for line feeds
+         * only made one line of a source whose lines end in carriage
+         * returns: its first "#define" swallowed all the others, and macros
+         * that expand to millions of tokens counted as a handful. */
         g_string_truncate (ln, 0);
         for (;;) {
-            const char *nl = strchr (p, '\n');
-            gsize n = nl ? (gsize) (nl - p) : strlen (p);
+            gsize n = strcspn (p, "\r\n");
             g_string_append_len (ln, p, (gssize) n);
-            p += n + (nl ? 1 : 0);
-            while (ln->len && ln->str[ln->len - 1] == '\r')
-                g_string_truncate (ln, ln->len - 1);
+            p += n;
+            const gboolean nl = *p != 0;
+            if (nl)
+                p += (p[1] == '\r' || p[1] == '\n') && p[1] != p[0] ? 2 : 1;
             if (!nl || !ln->len || ln->str[ln->len - 1] != '\\')
                 break;
             ln->str[ln->len - 1] = ' ';
