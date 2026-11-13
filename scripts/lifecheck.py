@@ -2299,10 +2299,14 @@ class XClient:
     def clients(self, wins):
         self.prop(self.root, "_NET_CLIENT_LIST", self.XA_WINDOW, wins)
 
+    def supported(self, names):
+        """what the window manager says it knows: _NET_SUPPORTED on the root"""
+        self.prop(self.root, "_NET_SUPPORTED", self.XA_ATOM, [self.atom(n) for n in names])
+
     def close(self):
         if not self.d:
             return      # closed already: its Display is freed memory
-        for name in ("_NET_ACTIVE_WINDOW", "_NET_CLIENT_LIST", "_NET_SUPPORTING_WM_CHECK"):
+        for name in ("_NET_ACTIVE_WINDOW", "_NET_CLIENT_LIST", "_NET_SUPPORTING_WM_CHECK", "_NET_SUPPORTED"):
             self.x.XDeleteProperty(self.d, self.root, self.atom(name))
         for win in reversed(self.wins):
             self.x.XDestroyWindow(self.d, win)
@@ -3076,12 +3080,45 @@ def case_desktop(env, W):
         if not check(len(ours) == 2, "desktop: the daemon has two windows", ours):
             return
 
-        # ---- a file manager's desktop window over the first monitor (black, as large as the
-        # monitor), listed by a window manager that puts no frame around it (marco with caja)
+        # ---- a window manager that does not say it knows the desktop type (_NET_SUPPORTED as dwm
+        # sets it; i3 leaves the type out as well): a window of that type over a whole monitor
+        # is one more client there - some program's fullscreen window - and the wallpaper
+        # window does not go into it
+        DWM = ["_NET_SUPPORTED", "_NET_WM_NAME", "_NET_WM_STATE", "_NET_SUPPORTING_WM_CHECK",
+               "_NET_WM_STATE_FULLSCREEN", "_NET_ACTIVE_WINDOW", "_NET_WM_WINDOW_TYPE",
+               "_NET_WM_WINDOW_TYPE_DIALOG", "_NET_CLIENT_LIST"]
         mark = env.mark()
+        xc.supported(DWM)
         d1 = xc.window(0, 0, 640, 360)
         xc.wtype(d1, DESKTOP)
         xc.clients([d1])
+        ok = wait_for(lambda: len(env.state().get("x11_desktop_windows") or []) == 1, 10, 0.1)
+        time.sleep(1.0 * PATIENCE)
+        check(bool(ok) and parents() == ["root", "root"] and xc.children(d1) == [],
+              "desktop: a window of the desktop type over the first monitor under a window manager "
+              "that does not list the type (dwm): both wallpaper windows stay on the root",
+              (env.state().get("x11_desktop_windows"), parents(), xc.children(d1)))
+        check(all(w in ours for w in xc.lowest(2)), "desktop: ... as the lowest windows of the root",
+              (xc.lowest(3), ours))
+        check(env.since(mark).count("does not list that type in _NET_SUPPORTED") == 1,
+              "desktop: ... the log says once why, and names WALPE_X11_DESKTOP=window", env.since(mark)[-300:])
+        text = (env.ipc({"cmd": "diag"}) or {}).get("text") or ""
+        check("0 of 2 wallpaper window(s) in it" in text and "does not list the desktop type" in text,
+              "desktop: ... walpe-ctl diag too", text[:600])
+        # ... and it is a fullscreen application when it has the focus and says so, as up to 0.14.0
+        xc.focus(d1)
+        xc.fullscreen(d1, True)
+        ok = wait_for(lambda: paused() == [True, False], 10, 0.1)
+        check(bool(ok), "desktop: ... focused and fullscreen it pauses its monitor (a fullscreen "
+              "application like any other)", (paused(), env.state().get("monitors_state")))
+        xc.fullscreen(d1, False)
+        ok = wait_for(lambda: paused() == [False, False], 10, 0.1)
+        check(bool(ok), "desktop: ... and no longer when it is not", paused())
+
+        # ---- a file manager's desktop window over the first monitor (black, as large as the
+        # monitor), listed by a window manager that knows the type and puts no frame around it
+        # (marco with caja): the same window, the window manager's list changes
+        xc.supported(DWM + [DESKTOP, "_NET_WM_WINDOW_TYPE_DOCK", "_NET_WM_WINDOW_TYPE_NORMAL"])
         parents_are(["0x%x" % d1, "root"], "a desktop window over the first monitor")
         kids = xc.children(d1)
         check(len(kids) == 1 and kids[0] in ours, "desktop: ... the X server says so too: it is the "

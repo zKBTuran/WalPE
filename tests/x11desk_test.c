@@ -185,8 +185,46 @@ static void test_window_kind (void)
     }
 }
 
+/* A window of the desktop type is the desktop only to a window manager
+ * that says it knows the type (_NET_SUPPORTED). The lists are shortened
+ * ones of what dwm 6.4, i3 4.23, openbox 3.6.1 and xfwm4 4.18 set; the
+ * atoms are numbers made up here. */
+static void test_wm_knows_desktop (void)
+{
+    enum { A_SUPPORTED = 300, A_NAME, A_STATE, A_CHECK, A_FULLSCREEN, A_ACTIVE, A_TYPE, A_DIALOG,
+           A_CLIENTS, A_DOCK, A_NORMAL, A_DESKTOP, A_UTILITY };
+    const unsigned long dwm[] = { A_SUPPORTED, A_NAME, A_STATE, A_CHECK, A_FULLSCREEN, A_ACTIVE,
+                                  A_TYPE, A_DIALOG, A_CLIENTS };
+    const unsigned long i3[] = { A_SUPPORTED, A_NAME, A_STATE, A_CHECK, A_FULLSCREEN, A_ACTIVE, A_TYPE,
+                                 A_NORMAL, A_DOCK, A_DIALOG, A_UTILITY, A_CLIENTS };
+    const unsigned long openbox[] = { A_SUPPORTED, A_CLIENTS, A_ACTIVE, A_CHECK, A_NAME, A_TYPE,
+                                      A_DESKTOP, A_DOCK, A_DIALOG, A_NORMAL, A_STATE, A_FULLSCREEN };
+    const unsigned long xfwm4[] = { A_ACTIVE, A_CLIENTS, A_SUPPORTED, A_CHECK, A_STATE, A_FULLSCREEN,
+                                    A_TYPE, A_DIALOG, A_DOCK, A_NORMAL, A_UTILITY, A_DESKTOP };
+    CHECK (!walpe_x11_wm_knows_desktop (dwm, G_N_ELEMENTS (dwm), A_DESKTOP));
+    CHECK (!walpe_x11_wm_knows_desktop (i3, G_N_ELEMENTS (i3), A_DESKTOP));
+    CHECK (walpe_x11_wm_knows_desktop (openbox, G_N_ELEMENTS (openbox), A_DESKTOP));
+    CHECK (walpe_x11_wm_knows_desktop (xfwm4, G_N_ELEMENTS (xfwm4), A_DESKTOP));
+    /* the last one of the list counts, one after its end does not */
+    CHECK (!walpe_x11_wm_knows_desktop (xfwm4, G_N_ELEMENTS (xfwm4) - 1, A_DESKTOP));
+    /* no window manager: no property; an atom the server does not have */
+    CHECK (!walpe_x11_wm_knows_desktop (NULL, 0, A_DESKTOP));
+    CHECK (!walpe_x11_wm_knows_desktop (NULL, 12, A_DESKTOP));
+    CHECK (!walpe_x11_wm_knows_desktop (openbox, G_N_ELEMENTS (openbox), 0));
+
+    /* what follows from it: `auto` goes into a desktop window only there,
+     * `window` everywhere, `root` nowhere */
+    CHECK (walpe_x11_desk_allowed (WALPE_X11_DESK_AUTO, TRUE));
+    CHECK (!walpe_x11_desk_allowed (WALPE_X11_DESK_AUTO, FALSE));
+    CHECK (walpe_x11_desk_allowed (WALPE_X11_DESK_WINDOW, FALSE));
+    CHECK (walpe_x11_desk_allowed (WALPE_X11_DESK_WINDOW, TRUE));
+    CHECK (!walpe_x11_desk_allowed (WALPE_X11_DESK_ROOT, TRUE));
+    CHECK (!walpe_x11_desk_allowed (WALPE_X11_DESK_ROOT, FALSE));
+}
+
 int main (void)
 {
+    test_wm_knows_desktop ();
     test_window_kind ();
     test_parse ();
     test_none ();

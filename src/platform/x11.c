@@ -105,6 +105,9 @@ static struct {
     WalpeDeskWin *desks;     /* the desktop windows the last scan of the clients found */
     guint n_desks;
     gboolean desk_tops_stale;    /* a window was reparented since their frames were asked for */
+    Atom a_supported;        /* _NET_SUPPORTED (None until a desktop window made it matter) */
+    int wm_desk;             /* the window manager lists the desktop type there: 1 / 0;
+                              * -1: not asked since it came (wm_knows_desktop) */
     gboolean desk_hidden_said;   /* the line about a wallpaper behind a desktop window */
 } X;
 
@@ -664,6 +667,36 @@ static char *window_class_name (Window w)
     return name ? name : g_strdup ("?");
 }
 
+/* Does the window manager say that it knows the desktop type (x11desk.h:
+ * walpe_x11_wm_knows_desktop)? Asked when the first window of that type
+ * that lies over a monitor is found, and again after the window manager
+ * came, went or changed what it lists - never in a session without such a
+ * window: no atom, no request there. */
+static gboolean wm_knows_desktop (void)
+{
+    if (X.wm_desk < 0) {
+        if (X.a_supported == None)
+            X.a_supported = XInternAtom (X.xd, "_NET_SUPPORTED", False);
+        normal_visible_atoms ();
+        guchar *d = NULL;
+        gulong n = window_prop32 (X.root, X.a_supported, XA_ATOM, 1024, &d);
+        X.wm_desk = walpe_x11_wm_knows_desktop ((const unsigned long *) d, n, a_desktop) ? 1 : 0;
+        if (d)
+            XFree (d);
+    }
+    return X.wm_desk > 0;
+}
+
+/* is this window one of the desktop windows of the last scan, under a
+ * window manager to which that type is the desktop? */
+static gboolean window_is_desk (Window w)
+{
+    for (guint k = 0; w != None && k < X.n_desks; k++)
+        if ((Window) X.desks[k].client == w)
+            return wm_knows_desktop ();
+    return FALSE;
+}
+
 /* a wallpaper window back to where it was made: the lowest child of the
  * root, mapped, only its Expose events asked for */
 static void desk_to_root (X11Surface *s)
@@ -757,12 +790,16 @@ static void desk_apply (void)
     if (!any)
         return;         /* no desktop window, none left behind: a bare window manager */
     const gboolean cm = walpe_x11_desk_see_through (X.wm_name, X.n_desks > 0 && compositor_running ());
+    /* (asked only when it decides something: `auto`, and a desktop window is there) */
+    const gboolean allowed = walpe_x11_desk_allowed (X.desk_mode, X.desk_mode == WALPE_X11_DESK_AUTO &&
+                                                     X.n_desks > 0 && wm_knows_desktop ());
+    const WalpeX11DeskMode mode = allowed ? X.desk_mode : WALPE_X11_DESK_ROOT;
     for (guint i = 0; i < X.surfs->len; i++) {
         X11Surface *s = SURF (i);
         if (s->kind != WALPE_SURFACE_WALLPAPER || s->xid == None || s->destroyed)
             continue;
         const WalpeDeskRect mon = { s->geom.x, s->geom.y, s->geom.width, s->geom.height };
-        const int k = walpe_x11_desk_host (X.desk_mode, &mon, X.desks, (int) X.n_desks, cm);
+        const int k = walpe_x11_desk_host (mode, &mon, X.desks, (int) X.n_desks, cm);
         const Window host = k >= 0 ? (Window) X.desks[k].client : None;
         const int hx = s->geom.x - (k >= 0 ? X.desks[k].r.x : 0);
         const int hy = s->geom.y - (k >= 0 ? X.desks[k].r.y : 0);
@@ -797,10 +834,18 @@ static void desk_apply (void)
         if (hid >= 0 && !X.desk_hidden_said) {
             X.desk_hidden_said = TRUE;
             char *cls = window_class_name ((Window) X.desks[hid].client);
-            g_message ("mon%d: the desktop's own desktop window 0x%lx (%s) lies over this monitor "
-                       "and nothing is seen through it: the wallpaper is behind it "
-                       "(WALPE_X11_DESKTOP=root). Without that variable the wallpaper window is "
-                       "put into the desktop window", s->index, X.desks[hid].client, cls);
+            if (X.desk_mode == WALPE_X11_DESK_ROOT)
+                g_message ("mon%d: the desktop's own desktop window 0x%lx (%s) lies over this monitor "
+                           "and nothing is seen through it: the wallpaper is behind it "
+                           "(WALPE_X11_DESKTOP=root). Without that variable the wallpaper window is "
+                           "put into the desktop window", s->index, X.desks[hid].client, cls);
+            else
+                g_message ("mon%d: a window of the desktop type, 0x%lx (%s), lies over this monitor "
+                           "and nothing is seen through it: the wallpaper is behind it. The window "
+                           "manager does not list that type in _NET_SUPPORTED - to it this is a "
+                           "window like any other -, so the wallpaper window stays the lowest window "
+                           "of the root. WALPE_X11_DESKTOP=window puts it into that window",
+                           s->index, X.desks[hid].client, cls);
             g_free (cls);
         }
     }
@@ -1229,6 +1274,7 @@ static void wm_look (void)
     gboolean present = FALSE;
     char *name = wm_name_read (&present);
     X.has_wm = present;     /* ("wm=yes" of walpe-ctl diag) */
+    X.wm_desk = -1;         /* (what it lists in _NET_SUPPORTED: asked when it matters) */
     const gboolean managed = walpe_x11_win_managed (X.win_mode, name);
     const gboolean changed = managed != X.managed || g_strcmp0 (name, X.wm_name) != 0;
     g_free (X.wm_name);
@@ -1474,10 +1520,13 @@ static void update_active_window (void)
         X.watched_win = active;
     }
     /* (a desktop's own desktop window has the focus after a click on the
-     * desktop; whatever state it carries, it is no fullscreen application) */
+     * desktop; whatever state it carries, it is no fullscreen application -
+     * where the window manager knows such a window as the desktop: under
+     * dwm or i3 a fullscreen window of that type is one more fullscreen
+     * client, and pauses as before) */
     gboolean fs = window_is_fullscreen (active);
-    for (guint k = 0; fs && k < X.n_desks; k++)
-        fs = X.desks[k].client != active;
+    if (fs && window_is_desk (active))
+        fs = FALSE;
     /* one batch: the daemon hears of the window and of its monitor at once */
     walpe_signals_begin ();
     if (fs != X.fs_active) {
@@ -1524,6 +1573,13 @@ static gboolean xdata_ready (gint fd, GIOCondition cond, gpointer user)
                     update_active_window ();
                 else if (at == a_clients)
                     cover_schedule (); /* clients appeared/vanished */
+                else if (at == X.a_supported && X.a_supported != None) {
+                    /* (the window manager's list of what it knows: asked
+                     * for again when a desktop window is looked at) */
+                    X.wm_desk = -1;
+                    if (X.n_desks > 0)
+                        cover_schedule ();
+                }
                 else if (at == X.a_wmcheck && X.a_wmcheck != None && !X.windowed) {
                     /* the window manager came, went or was replaced: its
                      * name a moment later (it names itself after this) */
@@ -1687,7 +1743,7 @@ static gboolean pointer_on_desktop (Window child)
     for (guint i = 0; i < X.surfs->len; i++)
         if (SURF (i)->xid == child)
             return TRUE;
-    if (walpe_x11_desk_is_top (child, X.desks, (int) X.n_desks))
+    if (walpe_x11_desk_is_top (child, X.desks, (int) X.n_desks) && wm_knows_desktop ())
         return TRUE;
     static Window last_w = None;
     static gboolean last_r = FALSE;
@@ -2277,6 +2333,7 @@ static gboolean x11_open (const WalpePlatformOpts *o, char **err)
     /* the window manager: is there one, and its name (the windows are
      * made after this) */
     X.a_wmcheck = XInternAtom (X.xd, "_NET_SUPPORTING_WM_CHECK", False);
+    X.wm_desk = -1;
     X.wm_name = wm_name_read (&X.has_wm);
     X.managed = !X.windowed && walpe_x11_win_managed (X.win_mode, X.wm_name);
     if (X.managed)
@@ -2310,7 +2367,10 @@ static char *x11_describe (void)
         g_free (cls);
     }
     if (X.n_desks || X.desk_mode != WALPE_X11_DESK_AUTO)
-        g_string_append_printf (s, " [WALPE_X11_DESKTOP: %s]", walpe_x11_desk_mode_name (X.desk_mode));
+        g_string_append_printf (s, " [WALPE_X11_DESKTOP: %s%s]", walpe_x11_desk_mode_name (X.desk_mode),
+                                X.n_desks && X.desk_mode == WALPE_X11_DESK_AUTO && !wm_knows_desktop ()
+                                    ? "; the window manager does not list the desktop type in "
+                                      "_NET_SUPPORTED: the wallpaper windows stay on the root" : "");
     if (X.managed || X.win_mode != WALPE_X11_WIN_AUTO)
         g_string_append_printf (s, "; wallpaper windows: %s%s%s%s [WALPE_X11_WINDOW: %s]",
                                 X.managed ? "managed, desktop type" : "override-redirect",

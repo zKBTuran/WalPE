@@ -21,9 +21,20 @@ mean exactly the window of 0.14.0. Measured under dwm: two requests to the X ser
 than before when the daemon starts (the window manager's name), the same number while it
 idles, one more in all when a window was opened and closed.
 
+A window of the desktop type is taken for the desktop's own only where the window manager
+says that it knows the type: `_NET_WM_WINDOW_TYPE_DESKTOP` among the atoms of
+`_NET_SUPPORTED` on the root window. xfwm4, openbox, marco, Muffin, KWin, IceWM, Fluxbox,
+bspwm and awesome list it. dwm and i3 do not: to them such a window is a client like any
+other, and one that lies over the whole monitor there is some program's fullscreen window
+(a second wallpaper program, a visualizer, a file manager's desktop shown as one more
+window). The wallpaper window does not go into it - it would cover what that program
+shows - and the window pauses the wallpaper like any fullscreen window, as up to 0.14.0.
+`WALPE_X11_DESKTOP=window` puts the wallpaper window into it all the same.
+
 | It finds | The wallpaper window is |
 |---|---|
 | no desktop window; any window manager but the two below (dwm, i3, openbox, bspwm, awesome, IceWM, Fluxbox, xfwm4, marco, none) | override-redirect, the lowest child of the root (as always) |
+| a window of the desktop type under a window manager that does not list that type (dwm, i3), or without a window manager | override-redirect, the lowest child of the root (as always); the log says once that it is behind that window |
 | a desktop window over the monitor that nothing is seen through: a 24-bit visual, or no compositing manager (xfdesktop, pcmanfm, pcmanfm-qt, caja) | a child of that desktop window, as large as the monitor: above the desktop's picture and icons, below every window and panel |
 | a desktop window with a 32-bit visual under a compositing manager (nemo-desktop) | left where it is, below that window: its icons are seen above the wallpaper |
 | a window manager named Mutter, Muffin or GNOME Shell | a managed window of the desktop type (no focus, no input, on every workspace), which Mutter keeps in its lowest layer |

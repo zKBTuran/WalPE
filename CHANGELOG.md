@@ -132,7 +132,9 @@ renders on a laptop's discrete GPU where there is one (under Graphics cards;
   window goes into Plasma's desktop window, as on the four desktops above.
 - A bare window manager (dwm, i3, openbox, bspwm ...) gets the window of 0.14.0, unchanged:
   what is done is chosen by the desktop window that is found and by the window manager's
-  name.
+  name. A window of the desktop type counts as the desktop's own only where the window
+  manager lists that type in `_NET_SUPPORTED`; dwm and i3 do not, and there such a window -
+  another program's fullscreen window - is left alone and pauses the wallpaper as before.
 - Clicks on the desktop reach a wallpaper that takes them (web pages, cursor scripts)
   under window managers that put a frame around the desktop window (xfwm4, openbox); they
   counted as clicks on a window.

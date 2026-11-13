@@ -34,7 +34,9 @@
 
 /* WALPE_X11_DESKTOP */
 typedef enum {
-    WALPE_X11_DESK_AUTO,    /* into an opaque desktop window, else the root */
+    WALPE_X11_DESK_AUTO,    /* into an opaque desktop window, else the root; the root
+                             * under a window manager that does not know the desktop
+                             * type (walpe_x11_desk_allowed) */
     WALPE_X11_DESK_ROOT,    /* always the lowest child of the root (as up to 0.14.0) */
     WALPE_X11_DESK_WINDOW,  /* into a desktop window, also a translucent one */
 } WalpeX11DeskMode;
@@ -167,6 +169,41 @@ static inline int walpe_x11_desk_parse (const char *s, WalpeX11DeskMode *out)
         return 1;
     }
     return -1;
+}
+
+/* Does the window manager treat a window of the desktop type as a
+ * desktop - below every other window, no frame, no place in its layout?
+ * It says so itself: _NET_WM_WINDOW_TYPE_DESKTOP is among the atoms of
+ * _NET_SUPPORTED on the root. xfwm4, openbox, marco, Muffin, Mutter, KWin,
+ * IceWM, Fluxbox, bspwm and awesome list it. dwm and i3 do not, and to
+ * them such a window is a client like any other: tiled, focused, raised,
+ * made fullscreen when it asks to be. Without a window manager there is
+ * no such property at all.
+ * `supported`: the atoms of the property (NULL / 0: none), `a_desktop`:
+ * the atom of that type. */
+static inline gboolean walpe_x11_wm_knows_desktop (const unsigned long *supported, unsigned long n,
+                                                   unsigned long a_desktop)
+{
+    for (unsigned long i = 0; supported && a_desktop && i < n; i++)
+        if (supported[i] == a_desktop)
+            return TRUE;
+    return FALSE;
+}
+
+/* May a wallpaper window go into a desktop window at all, and does such a
+ * window count as the desktop (no fullscreen application whatever state
+ * it carries)? `auto`: only where the window manager treats the type as a
+ * desktop (above). Under dwm, i3 or no window manager a window of that
+ * type that lies over the whole monitor is some program's fullscreen
+ * window - a second wallpaper program, a visualizer, a file manager's
+ * desktop that the window manager shows as one more client - and the
+ * wallpaper window drawn into it would cover what that program shows;
+ * there it stays the lowest window of the root, as up to 0.14.0.
+ * `window` is the user's word for "into it, whatever the window manager
+ * says"; `root` never. */
+static inline gboolean walpe_x11_desk_allowed (WalpeX11DeskMode mode, gboolean wm_knows_desktop)
+{
+    return mode == WALPE_X11_DESK_WINDOW || (mode == WALPE_X11_DESK_AUTO && wm_knows_desktop);
 }
 
 /* does the desktop window lie over the whole monitor? (A desktop-type
