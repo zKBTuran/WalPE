@@ -3561,6 +3561,26 @@ static void test_pichead (void)
         ph_box (a, "ftyp", (const guint8 *) "jxl \0\0\0\0jxl ", 12);
         ph_box (a, "jxlp", part->data, part->len);
         CHECK (ph_size ("jxl", a->data, a->len, 100000, 3000));
+        /* the codestream cut into parts anywhere - a first part of the two signature bytes,
+         * an empty one, the rest: the size is the codestream's, not the next box's header
+         * read as one (1 x 1 to 1 x 512 it was, for a picture of any size) */
+        {
+            GByteArray *c = g_byte_array_new ();
+            g_byte_array_append (c, (const guint8 *) "\0\0\0\x0cJXL \r\n\x87\n", 12);
+            ph_box (c, "ftyp", (const guint8 *) "jxl \0\0\0\0jxl ", 12);
+            ph_box (c, "jxlp", (const guint8 *) "\0\0\0\0\xff\x0a", 6);
+            ph_box (c, "jxlp", (const guint8 *) "\0\0\0\1", 4);
+            ph_box (c, "free", (const guint8 *) "\xff\x0a\x0b\x0e", 4);
+            GByteArray *rest = g_byte_array_new ();
+            g_byte_array_append (rest, (const guint8 *) "\x80\0\0\2", 4);
+            g_byte_array_append (rest, part->data + 6, part->len - 6);
+            ph_box (c, "jxlp", rest->data, rest->len);
+            CHECK (ph_size ("jxl", c->data, c->len, 100000, 3000));
+            /* cut inside the size: no answer */
+            CHECK (ph_size ("jxl", c->data, c->len - 6, 0, 0));
+            g_byte_array_unref (rest);
+            g_byte_array_unref (c);
+        }
         g_byte_array_unref (part);
     }
     CHECK (!walpe_pichead_size ("svg", (const guint8 *) "<svg", 4, &(int) { 0 }, &(int) { 0 }));

@@ -527,31 +527,38 @@ static gboolean jxl_codestream_size (const guint8 *b, gsize n, int *w, int *h)
 static gboolean jxl_size (Src *s, guint64 size, int *w, int *h)
 {
     guint8 b[16];
+    gsize n = 0;
     memset (b, 0, sizeof b);
     if (!src_read (s, 0, b, 2))
         return FALSE;
-    guint64 at = 0;
-    if (b[0] != 0xff) {
-        /* the container: the codestream is the "jxlc" box, or starts in the
-         * first "jxlp" box behind its 4-byte counter */
-        guint64 body, end, from = 0;
-        char type[4];
-        gboolean found = FALSE;
-        for (int n = 0; n < 4096 && !found && box_at (s, from, size, type, &body, &end); n++, from = end) {
-            if (!memcmp (type, "jxlc", 4)) {
-                at = body;
-                found = TRUE;
-            } else if (!memcmp (type, "jxlp", 4)) {
-                at = body + 4;
-                found = TRUE;
-            }
-        }
-        if (!found)
-            return FALSE;
+    if (b[0] == 0xff) {
+        while (n < sizeof b && src_read (s, n, b + n, 1))
+            n++;
+        return jxl_codestream_size (b, n, w, h);
     }
-    gsize n = 0;
-    while (n < sizeof b && src_read (s, at + n, b + n, 1))
-        n++;
+    /* The container: the codestream is the "jxlc" box, or the content of
+     * the "jxlp" boxes one after the other, each behind its 4-byte counter.
+     * The parts can be cut anywhere - a first one of two bytes, the
+     * signature alone, is as good as any to the decoder - so the first
+     * bytes of the codestream are gathered across them (the bytes behind
+     * a short first part are the next box's header, not the size). */
+    guint64 body, end, from = 0;
+    char type[4];
+    for (int k = 0; k < 4096 && n < sizeof b && box_at (s, from, size, type, &body, &end); k++, from = end) {
+        if (!memcmp (type, "jxlc", 4)) {
+            if (n)
+                return FALSE;       /* (both kinds in one file: not a file the format has) */
+            while (n < sizeof b && body + n < end && src_read (s, body + n, b + n, 1))
+                n++;
+            break;
+        }
+        if (!memcmp (type, "jxlp", 4)) {
+            if (end - body < 4)
+                return FALSE;
+            for (guint64 at = body + 4; n < sizeof b && at < end && src_read (s, at, b + n, 1); at++)
+                n++;
+        }
+    }
     return jxl_codestream_size (b, n, w, h);
 }
 

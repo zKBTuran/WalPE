@@ -61,7 +61,7 @@ gboolean walpe_pichead_is_bigtiff (const guint8 *d, gsize len);
  * For "tiff" (first directory, of the classic and of the 64-bit file; of a
  * tag that is there twice the larger value; every whole-number type a
  * decoder takes), "avif" (the largest "ispe" property) and "jxl" (the codestream's
- * size header) TRUE is an upper bound good for a limit, and FALSE means
+ * size header; of a container the codestream gathered from its parts) TRUE is an upper bound good for a limit, and FALSE means
  * only that this reader did not find it.
  *
  * The file variant reads what it needs from the file (a JPEG's frame
