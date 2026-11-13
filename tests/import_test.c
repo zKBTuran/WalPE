@@ -123,6 +123,67 @@ static void test_sound_stop (const char *any_file)
     g_free (q_pid); g_free (sh); g_free (old_path); g_free (path);
 }
 
+/* The stop of the caller next to the floor of free disk (WALPE_CONVERT_FREE_MB),
+ * which the same loop looks at once a second while ffmpeg runs: with the
+ * usual floor a run that is older than that look goes on until its caller
+ * stops it, and is then given up as above (-2, no message, ffmpeg gone,
+ * no ".part"); with a floor no disk reaches the call does not begin,
+ * says why (-1) and asks nobody whether to stop - also when the answer
+ * would be yes. */
+static void test_sound_stop_floor (const char *any_file)
+{
+    char *dir = P ("slow2"), *fake = P ("slow2/ffmpeg"), *pidf = P ("slow2/pid"), *dst_a = P ("slow2/a-sound.flac"),
+         *part_a = P ("slow2/a-sound.flac.part"), *text = NULL;
+    char *q_pid = g_shell_quote (pidf);
+    char *sh = g_strdup_printf ("#!/bin/sh\necho $$ > %s\nexec sleep 60\n", q_pid);
+    char *old_path = g_strdup (g_getenv ("PATH")), *path = g_strconcat (dir, ":", old_path, NULL);
+    g_mkdir_with_parents (dir, 0700);
+    if (!g_file_set_contents (fake, sh, -1, NULL) || g_chmod (fake, 0700)) {
+        CHECK (!"the stand-in ffmpeg could not be written");
+    } else {
+        g_setenv ("PATH", path, TRUE);
+        g_unsetenv ("WALPE_CONVERT_FREE_MB");
+        g_atomic_int_set (&stop_a, 0);
+        Extract a = { any_file, dst_a, 99, NULL };
+        GThread *t = g_thread_new ("extract", extract_thread, &a);
+        for (int i = 0; i < 5000 && !g_file_get_contents (pidf, &text, NULL, NULL); i++)
+            g_usleep (1000);
+        const pid_t child = text ? (pid_t) atoi (text) : 0;
+        CHECK (child > 1 && kill (child, 0) == 0);
+        g_usleep (1500000);     /* (the free disk has been looked at by now) */
+        CHECK (child > 1 && kill (child, 0) == 0 && a.res == 99);
+        gint64 t0 = g_get_monotonic_time ();
+        g_atomic_int_set (&stop_a, 1);
+        g_thread_join (t);
+        const double el = (g_get_monotonic_time () - t0) / 1e6;
+        CHECK (a.res == -2 && !a.err && el < 3.0);
+        CHECK (child > 1 && kill (child, 0) != 0);
+        CHECK (!g_file_test (dst_a, G_FILE_TEST_EXISTS) && !g_file_test (part_a, G_FILE_TEST_EXISTS));
+        g_free (a.err);
+        /* the floor comes first: nothing is started, and the answer is the
+         * floor's, not "given up" */
+        g_remove (pidf);
+        g_setenv ("WALPE_CONVERT_FREE_MB", "100000000", TRUE);
+        char *err = NULL;
+        g_atomic_int_set (&asked_b, 0);
+        g_atomic_int_set (&stop_b, 1);
+        const int rb = walpe_video_sound_extract_stoppable (any_file, dst_a, stop_b_cb, NULL, &err);
+        CHECK (rb == -1 && err && strstr (err, "left on the disk") && g_atomic_int_get (&asked_b) == 0);
+        CHECK (!g_file_test (pidf, G_FILE_TEST_EXISTS) && !g_file_test (dst_a, G_FILE_TEST_EXISTS) &&
+               !g_file_test (part_a, G_FILE_TEST_EXISTS));
+        g_free (err);
+        g_unsetenv ("WALPE_CONVERT_FREE_MB");
+        g_atomic_int_set (&stop_a, 0);
+        g_atomic_int_set (&stop_b, 0);
+        g_setenv ("PATH", old_path, TRUE);
+    }
+    g_remove (fake);
+    g_remove (pidf);
+    g_rmdir (dir);
+    g_free (dir); g_free (fake); g_free (pidf); g_free (dst_a); g_free (part_a); g_free (text);
+    g_free (q_pid); g_free (sh); g_free (old_path); g_free (path);
+}
+
 static gboolean have_arg (char **argv, const char *a, const char *next)
 {
     for (int i = 0; argv[i]; i++)
@@ -856,6 +917,7 @@ int main (int argc, char **argv)
         char *any = P ("any.mp4");
         g_file_set_contents (any, "stands for a video\n", -1, NULL);
         test_sound_stop (any);
+        test_sound_stop_floor (any);
         g_remove (any);
         g_free (any);
     }
