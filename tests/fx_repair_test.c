@@ -1570,6 +1570,47 @@ static void audit_checks (void)
                 g_string_append_printf (s, "void main () {\n\tfloat a = 0.0;\n%s\n\tC(a += 0.000001;)\n#endif\n}\n", ver[k].cond);
                 result (fx_expansion_ok (s->str) == !ver[k].refused, ver[k].what, NULL);
             }
+            /* What the driver's preprocessor works on and no token shows.
+             * Mesa's expands an argument anew for every place its parameter
+             * stands in the body, and its lists hold what is no token: a
+             * mark for an empty argument, the blanks and line ends between
+             * tokens, a blank for a macro that stands for nothing. C()
+             * below is 16.7 million marks and not one token (six levels of
+             * 16: 1.9 GB and 6 s in Mesa 25.2 for a shader that compiles);
+             * B is 4096 copies of its argument. */
+            {
+                GString *arg = g_string_new (NULL);
+                static const struct { const char *what, *defs, *open, *unit; int n; const char *close; } hid[] = {
+                    { "16.7 million copies of an empty argument", "", "C(", "", 0, ")" },
+                    { "16.7 million copies of a macro that stands for nothing", "#define NIL\n", "C(", "NIL", 1, ")" },
+                    { "4096 copies of what 2000 calls that leave nothing leave", "#define NONE()\n", "B(", "NONE() ", 2000, ")" },
+                    { "4096 expansions of an argument of 4000 tokens that a macro drops", "#define DROP(p)\n", "A(A(A(A(DROP(",
+                      "a + ", 2000, "a)))))" },
+                    { "4096 copies of an argument with 10000 blank lines in it", "", "B(a += 1.0;", "\n", 10000, ")" },
+                };
+                for (guint k = 0; k < G_N_ELEMENTS (hid); k++) {
+                    g_string_assign (arg, "");
+                    for (int i = 0; i < hid[k].n; i++)
+                        g_string_append (arg, hid[k].unit);
+                    g_string_assign (s, bomb);
+                    g_string_append_printf (s, "%svoid main () {\n\tfloat a = 0.0;\n\t%s%s%s\n}\n", hid[k].defs, hid[k].open,
+                                            arg->str, hid[k].close);
+                    char *what = g_strdup_printf ("%s: refused", hid[k].what);
+                    result (!fx_expansion_ok (s->str), what, NULL);
+                    g_free (what);
+                }
+                g_string_free (arg, TRUE);
+                /* ... and macros as shaders have them, their parameters
+                 * used several times, calls in calls over several lines */
+                fits = fx_expansion_sizes ("#define SQ(x) ((x) * (x))\n#define LERP3(a, b, t) (mix (a, b, t) + mix (b, a, t) + (t))\n"
+                                           "uniform float u;\nvoid main () {\n"
+                                           "\tfloat p = SQ(SQ(SQ(SQ(SQ(SQ(SQ(SQ(u))))))));\n"
+                                           "\tfloat q = LERP3(\n\t\tSQ(u),\n\n\t\tLERP3(u, SQ(u), 0.5),\n\t\tSQ()\n\t);\n}\n", &st);
+                d = g_strdup_printf ("longest statement %" G_GINT64_FORMAT, st);
+                /* p: "float p =", 256 u, 255 '*' and 1530 parentheses */
+                result (fits && st == 2044, "eight calls in each other of a macro that uses its parameter twice: accepted", d);
+                g_free (d);
+            }
         }
         g_string_assign (s, "#define SELF SELF + 1\n#define P Q\n#define Q P\nfloat a = SELF + P;\n");
         result (fx_expansion_ok (s->str), "self-referencing macros: accepted (not expanded in themselves)", NULL);

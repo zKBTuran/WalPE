@@ -40,7 +40,10 @@
 #include <string.h>
 
 enum { FXPRE_T_IDENT = 1, FXPRE_T_NUM, FXPRE_T_PUNCT, FXPRE_T_PASTE /* the "##" of a macro's body */,
-       FXPRE_T_MARK /* an empty argument beside "##" */ };
+       FXPRE_T_MARK /* no token, but something the driver's preprocessor keeps in its lists and
+                     * copies with the tokens: an empty argument, an expansion that leaves nothing,
+                     * a line end among the arguments of a call. Moved and charged like a token,
+                     * never written out. */ };
 
 typedef struct {
     const char *s;          /* in the cleaned text, or in the arena (pasted, predefined) */
@@ -142,6 +145,7 @@ typedef struct FxPre_ {
     int nest;
     guint directives;       /* directive lines obeyed so far */
     gboolean begun;         /* a line that is not blank has been read: "#version" comes too late */
+    gint64 nlines;          /* line ends read so far */
 } FxPre;
 
 /* ---------------------------------------------------------------- text */
@@ -778,7 +782,7 @@ static FxPreTok fxpre_paste (FxPre *pp, const FxPreTok *a, const FxPreTok *b)
     return t;
 }
 
-/* the "##" of a body applied, left to right; the marks of empty arguments go */
+/* the "##" of a body applied, left to right (a mark beside it is used up) */
 static void fxpre_paste_all (FxPre *pp, GArray *r)
 {
     guint w = 0;
@@ -791,15 +795,21 @@ static void fxpre_paste_all (FxPre *pp, GArray *r)
             t[w++] = t[i];
         }
     }
-    guint k = 0;
     for (guint i = 0; i < w; i++)
-        if (t[i].kind != FXPRE_T_MARK) {
-            t[k] = t[i];
-            if (t[k].kind == FXPRE_T_PASTE)     /* at an end of the body: pastes nothing */
-                t[k].kind = FXPRE_T_PUNCT;
-            k++;
-        }
-    g_array_set_size (r, k);
+        if (t[i].kind == FXPRE_T_PASTE)     /* at an end of the body: pastes nothing */
+            t[i].kind = FXPRE_T_PUNCT;
+    g_array_set_size (r, w);
+}
+
+/* the marks out of a list that is read as tokens (an #if expression) */
+static void fxpre_drop_marks (GArray *a)
+{
+    guint k = 0;
+    FxPreTok *t = (FxPreTok *) a->data;
+    for (guint i = 0; i < a->len; i++)
+        if (t[i].kind != FXPRE_T_MARK)
+            t[k++] = t[i];
+    g_array_set_size (a, k);
 }
 
 /* The macro `m`, named by the token just taken from `in`, is called: its
@@ -807,6 +817,7 @@ static void fxpre_paste_all (FxPre *pp, GArray *r)
  * call (a function-like macro with no '(' behind it) and is plain text. */
 static gboolean fxpre_call (FxPreIn *in, FxPreMacro *m)
 {
+    static const FxPreTok mark = { "", 0, 0, FXPRE_T_MARK, 0, 0 };
     FxPre *pp = in->pp;
     GArray *r = g_array_new (FALSE, FALSE, sizeof (FxPreTok));
     gboolean has_paste = FALSE;
@@ -819,9 +830,16 @@ static gboolean fxpre_call (FxPreIn *in, FxPreMacro *m)
         g_array_append_vals (r, m->body, m->nbody);
         for (guint i = 0; i < m->nbody && !has_paste; i++)
             has_paste = m->body[i].kind == FXPRE_T_PASTE;
-        fxpre_charge (pp, m->nbody);
+        /* (+ 2: an expansion is work also where the macro stands for
+         * nothing - Mesa keeps a blank for it, 270 bytes each when an
+         * argument of 25 of them is expanded 65536 times) */
+        fxpre_charge (pp, m->nbody + 2);
     } else {
         const FxPreTok *k = fxpre_peek (in);
+        while (k && k->kind == FXPRE_T_MARK && fxpre_charge (pp, 1)) {
+            fxpre_take (in);
+            k = fxpre_peek (in);
+        }
         if (!k || !(k->kind == FXPRE_T_PUNCT && k->len == 1 && k->s[0] == '(')) {
             g_array_free (r, TRUE);
             return FALSE;
@@ -831,12 +849,20 @@ static gboolean fxpre_call (FxPreIn *in, FxPreMacro *m)
          * every other pair of parentheses */
         GArray *args = g_array_new (FALSE, FALSE, sizeof (FxPreTok));
         GArray *ends = g_array_new (FALSE, FALSE, sizeof (guint));
+        /* A line end among the arguments is a blank the driver's
+         * preprocessor keeps in the argument and copies with it (Mesa:
+         * 100 blank lines in an argument that is copied 65536 times are
+         * 370 MB): a mark each. */
+        gint64 lines = pp->nlines;
+        guint real = 0;
         const guint directives = pp->directives;
         int depth = 0;
         gboolean closed = FALSE;
         while ((k = fxpre_peek (in)) != NULL && fxpre_charge (pp, 1)) {
             FxPreTok a = *k;
             fxpre_take (in);
+            for (; lines < pp->nlines && fxpre_charge (pp, 1); lines++)
+                g_array_append_val (args, mark);
             if (a.kind == FXPRE_T_PUNCT && a.len == 1) {
                 if (a.s[0] == '(') {
                     depth++;
@@ -848,19 +874,37 @@ static gboolean fxpre_call (FxPreIn *in, FxPreMacro *m)
                     continue;
                 }
             }
+            real += a.kind != FXPRE_T_MARK;
             g_array_append_val (args, a);
         }
         g_array_append_val (ends, args->len);
         guint na = ends->len;
-        if (na == 1 && args->len == 0 && m->nparams == 0)
+        if (na == 1 && real == 0 && m->nparams == 0)
             na = 0;
         if (closed && (int) na == m->nparams && !pp->fail) {
-            /* every argument expanded once, on its own */
+            /* Every argument expanded once, on its own - here. Mesa's
+             * preprocessor expands it anew for every place its parameter
+             * stands in the body, and what it works on there is more than
+             * the tokens that come out: a mark for an empty argument, the
+             * blanks and line ends between the tokens, a blank for a
+             * macro that stands for nothing. With calls in calls that
+             * work multiplies like the copies of a token do, and nothing
+             * of it need be a token: "C(C(C(C(C(C()))))))" with a C of 16
+             * uses is 16.7 million marks, 1.9 GB and 6 s in Mesa 25.2 -
+             * and an empty text. So the work an argument took - its
+             * tokens and marks, its expansion with all that is charged
+             * inside it - is charged again for each further use of its
+             * parameter. */
             GArray *exp = g_array_new (FALSE, FALSE, sizeof (FxPreTok));
             GArray *exp_ends = g_array_new (FALSE, FALSE, sizeof (guint));
+            gint64 *cost = g_new0 (gint64, MAX (na, 1));
+            guint8 *used = g_new0 (guint8, MAX (na, 1));
+            fxpre_charge (pp, 2);
             for (guint i = 0; i < na && !pp->fail; i++) {
                 const guint b = i ? g_array_index (ends, guint, i - 1) : 0, e = g_array_index (ends, guint, i);
+                const gint64 before = pp->work;
                 fxpre_expand_list (pp, &g_array_index (args, FxPreTok, b), e - b, exp);
+                cost[i] = pp->work - before + (e - b) + 1;
                 g_array_append_val (exp_ends, exp->len);
             }
             for (guint j = 0; j < m->nbody && !pp->fail; j++) {
@@ -872,19 +916,34 @@ static gboolean fxpre_call (FxPreIn *in, FxPreMacro *m)
                     fxpre_charge (pp, 1);
                     continue;
                 }
+                if (used[pi] && !fxpre_charge (pp, cost[pi]))
+                    break;
+                used[pi] = 1;
                 const gboolean beside_paste = (j > 0 && m->body[j - 1].kind == FXPRE_T_PASTE) ||
                                               (j + 1 < m->nbody && m->body[j + 1].kind == FXPRE_T_PASTE);
                 const GArray *from = beside_paste ? args : exp, *fe = beside_paste ? ends : exp_ends;
                 const guint b = pi ? g_array_index (fe, guint, pi - 1) : 0, e = g_array_index (fe, guint, pi);
-                if (e == b && beside_paste) {
-                    FxPreTok mark = { "", 0, 0, FXPRE_T_MARK, 0, 0 };
-                    g_array_append_val (r, mark);
+                if (beside_paste) {
+                    /* the tokens as they were written: of the marks, one where there is no token */
+                    const guint was = r->len;
+                    for (guint q = b; q < e && fxpre_charge (pp, 1); q++)
+                        if (g_array_index (from, FxPreTok, q).kind != FXPRE_T_MARK)
+                            g_array_append_val (r, g_array_index (from, FxPreTok, q));
+                    if (r->len == was)
+                        g_array_append_val (r, mark);
+                } else if (e == b) {
+                    /* nothing: the mark Mesa puts there, which the next
+                     * macro copies as it would a token */
+                    if (fxpre_charge (pp, 1))
+                        g_array_append_val (r, mark);
                 } else if (fxpre_charge (pp, e - b)) {
                     g_array_append_vals (r, &g_array_index (from, FxPreTok, b), e - b);
                 }
             }
             g_array_free (exp, TRUE);
             g_array_free (exp_ends, TRUE);
+            g_free (cost);
+            g_free (used);
         } else if (!pp->fail) {
             /* No call a compiler takes (no ')', another number of
              * arguments): the compile ends, but the preprocessing does
@@ -925,6 +984,9 @@ static gboolean fxpre_call (FxPreIn *in, FxPreMacro *m)
     }
     if (has_paste)
         fxpre_paste_all (pp, r);
+    /* an expansion that leaves nothing leaves a blank in Mesa's lists */
+    if (!r->len && fxpre_charge (pp, 1))
+        g_array_append_val (r, mark);
     m->disabled = 1;
     FxPreFrame f = { NULL, r->len, 0, m, TRUE };
     f.t = (FxPreTok *) g_array_free (r, FALSE);
@@ -972,6 +1034,8 @@ static void fxpre_expand (FxPreIn *in, GArray *out, gint64 max_out)
                 continue;
             }
         }
+        if (t.kind == FXPRE_T_MARK && out == pp->out)
+            continue;       /* (charged above; no token of the text) */
         if ((gint64) out->len >= max_out) {
             if (!pp->fail)
                 pp->fail = "too many tokens after preprocessing (every macro replaced)";
@@ -1007,6 +1071,7 @@ static gboolean fxpre_condition (FxPre *pp, const FxPreTok *t, guint n)
     while (in.frames->len)
         fxpre_pop (&in);
     g_array_free (in.frames, TRUE);
+    fxpre_drop_marks (e);
     gboolean odd = FALSE;
     gint64 v = fxpre_if_value (pp, (const FxPreTok *) e->data, e->len, &odd);
     g_array_free (e, TRUE);
@@ -1067,6 +1132,7 @@ static void fxpre_directive (FxPre *pp, const FxPreTok *toks, guint n)
         /* "#line N" / "#line N F" (macros expanded): the next line is N */
         GArray *e = g_array_new (FALSE, FALSE, sizeof (FxPreTok));
         fxpre_expand_list (pp, rest, nr, e);
+        fxpre_drop_marks (e);
         gint64 v[2] = { -1, -1 };
         for (guint i = 0; i < e->len && i < 2; i++) {
             const FxPreTok *k = &g_array_index (e, FxPreTok, i);
@@ -1131,6 +1197,7 @@ static gboolean fxpre_next_line (FxPre *pp, GArray *toks)
         }
         pp->p = *p ? p + 1 : p;
         pp->line++;
+        pp->nlines++;
         if (!fxpre_charge (pp, toks->len + 1))
             break;
         if (toks->len && g_array_index (toks, FxPreTok, 0).len == 1 && g_array_index (toks, FxPreTok, 0).s[0] == '#') {
