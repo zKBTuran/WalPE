@@ -209,6 +209,9 @@ opacity is not looked at. Run on a headless Plasma 6.8.2 with one and two output
 maximized and nearly-covering windows; minimized; the focus rule; the see-through list;
 rules switched off and on with a fullscreen window in place) and with a stand-in KWin
 (test `sig-kwin`); not on Plasma 5.27, where the script only says that it is too old.
+The test `daemon-kwin` repeats the fullscreen, maximized and half-covering windows and
+the script's coming and going on a real KWin, where one is installed
+([DEVELOPMENT.md](DEVELOPMENT.md#tests)).
 
 `walpe-ctl pause` / `resume` and the tray's pause entry work everywhere.
 
@@ -492,7 +495,12 @@ wallpaper; the add-on works there as on the bottom layer.
 > on one output and on two (the frame around the icon under the pointer is there, the
 > page has the pointer where it is, clicks and the wheel arrive from the wallpaper type,
 > a popup of Plasma's over the desktop and the panel count as "left"). Not run at all: a real Plasma session, a GPU, NVIDIA's driver, a restart
-> of KWin under the running shell, Plasma versions between 6.5 and 6.8.
+> of KWin under the running shell, Plasma versions between 6.5 and 6.8. What can be
+> repeated without a person - the stacking before and after a click in both starting
+> orders, the add-on installed, selected, unselected and removed, the pointer through the
+> add-on, the desktop after the daemon quit or was killed - is the test `daemon-kwin`
+> ([DEVELOPMENT.md](DEVELOPMENT.md#tests)), which is skipped where no KWin of Plasma 6 is
+> installed.
 
 ## Compositors that were run
 

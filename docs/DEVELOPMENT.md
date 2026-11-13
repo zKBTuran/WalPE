@@ -37,7 +37,8 @@ walpe-ctl  (src/ctl/)        command line client of the control socket
 walpe-tray (src/tray/)       tray icon (XEmbed + StatusNotifierItem), own process
 scripts/                     walpe-gpu-report.sh, walpe-collect.sh (installed); the end-to-end tests' harness:
                              displayenv.py, checkenv.py, lifecheck.py, waylandcheck.py, rescheck.py,
-                             scenevideocheck.py, webcheck.py, wlsilentcheck.py, wlwaitcheck.py
+                             scenevideocheck.py, webcheck.py, wlsilentcheck.py, wlwaitcheck.py,
+                             kwincheck.py
 protocols/                   Wayland protocol descriptions (third-party, see Licence)
 cross/                       meson cross files for aarch64
 data/                        systemd user unit, autostart and desktop entries, style.css, icon
@@ -89,6 +90,7 @@ directory; nothing of your session is read, written or disturbed:
 | `daemon-wayland-silent` | none | a compositor socket that accepts the connection and never answers: the daemon gives up after ten seconds (`scripts/wlsilentcheck.py`) |
 | `daemon-wayland-wait-socket` | none | a daemon restarted in place that waits for its compositor and gives up: which control socket file it removes, and what its log says (`scripts/wlwaitcheck.py`) |
 | `daemon-wayland` | headless sway | what only outputs can do (`scripts/waylandcheck.py`): two outputs, a mode / scale / transform that changes under the running daemon, outputs that appear and go, a pointer device, the choice between the two backends |
+| `daemon-kwin` | a private KDE Plasma session: KWin on two virtual outputs, Plasma's shell | what only KWin and Plasma can show (`scripts/kwincheck.py`): where the wallpaper is among Plasma's windows before and after a click on the desktop, the layer and what status says about it, the pause rules through the script in KWin, the add-on of `contrib/plasma` installed, selected and taken away, the tray's menu at Plasma's own StatusNotifierWatcher |
 | `web-wayland` | headless sway without Xwayland, no `DISPLAY` | the same pages on the private page host (`scripts/webcheck.py`), and what only a Wayland session has: two outputs, outputs that come, change and go, `DISPLAY` left over without an X server, what the page's sandbox sees of the session, the session's clipboard (needs `wl-copy` / `wl-paste`) |
 
 The X ones need `Xvfb` (and use `xdotool`, `xrandr` when present), the Wayland ones `sway`
@@ -102,6 +104,58 @@ run against another wlroots compositor by hand, which the test suite does not do
 `river` up to 0.3; it needs `wlr-randr` as well). The other Wayland tests are written
 for sway. `WALPE_CHECK_STRICT=1`
 turns "cannot run here" into a failure.
+
+`daemon-kwin` (its own suite, `kwin`) is the one test that runs the daemon on KDE Plasma
+itself. Every other Wayland test uses sway or a stand-in, and release 0.14.0 lost its
+wallpaper at the first click on Plasma's desktop with all of them passing: sway has no
+desktop window to raise, and the daemon's own status knew nothing. So this test looks at
+what KWin shows and does: the pictures are KWin's screenshots, the stacking order and the
+windows' states are read by a script inside KWin, the pointer is a device KWin makes for
+the test, the application windows are real Wayland clients.
+
+```sh
+meson test -C build daemon-kwin                      # or: --suite kwin
+python3 -I scripts/kwincheck.py --build build        # by hand: one line per check
+python3 -I scripts/kwincheck.py --build build --only stack,pause    # cases: stack, pause, addon, tray
+python3 -I scripts/kwincheck.py --build build --outputs 1           # one output instead of two
+python3 -I scripts/kwincheck.py --build build --no-shell            # KWin alone
+python3 -I scripts/kwincheck.py --build build --daemon old/walpe-daemon --tray old/walpe-tray
+```
+
+- **Needs** `kwin_wayland` of Plasma 6 and `dbus-daemon`. Without them, or with the KWin
+  of Plasma 5, the test is skipped (exit 77) with one sentence that says what is missing.
+  With `plasmashell` (and what comes with it: `kded6`, `kpackagetool6`, `dbus-send`) it
+  also runs the parts that need Plasma's desktop window, the add-on and the tray; where
+  the shell is missing those are left out, and the output says so.
+- **Starts** a session of its own in a temporary directory: runtime directory, session
+  bus, `kwin_wayland --virtual` on two outputs of 640 x 400, Plasma's shell with `kded6`,
+  a daemon per case. Nothing of your session is used, no autostart program runs, the
+  add-on is installed into the temporary directories only, and what was started is
+  stopped by process id (the services the private bus started for Plasma's shell by
+  their runtime directory, which nothing else has).
+- **KWin needs a device to draw on**: from 6.8 on a DRM render node or `/dev/udmabuf`.
+  On a machine with neither (a container) the test preloads a stand-in for the latter
+  into KWin (`tests/kwin/udmabuf_shim.c`, built with the tests, loaded into nothing
+  else); KWin's window management and script interface are untouched by it.
+- **It fails on what it was written for.** With the daemon and the tray of 0.14.0
+  (`--daemon`, `--tray`) the case `stack` fails in both orders of the report - the
+  wallpaper behind Plasma's desktop from the start, and gone after the click - and so do
+  `pause` (no script) and the ids of the tray's menu; with `WALPE_WL_LAYER=background`
+  in the environment today's daemon fails `stack` the same way.
+- **Time**: about a minute; a run in which much fails waits for each thing that does
+  not come (against 0.14.0: two and a half minutes). `KWINCHECK_PATIENCE=N` multiplies
+  the waits.
+
+What it does not cover: a graphics card (KWin and the daemon draw with Mesa's software
+rasteriser; it has not been run on a machine with a render node, where KWin would use
+that); a real session (no login, no session manager, no lock screen, no Xwayland, no
+PipeWire, no input device but KWin's own fake one); KWin or Plasma's shell restarted
+under the running daemon; activities and virtual desktops, "Peek at Desktop", the
+Overview; outputs that come, go, change or have a scale (KWin's virtual outputs are
+fixed when it starts: `daemon-wayland` does that on sway); video and web wallpapers
+(the wallpapers are generated one-colour scenes); the menu as Plasma draws it (the
+tray's menu is read over D-Bus, as a panel reads it); Plasma 5. It has run on Plasma
+6.8.2 only.
 
 One test talks to a sound server: `audio-server` starts a PulseAudio of its own (`pulseaudio`
 and `pactl` in a temporary directory, null sinks only, no session bus) and plays tones into

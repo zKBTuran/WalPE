@@ -94,6 +94,12 @@ renders on a laptop's discrete GPU where there is one (under Graphics cards;
   and a display that is off. `pause_rules.pause_covered` now has a `note` that says what
   it pauses for and that a window covering the wallpaper is not known in this session;
   the settings window prints it under the switch.
+- For those who build and test: what was run by hand on the headless Plasma is a test of
+  the suite now, `daemon-kwin`. It starts a private KWin and Plasma's shell and looks at
+  KWin's own screenshots and stacking order: the wallpaper before and after a click on
+  the desktop, the pause rules, the add-on, the tray's menu. With the daemon of 0.14.0 it
+  fails where the reports did; it is skipped where no KWin of Plasma 6 is installed
+  ([DEVELOPMENT.md](docs/DEVELOPMENT.md#tests)).
 
 - A still wallpaper (a picture, a scene in which nothing moves, anything paused) on an
   output whose scale or resolution changes: until the daemon had restarted for the new
