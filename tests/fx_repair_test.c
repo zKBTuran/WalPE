@@ -1542,6 +1542,34 @@ static void audit_checks (void)
                 result (fx_expansion_ok (s->str), what, NULL);
                 g_free (what);
             }
+            /* "#version" counts where the driver takes it: as the first
+             * thing of the source (blank lines and comments before it).
+             * Anywhere else it is an error and Mesa keeps the version it
+             * has - the built source begins with the engine's "#version",
+             * so one in the wallpaper's text changes neither __VERSION__
+             * nor GL_ES. "#version 100" is GLSL ES 1.00 without the "es". */
+            static const struct { const char *what, *head, *cond; gboolean refused; } ver[] = {
+                { "\"#version 300 es\" behind the engine's \"#version 330\", macros under #ifndef GL_ES: refused",
+                  "#version 330\n", "#version 300 es\n#ifndef GL_ES", TRUE },
+                { "\"#version 100\" behind \"#version 330\", macros under #if __VERSION__ == 330: refused",
+                  "#version 330\n", "#version 100\n#if __VERSION__ == 330", TRUE },
+                { "\"#version 300 es\" behind a declaration, macros under #ifndef GL_ES: refused",
+                  "float q;\n", "#version 300 es\n#ifndef GL_ES", TRUE },
+                { "\"#version 300 es\" behind a \"#define\", macros under #if __VERSION__ == 110: refused",
+                  "#define Q 1\n", "#version 300 es\n#if __VERSION__ == 110", TRUE },
+                { "\"#version 100\" first, macros under #ifdef GL_ES: refused", "#version 100\n", "#ifdef GL_ES", TRUE },
+                { "\"#version 300 es\" first, macros under #ifndef GL_ES: accepted, not counted", "#version 300 es\n", "#ifndef GL_ES",
+                  FALSE },
+                { "\"#version 300 es\" behind a comment and a blank line, macros under #ifndef GL_ES: accepted",
+                  "/* a comment */ // another\n\n  #version 300 es\n", "#ifndef GL_ES", FALSE },
+                { "\"#version 330\" first, macros under #ifdef GL_ES: accepted, not counted", "#version 330\n", "#ifdef GL_ES", FALSE },
+            };
+            for (guint k = 0; k < G_N_ELEMENTS (ver); k++) {
+                g_string_assign (s, ver[k].head);
+                g_string_append (s, bomb);
+                g_string_append_printf (s, "void main () {\n\tfloat a = 0.0;\n%s\n\tC(a += 0.000001;)\n#endif\n}\n", ver[k].cond);
+                result (fx_expansion_ok (s->str) == !ver[k].refused, ver[k].what, NULL);
+            }
         }
         g_string_assign (s, "#define SELF SELF + 1\n#define P Q\n#define Q P\nfloat a = SELF + P;\n");
         result (fx_expansion_ok (s->str), "self-referencing macros: accepted (not expanded in themselves)", NULL);

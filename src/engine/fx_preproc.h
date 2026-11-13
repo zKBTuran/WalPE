@@ -141,6 +141,7 @@ typedef struct FxPre_ {
     gboolean cond_line;     /* ... and it read __LINE__ or __FILE__ */
     int nest;
     guint directives;       /* directive lines obeyed so far */
+    gboolean begun;         /* a line that is not blank has been read: "#version" comes too late */
 } FxPre;
 
 /* ---------------------------------------------------------------- text */
@@ -1082,13 +1083,19 @@ static void fxpre_directive (FxPre *pp, const FxPreTok *toks, guint n)
             pp->file = v[1];
         g_array_free (e, TRUE);
     } else if (fxpre_is (w, "version")) {
-        /* the language: __VERSION__ and GL_ES follow it */
-        if (nr > 0 && rest[0].kind == FXPRE_T_NUM && rest[0].len < 8) {
+        /* the language: __VERSION__ and GL_ES follow it - where the
+         * driver takes the line, which is as the first thing of the
+         * source (blank lines and comments before it). Behind anything
+         * else it is an error and Mesa's preprocessor keeps the version
+         * it has: 110, or what the first line said (the engine's, in a
+         * built source: a "#version 300 es" in the wallpaper's text does
+         * not define GL_ES). "#version 100" is GLSL ES 1.00. */
+        if (!pp->begun && nr > 0 && rest[0].kind == FXPRE_T_NUM && rest[0].len < 8) {
             char tmp[8];
             memcpy (tmp, rest[0].s, rest[0].len);
             tmp[rest[0].len] = 0;
             pp->version = atoi (tmp);
-            pp->es = nr > 1 && fxpre_is (&rest[1], "es");
+            pp->es = pp->version == 100 || (nr > 1 && fxpre_is (&rest[1], "es"));
             if (pp->es)
                 fxpre_predefine (pp, "GL_ES", 0, 1);
         }
@@ -1129,10 +1136,13 @@ static gboolean fxpre_next_line (FxPre *pp, GArray *toks)
         if (toks->len && g_array_index (toks, FxPreTok, 0).len == 1 && g_array_index (toks, FxPreTok, 0).s[0] == '#') {
             pp->directives++;
             fxpre_directive (pp, (const FxPreTok *) toks->data, toks->len);
+            pp->begun = TRUE;
             continue;
         }
-        if (toks->len && !skip)
+        if (toks->len && !skip) {
+            pp->begun = TRUE;
             return TRUE;
+        }
     }
     g_array_set_size (toks, 0);
     return FALSE;
