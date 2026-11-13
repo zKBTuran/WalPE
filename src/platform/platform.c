@@ -232,6 +232,30 @@ void walpe_surface_want_pointer (WalpeSurface *s, gboolean want)
         ops->surface_want_pointer (s, want);
 }
 
+#ifdef HAVE_WAYLAND
+/* following an output in place: the Wayland backend's alone, and only a
+ * build that holds it has these three (the daemon's calls are compiled
+ * under the same condition) */
+gboolean walpe_platform_follows_outputs (void)
+{
+    return ops == &walpe_wayland_ops;
+}
+
+gboolean walpe_surface_follow_output (WalpeSurface *s, const WalpeOutput *o, int *w, int *h)
+{
+    return ops == &walpe_wayland_ops && s && o ? walpe_wayland_surface_follow_output (s, o, w, h)
+                                               : FALSE;
+}
+
+gboolean walpe_surface_fit (WalpeSurface *s, int *w, int *h)
+{
+    if (ops == &walpe_wayland_ops && s)
+        return walpe_wayland_surface_fit (s, w, h);
+    walpe_surface_size (s, w, h);
+    return FALSE;
+}
+#endif
+
 /* The three hooks below run once per frame on the render threads. `ops`
  * is written by open / close only, on the main thread, before the render
  * threads start and after they ended. */

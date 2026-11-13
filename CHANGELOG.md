@@ -125,6 +125,21 @@ renders on a laptop's discrete GPU where there is one (under Graphics cards;
   the desktop, the pause rules, the add-on, the tray's menu. With the daemon of 0.14.0 it
   fails where the reports did; it is skipped where no KWin of Plasma 6 is installed
   ([DEVELOPMENT.md](docs/DEVELOPMENT.md#tests)).
+- A monitor that changes no longer restarts the daemon. Up to now every change of an
+  output - a monitor unplugged, back from sleep on a compositor that removes sleeping
+  outputs, moved in the layout, another scale or mode chosen in the desktop's settings,
+  a rotation - made the daemon restart itself in place: two to ten seconds, and every
+  wallpaper on every monitor began again. The daemon now follows the change in place:
+  position, scale, refresh rate and a half turn change nothing that is shown; another
+  size in pixels gives the surface new buffers (a video plays on, a scene on that
+  monitor is loaded again); a monitor that goes has its wallpaper unloaded and gets it
+  back on a new surface when it returns; the other monitors' wallpapers go on where they
+  were throughout. Still a restart in place: more monitors than the daemon has had at
+  one time since its start (once per session, typically). `wayland_follow = off` in
+  `gpu.conf` (or `WALPE_WAYLAND_FOLLOW=off`) is the old behaviour. X11 is unchanged: a
+  build without the Wayland backend has none of this code. Run headless on sway 1.9 and
+  1.12, labwc 0.20.2, Wayfire 0.11.0, river 0.3.17 and KWin 6.8.2, software renderer
+  ([WAYLAND.md](docs/WAYLAND.md)).
 - A still wallpaper (a picture, a scene in which nothing moves, anything paused) on an
   output whose scale or resolution changes: until the daemon had restarted for the new
   layout - two to ten seconds - it was shown at its old size: its top left quarter

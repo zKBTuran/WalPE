@@ -164,7 +164,6 @@ typedef struct WlSurf {
     struct wl_region *empty_region;
     guint32 out_id;
     char *out_name;
-    int out_x, out_y, out_w, out_h;             /* the output's rectangle, pixels */
     char *title;
 
     GMutex rq_lock;             /* held by the thread that dispatches rq */
@@ -191,6 +190,8 @@ typedef struct WlSurf {
     guint todo;                 /* WL_LS_ACT_* the main thread has to follow up */
 
     /* ---- main thread only */
+    int out_x, out_y, out_w, out_h;             /* the output's rectangle, pixels (it
+                                                 * follows the output: walpe_wayland_surface_follow_output) */
     gboolean hidden_reported;
     gboolean hidden_known;
     guint lost_timer;
@@ -297,6 +298,7 @@ static struct {
     gboolean lost_reported;
     gboolean prov_started;
     int recreate_max;
+    guint test_close_id;        /* WALPE_WL_CLOSE_AFTER_MS (tests): its timer */
 
     gint dead;                  /* atomic: the connection is gone */
     gint no_feedback;           /* atomic: wp_presentation was withdrawn */
@@ -2198,6 +2200,83 @@ static gboolean wl_surface_set_buffer_size (WalpeSurface *ws, int w, int h)
     return TRUE;
 }
 
+/* Main thread: the surface's output has this rectangle, scale and refresh
+ * rate now (the daemon follows a change of the output in place). What only
+ * the main thread reads is taken at once - the rectangle a pointer
+ * position is given in; the size in pixels is recorded for the render
+ * thread (walpe_wayland_surface_fit). The surface's logical size needs nothing: the
+ * compositor configured it when the output changed. */
+gboolean walpe_wayland_surface_follow_output (WalpeSurface *ws, const WalpeOutput *o, int *w, int *h)
+{
+    WlSurf *s = (WlSurf *) ws;
+    WlOut *src = wl_out_by_id (o->id);
+    if (s->kind != WALPE_SURFACE_WALLPAPER || s->out_id != o->id || !src || wl_is_dead ())
+        return FALSE;
+    g_mutex_lock (&s->lock);
+    gboolean alive = s->wl_out == src->wo && s->ls.state != WL_LS_DEAD && s->ls.state != WL_LS_NONE;
+    if (alive) {
+        s->size_in.out_w = o->width;
+        s->size_in.out_h = o->height;
+        s->size_in.int_scale = wl_surface_has_scale (s->surface) ? wl_out_int_scale (&src->cur) : 1;
+        if (o->refresh_hz > 0.0)
+            s->refresh_hz = o->refresh_hz;
+        /* the size the buffers will have (walpe_wayland_surface_fit) */
+        WlSizeIn in = s->size_in;
+        WlSizeOut n;
+        in.user_w = in.user_h = 0;
+        wl_surface_sizes (&in, &n);
+        if (w)
+            *w = n.buf_w;
+        if (h)
+            *h = n.buf_h;
+    }
+    g_mutex_unlock (&s->lock);
+    if (!alive)
+        return FALSE;
+    s->out_x = o->x;
+    s->out_y = o->y;
+    s->out_w = o->width;
+    s->out_h = o->height;
+    /* a pointer that rests on it is at another place of the daemon's space now */
+    for (GList *l = W.seats; l; l = l->next) {
+        WlSeat *seat = l->data;
+        if (seat->over == s && W.ptr.seat == seat)
+            wl_ptr_show_seat (seat);
+    }
+    return TRUE;
+}
+
+/* Render thread, between two frames: the buffers get the size the output
+ * has now (walpe_wayland_surface_follow_output recorded it). The EGL library
+ * allocates the new size for the next frame; how the buffer is shown on
+ * the surface's logical size goes out with that frame's commit. */
+gboolean walpe_wayland_surface_fit (WalpeSurface *ws, int *w, int *h)
+{
+    WlSurf *s = (WlSurf *) ws;
+    gboolean changed = FALSE;
+    g_mutex_lock (&s->lock);
+    if (s->egl_window && s->kind == WALPE_SURFACE_WALLPAPER) {
+        WlSizeOut n;
+        /* (a buffer size set from outside was for the output's old size) */
+        s->size_in.user_w = s->size_in.user_h = 0;
+        wl_surface_sizes (&s->size_in, &n);
+        if (n.buf_w != s->size.buf_w || n.buf_h != s->size.buf_h ||
+            n.buffer_scale != s->size.buffer_scale) {
+            changed = n.buf_w != s->size.buf_w || n.buf_h != s->size.buf_h;
+            if (changed)
+                wl_egl_window_resize (s->egl_window, n.buf_w, n.buf_h, 0, 0);
+            s->size = n;
+            s->size_dirty = TRUE;
+        }
+    }
+    if (w)
+        *w = s->size.buf_w;
+    if (h)
+        *h = s->size.buf_h;
+    g_mutex_unlock (&s->lock);
+    return changed;
+}
+
 static guint32 wl_surface_output (WalpeSurface *ws)
 {
     return ((WlSurf *) ws)->out_id;
@@ -3152,6 +3231,8 @@ static void wl_close (void)
     if (!W.is_open)
         return;
     W.is_open = FALSE;
+    if (W.test_close_id)
+        g_source_remove (W.test_close_id);
     while (W.surfaces)
         wl_surf_destroy (W.surfaces->data);
     if (W.src) {
@@ -3267,11 +3348,43 @@ static char *wl_describe (void)
     return g_string_free (s, FALSE);
 }
 
+/* WALPE_WL_CLOSE_AFTER_MS=n (tests): n milliseconds after the start the
+ * first wallpaper surface is treated as if the compositor had sent
+ * zwlr_layer_surface_v1.closed for it while its output stays - an event no
+ * compositor at hand sends on request. What follows is what follows the
+ * real event: the role is given back in place, or (WALPE_WL_RECREATE=0, or
+ * after three times in ten seconds) the surface is reported closed. */
+static gboolean wl_test_close (gpointer data)
+{
+    for (GList *l = W.surfaces; l; l = l->next) {
+        WlSurf *s = l->data;
+        if (s->kind != WALPE_SURFACE_WALLPAPER)
+            continue;
+        g_mutex_lock (&s->lock);
+        struct zwlr_layer_surface_v1 *ls = s->layer;
+        g_mutex_unlock (&s->lock);
+        if (ls) {
+            g_message ("wayland: WALPE_WL_CLOSE_AFTER_MS: %s: as if the compositor had closed the "
+                       "wallpaper surface", s->out_name ? s->out_name : "?");
+            wl_layer_closed (s, ls);
+            break;
+        }
+    }
+    W.test_close_id = 0;
+    return G_SOURCE_REMOVE;
+}
+
 static void wl_start (gboolean layout_events, const WalpeSignalSink *sink, gpointer sink_user)
 {
     if (!W.is_open)
         return;
     W.layout_events = layout_events;
+    {
+        const char *e = W.started || W.opts.probe ? NULL : g_getenv ("WALPE_WL_CLOSE_AFTER_MS");
+        if (e && *e)
+            W.test_close_id = g_timeout_add ((guint) CLAMP (g_ascii_strtoll (e, NULL, 10), 1, 3600000),
+                                             wl_test_close, NULL);
+    }
     if (!W.src) {
         W.src = g_source_new (&wl_src_funcs, sizeof (GSource));
         g_source_set_name (W.src, "walpe-wayland");

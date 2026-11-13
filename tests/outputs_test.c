@@ -248,12 +248,120 @@ static void test_hotplug (void)
     walpe_output_list_free (&running);
 }
 
+/* what became of each output between two lists (walpe_follow_plan): the
+ * daemon keeps a monitor's surface while its output is the same one */
+static void test_follow_plan (void)
+{
+    WalpeOutputList run, seen;
+    WalpeFollowPlan p;
+    make (&run, two, 2);
+
+    /* nothing changed */
+    make (&seen, two, 2);
+    walpe_follow_plan (&run, &seen, &p);
+    CHECK (p.n_running == 2 && p.n_seen == 2 && p.kept == 2 && !p.placed && !p.resized && !p.gone && !p.added);
+    CHECK (p.running[0] == WALPE_FOLLOW_KEEP && p.running_to[1] == 1 && p.seen_from[1] == 1);
+    walpe_follow_plan_clear (&p);
+
+    /* the second output moves below the first, gets another scale, another
+     * refresh rate, is turned upside down: the same pixels */
+    seen.o[1].x = 0;
+    seen.o[1].y = 1080;
+    walpe_follow_plan (&run, &seen, &p);
+    CHECK (p.kept == 1 && p.placed == 1 && p.running[1] == WALPE_FOLLOW_PLACE && p.seen[1] == WALPE_FOLLOW_PLACE);
+    walpe_follow_plan_clear (&p);
+    seen.o[1].x = 1920;
+    seen.o[1].y = 0;
+    seen.o[1].scale = 1.5;
+    walpe_follow_plan (&run, &seen, &p);
+    CHECK (p.placed == 1 && p.running[1] == WALPE_FOLLOW_PLACE);
+    walpe_follow_plan_clear (&p);
+    seen.o[1].scale = 1.0;
+    seen.o[1].refresh_hz = 59.94;               /* the same mode, read slightly differently */
+    walpe_follow_plan (&run, &seen, &p);
+    CHECK (p.kept == 2);
+    walpe_follow_plan_clear (&p);
+    seen.o[1].refresh_hz = 75.0;
+    walpe_follow_plan (&run, &seen, &p);
+    CHECK (p.placed == 1);
+    walpe_follow_plan_clear (&p);
+    seen.o[1].refresh_hz = 60.0;
+    seen.o[1].transform = WALPE_TRANSFORM_180;
+    walpe_follow_plan (&run, &seen, &p);
+    CHECK (p.placed == 1 && !p.resized);
+    walpe_follow_plan_clear (&p);
+    seen.o[1].transform = 0;
+
+    /* another mode: another size in pixels (also when it moved besides) */
+    seen.o[1].width = 2560;
+    seen.o[1].height = 1440;
+    seen.o[1].x = 0;
+    walpe_follow_plan (&run, &seen, &p);
+    CHECK (p.kept == 1 && p.resized == 1 && !p.placed && p.running[1] == WALPE_FOLLOW_RESIZE &&
+           p.seen[1] == WALPE_FOLLOW_RESIZE && p.running_to[1] == 1);
+    walpe_follow_plan_clear (&p);
+    walpe_output_list_free (&seen);
+
+    /* the lists are in the order of the layout: the outputs swap places */
+    static const Spec swapped[] = { { "HDMI-A-1", 0, 0, 1920, 1080, 60.0, 1.0, 0 },
+                                    { "DP-1", 1920, 0, 1920, 1080, 144.0, 1.0, 0 } };
+    make (&seen, swapped, 2);
+    seen.o[0].id = 2;
+    seen.o[1].id = 1;
+    walpe_follow_plan (&run, &seen, &p);
+    CHECK (p.placed == 2 && p.running_to[0] == 1 && p.running_to[1] == 0 && p.seen_from[0] == 1);
+    walpe_follow_plan_clear (&p);
+    walpe_output_list_free (&seen);
+
+    /* the second output is pulled */
+    make (&seen, one, 1);
+    walpe_follow_plan (&run, &seen, &p);
+    CHECK (p.kept == 1 && p.gone == 1 && !p.added && p.running[1] == WALPE_FOLLOW_GONE && p.running_to[1] == -1);
+    walpe_follow_plan_clear (&p);
+    /* ... and every output */
+    seen.n = 0;
+    walpe_follow_plan (&run, &seen, &p);
+    CHECK (p.gone == 2 && p.n_seen == 0);
+    walpe_follow_plan_clear (&p);
+    seen.n = 1;
+    walpe_output_list_free (&seen);
+
+    /* a third one is plugged in */
+    static const Spec three[] = { { "DP-1", 0, 0, 1920, 1080, 144.0, 1.0, 0 },
+                                  { "HDMI-A-1", 1920, 0, 1920, 1080, 60.0, 1.0, 0 },
+                                  { "DP-2", 3840, 0, 1280, 720, 60.0, 1.0, 0 } };
+    make (&seen, three, 3);
+    walpe_follow_plan (&run, &seen, &p);
+    CHECK (p.kept == 2 && p.added == 1 && p.seen[2] == WALPE_FOLLOW_NEW && p.seen_from[2] == -1);
+    walpe_follow_plan_clear (&p);
+
+    /* an output that was switched off and on again is another output with
+     * the old name (the window system gave it a new id): one gone, one new,
+     * not "the same one" - its surface went with the old one */
+    walpe_output_list_free (&seen);
+    make (&seen, two, 2);
+    seen.o[1].id = 9;
+    walpe_follow_plan (&run, &seen, &p);
+    CHECK (p.kept == 1 && p.gone == 1 && p.added == 1 && p.running[1] == WALPE_FOLLOW_GONE &&
+           p.seen[1] == WALPE_FOLLOW_NEW);
+    walpe_follow_plan_clear (&p);
+    /* ... and an id that is used again for an output of another name too */
+    seen.o[1].id = 2;
+    walpe_output_set_names (&seen.o[1], "HDMI-A-2", NULL, NULL, NULL, NULL);
+    walpe_follow_plan (&run, &seen, &p);
+    CHECK (p.gone == 1 && p.added == 1);
+    walpe_follow_plan_clear (&p);
+    walpe_output_list_free (&seen);
+    walpe_output_list_free (&run);
+}
+
 int main (void)
 {
     test_equal_copy ();
     test_find ();
     test_texts ();
     test_hotplug ();
+    test_follow_plan ();
     if (fails)
         g_printerr ("outputs-test: %d check(s) failed\n", fails);
     else

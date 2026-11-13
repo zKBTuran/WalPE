@@ -1925,7 +1925,8 @@ endif
 # place of Xvfb (scripts/displayenv.py: sway on wlroots' headless backend,
 # software rendering, screenshots with grim), and scripts/waylandcheck.py
 # for what only real outputs can do: a mode / scale / transform that changes
-# under the running daemon, outputs that appear and go, a pointer device,
+# under the running daemon, outputs that appear and go (all followed in
+# place, without a restart, the other outputs' wallpapers going on), a pointer device,
 # the choice between the two backends. Each is skipped (77) without sway +
 # grim and in a build without the Wayland backend; the X ones above are
 # skipped in a build without the X11 backend. WALPE_CHECK_STRICT=1 in the
@@ -1956,8 +1957,7 @@ if lifecheck_py.found()
     depends: lifecheck_deps,
     is_parallel: false,
     timeout: 900)
-  # (a dozen cases, and every change of an output is a restart in place of
-  # the daemon, which it spaces ten seconds apart: the longest test here)
+  # (a dozen cases with a daemon each; the longest test here)
   test('daemon-wayland', lifecheck_py,
     args: ['-I', meson.current_source_dir() / 'scripts/waylandcheck.py',
            '--build', meson.current_build_dir()],

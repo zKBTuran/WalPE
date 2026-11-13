@@ -16,12 +16,17 @@
  * walpe_surface_set_interval) are called on the render thread that owns
  * the surface's EGL context.
  *
- * Layout changes: surfaces are made for the outputs found at start-up and
- * are never resized. When outputs come, go or change, the backend says so
- * (outputs_changed); the daemon reads the list again and, when it really
- * differs, restarts itself in place - the same on both backends. */
+ * Layout changes: surfaces are made for the outputs found at start-up.
+ * When outputs come, go or change, the backend says so (outputs_changed);
+ * the daemon reads the list again and, when it really differs, restarts
+ * itself in place. A backend whose surfaces can stay while their output
+ * changes (walpe_platform_follows_outputs: Wayland) lets the daemon follow
+ * the change without that restart ("following an output in place" below);
+ * X11 has none of it. */
 #pragma once
 #include <glib.h>
+#include <math.h>
+#include <string.h>
 #include <json-glib/json-glib.h>
 #include <epoxy/egl.h>
 #include "common/backend.h"
@@ -118,6 +123,89 @@ static inline WalpeLayoutVerdict walpe_layout_verdict (const WalpeOutputList *ru
     if (!held || too_soon || busy)
         return WALPE_LAYOUT_WAIT;
     return WALPE_LAYOUT_RESTART;
+}
+
+/* What became of each output between two lists, for a daemon that follows
+ * a change in place instead of restarting: the monitors it runs with
+ * (`running`) against the outputs now (`seen`). Two entries are the same
+ * output when id and name are equal - the id is the window system's own
+ * handle for it and lasts as long as the output does; an output that was
+ * disabled and enabled again is a new one that may carry the old name.
+ * A pure function (tests/outputs_test.c). */
+typedef enum {
+    WALPE_FOLLOW_KEEP,      /* nothing of it changed */
+    WALPE_FOLLOW_PLACE,     /* the same pixels: its position, scale, refresh rate or
+                             * transform differ */
+    WALPE_FOLLOW_RESIZE,    /* its size in pixels differs */
+    WALPE_FOLLOW_GONE,      /* (an entry of `running`) the output is not there any more */
+    WALPE_FOLLOW_NEW,       /* (an entry of `seen`) no running monitor is on it */
+} WalpeFollowKind;
+
+typedef struct {
+    int n_running, n_seen;
+    WalpeFollowKind *running;   /* per entry of `running`: KEEP, PLACE, RESIZE or GONE */
+    int *running_to;            /* ... and its index in `seen`, -1 when GONE */
+    WalpeFollowKind *seen;      /* per entry of `seen`: as its running entry, or NEW */
+    int *seen_from;             /* ... and its index in `running`, -1 when NEW */
+    int kept, placed, resized, gone, added;     /* how many of each */
+} WalpeFollowPlan;
+
+static inline void walpe_follow_plan (const WalpeOutputList *running, const WalpeOutputList *seen,
+                                      WalpeFollowPlan *plan)
+{
+    memset (plan, 0, sizeof (*plan));
+    plan->n_running = running->n;
+    plan->n_seen = seen->n;
+    plan->running = g_new0 (WalpeFollowKind, running->n + 1);
+    plan->running_to = g_new0 (int, running->n + 1);
+    plan->seen = g_new0 (WalpeFollowKind, seen->n + 1);
+    plan->seen_from = g_new0 (int, seen->n + 1);
+    for (int j = 0; j < seen->n; j++) {
+        plan->seen[j] = WALPE_FOLLOW_NEW;
+        plan->seen_from[j] = -1;
+    }
+    for (int i = 0; i < running->n; i++) {
+        const WalpeOutput *x = &running->o[i];
+        int at = -1;
+        /* (a list never has an id twice; should one, the first entry
+         * nobody has taken yet is the one) */
+        for (int j = 0; j < seen->n && at < 0; j++)
+            if (plan->seen_from[j] < 0 && seen->o[j].id == x->id &&
+                !g_strcmp0 (seen->o[j].name, x->name))
+                at = j;
+        plan->running_to[i] = at;
+        if (at < 0) {
+            plan->running[i] = WALPE_FOLLOW_GONE;
+            plan->gone++;
+            continue;
+        }
+        const WalpeOutput *y = &seen->o[at];
+        WalpeFollowKind k = WALPE_FOLLOW_KEEP;
+        if (x->width != y->width || x->height != y->height)
+            k = WALPE_FOLLOW_RESIZE;
+        else if (x->x != y->x || x->y != y->y || fabs (x->refresh_hz - y->refresh_hz) > 0.5 ||
+                 fabs (x->scale - y->scale) > 0.001 || x->transform != y->transform)
+            k = WALPE_FOLLOW_PLACE;
+        plan->running[i] = plan->seen[at] = k;
+        plan->seen_from[at] = i;
+        if (k == WALPE_FOLLOW_RESIZE)
+            plan->resized++;
+        else if (k == WALPE_FOLLOW_PLACE)
+            plan->placed++;
+        else
+            plan->kept++;
+    }
+    for (int j = 0; j < seen->n; j++)
+        plan->added += plan->seen_from[j] < 0;
+}
+
+static inline void walpe_follow_plan_clear (WalpeFollowPlan *plan)
+{
+    g_free (plan->running);
+    g_free (plan->running_to);
+    g_free (plan->seen);
+    g_free (plan->seen_from);
+    memset (plan, 0, sizeof (*plan));
 }
 
 /* ----------------------------------------------------------------- events */
@@ -310,6 +398,30 @@ unsigned long walpe_surface_native_id (WalpeSurface *s);
  * not. Wayland: the surface takes pointer input only while it does; X11:
  * nothing (the pointer is read from the root window). */
 void walpe_surface_want_pointer (WalpeSurface *s, gboolean want);
+
+/* ---- following an output in place
+ * TRUE: a WALLPAPER surface of this backend lasts as long as its output
+ * does and can be given the output's new rectangle
+ * (walpe_surface_follow_output), so the daemon need not restart when an
+ * output moves, changes its scale, refresh rate or mode, goes or comes.
+ * FALSE (X11, no backend): every change of the outputs is followed by a
+ * restart in place. These three exist only in a build that holds the
+ * Wayland backend (HAVE_WAYLAND), like the daemon's code that calls them. */
+gboolean walpe_platform_follows_outputs (void);
+/* Main thread: `o` is what the surface's output is now (the same output:
+ * the id the surface was made for). The backend takes the rectangle (the
+ * pointer positions it reports lie in it), the scale and the refresh rate.
+ * A new size in pixels is not applied here: the surface's render thread
+ * does that with walpe_surface_fit; *w, *h (may be NULL): the surface size
+ * it will then have. FALSE = the surface cannot go on (the window system
+ * closed it, its output is gone, o is another output): nothing was
+ * changed, *w and *h are left alone. */
+gboolean walpe_surface_follow_output (WalpeSurface *s, const WalpeOutput *o, int *w, int *h);
+/* Render thread, between two frames: give the surface's buffers the size
+ * the output has since the last walpe_surface_follow_output. *w, *h: the
+ * surface size from now on. FALSE = nothing to do or not possible; *w, *h
+ * are the size it has. */
+gboolean walpe_surface_fit (WalpeSurface *s, int *w, int *h);
 
 /* ---- presentation, render thread
  * The daemon's "swap interval" (present.h): 1 = after a swap the thread

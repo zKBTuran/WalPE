@@ -180,7 +180,7 @@ static void test_hints (void)
 
     /* every documented key is either a driver hint or a daemon setting */
     static const char *const own[] = { "present", "idle_release", "egl_display", "swap_damage",
-                                       "frame_align", "wayland_reconnect" };
+                                       "frame_align", "wayland_reconnect", "wayland_follow" };
     int nhint = 0, nown = 0;
     for (const char *const *k = walpe_gpuconf_keys (); *k; k++) {
         gboolean is_own = FALSE;
@@ -193,7 +193,7 @@ static void test_hints (void)
         nown += is_own;
         nhint += is_hint;
     }
-    CHECK (nown == 6 && nhint == 6);
+    CHECK (nown == 7 && nhint == 6);
 }
 
 static void test_shader_cache (void)

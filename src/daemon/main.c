@@ -92,6 +92,20 @@ static guint mouse_poll_ms (void);
 
 typedef struct { int x, y, width, height; } WalpeRect;
 
+/* Following a change of the outputs in place (layout_follow, further down)
+ * needs a window system whose surfaces last while their output changes:
+ * Wayland (platform.h). A build without that backend holds none of the
+ * code for it: no field of Mon, nothing on a render thread's path. */
+#ifdef HAVE_WAYLAND
+#define WALPE_FOLLOW 1
+/* render thread: the size of its surface, which is what it draws at */
+#define MON_W(m) ((m)->rt_w)
+#define MON_H(m) ((m)->rt_h)
+#else
+#define MON_W(m) ((m)->geom.width)
+#define MON_H(m) ((m)->geom.height)
+#endif
+
 typedef struct Mon {
     int index;
     WalpeSurface *ps;        /* the platform's surface: the native window `surf` is
@@ -110,7 +124,9 @@ typedef struct Mon {
     GMutex lock;
     GCond cond;
     GThread *thread;
-    WalpeRect geom;          /* monitor geometry (read-only after init) */
+    WalpeRect geom;          /* monitor geometry (read-only after init; where an output
+                              * is followed in place, layout_follow: the main thread's,
+                              * and the render thread reads MON_W / MON_H) */
     float mx, my;            /* parallax mouse, written by main, read by thread */
     guint render_count;      /* rendered frames (diagnostics) */
     /* swaps that fail (mon_swap_failed): render thread, except swap_lost */
@@ -323,6 +339,19 @@ typedef struct Mon {
     GCond mem_cond;          /* mem_done changed */
     /* render thread: what happened to this monitor since the daemon started */
     guint n_loads, n_pauses, n_resumes, n_paused_frames, n_idle_releases, n_roles;
+#ifdef WALPE_FOLLOW
+    /* an output followed in place (layout_follow) */
+    int rt_w, rt_h;          /* render thread: the size of its surface (MON_W, MON_H):
+                              * geom.width / .height as it last took them */
+    gboolean fit_req;        /* main -> thread (lock), with res_changed: its output has
+                              * another size or scale: the surface is fitted to it
+                              * and rt_w / rt_h are taken anew */
+    gboolean parked;         /* lock: it has no output: its thread holds no wallpaper,
+                              * its context is current on nothing, and it waits */
+    gboolean park_told;      /* main: ... and has said so (mon_parked_cb) */
+    guint life;              /* main: the outputs it has had; a load's note carries it,
+                              * and one of an earlier output is not acted on */
+#endif
 } Mon;
 
 typedef struct { int kind; float x, y; } PtrMsg;
@@ -832,7 +861,7 @@ static EGLBoolean mon_swap (Mon *m)
     }
     walpe_surface_pre_swap (m->ps);
     if (P.swap_damage && P.has_damage) {
-        EGLint r[4] = { 0, 0, m->geom.width, m->geom.height };
+        EGLint r[4] = { 0, 0, MON_W (m), MON_H (m) };
         return P.damage_khr ? eglSwapBuffersWithDamageKHR (D.egl_dpy, m->surf, r, 1)
                             : eglSwapBuffersWithDamageEXT (D.egl_dpy, m->surf, r, 1);
     }
@@ -1153,7 +1182,7 @@ static gboolean sf_present (Mon *m, guint64 need)
     /* GPUPROF: the follower's frame = this blit + its swap */
     gboolean prof = WALPE_PROF_ON ();
     if (prof) {
-        walpe_prof_frame_begin (m->index, m->geom.width, m->geom.height);
+        walpe_prof_frame_begin (m->index, MON_W (m), MON_H (m));
         walpe_prof_stage (WALPE_PROF_ST_PRESENT);
     }
     if (m->sf_fbo_tex[s] != tex) {
@@ -1165,13 +1194,13 @@ static gboolean sf_present (Mon *m, guint64 need)
     }
     glBindFramebuffer (GL_READ_FRAMEBUFFER, m->sf_fbo[s]);
     glBindFramebuffer (GL_DRAW_FRAMEBUFFER, 0);
-    glViewport (0, 0, m->geom.width, m->geom.height);
+    glViewport (0, 0, MON_W (m), MON_H (m));
     {
         /* this monitor's own visible boxes ("Skip hidden areas"; -1 = no clip) */
         WalpeBox cb[WALPE_CLIP_MAX];
-        int cn = w == m->geom.width && h == m->geom.height ? walpe_clip_boxes (cb) : -1;
+        int cn = w == MON_W (m) && h == MON_H (m) ? walpe_clip_boxes (cb) : -1;
         if (cn < 0)
-            glBlitFramebuffer (0, 0, w, h, 0, 0, m->geom.width, m->geom.height,
+            glBlitFramebuffer (0, 0, w, h, 0, 0, MON_W (m), MON_H (m),
                                GL_COLOR_BUFFER_BIT, GL_NEAREST);
         for (int i = 0; i < cn; i++)
             glBlitFramebuffer (cb[i].x0, cb[i].y0, cb[i].x1, cb[i].y1, cb[i].x0, cb[i].y0,
@@ -1206,8 +1235,8 @@ static gboolean sf_present (Mon *m, guint64 need)
     if (prof)
         walpe_prof_frame_end (TRUE);             /* GPUPROF */
     g_atomic_int_inc (&m->render_count);
-    g_atomic_int_set (&m->last_w, m->geom.width);
-    g_atomic_int_set (&m->last_h, m->geom.height);
+    g_atomic_int_set (&m->last_w, MON_W (m));
+    g_atomic_int_set (&m->last_h, MON_H (m));
     return TRUE;
 }
 
@@ -1340,7 +1369,15 @@ static int mon_content_fps (Mon *m, WalpeType type, int cap)
  * the log only: status now shows it per monitor ("load_error"). kept: it
  * failed and the windows were left as they were (load_keep). What follows
  * from it is decided on the main thread: load_ended (). */
-typedef struct { Mon *m; char *path; char *msg; gboolean kept; guint tag; } LoadNote;
+typedef struct {
+    Mon *m;
+    char *path, *msg;
+    gboolean kept;
+    guint tag;
+#ifdef WALPE_FOLLOW
+    guint life;     /* Mon.life when the load was made */
+#endif
+} LoadNote;
 
 static void load_ended (Mon *m, const char *path, const char *msg, gboolean kept);
 static gboolean diag_say (gpointer first_gl);   /* diag.h: the summary in the log, once */
@@ -1350,6 +1387,11 @@ static gboolean load_note_cb (gpointer user)
     LoadNote *n = user;
     if (n->tag && n->tag == n->m->load_wait)
         n->m->loading = FALSE;   /* (an older load's note leaves the newer one pending) */
+#ifdef WALPE_FOLLOW
+    /* (a load made for an output the monitor no longer has says nothing
+     * about the one it has now: layout_follow) */
+    if (n->life == n->m->life)
+#endif
     load_ended (n->m, n->path, n->msg, n->kept);
     g_free (n->path);
     g_free (n->msg);
@@ -1380,6 +1422,9 @@ static void mon_load_note (Mon *m, const char *path, char *msg, gboolean kept, g
     n->msg = msg;
     n->kept = kept;
     n->tag = tag;
+#ifdef WALPE_FOLLOW
+    n->life = m->life;      /* (written by the main thread only while this thread is parked) */
+#endif
     g_idle_add (load_note_cb, n);
 }
 
@@ -1391,7 +1436,7 @@ static void mon_load_note (Mon *m, const char *path, char *msg, gboolean kept, g
  * (blank_req) should there be none after all. */
 static void mon_load_failed_frame (Mon *m, gboolean keep)
 {
-    int w = MAX (1, m->geom.width), h = MAX (1, m->geom.height);
+    int w = MAX (1, MON_W (m)), h = MAX (1, MON_H (m));
     mon_free_content (m);
     g_atomic_int_set (&m->content_type, WALPE_TYPE_NONE);   /* a follower had no content */
     /* nor does anything want the pointer: a scene freed early to make room
@@ -1493,7 +1538,7 @@ static void mon_do_load_ex (Mon *m, const char *path, gboolean paused, int fps,
         glBindFramebuffer (GL_FRAMEBUFFER, 0);
         glDisable (GL_SCISSOR_TEST);
         glColorMask (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        glViewport (0, 0, MAX (1, m->geom.width), MAX (1, m->geom.height));
+        glViewport (0, 0, MAX (1, MON_W (m)), MAX (1, MON_H (m)));
         glClearColor (0.0f, 0.0f, 0.0f, 1.0f);
         glClear (GL_COLOR_BUFFER_BIT);
         walpe_surface_pre_swap (m->ps);
@@ -1599,7 +1644,7 @@ static void mon_do_load_ex (Mon *m, const char *path, gboolean paused, int fps,
      * frame of another size is scaled and the texture cap: before gl_init,
      * and again before every frame (mon_do_render_frame) */
     const gboolean own_size = m->rt_res_w > 0 && m->rt_res_h > 0 &&
-                              (m->rt_res_w != m->geom.width || m->rt_res_h != m->geom.height);
+                              (m->rt_res_w != MON_W (m) || m->rt_res_h != MON_H (m));
     c->render_w = own_size ? m->rt_res_w : 0;
     c->render_h = own_size ? m->rt_res_h : 0;
     c->scale_filter = g_atomic_int_get (&D.cfg->scale_filter);
@@ -1688,8 +1733,8 @@ static void mon_do_render_frame (Mon *m, gboolean paused, gboolean force, gboole
      * begun when the daemon is ending */
     if (G_UNLIKELY (force) && walpe_load_stopping ())
         return;
-    int w = m->geom.width;
-    int h = m->geom.height;
+    int w = MON_W (m);
+    int h = MON_H (m);
     if (w < 1 || h < 1)
         return;
     glViewport (0, 0, w, h);
@@ -1828,7 +1873,7 @@ static void mon_do_render (Mon *m, gboolean paused, gboolean force, gboolean sel
     gboolean prof = WALPE_PROF_ON () && m->content && !(paused && !force);
     guint presented = (guint) g_atomic_int_get (&m->render_count);
     if (prof)
-        walpe_prof_frame_begin (m->index, m->geom.width, m->geom.height);
+        walpe_prof_frame_begin (m->index, MON_W (m), MON_H (m));
     mon_do_render_frame (m, paused, force, self_paused, ptr_x, ptr_y, clip_gen);
     if (prof)
         walpe_prof_frame_end ((guint) g_atomic_int_get (&m->render_count) != presented);
@@ -1846,8 +1891,8 @@ static void mon_prof_sync (Mon *m)
     WalpeProfThreadInfo info = {
         .monitor = m->index,
         .name = m->name,
-        .w = m->geom.width,
-        .h = m->geom.height,
+        .w = MON_W (m),
+        .h = MON_H (m),
         .type = walpe_type_name (g_atomic_int_get (&m->content_type)),
         .path = m->content_path,
         .role = role,
@@ -1855,10 +1900,10 @@ static void mon_prof_sync (Mon *m)
         /* the size its wallpaper is rendered at (the output's own unless
          * another was chosen); a scene of its own keeps one more picture
          * of that size, the target it is scaled from */
-        .render_w = m->rt_res_w > 0 ? m->rt_res_w : m->geom.width,
-        .render_h = m->rt_res_h > 0 ? m->rt_res_h : m->geom.height,
+        .render_w = m->rt_res_w > 0 ? m->rt_res_w : MON_W (m),
+        .render_h = m->rt_res_h > 0 ? m->rt_res_h : MON_H (m),
         .render_target = m->content && m->content->type == WALPE_TYPE_SCENE && m->rt_res_w > 0 &&
-                         (m->rt_res_w != m->geom.width || m->rt_res_h != m->geom.height),
+                         (m->rt_res_w != MON_W (m) || m->rt_res_h != MON_H (m)),
     };
     fx_targets_stats (&info.fx_bytes, &info.fx_count);
     fx_pass_stats (&info.fx_run, &info.fx_cached, FALSE);
@@ -2100,8 +2145,8 @@ static char *mon_mem_report (Mon *m, gboolean deep)
     json_builder_set_member_name (b, "paused");
     json_builder_add_boolean_value (b, m->pause_applied);
     walpe_mem_jstr (b, "role", m->follow_sf ? "follows" : m->lead_sf ? "leads" : "own");
-    walpe_mem_jint (b, "width", m->geom.width);
-    walpe_mem_jint (b, "height", m->geom.height);
+    walpe_mem_jint (b, "width", MON_W (m));
+    walpe_mem_jint (b, "height", MON_H (m));
     walpe_mem_jint (b, "frames", (guint) g_atomic_int_get (&m->render_count));
     walpe_mem_jint (b, "wakeups", (guint) g_atomic_int_get (&m->wakeups));
     walpe_mem_jint (b, "loads", m->n_loads);
@@ -2150,21 +2195,10 @@ static char *mon_mem_report (Mon *m, gboolean deep)
     return out;
 }
 
-static gpointer mon_thread (gpointer data)
+/* render thread, its context current for the first time: what the thread
+ * and the daemon take from it once */
+static void mon_thread_begin (Mon *m)
 {
-    Mon *m = data;
-    g_mutex_lock (&ctx_lock);
-    m->ctx = create_thread_context ();
-    ctx_created++;
-    g_cond_broadcast (&ctx_cond);
-    while (ctx_created < ctx_expected)
-        g_cond_wait (&ctx_cond, &ctx_lock);
-    g_mutex_unlock (&ctx_lock);
-    if (m->ctx == EGL_NO_CONTEXT ||
-        !eglMakeCurrent (D.egl_dpy, m->surf, m->surf, m->ctx)) {
-        g_warning ("monitor %d: EGL context unusable; thread exits", m->index);
-        return NULL;
-    }
     mon_present_apply (m);   /* the swap interval of this monitor's window */
     {
         /* one monitor thread at a time: what glutil builds once for all of
@@ -2178,8 +2212,85 @@ static gpointer mon_thread (gpointer data)
     sw_note_gl ();        /* GL_VENDOR / GL_RENDERER: logged once, in `status` */
     res_note_gl ();       /* the largest render size this GL can be asked for */
     g_atomic_int_set (&D.egl_is_es, epoxy_is_desktop_gl () ? 0 : 1);
+}
+
+#ifdef WALPE_FOLLOW
+/* A monitor without an output (layout_follow): its render thread holds no
+ * wallpaper and no role, its context is current on nothing, and it waits
+ * here - m->lock held, m->parked set - until the main thread has given
+ * the monitor an output again (a new surface, every field of Mon set
+ * anew, m->parked cleared) or the daemon ends. Then: its context on the
+ * new surface. The main thread is told that the wait has begun
+ * (mon_parked_cb): from then on it may free the old surface.
+ * *begun: this thread has had its context current before. Returns with
+ * m->lock held; the caller looks at m->quitting. */
+static gboolean mon_parked_cb (gpointer user);
+
+static void mon_park_wait (Mon *m, gboolean *begun)
+{
+    g_idle_add (mon_parked_cb, m);
+    while (m->parked && !m->quitting)
+        g_cond_wait (&m->cond, &m->lock);
+    if (m->quitting)
+        return;
+    g_mutex_unlock (&m->lock);
+    gboolean ok = eglMakeCurrent (D.egl_dpy, m->surf, m->surf, m->ctx);
+    const EGLint err = ok ? EGL_SUCCESS : eglGetError ();
+    if (ok && *begun) {
+        mon_present_apply (m);
+    } else if (ok) {
+        mon_thread_begin (m);
+        *begun = TRUE;
+    }
+    g_mutex_lock (&m->lock);
+    if (ok)
+        return;
+    /* nothing can be drawn: said like swaps that fail for good (status
+     * "swap_error"; the main thread restarts in place to make contexts and
+     * surfaces anew, at most once a minute), and this thread waits for
+     * the end */
+    g_warning ("monitor %d (%s): its GL context could not be put on the new surface (0x%x)",
+               m->index, m->name, (guint) err);
+    g_atomic_int_set (&m->swap_lost, (gint) (err == EGL_CONTEXT_LOST ? err : EGL_BAD_SURFACE));
+    g_idle_add (swap_lost_cb, m);
+    while (!m->quitting)
+        g_cond_wait (&m->cond, &m->lock);
+}
+
+/* Mon.role_idx: no role and no output any more (mon_park) */
+#define MON_ROLE_PARK (-2)
+#endif
+
+static gpointer mon_thread (gpointer data)
+{
+    Mon *m = data;
+    g_mutex_lock (&ctx_lock);
+    m->ctx = create_thread_context ();
+    ctx_created++;
+    g_cond_broadcast (&ctx_cond);
+    while (ctx_created < ctx_expected)
+        g_cond_wait (&ctx_cond, &ctx_lock);
+    g_mutex_unlock (&ctx_lock);
+#ifdef WALPE_FOLLOW
+    /* (a monitor that starts without an output has no surface yet: its
+     * context is made with the others' and current on nothing) */
+    gboolean begun = m->surf != EGL_NO_SURFACE;
+#else
+    const gboolean begun = TRUE;
+#endif
+    if (m->ctx == EGL_NO_CONTEXT ||
+        (begun && !eglMakeCurrent (D.egl_dpy, m->surf, m->surf, m->ctx))) {
+        g_warning ("monitor %d: EGL context unusable; thread exits", m->index);
+        return NULL;
+    }
+    if (begun)
+        mon_thread_begin (m);
 
     g_mutex_lock (&m->lock);
+#ifdef WALPE_FOLLOW
+    if (!begun)
+        mon_park_wait (m, &begun);
+#endif
     while (!m->quitting) {
         char *load = m->load_path;
         m->load_path = NULL;
@@ -2208,6 +2319,13 @@ static gpointer mon_thread (gpointer data)
         m->rt_vbox = m->vbox;
         gboolean res_changed = m->res_changed;
         m->res_changed = FALSE;
+#ifdef WALPE_FOLLOW
+        /* its output has another size or scale (layout_follow): the
+         * surface is fitted to it below */
+        const gboolean fit = res_changed && m->fit_req;
+        if (fit)
+            m->fit_req = FALSE;
+#endif
         gboolean stats_wanted = m->stats_until_us > g_get_monotonic_time ();
         gboolean describe_req = m->describe_req;
         m->describe_req = FALSE;
@@ -2366,6 +2484,42 @@ static gpointer mon_thread (gpointer data)
             mon_prof_sync (m);   /* GPUPROF */
         if (idle_release)
             mon_idle_release (m);
+#ifdef WALPE_FOLLOW
+        if (role && ridx == MON_ROLE_PARK) {
+            /* its output is gone (mon_park): the wallpaper and the role go,
+             * the context is taken off the surface, which the main thread
+             * frees once this thread waits. The thread and its context
+             * stay for the next output: a monitor that comes back. */
+            mon_drop_role (m);
+            g_atomic_int_set (&m->idle_released, 0);
+            mon_free_content (m);
+            g_clear_pointer (&m->content_path, g_free);
+            g_clear_pointer (&load, g_free);
+            if (ptr)
+                g_array_unref (ptr);
+            glFinish ();   /* deletes are only queued until the driver has run them */
+            eglMakeCurrent (D.egl_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            malloc_trim (0);
+            g_mutex_lock (&m->lock);
+            m->parked = TRUE;
+            mon_park_wait (m, &begun);
+            continue;
+        }
+        if (fit) {
+            /* between two frames: the buffers of the next one have the
+             * output's new size, and it is drawn whatever the content
+             * thinks of it (the window shows the old size stretched) */
+            int fw = m->rt_w, fh = m->rt_h;
+            walpe_surface_fit (m->ps, &fw, &fh);
+            if (fw > 0 && fh > 0) {
+                m->rt_w = fw;
+                m->rt_h = fh;
+            }
+            m->win_has_frame = FALSE;
+            m->needs_first_frame = TRUE;
+            render = TRUE;
+        }
+#endif
         if (role) {
             m->n_roles++;
             walpe_memc_inc (WALPE_MEMC_ROLE);
@@ -2484,7 +2638,7 @@ static gpointer mon_thread (gpointer data)
         if (render) {
             m->clip_due_us = 0;
             if (clip_n >= 0)
-                walpe_clip_set (clip, clip_n, m->geom.width, m->geom.height);
+                walpe_clip_set (clip, clip_n, MON_W (m), MON_H (m));
             else
                 walpe_clip_off ();
             m->last_draw_us = g_get_monotonic_time ();
@@ -5633,6 +5787,10 @@ static WalpeOutputList layout_now;   /* (the layout code further down fills it) 
 static char *mons_no_surface;        /* outputs that got no wallpaper surface at start, by name
                                       * (NULL = every one got its own; diag.h) */
 
+#ifdef WALPE_FOLLOW
+static int mons_waiting (void);
+#endif
+
 static void status_backend (JsonBuilder *b)
 {
     jb_str (b, "display_backend", walpe_backend_name (D.backend));
@@ -5645,6 +5803,12 @@ static void status_backend (JsonBuilder *b)
     jb_str (b, "wayland_pointer", D.cfg->wayland_pointer ? "off" : "auto");
     if (mons_no_surface)    /* outputs the daemon shows nothing on: no surface at start */
         jb_str (b, "monitors_without_surface", mons_no_surface);
+#ifdef WALPE_FOLLOW
+    /* render threads that wait for an output (their monitor's output went:
+     * layout_follow); absent on a window system where none ever does */
+    if (walpe_platform_follows_outputs ())
+        jb_int (b, "render_threads_waiting", mons_waiting ());
+#endif
     json_builder_set_member_name (b, "pause_signals");
     json_builder_begin_object (b);
     for (int s = 0; s < WALPE_SIG_N; s++) {
@@ -9269,8 +9433,55 @@ static gboolean fpslog_tick (gpointer user)
     return G_SOURCE_CONTINUE;
 }
 
-/* One monitor: its record and the surface it is rendered to (the
- * platform makes the native window and the EGL surface on it). out: the
+/* The surface a monitor is rendered to: the platform makes the native
+ * window and the EGL surface on it. out: the output it covers (NULL: the
+ * --windowed window of g's size). *sw, *sh: the surface's size. NULL = none
+ * could be made (said). say: the line about the swap behaviour. */
+static WalpeSurface *mon_surface_make (Mon *m, const WalpeOutput *out, const WalpeRect *g,
+                                       gboolean or_mode, int idx, gboolean say, EGLSurface *surf,
+                                       int *sw, int *sh)
+{
+    WalpeSurfaceSpec spec = {
+        .kind = or_mode ? WALPE_SURFACE_WALLPAPER : WALPE_SURFACE_WINDOW,
+        .output = or_mode ? out : NULL,
+        .width = g->width,
+        .height = g->height,
+        .title = "walpe (preview)",
+        .user = m,
+    };
+    WalpeSurface *ps = walpe_surface_new (&spec, D.egl_dpy, D.egl_conf, surf, sw, sh);
+    if (!ps) {
+        g_warning ("eglCreateWindowSurface failed for monitor %d (0x%x)",
+                   idx, eglGetError ());
+        return NULL;
+    }
+    {
+        /* every frame is drawn in full before it is swapped: the back
+         * buffer's old content is never needed. A surface that preserves
+         * it (EGL_BUFFER_PRESERVED) makes the driver copy the whole frame
+         * back on every swap; ask for EGL_BUFFER_DESTROYED where that is
+         * not the surface's state already. WALPE_EGL_SWAP=keep leaves the
+         * driver's default (A/B). */
+        const char *e = g_getenv ("WALPE_EGL_SWAP");
+        EGLint sb = 0;
+        gboolean have = eglQuerySurface (D.egl_dpy, *surf, EGL_SWAP_BEHAVIOR, &sb);
+        if (!have)
+            (void) eglGetError ();
+        gboolean set = FALSE;
+        if (have && sb == EGL_BUFFER_PRESERVED && !(e && !strcmp (e, "keep"))) {
+            set = eglSurfaceAttrib (D.egl_dpy, *surf, EGL_SWAP_BEHAVIOR, EGL_BUFFER_DESTROYED);
+            if (!set)
+                (void) eglGetError ();
+        }
+        if (say)
+            g_message ("EGL surface: swap behaviour %s%s",
+                       !have ? "unknown" : sb == EGL_BUFFER_PRESERVED ? "preserved" : "destroyed",
+                       set ? " -> destroyed" : "");
+    }
+    return ps;
+}
+
+/* One monitor: its record and the surface it is rendered to. out: the
  * output it covers (NULL: the --windowed window of g's size). */
 static Mon *make_monitor (const WalpeOutput *out, const WalpeRect *g, int idx, gboolean or_mode,
                           const char *name)
@@ -9282,19 +9493,9 @@ static Mon *make_monitor (const WalpeOutput *out, const WalpeRect *g, int idx, g
     m->geom = *g;
     m->present_iv_applied = -1;
     m->present_iv = 1;
-    WalpeSurfaceSpec spec = {
-        .kind = or_mode ? WALPE_SURFACE_WALLPAPER : WALPE_SURFACE_WINDOW,
-        .output = or_mode ? out : NULL,
-        .width = g->width,
-        .height = g->height,
-        .title = "walpe (preview)",
-        .user = m,
-    };
     int sw = 0, sh = 0;
-    m->ps = walpe_surface_new (&spec, D.egl_dpy, D.egl_conf, &m->surf, &sw, &sh);
+    m->ps = mon_surface_make (m, out, g, or_mode, idx, idx == 0, &m->surf, &sw, &sh);
     if (!m->ps) {
-        g_warning ("eglCreateWindowSurface failed for monitor %d (0x%x)",
-                   idx, eglGetError ());
         g_free (m->name);
         g_free (m);
         return NULL;
@@ -9307,29 +9508,10 @@ static Mon *make_monitor (const WalpeOutput *out, const WalpeRect *g, int idx, g
         m->geom.width = sw;
         m->geom.height = sh;
     }
-    {
-        /* every frame is drawn in full before it is swapped: the back
-         * buffer's old content is never needed. A surface that preserves
-         * it (EGL_BUFFER_PRESERVED) makes the driver copy the whole frame
-         * back on every swap; ask for EGL_BUFFER_DESTROYED where that is
-         * not the surface's state already. WALPE_EGL_SWAP=keep leaves the
-         * driver's default (A/B). */
-        const char *e = g_getenv ("WALPE_EGL_SWAP");
-        EGLint sb = 0;
-        gboolean have = eglQuerySurface (D.egl_dpy, m->surf, EGL_SWAP_BEHAVIOR, &sb);
-        if (!have)
-            (void) eglGetError ();
-        gboolean set = FALSE;
-        if (have && sb == EGL_BUFFER_PRESERVED && !(e && !strcmp (e, "keep"))) {
-            set = eglSurfaceAttrib (D.egl_dpy, m->surf, EGL_SWAP_BEHAVIOR, EGL_BUFFER_DESTROYED);
-            if (!set)
-                (void) eglGetError ();
-        }
-        if (idx == 0)
-            g_message ("EGL surface: swap behaviour %s%s",
-                       !have ? "unknown" : sb == EGL_BUFFER_PRESERVED ? "preserved" : "destroyed",
-                       set ? " -> destroyed" : "");
-    }
+#ifdef WALPE_FOLLOW
+    m->rt_w = m->geom.width;
+    m->rt_h = m->geom.height;
+#endif
     g_mutex_init (&m->lock);
     g_cond_init (&m->cond);
     g_cond_init (&m->mem_cond);
@@ -9370,12 +9552,452 @@ static gboolean layout_force;   /* a surface was taken away: restart even when t
 #define LAYOUT_RESTART_GAP_S 10
 static WalpeOutputList layout_pending;   /* a different layout, seen once */
 
+#ifdef WALPE_FOLLOW
+/* ------------------------------------------- outputs followed in place
+ * A window system whose surfaces last while their output changes
+ * (walpe_platform_follows_outputs: Wayland) needs no restart for a change
+ * of the outputs. The restart costs every monitor its picture for two to
+ * ten seconds and every wallpaper its place: a video starts over, a scene
+ * begins again - on the monitor nobody touched too - for a monitor that
+ * went to sleep, a laptop that was docked, a scale chosen in the desktop's
+ * settings. layout_check () therefore asks layout_follow () first, with
+ * the layout it has seen twice, and restarts only where that says no.
+ *
+ * What is followed, per output of the new list (walpe_follow_plan):
+ *  - the same output at another place, scale, refresh rate or transform:
+ *    its monitor gets the new rectangle and rate. The surface needs
+ *    nothing (the compositor configured its new logical size, the backend
+ *    showed the buffer at it); neither its wallpaper nor anybody else's is
+ *    touched.
+ *  - the same output with another size in pixels (a mode, a scale without
+ *    viewporter, a quarter turn): the surface stays, its render thread
+ *    gives the buffers the new size between two frames (Mon.fit_req,
+ *    walpe_surface_fit) and draws at it. What depends on the size follows
+ *    as it does for a render resolution chosen with `walpe-ctl resolution`
+ *    (res_refresh, res_commit): a scene on that monitor is loaded again,
+ *    groups that share a rendering are formed again. The other monitors
+ *    go on.
+ *  - an output that is gone: its monitor is PARKED (mon_park). The render
+ *    thread frees the wallpaper, takes its context off the surface and
+ *    waits (mon_park_wait); the main thread then frees the surface. Thread
+ *    and context stay.
+ *  - a new output: a parked monitor is given to it (mon_attach): a new
+ *    surface, every field of the record anew, its thread goes on with the
+ *    context it has, and the wallpaper saved for the output is loaded.
+ *    A monitor that is switched off and on again is this case (the
+ *    compositor makes a new output of the old name).
+ *  - a monitor whose surface the compositor closed for good while its
+ *    output stays is parked and given the output again: a new surface for
+ *    that output alone.
+ * Not followed, the restart in place as before: an output for which no
+ * render thread waits - more outputs than the daemon has had at once.
+ * A new thread would have to make a GL context in the share group while
+ * the other threads' contexts are current, which the start-up takes care
+ * never to do (ctx_lock), and no driver was at hand to try it on.
+ * Likewise --monitor N, swaps that fail for good (swap_lost_cb: the
+ * contexts are made anew), and `wayland_follow = off` in gpu.conf
+ * (WALPE_WAYLAND_FOLLOW=0), which is the behaviour up to 0.14.0.
+ *
+ * A record is never freed while the daemon runs: a shared frame names its
+ * followers, queued callbacks name their monitor. Its thread waits on its
+ * own lock and condition, so a record is used again for the next output
+ * with everything else in it wiped (mon_wipe). Mon.life tells a load's
+ * note that it was made for the output before. */
+static GList *mons_parked;      /* Mon: monitors without an output (their threads wait,
+                                 * or are on their way there: Mon.park_told) */
+static int layout_only = -1;    /* --monitor N: only that output has a monitor */
+static gboolean layout_owed;    /* an output of layout_now waits for a render thread
+                                 * that is not parked yet: layout_check looks again */
+static int layout_owed_looks;   /* ... and has done so this often */
+/* half-second looks an output waits for a render thread that is still busy
+ * with the output it had (it loads a wallpaper, or draws a slow frame)
+ * before the daemon restarts in place for it after all */
+#define LAYOUT_OWED_LOOKS 40
+static gboolean layout_pending_set;     /* layout_pending holds a layout (one without
+                                         * any output is one too) */
+
+static gboolean layout_follow_on (void)
+{
+    static int on = -1;
+    if (on < 0) {
+        gboolean b = TRUE;
+        const char *v = present_setting ("wayland_follow");
+        on = !(v && walpe_conf_bool (v, &b) && !b);
+        if (v && !walpe_conf_bool (v, &b))
+            g_warning ("wayland_follow = %s is not understood (on, off): on", v);
+        if (!on)
+            g_message ("wayland_follow is off: every change of an output restarts the daemon in "
+                       "place, as up to 0.14.0");
+    }
+    return on;
+}
+
+/* main, queued by a render thread that has begun to wait (mon_park_wait):
+ * nothing uses the surface of its monitor any more */
+static gboolean mon_parked_cb (gpointer user)
+{
+    Mon *m = user;
+    g_mutex_lock (&m->lock);
+    const gboolean parked = m->parked;
+    g_mutex_unlock (&m->lock);
+    if (!parked || m->park_told)
+        return G_SOURCE_REMOVE;
+    m->park_told = TRUE;
+    if (m->ps) {
+        walpe_surface_free (m->ps);   /* its EGL surface, then its window */
+        m->ps = NULL;
+        m->surf = EGL_NO_SURFACE;
+    }
+    if (layout_owed)
+        layout_schedule ();     /* an output waits for this thread */
+    return G_SOURCE_REMOVE;
+}
+
+/* main: m has no output any more (why: for the log). It leaves the list of
+ * monitors at once; its thread lets go of the wallpaper and the surface
+ * when it gets there. The caller forms the groups again (apply_wallpapers):
+ * monitors that followed m still name it as their leader until then. */
+static void mon_park (Mon *m, const char *why)
+{
+    g_message ("monitor %d (%s): %s: its wallpaper is unloaded, its render thread waits for an "
+               "output", m->index, m->name ? m->name : "?", why);
+    D.mons = g_list_remove (D.mons, m);
+    mons_parked = g_list_append (mons_parked, m);
+    if (m->expose_timer_id) {
+        g_source_remove (m->expose_timer_id);
+        m->expose_timer_id = 0;
+    }
+    m->park_told = FALSE;
+    g_mutex_lock (&m->lock);
+    g_clear_pointer (&m->load_path, g_free);    /* a load its thread has not taken */
+    m->loading = FALSE;
+    if (m->role_sf)
+        sf_unref (m->role_sf);                  /* a pending role nobody adopted */
+    m->role_sf = NULL;
+    m->role_idx = MON_ROLE_PARK;
+    m->role_change = TRUE;
+    g_cond_signal (&m->cond);
+    g_mutex_unlock (&m->lock);
+}
+
+/* main, m->lock held, m's thread waits in mon_park_wait: the record as
+ * g_new0 gave it, but for what the waiting thread stands on (the lock, the
+ * conditions, the thread, its context) and its count of outputs */
+static void mon_wipe (Mon *m)
+{
+    g_free (m->load_path);
+    g_free (m->first_path);
+    g_free (m->content_path);
+    g_free (m->name);
+    g_free (m->want_path);
+    g_free (m->loaded_path);
+    g_free (m->load_error);
+    g_free (m->good_path);
+    g_free (m->reopen_for);
+    g_free (m->restored);
+    g_free (m->qdescribe);
+    g_free (m->res_note);
+    g_free (m->mem_json);
+    walpe_region_clear (&m->vis);
+    if (m->ptr_q)
+        g_array_unref (m->ptr_q);
+    if (m->role_sf)
+        sf_unref (m->role_sf);
+    GThread *thread = m->thread;
+    const EGLContext ctx = m->ctx;
+    const guint life = m->life;
+    const gboolean quitting = m->quitting;
+    char *base = (char *) m;
+    /* [start, lock) [thread, mem_cond) (mem_cond, end): lock and cond lie
+     * side by side */
+    G_STATIC_ASSERT (G_STRUCT_OFFSET (Mon, cond) == G_STRUCT_OFFSET (Mon, lock) + sizeof (GMutex));
+    G_STATIC_ASSERT (G_STRUCT_OFFSET (Mon, thread) == G_STRUCT_OFFSET (Mon, cond) + sizeof (GCond));
+    memset (base, 0, G_STRUCT_OFFSET (Mon, lock));
+    memset (base + G_STRUCT_OFFSET (Mon, thread), 0,
+            G_STRUCT_OFFSET (Mon, mem_cond) - G_STRUCT_OFFSET (Mon, thread));
+    memset (base + G_STRUCT_OFFSET (Mon, mem_cond) + sizeof (GCond), 0,
+            sizeof (Mon) - G_STRUCT_OFFSET (Mon, mem_cond) - sizeof (GCond));
+    m->thread = thread;
+    m->ctx = ctx;
+    m->life = life + 1;
+    m->quitting = quitting;
+    m->parked = TRUE;
+    m->park_told = TRUE;
+}
+
+static int mons_waiting (void)
+{
+    return (int) g_list_length (mons_parked);
+}
+
+/* main: a parked monitor whose thread waits, NULL = none */
+static Mon *mon_parked_ready (void)
+{
+    for (GList *l = mons_parked; l; l = l->next)
+        if (((Mon *) l->data)->park_told)
+            return l->data;
+    return NULL;
+}
+
+/* main: output o (entry idx of the layout) gets the parked monitor m: a
+ * surface on it and a record set up as make_monitor and the start-up set
+ * up a new one. Its thread goes on waiting until mon_unpark. NULL = no
+ * surface could be made on the output (said); m stays parked. */
+static Mon *mon_attach (Mon *m, const WalpeOutput *o, int idx)
+{
+    WalpeRect g = { o->x, o->y, o->width, o->height };
+    EGLSurface surf = EGL_NO_SURFACE;
+    int sw = 0, sh = 0;
+    WalpeSurface *ps = mon_surface_make (m, o, &g, TRUE, idx, FALSE, &surf, &sw, &sh);
+    if (!ps)
+        return NULL;
+    g_mutex_lock (&m->lock);
+    mon_wipe (m);
+    m->name = o->name && *o->name ? g_strdup (o->name) : g_strdup_printf ("mon%d", idx);
+    m->ptr_lx = m->ptr_ly = -2.0f;
+    m->index = idx;
+    m->geom = g;
+    if (sw > 0 && sh > 0) {
+        m->geom.width = sw;
+        m->geom.height = sh;
+    }
+    m->rt_w = m->geom.width;
+    m->rt_h = m->geom.height;
+    m->present_iv_applied = -1;
+    m->present_iv = 1;
+    m->ps = ps;
+    m->surf = surf;
+    m->out_id = walpe_surface_output (ps);
+    m->hz = o->refresh_hz;
+    m->clip_n = -1;
+    m->needs_first_frame = TRUE;
+    g_mutex_unlock (&m->lock);
+    mons_parked = g_list_remove (mons_parked, m);
+    D.mons = g_list_append (D.mons, m);     /* (layout_follow puts the list in order) */
+    return m;
+}
+
+/* main: everything of m is set: its thread puts its context on the new
+ * surface and goes on */
+static void mon_unpark (Mon *m)
+{
+    g_mutex_lock (&m->lock);
+    m->pause_wanted = m->self_paused = m->own_paused = want_pause_mon (m);
+    m->fps = m->fps_cap = mon_fps_cap (m);
+    walpe_config_quality_for (D.cfg, mon_quality_path (m), &m->quality);
+    m->parked = FALSE;
+    m->park_told = FALSE;
+    g_cond_signal (&m->cond);
+    g_mutex_unlock (&m->lock);
+}
+
+static gint mon_index_cmp (gconstpointer a, gconstpointer b)
+{
+    return ((const Mon *) a)->index - ((const Mon *) b)->index;
+}
+
+typedef enum { FOLLOW_NO, FOLLOW_DONE, FOLLOW_WAIT } FollowResult;
+
+/* main: the outputs are `l` now, and that has held for two looks. DONE:
+ * the monitors are on it. WAIT: also, but for an output whose render
+ * thread is still letting go of the output it had: look again shortly.
+ * NO: nothing was changed (or nothing that a restart does not make anew):
+ * the caller restarts in place. */
+static FollowResult layout_follow (const WalpeOutputList *l)
+{
+    if (!walpe_platform_follows_outputs () || D.windowed || layout_only >= 0 || swap_restart ||
+        !layout_follow_on ())
+        return FOLLOW_NO;
+    guint n = g_list_length (D.mons), i = 0;
+    Mon **ms = g_new0 (Mon *, n + 1);
+    gboolean *dead = g_new0 (gboolean, n + 1);
+    WalpeOutputList run = { (int) n, g_new0 (WalpeOutput, n + 1) };
+    gboolean known = TRUE;
+    for (GList *it = D.mons; it; it = it->next, i++) {
+        ms[i] = it->data;
+        const WalpeOutput *o = mon_output (ms[i]);
+        if (o)
+            run.o[i] = *o;      /* (its strings stay layout_now's) */
+        else
+            known = FALSE;
+    }
+    WalpeFollowPlan p = { 0 };
+    FollowResult res = FOLLOW_NO;
+    if (!known)
+        goto out;
+    walpe_follow_plan (&run, l, &p);
+    /* the surfaces that stay take their output's rectangle; one the window
+     * system has closed for good says so here */
+    int n_dead = 0;
+    int *fit_w = g_new0 (int, n + 1), *fit_h = g_new0 (int, n + 1);
+    for (i = 0; i < n; i++) {
+        if (p.running[i] == WALPE_FOLLOW_GONE)
+            continue;
+        const WalpeOutput *o = &l->o[p.running_to[i]];
+        fit_w[i] = o->width;
+        fit_h[i] = o->height;
+        dead[i] = !walpe_surface_follow_output (ms[i]->ps, o, &fit_w[i], &fit_h[i]);
+        n_dead += dead[i];
+    }
+    /* is there a render thread for every output that will be without a
+     * monitor? (the ones parked here are: each frees one) */
+    if (p.added > (int) g_list_length (mons_parked) + p.gone) {
+        g_message ("monitor layout: %d new output(s), %d render thread(s) without an output: "
+                   "not followed in place", p.added, (int) g_list_length (mons_parked) + p.gone);
+        g_free (fit_w);
+        g_free (fit_h);
+        goto out;
+    }
+    gboolean structure = p.gone || p.resized || n_dead;
+    int attached = 0;
+    /* 1. the monitors whose output is gone, or whose surface is */
+    for (i = 0; i < n; i++)
+        if (p.running[i] == WALPE_FOLLOW_GONE)
+            mon_park (ms[i], "its output is gone");
+        else if (dead[i])
+            mon_park (ms[i], "the window system closed its surface");
+    /* 2. the monitors that stay */
+    for (i = 0; i < n; i++) {
+        Mon *m = ms[i];
+        if (p.running[i] == WALPE_FOLLOW_GONE || dead[i])
+            continue;
+        const WalpeOutput *o = &l->o[p.running_to[i]];
+        const WalpeOutput *was = &run.o[i];
+        const gboolean fit = fit_w[i] != m->geom.width || fit_h[i] != m->geom.height ||
+                             fabs (o->scale - was->scale) > 0.001;
+        m->index = p.running_to[i];
+        m->geom.x = o->x;
+        m->geom.y = o->y;
+        if (fabs (o->refresh_hz - m->hz) > 0.5)
+            structure = TRUE;       /* who leads a group follows from the rates */
+        g_mutex_lock (&m->lock);
+        m->hz = o->refresh_hz;
+        if (fit) {
+            m->geom.width = fit_w[i];
+            m->geom.height = fit_h[i];
+            m->fit_req = TRUE;
+            m->res_changed = TRUE;
+            g_cond_signal (&m->cond);
+        }
+        g_mutex_unlock (&m->lock);
+    }
+    g_free (fit_w);
+    g_free (fit_h);
+    /* 3. the outputs without a monitor */
+    GList *fresh = NULL;
+    GString *none = g_string_new (NULL);
+    gboolean owed = FALSE;
+    for (int j = 0; j < l->n; j++) {
+        gboolean have = p.seen_from[j] >= 0 && !dead[p.seen_from[j]];
+        if (have)
+            continue;
+        Mon *m = mon_parked_ready ();
+        if (!m) {
+            owed = TRUE;        /* (its thread is on its way: mon_parked_cb) */
+            continue;
+        }
+        if (mon_attach (m, &l->o[j], j)) {
+            fresh = g_list_prepend (fresh, m);
+            attached++;
+        } else {
+            g_string_append_printf (none, "%s%s", none->len ? ", " : "", l->o[j].name);
+            g_warning ("monitor %d (%s): NO WALLPAPER SURFACE could be made on it (the line above "
+                       "says why): nothing is shown there", j, l->o[j].name);
+        }
+    }
+    D.mons = g_list_sort (D.mons, mon_index_cmp);
+    /* 4. the layout the daemon runs with, and what is worked out from it */
+    walpe_output_list_free (&layout_now);
+    walpe_output_list_copy (&layout_now, l);
+    if (p.placed || p.resized || p.gone || n_dead || attached) {
+        /* (not for a look that only found an output still waiting) */
+        GString *d = g_string_new (NULL);
+        for (int j = 0; j < l->n; j++)
+            g_string_append_printf (d, "%s%s %dx%d+%d+%d", j ? ", " : "", l->o[j].name, l->o[j].width,
+                                    l->o[j].height, l->o[j].x, l->o[j].y);
+        g_message ("monitor layout changed (now: %s): followed in place (%d moved or scaled, %d "
+                   "resized, %d gone, %d new%s%s)", l->n ? d->str : "no output", p.placed, p.resized,
+                   p.gone, attached, n_dead ? ", a closed surface is made again" : "",
+                   owed ? "; an output waits for a render thread that is still busy" : "");
+        g_string_free (d, TRUE);
+    }
+    g_free (mons_no_surface);
+    mons_no_surface = none->len ? g_string_free (none, FALSE) : (g_string_free (none, TRUE), NULL);
+    D.max_hz = 0.0;
+    for (GList *it = D.mons; it; it = it->next)
+        D.max_hz = MAX (D.max_hz, ((Mon *) it->data)->hz);
+    {
+        const char **names = g_new0 (const char *, (gsize) l->n + 1);
+        for (int j = 0; j < l->n; j++)
+            names[j] = l->o[j].name;
+        walpe_config_set_outputs (D.cfg, names, (guint) l->n, D.backend == WALPE_BACKEND_WAYLAND);
+        g_free (names);
+    }
+    const gboolean sizes = res_refresh ();
+    if (structure || fresh) {
+        char *bad = present_apply_spec (P.spec);   /* the present mode goes by name and index */
+        g_free (bad);
+    }
+    for (GList *it = fresh; it; it = it->next)
+        mon_unpark (it->data);
+    g_list_free (fresh);
+    if (structure || attached || sizes)
+        res_commit (TRUE);      /* the groups again, each monitor its wallpaper */
+    /* who reports what for which output: the ids are looked up again, the
+     * values read again (which also brings the pause states up to date) */
+    walpe_sigprov_outputs_changed ();
+    signals_changed (WALPE_SIG_PER_OUTPUT, NULL);
+    layout_force = FALSE;
+    layout_owed_looks = owed ? layout_owed_looks + 1 : 0;
+    layout_owed = owed;
+    res = owed ? FOLLOW_WAIT : FOLLOW_DONE;
+    if (owed && layout_owed_looks > LAYOUT_OWED_LOOKS) {
+        g_message ("monitor layout: an output has waited %d s for a render thread: not followed "
+                   "in place", LAYOUT_OWED_LOOKS / 2);
+        layout_owed_looks = 0;
+        res = FOLLOW_NO;        /* (layout_check: the restart in place makes its monitor) */
+    }
+out:
+    walpe_follow_plan_clear (&p);
+    g_free (run.o);
+    g_free (ms);
+    g_free (dead);
+    return res;
+}
+#endif  /* WALPE_FOLLOW */
+
 static gboolean layout_check (gpointer user)
 {
     (void) user;
     layout_timer = 0;
     WalpeOutputList l = { 0 };
     walpe_platform_outputs (&l);
+#ifdef WALPE_FOLLOW
+    {
+        /* a window system whose surfaces last: the change is followed in
+         * place where it can be, once it has held for two looks (or is the
+         * layout the daemon is on already, with something still owed) */
+        const gboolean same = walpe_output_list_equal (&l, &layout_now);
+        const gboolean held = layout_pending_set && walpe_output_list_equal (&l, &layout_pending);
+        if (same ? (layout_force || layout_owed) : held) {
+            FollowResult fr = layout_follow (&l);
+            if (fr != FOLLOW_NO) {
+                walpe_output_list_free (&layout_pending);
+                layout_pending_set = FALSE;
+                walpe_output_list_free (&l);
+                if (fr == FOLLOW_WAIT)
+                    layout_timer = g_timeout_add (500, layout_check, NULL);
+                return G_SOURCE_REMOVE;
+            }
+            if (layout_owed) {
+                /* an output is still without a monitor and cannot get one
+                 * in place any more: the restart makes one for it */
+                layout_owed = FALSE;
+                layout_force = TRUE;
+            }
+        }
+    }
+#endif
     gint64 last = g_ascii_strtoll (g_getenv ("WALPE_LAYOUT_RESTARTED") ? g_getenv ("WALPE_LAYOUT_RESTARTED") : "0",
                                    NULL, 10);
     gboolean too_soon = last > 0 && g_get_monotonic_time () - last < LAYOUT_RESTART_GAP_S * G_USEC_PER_SEC &&
@@ -9387,11 +10009,17 @@ static gboolean layout_check (gpointer user)
                                   Imp.active || Ws.active, &settled)) {
     case WALPE_LAYOUT_SAME:
         walpe_output_list_free (&layout_pending);      /* it was a passing state */
+#ifdef WALPE_FOLLOW
+        layout_pending_set = FALSE;
+#endif
         walpe_output_list_free (&l);
         return G_SOURCE_REMOVE;
     case WALPE_LAYOUT_WAIT:
         walpe_output_list_free (&layout_pending);
         layout_pending = l;                 /* look again: it has to hold */
+#ifdef WALPE_FOLLOW
+        layout_pending_set = TRUE;
+#endif
         layout_timer = g_timeout_add (settled ? 2000 : 1000, layout_check, NULL);
         return G_SOURCE_REMOVE;
     case WALPE_LAYOUT_RESTART:
@@ -9400,6 +10028,9 @@ static gboolean layout_check (gpointer user)
     if (!restart_begin ("the monitor layout changed")) {
         /* (the next change of the outputs looks again) */
         walpe_output_list_free (&layout_pending);
+#ifdef WALPE_FOLLOW
+        layout_pending_set = FALSE;
+#endif
         layout_force = FALSE;
         swap_restart = FALSE;
     } else {
@@ -10595,6 +11226,9 @@ int main (int argc, char **argv)
         return 1;
     }
 
+#ifdef WALPE_FOLLOW
+    layout_only = monitor_all ? -1 : monitor_idx;
+#endif
     if (windowed) {
         WalpeRect g = { .width = 960, .height = 540 };
         make_monitor (NULL, &g, 0, FALSE, "windowed"); /* normal window: WM tiles it, on top */
@@ -10826,6 +11460,12 @@ int main (int argc, char **argv)
      * still running called request_redraw on a follower that had already
      * been joined and freed (heap-use-after-free when the follower comes
      * first in the list: the faster monitor leads). */
+#ifdef WALPE_FOLLOW
+    /* the monitors without an output end like the others: their threads
+     * wait, or are on their way there (their surfaces are freed below) */
+    D.mons = g_list_concat (D.mons, mons_parked);
+    mons_parked = NULL;
+#endif
     for (GList *l = D.mons; l; l = l->next) {
         Mon *m = l->data;
         g_mutex_lock (&m->lock);

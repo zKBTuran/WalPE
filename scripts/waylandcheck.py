@@ -27,7 +27,8 @@ not what the daemon believes it drew. Each case starts its own daemon:
   mode      the output's mode changes under the running daemon (640x360 ->
             800x450 -> 1280x720 -> 640x360): status follows, the picture
             fills the new size, the control socket stays connectable and the
-            process id stays.
+            process id stays. (How the daemon follows - in place - is the
+            case `follow`; these cases look at what is on the output.)
   scale     output scale 2 and 1.5: the picture is right and is drawn in the
             output's own pixels (a sharp colour edge), not enlarged from
             the scaled size. Then the scale alone changes, at a moment at
@@ -40,8 +41,21 @@ not what the daemon believes it drew. Each case starts its own daemon:
             the right way up.
   hotplug   an output appears (it gets the wallpaper for all), gets a
             wallpaper of its own, is disabled and enabled again (its own
-            wallpaper is back), is unplugged; then every output is gone and
-            one returns. The daemon lives through all of it.
+            wallpaper is back), is unplugged; then every output is gone (the
+            daemon has no monitor, its render threads wait) and one
+            returns. The daemon lives through all of it.
+  follow    two outputs; the second one moves, changes its scale and its
+            mode, is switched off and on again: each change is followed
+            without a restart in place (the log, the daemon's uptime), the
+            first output's animated wallpaper is never loaded again and goes
+            on drawing, the pictures are right, the pointer is followed on
+            the output where it lies afterwards. WALPE_WAYLAND_FOLLOW=off:
+            the restart in place for a change, as before.
+  closed    the compositor closes a wallpaper surface while its output
+            stays (made up with WALPE_WL_CLOSE_AFTER_MS): the surface gets
+            its role back, or with WALPE_WL_RECREATE=0 that output gets a new
+            surface and its wallpaper again; nothing restarts, the other
+            output's wallpaper goes on.
   pointer   a scene whose colour follows the pointer follows a pointer
             device that moves over the wallpaper, on the output it is on,
             at the right place also on an output with scale 1.5.
@@ -79,8 +93,8 @@ not what the daemon believes it drew. Each case starts its own daemon:
   lost      the compositor goes away: the daemon ends with status 1 and
             leaves no socket behind.
   cycles    (only with --only cycles) an output is created and unplugged
-            six times: the daemon's open files do not grow from the second
-            round to the last.
+            six times: the daemon's open files and threads do not grow from
+            the second round to the last.
 
 --display labwc|wayfire|river: that compositor in sway's place (it needs the
 program wlr-randr besides grim; river: up to 0.3, see scripts/displayenv.py).
@@ -600,17 +614,31 @@ def case_hotplug(env, W):
           "hotplug: config.json keeps the unplugged output's own choice for its return", (cur, own))
 
     # every output gone, then one back
-    # (with no output there is nothing to restart for: the daemon keeps the monitors it
-    # was started with until one is back; their surfaces are gone, nothing is drawn)
+    # (the daemon has no monitor then: the wallpaper is unloaded, its render thread waits
+    # for an output; a daemon that restarts for every change, wayland_follow = off, keeps
+    # the monitor it was started with until one is back, with a surface that is gone)
     check(env.display.output(a, enable=False), "hotplug: the compositor disables the last output")
 
     def none_shown():
+        """the monitors on the outputs of this case, what else the daemon has a monitor on
+        (a compositor may put a stand-in output in the place of the last one: Wayfire's
+        NOOP-1), its surfaces, and whether a render thread waits"""
         st = env.state()
-        return {"monitors": [bool(m.get("hidden")) for m in st.get("monitors") or []],
-                "surfaces": [sf.get("role") for sf in st.get("wl_surfaces") or []]}
-    ok, _ = follow(env, lambda: none_shown() == {"monitors": [True], "surfaces": ["dead"]})
-    check(ok, "hotplug: the daemon answers with no output left: its monitor is not shown, the surface is gone",
-          none_shown())
+        names = [m.get("name") for m in st.get("monitors") or []]
+        return {"monitors": [n for n in names if n in (a, b)], "elsewhere": [n for n in names if n not in (a, b)],
+                "surfaces": [(sf.get("output"), sf.get("role")) for sf in st.get("wl_surfaces") or []],
+                "waiting": (st.get("render_threads_waiting") or 0) > 0}
+
+    def all_gone():
+        ns = none_shown()
+        return (not ns["monitors"] and ns["waiting"] and
+                sorted(o for o, _ in ns["surfaces"]) == sorted(ns["elsewhere"]))
+    ok, _ = follow(env, all_gone)
+    ns = none_shown()
+    check(ok, "hotplug: the daemon answers with no output left: no monitor and no surface on the outputs that "
+          "went, a render thread waits", ns)
+    if ns["elsewhere"]:
+        note("hotplug: the compositor put another output in their place, which got a monitor: %s" % ns["elsewhere"])
     time.sleep(1.0 * PATIENCE)
     check(env.daemon.poll() is None, "hotplug: ... and keeps running")
     check(env.display.output(a, enable=True, mode=(640, 360), pos=(0, 0)), "hotplug: the output returns")
@@ -619,6 +647,205 @@ def case_hotplug(env, W):
     check(env.daemon.poll() is None and env.daemon.pid == pid, "hotplug: same process throughout")
     healthy(env, mark, "hotplug")
     env.stop_daemon()
+
+
+# ------------------------------------------------------------------- follow
+def lives(env):
+    """the `mem` report: per output how often its render thread loaded a wallpaper and how
+    many frames it has presented since the daemon began, and how long that is ago. A
+    restart in place begins all three again."""
+    rep = (env.ipc({"cmd": "mem", "wait": 10}, timeout=15.0) or {}).get("mem") or {}
+    return ({m.get("name"): (m.get("loads"), m.get("frames")) for m in rep.get("monitors") or []},
+            rep.get("uptime_s") or 0.0)
+
+
+RESTART_LINES = ("restarts in place", "restarting to follow it")
+
+
+def case_follow(env, W):
+    """Two outputs. The second one moves, changes its scale and its mode, is switched off
+    and on again: the daemon follows each change without restarting, and the first
+    output's wallpaper - an animated scene - is never loaded again and goes on drawing."""
+    if not start(env, [("A", 640, 360, 0, 0), ("B", 480, 270, 640, 0)], "follow"):
+        return
+    mark = env.mark()
+    (a, *_), (b, *_) = env.mons
+    pid = env.daemon.pid
+    env.open(W["anim"])
+    lc.loaded(env, W["anim"])
+    env.open(W["quad"], index_of(env, b))
+    lc.loaded(env, W["quad"], index_of(env, b))
+    ok, lk = shows_quad(env, b, size=(480, 270))
+    check(ok, "follow: an animated scene on the first output, the four-colour scene on the second", lk)
+
+    def mon(name):
+        for m in env.state().get("monitors") or []:
+            if m.get("name") == name:
+                return m
+        return {}
+
+    def step(what, change, done, own=True, timeout=30):
+        """one change of the second output. own: its own wallpaper is not loaded again
+        either (a scene is, when the size it is rendered at changes). -> followed"""
+        time.sleep(0.5 * PATIENCE)
+        m, (before, up0) = env.mark(), lives(env)
+        if not check(bool(change()), f"follow: {what}: the compositor takes it"):
+            return False
+        ok, bad = follow(env, done, timeout)
+        check(ok, f"follow: {what}: status follows", rects(env))
+        check(bad == 0, f"follow: {what}: the control socket stayed connectable", f"{bad} failed connects")
+        time.sleep(1.0 * PATIENCE)
+        after, up1 = lives(env)
+        said = [ln for ln in env.since(m).splitlines() if any(r in ln for r in RESTART_LINES)]
+        check(not said and up1 > up0 and env.daemon.poll() is None and env.daemon.pid == pid,
+              f"follow: {what}: followed without a restart in place", (said[:2], up0, up1))
+        la, lb = before.get(a) or (None, 0), after.get(a) or (None, -1)
+        check(la[0] is not None and la[0] == lb[0] and (lb[1] or 0) > (la[1] or 0),
+              f"follow: {what}: the first output's wallpaper was not loaded again and went on drawing",
+              f"loads {la[0]} -> {lb[0]}, frames {la[1]} -> {lb[1]}")
+        if own and b in after:
+            check((before.get(b) or (None,))[0] == after[b][0],
+                  f"follow: {what}: the second output's wallpaper was not loaded again either",
+                  f"loads {(before.get(b) or (None,))[0]} -> {after[b][0]}")
+        return ok
+
+    # another place in the layout: below the first output
+    # (both are placed: a compositor that arranges outputs by itself moves the other one)
+    step("moved below the first", lambda: env.display.output(b, pos=(0, 360)) and env.display.output(a, pos=(0, 0)),
+         lambda: rects(env) == {a: [0, 0, 640, 360], b: [0, 360, 480, 270]})
+    ok, lk = shows_quad(env, b, size=(480, 270))
+    check(ok, "follow: moved: the picture on the second output is as it was", lk)
+    # another scale on the same mode: the same pixels, half the size in the layout
+    step("scale 2", lambda: env.display.output(b, scale=2), lambda: mon(b).get("scale") == 2)
+    ok, lk = shows_quad(env, b, size=(480, 270))
+    check(ok and 0 <= lk["edge"] <= 1, "follow: scale 2: the picture fills the output, drawn in its own pixels", lk)
+    step("scale 1 again", lambda: env.display.output(b, scale=1), lambda: mon(b).get("scale") in (None, 1))
+    # another mode: the surface's buffers get the new size, the scene is rendered at it
+    step("mode 800x450", lambda: env.display.output(b, mode=(800, 450)),
+         lambda: rects(env).get(b, [])[2:] == [800, 450], own=False)
+    check(lc.loaded(env, W["quad"], index_of(env, b), timeout=30), "follow: mode: the wallpaper is the one from before",
+          rc.brief(env.monitors()))
+    ok, lk = shows_quad(env, b, size=(800, 450))
+    check(ok and 0 <= lk["edge"] <= 1, "follow: mode: the picture fills 800x450 and is drawn at that size "
+          "(a sharp edge)", lk)
+    sf = [x for x in env.state().get("wl_surfaces") or [] if x.get("output") == b]
+    check(len(sf) == 1 and sf[0].get("buffer") == [800, 450] and sf[0].get("role") == "ready",
+          "follow: mode: status wl_surfaces: the surface's buffer is 800x450", sf)
+    # switched off: only the first output is left, and is not disturbed
+    step("switched off", lambda: env.display.output(b, enable=False),
+         lambda: rects(env) == {a: [0, 0, 640, 360]})
+    st = env.state()
+    check(len(st.get("wl_surfaces") or []) == 1 and st.get("render_threads_waiting") == 1,
+          "follow: off: one wallpaper surface is left, the other output's render thread waits",
+          (st.get("wl_surfaces"), st.get("render_threads_waiting")))
+    # ... and on again: it has its own wallpaper back
+    step("switched on again", lambda: env.display.output(b, enable=True, mode=(480, 270), pos=(640, 0)),
+         lambda: rects(env) == {a: [0, 0, 640, 360], b: [640, 0, 480, 270]}, own=False)
+    check(lc.loaded(env, W["quad"], index_of(env, b), timeout=30), "follow: on again: its own wallpaper is loaded",
+          rc.brief(env.monitors()))
+    ok, lk = shows_quad(env, b, size=(480, 270))
+    check(ok, "follow: on again: the four-colour scene is on it", lk)
+    if env.display.can_point():
+        # the pointer is where the output is now: left of the first one
+        step("moved to the left of the first", lambda: env.display.output(b, pos=(0, 0)) and
+             env.display.output(a, pos=(480, 0)),
+             lambda: rects(env) == {a: [480, 0, 640, 360], b: [0, 0, 480, 270]})
+        env.open(W["ptr"], index_of(env, b))
+        lc.loaded(env, W["ptr"], index_of(env, b))
+
+        def colour(want, x, y):
+            box, n = [None], [0]
+
+            def ok():
+                f = env.display.shot(b)
+                box[0] = rc.name_of(displayenv.pixel_of(f, f[0] // 2, f[1] // 2)) if f else "none"
+                if box[0] != want:
+                    n[0] += 1
+                    env.display.pointer(x + n[0] % 2, y)
+                return box[0] == want
+            env.display.pointer(x, y)
+            wait_for(ok, 8, 0.2)
+            return box[0]
+        got = [colour("blue", 4, 100), colour("red", 476, 100)]
+        check(got == ["blue", "red"], "follow: the pointer is followed on the output where it lies now "
+              "(left edge blue, right edge red)", got)
+    healthy(env, mark, "follow")
+    env.stop_daemon()
+    # the setting that brings back a restart in place for every change
+    if not start(env, [("A", 640, 360, 0, 0), ("B", 480, 270, 640, 0)], "follow, wayland_follow off",
+                 extra={"WALPE_WAYLAND_FOLLOW": "off"}):
+        return
+    (a, *_), (b, *_) = env.mons
+    m = env.mark()
+    env.display.output(b, pos=(0, 360))
+    env.display.output(a, pos=(0, 0))
+    ok, _ = follow(env, lambda: rects(env) == {a: [0, 0, 640, 360], b: [0, 360, 480, 270]}, 40)
+    said = [r for r in RESTART_LINES if r in env.since(m)]
+    check(ok and len(said) == len(RESTART_LINES) and "wayland_follow is off" in env.since(m),
+          "follow: WALPE_WAYLAND_FOLLOW=off: the daemon restarts in place for the change, as before, and says "
+          "that the setting is off", (rects(env), said))
+    env.stop_daemon()
+
+
+# ------------------------------------------------------------------- closed
+def case_closed(env, W):
+    """The compositor closes a wallpaper surface while its output stays (the daemon is
+    told to act as if: WALPE_WL_CLOSE_AFTER_MS; no compositor here does it on request).
+    The surface gets its role back in place; where that is not to be tried
+    (WALPE_WL_RECREATE=0) that output's wallpaper is loaded again on a new surface. In
+    both cases nothing restarts and the other output's wallpaper goes on."""
+    after = int(6000 * PATIENCE)
+    for recreate, what in ((None, "closed"), ("0", "closed, WALPE_WL_RECREATE=0")):
+        extra = {"WALPE_WL_CLOSE_AFTER_MS": str(after)}
+        if recreate is not None:
+            extra["WALPE_WL_RECREATE"] = recreate
+        t0 = time.time()
+        if not start(env, [("A", 640, 360, 0, 0), ("B", 480, 270, 640, 0)], what, extra=extra):
+            return
+        mark = env.mark()
+        (a, *_), (b, *_) = env.mons
+        pid = env.daemon.pid
+        # the surface that is closed is the first one the daemon made: the first output's
+        env.open(W["quad"])
+        lc.loaded(env, W["quad"])
+        env.open(W["anim"], index_of(env, b))
+        lc.loaded(env, W["anim"], index_of(env, b))
+        ok, lk = shows_quad(env, a, size=(640, 360))
+        check(ok and time.time() - t0 < after / 1000.0, f"{what}: the four-colour scene on the first output, an "
+              "animated one on the second, before the surface is closed", (lk, time.time() - t0))
+        before, up0 = lives(env)
+        said = wait_for(lambda: "as if the compositor had closed the wallpaper surface" in env.since(mark),
+                        after / 1000.0 / PATIENCE + 10, 0.2)
+        check(bool(said), f"{what}: the surface of the first output is closed", env.since(mark)[-300:])
+
+        def surface():
+            sf = [x for x in env.state().get("wl_surfaces") or [] if x.get("output") == a]
+            return sf[0] if len(sf) == 1 else {}
+        if recreate is None:
+            ok = wait_for(lambda: surface().get("role") == "ready" and surface().get("recreated") == 1, 20, 0.2)
+            check(bool(ok) and "it has its role again" in env.since(mark),
+                  f"{what}: the surface has its role again (status wl_surfaces: ready, recreated 1)", surface())
+        else:
+            ok = wait_for(lambda: "the window system closed its surface" in env.since(mark) and
+                          surface().get("role") == "ready" and surface().get("recreated") == 0 and
+                          env.state().get("render_threads_waiting") == 0, 30, 0.2)
+            check(bool(ok), f"{what}: the first output's monitor let go of the closed surface and has a new one "
+                  "(status wl_surfaces: ready, never re-created)", (surface(), env.since(mark)[-400:]))
+            check(lc.loaded(env, W["quad"], index_of(env, a), timeout=30), f"{what}: its wallpaper is loaded again",
+                  rc.brief(env.monitors()))
+        ok, lk = shows_quad(env, a, size=(640, 360))
+        check(ok, f"{what}: the four-colour scene is on the first output again", lk)
+        time.sleep(1.0 * PATIENCE)
+        now, up1 = lives(env)
+        log = env.since(mark)
+        check(not any(r in log for r in RESTART_LINES) and up1 > up0 and env.daemon.pid == pid,
+              f"{what}: no restart in place", (up0, up1))
+        lb, ln = before.get(b) or (None, 0), now.get(b) or (None, -1)
+        check(lb[0] is not None and lb[0] == ln[0] and (ln[1] or 0) > (lb[1] or 0),
+              f"{what}: the second output's wallpaper was not loaded again and went on drawing",
+              f"loads {lb[0]} -> {ln[0]}, frames {lb[1]} -> {ln[1]}")
+        healthy(env, mark, what)
+        env.stop_daemon()
 
 
 # ------------------------------------------------------------------ pointer
@@ -993,7 +1220,7 @@ def case_lost(env, W):
 
 # ------------------------------------------------------------------- cycles
 def case_cycles(env, W, rounds=6):
-    """not in the default run (each round is two restarts in place, ten seconds apart at least)"""
+    """not in the default run (it was two restarts in place a round, ten seconds apart at least)"""
     if not start(env, [("A", 640, 360, 0, 0)], "cycles"):
         return
     mark = env.mark()
@@ -1006,7 +1233,13 @@ def case_cycles(env, W, rounds=6):
             return len(os.listdir(f"/proc/{pid}/fd"))
         except OSError:
             return -1
-    counts = []
+
+    def threads():
+        try:
+            return len(os.listdir(f"/proc/{pid}/task"))
+        except OSError:
+            return -1
+    counts, tcounts = [], []
     for i in range(rounds):
         b = env.display.add_output(mode=(480, 270), pos=(640, 0))
         ok, _ = follow(env, lambda: len(rects(env)) == 2, 40)
@@ -1018,8 +1251,12 @@ def case_cycles(env, W, rounds=6):
         lc.loaded(env, W["red"], timeout=30)
         time.sleep(2.0 * PATIENCE)
         counts.append(open_files())
+        tcounts.append(threads())
     check(len(counts) == rounds and counts[-1] <= counts[1],
           "cycles: no more open files after the last round than after the second", counts)
+    check(len(tcounts) == rounds and tcounts[-1] <= tcounts[1],
+          "cycles: no more threads after the last round than after the second (a render thread that waits "
+          "is used again)", tcounts)
     check(env.daemon.poll() is None and env.daemon.pid == pid, "cycles: same process throughout")
     healthy(env, mark, "cycles")
     env.stop_daemon()
@@ -1228,6 +1465,7 @@ def case_fullscreen(env, W):
 OPT_IN = ("cycles",)
 CASES = [("start", case_start), ("layer", case_layer), ("two", case_two), ("mode", case_mode), ("scale", case_scale),
          ("noviewport", case_noviewport), ("rotate", case_rotate), ("hotplug", case_hotplug),
+         ("follow", case_follow), ("closed", case_closed),
          ("pointer", case_pointer), ("covered", case_covered), ("fullscreen", case_fullscreen),
          ("backend", case_backend),
          ("noshell", case_noshell), ("cycles", case_cycles), ("lost", case_lost)]

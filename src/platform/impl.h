@@ -18,7 +18,7 @@
  *    from inside a call the daemon makes into the backend - with two
  *    exceptions: pause signals may be reported (walpe_signal_set) from
  *    inside start () and from a provider's recheck (now = TRUE).
- *  - The three presentation hooks and set_buffer_size run on the render
+ *  - The three presentation hooks, set_buffer_size and surface_fit run on the render
  *    thread of the surface, with its EGL context current. They must not
  *    wait for the main thread to do something (the main thread may be
  *    joining that very render thread). swapped () is the only one that
@@ -110,6 +110,12 @@ void walpe_wayland_probe (WalpePlatformProbe *out);
  * Closes it when it is still there; called when another backend was
  * opened. */
 void walpe_wayland_probe_release (void);
+/* Wayland only: walpe_surface_follow_output and walpe_surface_fit of
+ * platform.h ("following an output in place"). Not members of the table:
+ * the X11 backend has no such thing, and a build without the Wayland
+ * backend has neither these nor the daemon's code that calls them. */
+gboolean walpe_wayland_surface_follow_output (WalpeSurface *s, const WalpeOutput *o, int *w, int *h);
+gboolean walpe_wayland_surface_fit (WalpeSurface *s, int *w, int *h);
 
 /* helpers of platform.c for the backends */
 /* a filled-in output record: name copied, canon derived; the other
