@@ -161,6 +161,17 @@ named after the wallpaper.
   file is there (0.4 s for a clip of four seconds here; a few seconds for a song). A video
   without a sound track gets an empty file of that name, so nobody asks again. A changed
   video gets a new file; files nothing played for 90 days are removed.
+- What that costs, measured: `ffmpeg` runs once per video at the lowest CPU and disk
+  priority - 0.1 s of CPU for a clip of 10 s, 0.6 to 0.9 s for a song of four minutes, 22 s
+  for a video of two hours (34 s by the clock when the machine is idle, 100 s beside a
+  daemon that renders in software; the sound comes when it is done). The file takes 3 to
+  4 MB a minute for music (1 MB for a plain tone, up to 11 MB for noise): 388 MB for the two
+  hours. The track is read as a stream while it plays: a track of two hours takes no more
+  of the daemon's memory than one of ten seconds, and a place in it - after a pause, when
+  sound is switched on in the middle - is found without decoding what lies in front of it.
+  A wallpaper that is replaced before its `ffmpeg` is done takes it along, and leaves
+  nothing in the cache: the track is taken out from the start the next time the video is
+  shown (and kept once the video stays for as long as that takes).
 - **With sound off nothing of this happens**: no ffmpeg, no file, no thread, no stream.
 - **Where the clip starts again nothing is heard of it.** One pass of the track is one pass
   of the clip, to the sample, and the track loops by itself in one stream: the file's first
