@@ -998,6 +998,28 @@ static void test_period (const char *dir)
            "from 2.2 s of a pass of 2.5 s: %d passes, %" G_GINT64_FORMAT " frames", st.plays, st.frames);
     walpe_sound_group_free (g);
     CHECK (threads_gone (), "period: the threads end");
+    /* A player whose only file is no sound - the empty file that stands for
+     * "this video has no sound track" - gives its thread back at once, with
+     * the group still there (it used to sleep until the group was freed:
+     * one thread for every video wallpaper without sound, while shown). */
+    {
+        char *none = g_build_filename (dir, "none-sound.flac", NULL);
+        g_file_set_contents (none, "", 0, NULL);
+        WalpeSoundGroup *ge = walpe_sound_group_new ("/w/period-empty", 1);
+        WalpeSound *se = snd_new (ge, none, NULL, WALPE_SOUND_LOOP, 1.0f);
+        walpe_sound_set_period (se, 4.0);
+        walpe_sound_group_set_active (ge, TRUE);
+        walpe_sound_restart_at (se, 0.1);
+        CHECK (threads_gone () && stats_of (se).frames == 0,
+               "a player with an empty file: its thread ends while the group lives (%d left)", walpe_sound_threads ());
+        walpe_sound_restart_at (se, 1.0);       /* (told a place again, as the picture does: no new thread) */
+        walpe_sound_play (se);
+        g_usleep (20000);
+        CHECK (walpe_sound_threads () == 0, "... and none is made for it again (%d)", walpe_sound_threads ());
+        walpe_sound_group_free (ge);
+        g_remove (none);
+        g_free (none);
+    }
     /* Paused near the end of a pass. The player fades out with 20 ms more
      * of the file, which count as part of the pass - and counted past its
      * end when fewer than 20 ms were left: the pass then had a negative

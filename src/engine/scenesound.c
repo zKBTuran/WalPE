@@ -823,7 +823,11 @@ static int next_action (WalpeSound *s, gboolean out_is_open, double *restart_s)
     int act;
     g_mutex_lock (&s->lock);
     for (;;) {
-        if (s->quit)
+        /* (a player none of whose files can be played will never have
+         * anything to put out: its thread ends with that, it does not wait
+         * for the group to be freed - a video wallpaper without a sound
+         * track kept one sleeping thread for as long as it was shown) */
+        if (s->quit || s->broken)
             act = ACT_QUIT;
         else if (s->rewind)
             act = ACT_REWIND;
