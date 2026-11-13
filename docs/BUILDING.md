@@ -65,8 +65,9 @@ parts need no new library: graphics devices are read from sysfs, and VA-API, DRM
 devices go through FFmpeg's own interface.
 
 Three libraries are not linked: the daemon loads them by name when they are installed, and
-without one nothing but its use is missing, with no message. `libpulse-simple.so.0` plays
-wallpaper sound; it is part of the libpulse the `audio` option needs. `libXss.so.1` tells
+without one nothing but its use is missing (for the two X libraries with no message).
+`libpulse-simple.so.0` plays wallpaper sound; it is part of the libpulse the `audio` option
+needs. `libXss.so.1` tells
 the X11 backend that the X screen saver is on, which pauses like a sleeping display
 (Debian and Ubuntu: `libxss1`, Arch: `libxss`). `libXfixes.so.3` reports the start and the
 end of a compositing manager to "pause when covered" on X11, which otherwise asks when a
@@ -360,7 +361,29 @@ makepkg -si _scenescript=0   # without SceneScript, when there is no QuickJS (be
 ```
 
 `pacman -R walpe` removes it again; settings, the library and caches in your home directory
-stay. The package is the build of this file with the prefix `/usr`, and differs from
+stay.
+
+**Earlier copies first.** pacman knows nothing of a WalPE that was installed or run by
+hand, and such a copy can be the one that starts:
+
+- An earlier `meson install` with the default prefix put the programs into
+  `/usr/local/bin`, which comes before `/usr/bin` in Arch's `PATH`: `walpe`, `walpe-ctl` and
+  the autostart entries (`Exec=walpe-daemon`) would go on starting the old ones. Remove it
+  with `sudo ninja -C <its build directory> uninstall`; the same, without `sudo`, for one
+  in `~/.local` where `~/.local/bin` is in your `PATH`.
+- The tray switch in the window's settings writes `~/.config/autostart/walpe-tray.desktop`
+  with the full path of the `walpe-tray` beside the window it was pressed in, and that
+  file wins over the package's entry of the same name. If you used the switch in a WalPE
+  that ran from a build directory, the tray of that directory starts at login, and the
+  engine and the window it starts are that directory's too: delete the file, or switch the
+  tray off and on once in the installed window.
+- A `walpe.service` copied to `~/.config/systemd/user/` names `~/.local/bin/walpe-daemon`
+  and hides the package's unit of the same name: delete it.
+
+`walpe-ctl diag` names in its first line the version of the engine that runs and what
+started it; `readlink /proc/$(pidof walpe-daemon)/exe` names its file.
+
+The package is the build of this file with the prefix `/usr`, and differs from
 `./build.sh` and `meson install` in this:
 
 - **Nothing is left out without a word.** Every optional part is asked for by name, and
@@ -375,8 +398,8 @@ stay. The package is the build of this file with the prefix `/usr`, and differs 
   `~/.config/autostart/` (the window's tray switch does it for `walpe-tray.desktop`).
   For sway, Hyprland and the like, which run no autostart entries, the package has the
   systemd user unit, not switched on: `systemctl --user enable --now walpe.service`. Use
-  one of the two: a second `walpe-daemon` ends with status 1, and the unit starts it again
-  every three seconds.
+  one of the two: a second `walpe-daemon` ends with status 1, which the unit takes for a
+  failure and answers with a new start every three seconds (`Restart=on-failure`).
 - **The add-on for KDE Plasma is installed for all users**, as the wallpaper type "WalPE"
   in `/usr/share/plasma/wallpapers`. Nothing uses it until you choose it: right-click the
   desktop, "Desktop and Wallpaper", wallpaper type **WalPE**
@@ -393,9 +416,9 @@ stay. The package is the build of this file with the prefix `/usr`, and differs 
   file says `-O2` where `./build.sh` builds with `-O3`.
 
 QuickJS, which runs the scripts of scene wallpapers and is linked statically, is in none
-of Arch's repositories: `quickjs` is in the AUR and has to be installed before `makepkg`
-(an AUR helper does both). `quickjs-ng` from `extra` is another library, with other file
-names, and is not what the build looks for. `_scenescript=0` builds without: scripted
+of Arch's repositories: the AUR has `quickjs`, which has to be installed before `makepkg`
+runs (it is needed for the build only). `quickjs-ng` from `extra` is another library, with
+other file names, and is not what the build looks for. `_scenescript=0` builds without: scripted
 values of scenes (clocks, switches, values that follow the sound) then keep their start
 values.
 
