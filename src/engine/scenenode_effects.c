@@ -1034,6 +1034,64 @@ static const char *fx_trim (const char *s)
 #include "fx_srcrepair.h"
 #include "fx_essl.h"
 
+/* FxPreProbe (fx_preproc.h): does this driver's preprocessor define `name`
+ * in a shader of the kind `user` says, and as what? The driver is asked
+ * with three lines that it compiles or does not; the answers are kept per
+ * thread. -1: it does not answer as expected (then nothing is assumed). */
+static int fx_pre_probe (const char *name, gint64 *value, gpointer user)
+{
+    static __thread GHashTable *known;      /* "v name" / "f name" -> 2 + answer (4: defined as 0) */
+    static __thread int usable = -1;
+    /* (a name nobody defines must read as not defined, both ways round; then:
+     * is `name` defined, is it 1, is it 0) */
+    static const char *const ask[] = { "#ifdef WALPE_NO_SUCH_NAME_", "#ifndef WALPE_NO_SUCH_NAME_", "#ifdef ", "#if 1 == ",
+                                       "#if 0 == " };
+    const GLenum stage = GPOINTER_TO_UINT (user);
+    const int es = fx_essl ();
+    char *key = g_strdup_printf ("%c %s", stage == GL_VERTEX_SHADER ? 'v' : 'f', name);
+    if (!known)
+        known = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+    gpointer kept = g_hash_table_lookup (known, key);
+    if (kept) {
+        const int a = GPOINTER_TO_INT (kept) - 2;
+        g_free (key);
+        *value = a == 1;
+        return a == 2 ? 1 : a;
+    }
+    int answer = -2;
+    for (int step = usable < 0 ? 0 : 2; answer == -2 && step < 5; step++) {
+        char *src = g_strdup_printf ("#version %d%s\n%s%s\n#error walpe\n#endif\nvoid main () {}\n", es ? es : 330,
+                                     es ? " es" : "", ask[step], step < 2 ? "" : name);
+        const char *text = src;
+        GLuint sh = glCreateShader (stage);
+        GLint ok = 0;
+        glShaderSource (sh, 1, &text, NULL);
+        glCompileShader (sh);
+        glGetShaderiv (sh, GL_COMPILE_STATUS, &ok);
+        glDeleteShader (sh);
+        g_free (src);
+        if (step == 0)
+            usable = ok ? -1 : 0;
+        else if (step == 1)
+            usable = usable < 0 && !ok;
+        if (step < 2) {
+            if (!usable)
+                answer = -1;
+        } else if (step == 2 && ok) {
+            answer = 0;
+        } else if (step > 2 && !ok) {
+            answer = step == 3 ? 1 : 2;
+        } else if (step == 4) {
+            answer = -1;        /* defined, as something else than 0 or 1 */
+        }
+    }
+    if (usable == 0)
+        answer = -1;
+    g_hash_table_insert (known, key, GINT_TO_POINTER (answer + 2));
+    *value = answer == 1;
+    return answer == 2 ? 1 : answer;
+}
+
 /* FxTryFn on a GL shader object */
 static gboolean fx_try_gl (const char *src, char *log, gsize logsize, gpointer user)
 {
@@ -2318,7 +2376,12 @@ static GLuint fx_build_program (char **vsrc, char **fsrc, const char *shader,
     if (!fx_prepass (vsrc, fsrc, shader))
         return 0;
     gint64 vst = 0, fst = 0;
-    if (!fx_expansion_sizes_once (*vsrc, &vst) || !fx_expansion_sizes_once (*fsrc, &fst)) {
+    fx_pre_probe_stage = GL_VERTEX_SHADER;
+    gboolean fits = fx_expansion_sizes_once (*vsrc, &vst);
+    fx_pre_probe_stage = GL_FRAGMENT_SHADER;
+    fits = fits && fx_expansion_sizes_once (*fsrc, &fst);
+    fx_pre_probe_stage = 0;
+    if (!fits) {
         g_warning ("fx: shader %s (%s): its macros expand to more than %d tokens, not compiled",
                    walpe_log_str (shader), walpe_log_str (dbgname), FX_MAX_EXPANSION);
         return 0;

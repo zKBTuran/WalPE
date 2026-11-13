@@ -1392,7 +1392,101 @@ static void audit_checks (void)
         for (int i = 0; i < 300; i++)
             g_string_append_printf (s, "#define C%d C%d\n", i, i + 1);
         g_string_append (s, "#define C300 1\nfloat a = C0;\n");
-        result (!fx_expansion_ok (s->str), "300 macros deep: refused", NULL);
+        result (fx_expansion_ok (s->str), "300 macros that each name the next: accepted (one token)", NULL);
+        g_string_assign (s, "");
+        for (int i = 0; i < 20000; i++)
+            g_string_append_printf (s, "#define C%d C%d\n", i, i + 1);
+        g_string_append (s, "#define C20000 1\nfloat a = C0;\n");
+        result (!fx_expansion_ok (s->str), "20000 macros that each name the next: refused (1.8 s in Mesa's preprocessor)", NULL);
+        for (int deep = 300; deep <= 600; deep += 300) {
+            g_string_assign (s, "#define F(x) (x)\nfloat a = ");
+            for (int i = 0; i < deep; i++)
+                g_string_append (s, "F(");
+            g_string_append (s, "1.0");
+            for (int i = 0; i < deep; i++)
+                g_string_append (s, ")");
+            g_string_append (s, ";\n");
+            result (fx_expansion_ok (s->str) == (deep == 300), deep == 300
+                    ? "macro calls nested 300 deep in each other's arguments: accepted"
+                    : "macro calls nested 600 deep in each other's arguments: refused", NULL);
+        }
+        /* any number of parameters (a macro of 300 compiles in Mesa) */
+        g_string_assign (s, "#define SUM(");
+        for (int i = 0; i < 300; i++)
+            g_string_append_printf (s, "%sp%d", i ? ", " : "", i);
+        g_string_append (s, ") (p0 + p150 + p299 + p0)\nfloat a = SUM(");
+        for (int i = 0; i < 300; i++)
+            g_string_append_printf (s, "%s%d.0", i ? ", " : "", i);
+        g_string_append (s, ");\n");
+        {
+            gint64 st300 = 0;
+            gboolean ok300 = fx_expansion_sizes (s->str, &st300);
+            /* float a = ( 0.0 + 150.0 + 299.0 + 0.0 ) */
+            char *d = g_strdup_printf ("statement of %" G_GINT64_FORMAT " tokens (12)", st300);
+            result (ok300 && st300 == 12, "a macro with 300 parameters: accepted, each argument in its place", d);
+            g_free (d);
+        }
+        /* What a preprocessor does with a call and the line-by-line estimate
+         * of 0.14.0 did not: each of these is 16.7 million copies of the
+         * argument (2.5 GB and a crash in Mesa 25.2 for the first) and
+         * counted as a few dozen tokens. */
+        {
+            static const char *const bomb = "#define A(x) x x x x x x x x\n#define B(x) A(A(A(A(x))))\n#define C(x) B(B(x))\n";
+            static const struct { const char *what, *use; } call[] = {
+                { "an argument with a ';' in it", "void main () {\n\tfloat a = 0.0;\n\tC(a += 0.000001;)\n}\n" },
+                { "an argument on the lines behind the name", "void main () {\n\tfloat a = 0.0;\n\tC\n\t(\n\t\ta += 0.000001;\n\t)\n}\n" },
+                { "a call that begins in a macro and ends in the text",
+                  "#define OPEN C(\nvoid main () {\n\tfloat a = 0.0;\n\tOPEN a += 0.000001; )\n}\n" },
+                { "a macro named by ## from two halves",
+                  "#define CAT(p, q) p ## q\nvoid main () {\n\tfloat a = 0.0;\n\tCAT(, C)(a += 0.000001;)\n}\n" },
+                { "an argument of braces and statements", "void main () {\n\tfloat a = 0.0;\n\tC({ a += 0.000001; })\n}\n" },
+            };
+            for (guint k = 0; k < G_N_ELEMENTS (call); k++) {
+                g_string_assign (s, bomb);
+                g_string_append (s, call[k].use);
+                char *what = g_strdup_printf ("16.7 million copies through %s: expansion size refused", call[k].what);
+                result (!fx_expansion_ok (s->str), what, NULL);
+                g_free (what);
+            }
+            /* the same macros where no compiler sees them: the text is what
+             * the #if directives leave, with the macros the source defines */
+            g_string_assign (s, "#define QUALITY 1\n");
+            g_string_append (s, bomb);
+            g_string_append (s, "void main () {\n\tfloat a = 0.0;\n#if QUALITY > 1\n\tC(a += 0.000001;)\n#elif defined(NOTHING)\n"
+                                "\tC(a += 1.0;)\n#else\n\ta += 1.0;\n#endif\n}\n");
+            gint64 st = 0;
+            gboolean fits = fx_expansion_sizes (s->str, &st);
+            char *d = g_strdup_printf ("longest statement %" G_GINT64_FORMAT, st);
+            result (fits && st == 4, "the macros in branches that are not compiled: accepted, not counted", d);
+            g_free (d);
+            /* ... and behind a name only the driver defines, with nobody to
+             * ask (no context here): counted both ways */
+            g_string_assign (s, bomb);
+            g_string_append (s, "void main () {\n\tfloat a = 0.0;\n#ifdef GL_ARB_no_such_extension\n\ta += 1.0;\n#else\n"
+                                "\tC(a += 0.000001;)\n#endif\n}\n");
+            result (!fx_expansion_ok (s->str), "the macros behind a name of the driver's, in the #else: refused", NULL);
+            g_string_assign (s, bomb);
+            g_string_append (s, "void main () {\n\tfloat a = 0.0;\n#if defined(GL_ARB_no_such_extension) && !defined(GL_ARB_another)\n"
+                                "\tC(a += 0.000001;)\n#endif\n}\n");
+            result (!fx_expansion_ok (s->str), "... behind two such names, one defined and one not: refused", NULL);
+            g_string_assign (s, bomb);
+            g_string_append (s, "void main () {\n\tfloat a = 0.0;\n#if __LINE__ == 7\n\tC(a += 0.000001;)\n#endif\n}\n");
+            result (!fx_expansion_ok (s->str), "... behind a condition on the line number: refused", NULL);
+            g_string_assign (s, "#ifdef GL_ES\nprecision mediump float;\n#endif\n#ifdef GL_OES_standard_derivatives\n"
+                                "#extension GL_OES_standard_derivatives : enable\n#endif\nvoid main () {\n"
+                                "#ifdef GL_FRAGMENT_PRECISION_HIGH\n\thighp float a = 1.0;\n#else\n\tfloat a = 1.0;\n#endif\n}\n");
+            fits = fx_expansion_sizes (s->str, &st);
+            d = g_strdup_printf ("longest statement %" G_GINT64_FORMAT, st);
+            result (fits && st == 5, "the usual tests of GL_ES and the driver's names: accepted", d);
+            g_free (d);
+            /* a statement is what the compiler gets: the ';' of a macro's
+             * body and of an argument end one */
+            fits = fx_expansion_sizes ("#define STEP a += 1.0; b += a;\n#define TWICE(x) x x\nvoid main () {\n\tfloat a = 0.0, b = 0.0;\n"
+                                       "\tSTEP STEP STEP STEP\n\tTWICE(TWICE(a = a * 2.0 + b;))\n}\n", &st);
+            d = g_strdup_printf ("longest statement %" G_GINT64_FORMAT, st);
+            result (fits && st == 8, "statements inside a macro's body and inside an argument: each its own", d);
+            g_free (d);
+        }
         g_string_assign (s, "#define SELF SELF + 1\n#define P Q\n#define Q P\nfloat a = SELF + P;\n");
         result (fx_expansion_ok (s->str), "self-referencing macros: accepted (not expanded in themselves)", NULL);
         g_string_free (s, TRUE);

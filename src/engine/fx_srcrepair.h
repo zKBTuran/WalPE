@@ -2173,112 +2173,24 @@ static gboolean fx_varying_repair (char **vsrc, char **fsrc, gboolean lenient)
  * What the driver's preprocessor would have to produce. "#define A0
  * (A1+A1+...+A1)" over eight levels is 16.7 million tokens: a minute and
  * gigabytes in Mesa's compiler, sixteen-fold the OOM killer - from 1 KB of
- * wallpaper data. The size is computed, never produced: an object-like
- * macro once (memo), a function-like one per call from the sizes of its
- * arguments. Conservative: #define lines count whatever #if they are in.
+ * wallpaper data.
+ *
+ * The size is that of the text after preprocessing, and it comes from
+ * preprocessing it (fx_preproc.h, which stops at the limit): the lines the #if
+ * directives leave, with the macros the built source defines (the combos
+ * are among them), every macro call replaced. Until 0.14.0 the size was
+ * estimated line by line from the text of the "#define" lines, and what a
+ * preprocessor does and that estimate did not were ways around the limit:
+ *   - "C(a += 0.000001;)": the line was cut at the ';' before the call was
+ *     looked at, the argument counted as nothing - 28 tokens for 16.7
+ *     million copies, 2.5 GB and a crash in the driver from 190 bytes;
+ *   - a call whose arguments stand on the following lines: the same;
+ *   - "#define OPEN C(C(C(C(" and "OPEN a; ))))": a call that begins in a
+ *     macro's replacement and ends in the text behind it.
  * Real effect shaders expand to a few 10000 tokens. */
 #define FX_MAX_EXPANSION 1000000
 
-typedef struct {
-    char *body;
-    char **params;   /* NULL = object-like */
-    int np;
-    gint64 size;     /* object-like: tokens it expands to, -1 = not known yet */
-    gboolean busy;   /* being expanded: a macro is not expanded inside itself */
-} FxMac;
-
-typedef struct { GHashTable *macros; gint64 work; } FxMx;
-
-static void fx_mac_free (gpointer p)
-{
-    FxMac *m = p;
-    g_free (m->body);
-    g_strfreev (m->params);
-    g_free (m);
-}
-
-/* tokens the text [s, e) expands to; in / argc: the function-like macro
- * whose body this is and the sizes of its arguments */
-static gint64 fx_mx_text (FxMx *m, const char *s, const char *e, const FxMac *in,
-                          const gint64 *argc, int depth)
-{
-    gint64 total = 0;
-    const char *p = s;
-    while (p < e && total <= FX_MAX_EXPANSION && m->work <= FX_MAX_EXPANSION) {
-        if (g_ascii_isspace (*p)) {
-            p++;
-            continue;
-        }
-        m->work++;
-        if (!fx_is_ident_start (*p)) {
-            if (g_ascii_isdigit (*p))
-                while (p + 1 < e && (g_ascii_isalnum (p[1]) || p[1] == '.'))
-                    p++;
-            p++;
-            total++;
-            continue;
-        }
-        const char *q = p;
-        while (q < e && fx_is_ident (*q))
-            q++;
-        gsize len = (gsize) (q - p);
-        int pi = -1;
-        for (int i = 0; in && i < in->np && pi < 0; i++)
-            if (strlen (in->params[i]) == len && !strncmp (in->params[i], p, len))
-                pi = i;
-        char *name = pi < 0 ? g_strndup (p, len) : NULL;
-        FxMac *mac = name ? g_hash_table_lookup (m->macros, name) : NULL;
-        g_free (name);
-        p = q;
-        if (pi >= 0) {
-            total += argc[pi];
-        } else if (!mac || mac->busy) {
-            total++;
-        } else if (depth > 200 || mac->np > 64) {
-            /* macros nested 200 deep, 65 parameters: not a shader */
-            m->work = (gint64) FX_MAX_EXPANSION + 1;
-        } else if (!mac->params) {
-            if (mac->size < 0) {
-                mac->busy = TRUE;
-                mac->size = fx_mx_text (m, mac->body, mac->body + strlen (mac->body), NULL, NULL,
-                                        depth + 1);
-                mac->busy = FALSE;
-            }
-            total += mac->size;
-        } else {
-            const char *o = p;
-            while (o < e && g_ascii_isspace (*o))
-                o++;
-            if (o >= e || *o != '(') {
-                total++;   /* the name without a call */
-                continue;
-            }
-            gint64 ac[64] = { 0 };
-            int na = 0, d = 0;
-            const char *a = o + 1, *c = o + 1;
-            for (; c < e; c++) {
-                if (*c == '(' || *c == '[') {
-                    d++;
-                } else if ((*c == ')' || *c == ']') && d > 0) {
-                    d--;
-                } else if (*c == ')' || (*c == ',' && d == 0)) {
-                    gint64 v = fx_mx_text (m, a, c, in, argc, depth + 1);
-                    if (na < 64)
-                        ac[na] = v;
-                    na++;
-                    a = c + 1;
-                    if (*c == ')')
-                        break;
-                }
-            }
-            mac->busy = TRUE;
-            total += fx_mx_text (m, mac->body, mac->body + strlen (mac->body), mac, ac, depth + 1);
-            mac->busy = FALSE;
-            p = c < e ? c + 1 : e;
-        }
-    }
-    return MIN (total, (gint64) FX_MAX_EXPANSION + 1);
-}
+#include "fx_preproc.h"
 
 /* ---- statement size ------------------------------------------------------
  * A driver's compiler walks an expression by recursion, and one statement
@@ -2295,94 +2207,56 @@ static gint64 fx_mx_text (FxMx *m, const char *s, const char *e, const FxMac *in
  * that of a thread with a stack of 8 MiB. */
 #define FX_MAX_STATEMENT 8192
 
-/* FALSE: the source expands beyond FX_MAX_EXPANSION tokens. *statement
+/* Names only the driver defines (GL_OES_standard_derivatives,
+ * GL_FRAGMENT_PRECISION_HIGH, ...): asked of the driver itself where a
+ * context is current - fx_build_program () sets this for the kind of
+ * shader it is about to compile; 0 = nobody to ask (tests, tools), and
+ * what hangs on such a name is counted both ways. */
+static __thread guint fx_pre_probe_stage;
+static int fx_pre_probe (const char *name, gint64 *value, gpointer user);
+
+/* FALSE: the source expands beyond FX_MAX_EXPANSION tokens (or beyond what
+ * fx_preproc.h reads: macro calls nested 512 deep in each other's arguments,
+ * text of more than 24 MiB). *statement
  * (when asked for): the tokens of its longest statement - what stands
- * between two of ';', '{' and '}', macros expanded. A macro counts as part
- * of the statement that uses it, whatever its body holds, and lines of
- * dead #if branches count like the others. */
+ * between two of ';', '{' and '}' after preprocessing.
+ * What cannot be known here - a condition on __LINE__, a name of the
+ * driver's nobody can be asked about - is run both ways (fx_preproc.h); the
+ * numbers are the largest of all runs. */
 static gboolean fx_expansion_sizes (const char *src, gint64 *statement)
 {
-    FxMx m = { g_hash_table_new_full (g_str_hash, g_str_equal, g_free, fx_mac_free), 0 };
-    gint64 total = 0, run = 0, longest = 0;
-    GString *ln = g_string_new (NULL);
-    for (const char *p = src; *p && total <= FX_MAX_EXPANSION && m.work <= FX_MAX_EXPANSION;) {
-        /* one logical line (backslash-newline joined). A line ends where it
-         * ends for the driver: at a line feed, at a carriage return, or at
-         * the two together in either order (GLSL 3.30, 3.1: "terminated by
-         * carriage-return or line-feed; if both are used together, it will
-         * count as only a single line termination"). Looking for line feeds
-         * only made one line of a source whose lines end in carriage
-         * returns: its first "#define" swallowed all the others, and macros
-         * that expand to millions of tokens counted as a handful. */
-        g_string_truncate (ln, 0);
-        for (;;) {
-            gsize n = strcspn (p, "\r\n");
-            g_string_append_len (ln, p, (gssize) n);
-            p += n;
-            const gboolean nl = *p != 0;
-            if (nl)
-                p += (p[1] == '\r' || p[1] == '\n') && p[1] != p[0] ? 2 : 1;
-            if (!nl || !ln->len || ln->str[ln->len - 1] != '\\')
-                break;
-            ln->str[ln->len - 1] = ' ';
-        }
-        const char *d = fx_sp (ln->str), *end = ln->str + ln->len;
-        if (*d != '#') {
-            /* statement by statement */
-            for (const char *s = d; total <= FX_MAX_EXPANSION && m.work <= FX_MAX_EXPANSION;) {
-                const char *q = s;
-                while (q < end && *q != ';' && *q != '{' && *q != '}')
-                    q++;
-                gint64 n = fx_mx_text (&m, s, q, NULL, NULL, 0);
-                total += n;
-                run += n;
-                longest = MAX (longest, run);
-                if (q >= end)
-                    break;
-                total++;   /* the ';', '{' or '}' */
-                m.work++;
-                run = 0;
-                s = q + 1;
-            }
-            continue;
-        }
-        const char *w = fx_sp (d + 1), *we = w;
-        while (fx_is_ident (*we))
-            we++;
-        gsize wl = (gsize) (we - w);
-        if ((wl == 2 && !strncmp (w, "if", 2)) || (wl == 4 && !strncmp (w, "elif", 4))) {
-            total += fx_mx_text (&m, we, end, NULL, NULL, 0);
-        } else if ((wl == 6 && !strncmp (w, "define", 6)) || (wl == 5 && !strncmp (w, "undef", 5))) {
-            const char *n = fx_sp (we), *ne = n;
-            while (fx_is_ident (*ne))
-                ne++;
-            if (ne == n)
-                continue;
-            char *name = g_strndup (n, (gsize) (ne - n));
-            if (wl == 5) {
-                g_hash_table_remove (m.macros, name);
-                g_free (name);
-                continue;
-            }
-            FxMac *mac = g_new0 (FxMac, 1);
-            mac->size = -1;
-            const char *b = ne;
-            if (*ne == '(') {
-                const char *ce = strchr (ne, ')');
-                char *plist = g_strndup (ne + 1, ce ? (gsize) (ce - ne - 1) : 0);
-                mac->params = g_strsplit (plist, ",", -1);
-                g_free (plist);
-                for (mac->np = 0; mac->params[mac->np]; mac->np++)
-                    g_strstrip (mac->params[mac->np]);
-                b = ce ? ce + 1 : end;
-            }
-            mac->body = g_strdup (b);
-            g_hash_table_insert (m.macros, name, mac);
-        }
+    FxPreConf conf = { 0 };
+    gint64 longest = 0;
+    gboolean ok = TRUE;
+    conf.max_out = FX_MAX_EXPANSION + 1;
+    conf.max_work = 12 * (gint64) FX_MAX_EXPANSION;
+    conf.max_bytes = 24 * 1024 * 1024;
+    if (fx_pre_probe_stage) {
+        conf.probe = fx_pre_probe;
+        conf.probe_user = GUINT_TO_POINTER (fx_pre_probe_stage);
     }
-    gboolean ok = total <= FX_MAX_EXPANSION && m.work <= FX_MAX_EXPANSION;
-    g_string_free (ln, TRUE);
-    g_hash_table_unref (m.macros);
+    /* (all the ways together get twice the work of one: a real shader
+     * has no condition that is run both ways) */
+    const gint64 one_way = conf.max_work;
+    gint64 left = 2 * one_way;
+    for (;;) {
+        FxPre pp;
+        conf.max_work = MIN (one_way, left);
+        ok = fx_pre_run (&pp, src, &conf) && ok;
+        left -= MIN (pp.work, left);
+        const FxPreTok *t = (const FxPreTok *) pp.out->data;
+        gint64 run = 0;
+        for (guint i = 0; i < pp.out->len; i++) {
+            if (t[i].kind == FXPRE_T_PUNCT && t[i].len == 1 && (t[i].s[0] == ';' || t[i].s[0] == '{' || t[i].s[0] == '}'))
+                run = 0;
+            else if (++run > longest)
+                longest = run;
+        }
+        const int used = pp.unknown;
+        fx_pre_clear (&pp);
+        if (!ok || !fx_pre_next (&conf.forced, used))
+            break;
+    }
     if (statement)
         *statement = longest;
     return ok;
