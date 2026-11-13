@@ -671,9 +671,9 @@ static char *window_class_name (Window w)
 
 /* Does the window manager say that it knows the desktop type (x11desk.h:
  * walpe_x11_wm_knows_desktop)? Asked when the first window of that type
- * that lies over a monitor is found, and again after the window manager
- * came, went or changed what it lists - never in a session without such a
- * window: no atom, no request there. */
+ * is found on a monitor, and again after the window manager came, went or
+ * changed what it lists - never in a session without such a window: no
+ * atom, no request there. */
 static gboolean wm_knows_desktop (void)
 {
     if (X.wm_desk < 0) {
@@ -791,11 +791,26 @@ static void desk_apply (void)
         any = SURF (i)->host != None || SURF (i)->host_want != None;
     if (!any)
         return;         /* no desktop window, none left behind: a bare window manager */
-    const gboolean cm = walpe_x11_desk_see_through (X.wm_name, X.n_desks > 0 && compositor_running ());
     /* (asked only when it decides something: `auto`, and a desktop window is there) */
     const gboolean allowed = walpe_x11_desk_allowed (X.desk_mode, X.desk_mode == WALPE_X11_DESK_AUTO &&
                                                      X.n_desks > 0 && wm_knows_desktop ());
     const WalpeX11DeskMode mode = allowed ? X.desk_mode : WALPE_X11_DESK_ROOT;
+    /* Is a compositing manager running? That decides something only for a
+     * desktop window with a 32-bit visual that lies over a monitor
+     * (x11desk.h: nothing is seen through any other, and a smaller one is
+     * no desktop). The question is a request to the server, and this runs
+     * after every scan of the windows: xfdesktop, caja, pcmanfm and
+     * pcmanfm-qt have 24-bit windows, and so has - or is small - a system
+     * monitor's window of the desktop type under dwm, where a scan must
+     * cost what it did without this file. */
+    gboolean deep = FALSE;
+    for (guint k = 0; k < X.n_desks && !deep; k++)
+        for (guint i = 0; X.desks[k].depth == 32 && i < X.surfs->len && !deep; i++) {
+            const XRect *g = &SURF (i)->geom;
+            const WalpeDeskRect mon = { g->x, g->y, g->width, g->height };
+            deep = walpe_x11_desk_covers (&X.desks[k], &mon);
+        }
+    const gboolean cm = walpe_x11_desk_see_through (X.wm_name, deep && compositor_running ());
     for (guint i = 0; i < X.surfs->len; i++) {
         X11Surface *s = SURF (i);
         if (s->kind != WALPE_SURFACE_WALLPAPER || s->xid == None || s->destroyed)
