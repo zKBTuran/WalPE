@@ -1001,14 +1001,21 @@ if with_tests
 # no X function left, and no build's daemon names libpulse-simple (scene
 # sound makes its calls with libpulse itself). tests/linkage_test.sh reads the
 # two files with readelf and nm; skipped without them. No display, no daemon.
+# And what the modules take from the daemon is in modules.dynlist: the
+# daemon of a system whose libraries ask for --export-dynamic (Ubuntu
+# 24.04) exports every WALPE_API function, and a module that needs one the
+# list does not name loads there and nowhere else.
 linkage_deps = [daemon]
 if have_web
   linkage_deps += web_mod
 endif
+if have_ffmpeg
+  linkage_deps += video_mod
+endif
 test('linkage', find_program('sh'),
   args: [files('tests/linkage_test.sh'), meson.current_build_dir(),
          have_wayland ? 'wayland' : 'nowayland',
-         have_x11 or have_webhost_x11 ? 'x11' : 'nox11'],
+         have_x11 or have_webhost_x11 ? 'x11' : 'nox11', dynlist],
   depends: linkage_deps, timeout: 60)
 
 # docs/ENVIRONMENT.md names every variable of WalPE's own that a test
