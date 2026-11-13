@@ -533,7 +533,15 @@ static int wl_sync_until (struct wl_display *dpy, struct wl_event_queue *q, gint
             continue;
         }
         if (pr > 0 && (pfd.revents & POLLIN)) {
-            if (wl_display_read_events (dpy) < 0) {
+            /* What was read is handed out before the next read. The
+             * compositor's last sentence (wl_display.error) waits on a
+             * queue of its own, which the test at the top does not see:
+             * the next read then met the closed socket first, and the
+             * connection had ended with "broken pipe" instead of with the
+             * protocol error it ended with (wl_dpy_refused). */
+            if (wl_display_read_events (dpy) < 0 ||
+                (q ? wl_display_dispatch_queue_pending (dpy, q)
+                   : wl_display_dispatch_pending (dpy)) < 0) {
                 rc = -1;
                 break;
             }
@@ -3239,6 +3247,20 @@ static gboolean wl_open_once (const WalpePlatformOpts *opts, char **err, gint64 
              * tried once, as where it was written) */
             *going_down = !kept && !wl_handed && !g_getenv ("WAYLAND_SOCKET") &&
                           g_get_monotonic_time () < deadline;
+            /* ... and not after a protocol error: that compositor is not
+             * on its way out, it objected to what this client sent, and
+             * would to the same requests five times a second for as long
+             * as the wait lasts. A daemon that waits says why it stops. */
+            if (opts->reconnect_wait_s > 0 && wl_dpy_refused (W.dpy)) {
+                const struct wl_interface *itf = NULL;
+                uint32_t id = 0;
+                uint32_t code = wl_display_get_protocol_error (W.dpy, &itf, &id);
+                *going_down = FALSE;
+                fail = fail_text = g_strdup_printf (
+                    "the Wayland compositor closed the connection during start-up with a protocol "
+                    "error (%u on %s@%u): it is not tried again (wayland_reconnect)", code,
+                    itf ? itf->name : "?", id);
+            }
         } else if (r == 0) {
             fail = fail_text = g_strdup_printf ("the Wayland compositor accepted the connection but "
                                                 "did not answer within %d seconds",

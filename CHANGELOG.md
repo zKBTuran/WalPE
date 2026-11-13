@@ -225,7 +225,8 @@ it was). A bare window manager on X11 - dwm, i3, openbox - gets the window of 0.
   begins anew, so a compositor that crashes three times in a minute is still waited for
   each time. And it does not come back at all to a connection the compositor ended with a
   protocol error: the compositor objected to something the daemon sent and would again
-  (it used to restart in place and connect anew). The reason for both: under
+  (it used to restart in place and connect anew; a daemon that was waiting connected five
+  times a second until the wait was over). The reason for both: under
   `kwin_wayland_wrapper` a Plasma session is over after about ten crashes of KWin, and a
   daemon that KWin died of would have come back until they were used up. The two numbers
   are fixed, there is no new setting, and the default is unchanged (0: the daemon ends at

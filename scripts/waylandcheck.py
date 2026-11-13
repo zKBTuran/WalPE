@@ -126,7 +126,7 @@ not what the daemon believes it drew. Each case starts its own daemon:
             stay that is not short and the count begins anew (with "short"
             made 8 seconds: WALPE_WL_SHORT_STAY_MS). A connection the
             compositor ends with a protocol error is not come back to at
-            all.
+            all, neither under a running daemon nor under one that waits.
   lost      the compositor goes away: the daemon ends with status 1 and
             leaves no socket behind; its render thread, which goes on for a
             moment (made long here: WALPE_LOST_LINGER_MS), presents nothing
@@ -1617,7 +1617,9 @@ class WlFront:
     compositor that dies and is started again, one that does not keep this client).
     refuse (): the wallpaper client's connection gets the sentence a compositor sends
     when it objects to a request (wl_display.error, here: about the client's registry,
-    its object 2) and is closed after it."""
+    its object 2) and is closed after it; refuse_new = True: every connection made from
+    now on gets that at its first request, about the display itself ("invalid method":
+    libwayland reports the two kinds differently)."""
 
     class Conn:
         def __init__(self):
@@ -1642,7 +1644,7 @@ class WlFront:
             return not self.left and not self.hdr
 
     def __init__(self, path, target):
-        self.path, self.target, self.cut, self.n, self.on = path, target, None, 0, True
+        self.path, self.target, self.cut, self.refuse_new, self.n, self.on = path, target, None, False, 0, True
         self.conns = []
         try:
             os.unlink(path)
@@ -1661,6 +1663,7 @@ class WlFront:
                 return
             self.n += 1
             k = self.Conn()
+            k.refuse = (1, 1) if self.refuse_new else None
             self.conns.append(k)
             threading.Thread(target=self._pump, args=(c, k), daemon=True).start()
 
@@ -1734,7 +1737,7 @@ RESTARTS = "restarting in place, waiting up to"
 
 def flap_start(env, W, front, what, wait_s, extra=None):
     """a daemon with wayland_reconnect whose compositor is the stand-in; -> started"""
-    front.cut = None
+    front.cut, front.refuse_new = None, False
     cfg = dict(CONFIG, current=W["anim"])
     ex = {"WAYLAND_DISPLAY": front.path, "WALPE_WAYLAND_RECONNECT": str(wait_s)}
     ex.update(extra or {})
@@ -1850,13 +1853,35 @@ def flap_refused(env, W, front, wait_s):
     check(not os.path.exists(env.sock), f"{what}: no control socket is left behind")
 
 
+def flap_refused_start(env, W, front, wait_s):
+    """... and to the first request of a daemon that waits for it. (Before: the connection
+    "closed during start-up" was made again five times a second for the whole of the wait.)"""
+    what = "flap, a protocol error at the start"
+    if not flap_start(env, W, front, what, wait_s):
+        return
+    mark, n0 = env.mark(), front.n
+    front.refuse_new = True
+    front.cut = 0.01
+    waits = wait_for(lambda: RESTARTS in env.since(mark) or env.daemon.poll() is not None, 20)
+    t0 = time.time()
+    status, _ = flap_ended(env, wait_s + 10 * PATIENCE)
+    took, log = time.time() - t0, env.since(mark)
+    check(bool(waits) and status == 1 and "with a protocol error (1 on wl_display@1): it is not tried again "
+          "(wayland_reconnect)" in log, f"{what}: the daemon that restarted in place to wait ends with status 1 "
+          "and says why", (status, log[-1500:]))
+    check(front.n - n0 == 1 and took < wait_s / 2, f"{what}: after one connection, not at the end of the "
+          f"wait of {wait_s} s", (front.n - n0, round(took, 1)))
+    time.sleep(0.5)
+    check(not os.path.exists(env.sock), f"{what}: no control socket is left behind")
+
+
 def case_flap(env, W):
     """A compositor that does not keep the daemon's connection, and one that objects to
     it: a daemon with wayland_reconnect does not come back to either without end. Runs
     after `reconnect` (the compositor that goes and comes back and is waited for)."""
     front = WlFront(os.path.join(env.display.rt, "wayland-front"), env.display.display)
     try:
-        for part in (flap_bound, flap_long_stay, flap_refused):
+        for part in (flap_bound, flap_long_stay, flap_refused, flap_refused_start):
             try:
                 part(env, W, front, 20)
             finally:

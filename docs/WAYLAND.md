@@ -207,7 +207,8 @@ first loss. That is four restarts in place in a row at most; one stay of 30 seco
 more and the count begins anew, so a compositor that crashes three times within a minute
 is waited for each time, and so is one that crashes every now and then for as long as the
 session lasts. And a connection the compositor ended with a protocol error - it objected
-to something the daemon sent - is not come back to at all: the same request would follow. (The compositor's sentence is in the log, in a
+to something the daemon sent - is not come back to at all, whether the daemon was running
+or waiting: the same request would follow. (The compositor's sentence is in the log, in a
 line of libwayland's and in the daemon's warning; please report it.) The two numbers are
 fixed. The reason for them: under `kwin_wayland_wrapper` a Plasma session is over after
 about ten crashes of KWin, and a daemon that came back each time to a KWin that dies of
@@ -699,6 +700,7 @@ What a compositor that is started again does to the daemon, measured on KWin 6.8
 | the compositor comes back and is killed again within a second | - | the daemon waits again, at whatever moment of its start that catches it (it used to end when that caught it setting up EGL); the fifth time in a row it ends (next row) |
 | a stand-in socket in front of sway that ends every connection 3 s after it was made | ends with status 1 at the first | four restarts in place, then the fifth short stay ends the daemon with status 1, 15 s after the first loss, nothing left behind (it used to restart every 3 s for as long as that went on: 29 times in 90 s) |
 | the same socket ends the daemon's connection with a protocol error | ends with status 1 | ends with status 1 at once and makes no new connection (it used to restart in place and come back) |
+| ... and the first connection of a daemon that waits | - | ends with status 1 after that one connection and says which error (it used to connect five times a second until the wait was over) |
 
 ## Notes per compositor
 
