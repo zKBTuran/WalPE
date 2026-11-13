@@ -78,6 +78,20 @@ int main (void)
     home_is ("/home/al", "/home/al/a /home/al/b", "~/a ~/b");
     home_is ("/", "/usr/lib/x", "/usr/lib/x");                                      /* no home to speak of */
     home_is (NULL, "/usr/lib/x", "/usr/lib/x");
+    /* GLib puts a file name between the quotation marks U+201C and U+201D
+     * (here: a scene's package that cannot be copied into the cache), other
+     * texts between guillemets and no-break spaces. A byte beyond ASCII in
+     * front of the path counted as part of a name, and the home directory
+     * stood there in full - in a summary that had "~" there before. */
+    home_is ("/home/al", "Failed to create file \xe2\x80\x9c/home/al/.cache/walpe/pkg/7/scene.json.A1B2C3\xe2\x80\x9d: "
+                         "No space left on device",
+             "Failed to create file \xe2\x80\x9c~/.cache/walpe/pkg/7/scene.json.A1B2C3\xe2\x80\x9d: "
+             "No space left on device");
+    home_is ("/home/al", "\xe2\x80\x9c/home/al\xe2\x80\x9d and \xc2\xab\xc2\xa0/home/al/a\xc2\xa0\xc2\xbb",
+             "\xe2\x80\x9c~\xe2\x80\x9d and \xc2\xab\xc2\xa0~/a\xc2\xa0\xc2\xbb");
+    /* ... and a letter beyond ASCII still is part of a name */
+    home_is ("/home/al", "/mnt/caf\xc3\xa9/home/al/x and /home/al\xc3\xa9/x",
+             "/mnt/caf\xc3\xa9/home/al/x and /home/al\xc3\xa9/x");
 
     /* ---- 3. what is still a path */
     paths_are ("LOAD ERROR: /mnt/walls/Secret/noscene: scene.json not found in /mnt/walls/Secret/noscene",
@@ -91,6 +105,12 @@ int main (void)
                "quoted \".../scene.json\" and '.../w' end");
     paths_are ("file:///mnt/x/index.html", "file://.../index.html");
     paths_are ("two\n/a/b\n/c/d e", "two\n.../b\n.../d e");
+    /* between GLib's quotation marks (blanks in the name included), between guillemets */
+    paths_are ("Failed to open file \xe2\x80\x9c/run/media/al/My Stick/a b.mp4\xe2\x80\x9d: Permission denied",
+               "Failed to open file \xe2\x80\x9c.../a b.mp4\xe2\x80\x9d: Permission denied");
+    paths_are ("in \xc2\xab\xc2\xa0/srv/x/y.png\xc2\xa0\xc2\xbb.", "in \xc2\xab\xc2\xa0.../y.png\xc2\xa0\xc2\xbb.");
+    paths_are ("see /srv/x/y.png\xe2\x80\x9d: no", "see .../y.png\xe2\x80\x9d: no");
+    paths_are ("/mnt/caf\xc3\xa9 \xe2\x80\x93 two/x.json", ".../caf\xc3\xa9 \xe2\x80\x93 two/x.json");    /* (cut at the blank, as before) */
     /* ... and what is none, or says nothing: unchanged */
     static const char *const kept[] = {
         "pause rules: fullscreen on; PAUSED by walpe-ctl pause / the tray",
@@ -149,6 +169,11 @@ int main (void)
         all_is ("/home/al", f, "/mnt/My Walls/a: the previous wallpaper could not be opened again "
                                "(/run/media/al/STICK/b: b.mp4 is no video)",
                 "a: the previous wallpaper could not be opened again (.../b: b.mp4 is no video)");
+        /* GLib's message about a file below a known folder, and below none */
+        all_is ("/home/al", f, "/mnt/My Walls/a: Failed to open file \xe2\x80\x9c/mnt/My Walls/a/scene.pkg\xe2\x80\x9d: "
+                               "Permission denied (\xe2\x80\x9c/srv/other/b c/d.pkg\xe2\x80\x9d too)",
+                "a: Failed to open file \xe2\x80\x9c" "a/scene.pkg\xe2\x80\x9d: Permission denied "
+                "(\xe2\x80\x9c.../d.pkg\xe2\x80\x9d too)");
         /* nothing of the folders is left in any of them */
         char *t = all ("/home/al", f, "/tmp/x/outside/Secret-Folder/clip.mp4 \"/tmp/x/outside/Secret-Folder\" "
                                       "/home/al/v.mp4 /mnt/My Walls/s/scene.json");

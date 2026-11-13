@@ -34,11 +34,69 @@ static inline gboolean walpe_diag_name_char (char c)
     return g_ascii_isalnum (c) || c == '_' || c == '-' || c == '.' || (guchar) c >= 0x80;
 }
 
+/* a character beyond ASCII: part of a name when it is a letter, a digit or
+ * a mark, not when it is punctuation or a blank - GLib writes a file name
+ * between the quotation marks U+201C and U+201D ("Failed to create file
+ * <U+201C>/home/al/...<U+201D>: ..."), other texts between guillemets with
+ * a no-break space. Bytes that are no UTF-8 count as part of a name. */
+static inline gboolean walpe_diag_name_uni (gunichar u)
+{
+    return u == (gunichar) -1 || u == (gunichar) -2 || g_unichar_isalnum (u) || g_unichar_ismark (u);
+}
+
+/* is the character that begins at s[at] part of a name? (the end of the
+ * text is not) */
+static inline gboolean walpe_diag_name_at (const GString *s, gsize at)
+{
+    if (at >= s->len)
+        return FALSE;
+    if ((guchar) s->str[at] < 0x80)
+        return walpe_diag_name_char (s->str[at]);
+    return walpe_diag_name_uni (g_utf8_get_char_validated (s->str + at, (gssize) (s->len - at)));
+}
+
+/* is the character that ends in front of s[at] part of a name? (*uni: that
+ * character when it lies beyond ASCII, else 0) */
+static inline gboolean walpe_diag_name_before (const GString *s, gsize at, gunichar *uni)
+{
+    if (uni)
+        *uni = 0;
+    if (at == 0 || at > s->len)
+        return FALSE;
+    if ((guchar) s->str[at - 1] < 0x80)
+        return walpe_diag_name_char (s->str[at - 1]);
+    const char *p = g_utf8_find_prev_char (s->str, s->str + at);
+    gunichar u = p ? g_utf8_get_char_validated (p, (gssize) (s->str + at - p)) : (gunichar) -1;
+    if (uni && u != (gunichar) -1 && u != (gunichar) -2)
+        *uni = u;
+    return walpe_diag_name_uni (u);
+}
+
+/* does a character beyond ASCII that ends a path begin at s[at]: a
+ * quotation mark, a closing bracket, a blank (the no-break space)? */
+static inline gboolean walpe_diag_path_stop (const GString *s, gsize at)
+{
+    if (at >= s->len || (guchar) s->str[at] < 0xc0)     /* ASCII, or the middle of a character */
+        return FALSE;
+    gunichar u = g_utf8_get_char_validated (s->str + at, (gssize) (s->len - at));
+    if (u == (gunichar) -1 || u == (gunichar) -2)
+        return FALSE;
+    switch (g_unichar_type (u)) {
+    case G_UNICODE_FINAL_PUNCTUATION:
+    case G_UNICODE_INITIAL_PUNCTUATION:
+    case G_UNICODE_CLOSE_PUNCTUATION:
+    case G_UNICODE_SPACE_SEPARATOR:
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
 /* does a path begin at s[at], or is that the middle of a longer one
  * ("/home/al" inside "/mnt/backup/home/al")? */
 static inline gboolean walpe_diag_path_start (const GString *s, gsize at)
 {
-    return at == 0 || (!walpe_diag_name_char (s->str[at - 1]) && s->str[at - 1] != '/');
+    return at == 0 || (!walpe_diag_name_before (s, at, NULL) && s->str[at - 1] != '/');
 }
 
 /* every "<home>" that is a whole path or the start of one becomes "~"
@@ -53,7 +111,7 @@ static inline void walpe_diag_no_home (GString *s, const char *home)
         if (!p)
             break;
         at = (gsize) (p - s->str);
-        if (walpe_diag_name_char (s->str[at + hl]) || !walpe_diag_path_start (s, at)) {
+        if (walpe_diag_name_at (s, at + hl) || !walpe_diag_path_start (s, at)) {
             at++;
             continue;
         }
@@ -96,7 +154,7 @@ static inline void walpe_diag_no_folders (GString *s, GPtrArray *folders, const 
                 at++;       /* "/data/mnt/walls": the middle of another path */
             } else if (next == '/') {
                 g_string_erase (s, (gssize) at, (gssize) fl + 1);
-            } else if (!walpe_diag_name_char (next)) {
+            } else if (!walpe_diag_name_at (s, at + fl)) {
                 g_string_erase (s, (gssize) at, (gssize) (fl - keep));
                 at += keep;
             } else {
@@ -111,16 +169,24 @@ static inline void walpe_diag_no_folders (GString *s, GPtrArray *folders, const 
  * begins at a "/" that follows the start of the text, a blank, a quote,
  * "(", "[", "<", "=", "," or ":" and ends before the next blank or one of
  * "'<>|,;)] - right after a quote at the closing quote instead, so a
- * quoted name may hold blanks. "scheme://host/..." is left alone,
- * "file:///a/b" is the path /a/b. */
+ * quoted name may hold blanks. Punctuation beyond ASCII begins a path as
+ * well: right after U+201C or U+2018 (GLib's quotation marks) the path ends
+ * at the closing one, U+201D or U+2019; anywhere else a closing or opening
+ * quotation mark, a closing bracket or a blank beyond ASCII ends it too.
+ * "scheme://host/..." is left alone, "file:///a/b" is the path /a/b. */
 static inline void walpe_diag_short_paths (GString *s)
 {
     for (gsize i = 0; i < s->len; i++) {
         if (s->str[i] != '/')
             continue;
         const char before = i ? s->str[i - 1] : ' ';
-        if (!strchr (" \t\n\"'([<=,:", before))
+        gunichar ubefore = 0;       /* punctuation beyond ASCII in front of it */
+        if ((guchar) before >= 0x80) {
+            if (walpe_diag_name_before (s, i, &ubefore) || !ubefore)
+                continue;
+        } else if (!strchr (" \t\n\"'([<=,:", before)) {
             continue;
+        }
         if (before == ':' && i + 1 < s->len && s->str[i + 1] == '/') {
             if (i + 2 < s->len && s->str[i + 2] == '/') {
                 i += 2;                 /* file:///a/b */
@@ -134,8 +200,13 @@ static inline void walpe_diag_short_paths (GString *s)
         if (before == '"' || before == '\'') {
             while (e < s->len && s->str[e] != before && s->str[e] != '\n')
                 e++;
+        } else if (ubefore == 0x201c || ubefore == 0x2018) {
+            /* (the closing quote in UTF-8: e2 80 9d, e2 80 99) */
+            const char close[4] = { '\xe2', '\x80', ubefore == 0x201c ? '\x9d' : '\x99', 0 };
+            while (e < s->len && s->str[e] != '\n' && strncmp (s->str + e, close, 3))
+                e++;
         } else {
-            while (e < s->len && !strchr (" \t\n\"'<>|,;)]", s->str[e]))
+            while (e < s->len && !strchr (" \t\n\"'<>|,;)]", s->str[e]) && !walpe_diag_path_stop (s, e))
                 e++;
             while (e > i + 1 && strchr (":.", s->str[e - 1]))
                 e--;                    /* the end of a sentence, not of a name */
