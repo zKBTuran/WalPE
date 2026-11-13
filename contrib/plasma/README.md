@@ -36,6 +36,18 @@ keeps the version it has loaded until it is restarted, e.g. by logging out and i
 Needs Plasma 6.5 or newer and the tools `kpackagetool6` and `dbus-send`: `install.sh`
 says what is missing and changes nothing on an older Plasma, on X11 and outside Plasma.
 
+**With a package of WalPE.** A package can install the wallpaper type for every user, in
+`/usr/share/plasma/wallpapers` (`install.sh` itself is installed by nothing: it is run from
+WalPE's source tree). `install.sh` looks for that copy in the system's data directories
+(`XDG_DATA_DIRS`, by default `/usr/local/share` and `/usr/share`), and `select`,
+`unselect` and `status` work with it as with a copy of your own; nothing has to be
+installed first. `install` and `uninstall` are about your own copy only. Plasma takes a
+copy in `~/.local/share` before the package's, so one that `install` made earlier stays in
+use after the package arrives or is updated, and may be older: `status` shows both with
+their versions and says which is in use. `uninstall` then removes yours and leaves the
+desktops their wallpaper type (it has its files: the package's), and Plasma's shell shows
+the package's copy from its next start; the package's copy goes with the package.
+
 ## What is in it
 
 One Plasma package, `wallpaper/` (`io.github.walpe.plasma`), installed to
