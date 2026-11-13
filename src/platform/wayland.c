@@ -81,6 +81,13 @@
 #include "presentation-time-client-protocol.h"
 #include "linux-dmabuf-v1-client-protocol.h"
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
+#include "cursor-shape-v1-client-protocol.h"
+
+/* cursor-shape-v1 has a request that takes a tablet tool (tablet-v2), so
+ * the code generated from it names that interface. The daemon has no
+ * tablet and never sends the request; the tablet protocol is not in the
+ * tree. The name it needs, as an interface without requests or events: */
+G_GNUC_INTERNAL const struct wl_interface zwp_tablet_tool_v2_interface = { "zwp_tablet_tool_v2", 1, 0, NULL, 0, NULL };
 
 #include "platform/impl.h"
 #include "platform/wayland_logic.h"
@@ -131,6 +138,7 @@ typedef struct {
     guint32 name, version;
     struct wl_seat *seat;
     struct wl_pointer *pointer;
+    struct wp_cursor_shape_device_v1 *shape_dev;    /* of that pointer, made when first needed */
     /* its pointer: the surface of ours it is on (NULL = on none) and the
      * position on it the protocol told last */
     struct WlSurf *over;
@@ -280,6 +288,10 @@ static struct {
     } ptr;
     gboolean sel_buttons, sel_motion;
 #ifdef HAVE_WL_CURSOR
+    /* the pointer's image over a wallpaper: the compositor's own where it
+     * takes a shape by name (cursor-shape-v1), else one from the theme */
+    struct wp_cursor_shape_manager_v1 *cursor_shape_mgr;
+    guint cursor_by_shape, cursor_by_theme;     /* how often each was set (status) */
     struct wl_cursor_theme *cursor_theme;
     int cursor_theme_scale;
     struct wl_surface *cursor_surface;
@@ -881,10 +893,31 @@ static void wl_ptr_place (WlSurf *s, wl_fixed_t fx, wl_fixed_t fy)
 }
 
 /* The pointer came onto a wallpaper: it needs an image, or it keeps the
- * one of the window it came from. The theme's default arrow, at the
- * output's integer scale. */
+ * one of the window it came from. The default arrow.
+ *
+ * Where the compositor takes a shape by its name (wp_cursor_shape_v1) it
+ * is asked for "default" and draws the arrow it draws everywhere else:
+ * its theme, its size, sharp at a fractional scale, and a change of the
+ * theme while the daemon runs. Otherwise the arrow is loaded here, from
+ * the theme and size the environment names (XCURSOR_THEME, XCURSOR_SIZE;
+ * the library's default theme and 24 without them), at the output's
+ * integer scale. That is right where the session exports the two
+ * variables to the daemon and wrong where it does not (a daemon started
+ * by systemd --user, a compositor whose cursor is set in its own
+ * configuration only): the pointer then changed its look and size when it
+ * came onto a wallpaper that takes pointer input. */
 static void wl_cursor_show (WlSeat *seat, guint32 serial, WlSurf *s)
 {
+    if (W.cursor_shape_mgr && seat->pointer) {
+        if (!seat->shape_dev)
+            seat->shape_dev = wp_cursor_shape_manager_v1_get_pointer (W.cursor_shape_mgr, seat->pointer);
+        if (seat->shape_dev) {
+            wp_cursor_shape_device_v1_set_shape (seat->shape_dev, serial,
+                                                 WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT);
+            W.cursor_by_shape++;
+            return;
+        }
+    }
 #ifdef HAVE_WL_CURSOR
     if (!W.shm || !W.compositor || !seat->pointer)
         return;
@@ -927,8 +960,8 @@ static void wl_cursor_show (WlSeat *seat, guint32 serial, WlSurf *s)
     wl_surface_attach (W.cursor_surface, buf, 0, 0);
     wl_surface_damage (W.cursor_surface, 0, 0, INT32_MAX, INT32_MAX);
     wl_surface_commit (W.cursor_surface);
+    W.cursor_by_theme++;
 #else
-    (void) seat;
     (void) serial;
     (void) s;
 #endif
@@ -1123,6 +1156,10 @@ static void wl_seat_drop_pointer (WlSeat *seat)
 {
     if (!seat->pointer)
         return;
+    if (seat->shape_dev) {
+        wp_cursor_shape_device_v1_destroy (seat->shape_dev);
+        seat->shape_dev = NULL;
+    }
 #ifdef WL_POINTER_RELEASE_SINCE_VERSION
     if (seat->version >= WL_POINTER_RELEASE_SINCE_VERSION)
         wl_pointer_release (seat->pointer);
@@ -1320,6 +1357,10 @@ static void wl_reg_global (void *data, struct wl_registry *reg, uint32_t name, c
     } else if (!strcmp (itf, zwp_linux_dmabuf_v1_interface.name)) {
         W.dmabuf_name = name;
         W.dmabuf_version = version;
+    } else if (!strcmp (itf, wp_cursor_shape_manager_v1_interface.name)) {
+        /* (version 1 has the shape that is asked for, "default") */
+        if (!W.cursor_shape_mgr)
+            W.cursor_shape_mgr = wl_registry_bind (reg, name, &wp_cursor_shape_manager_v1_interface, 1);
     }
 }
 
@@ -3298,6 +3339,8 @@ static void wl_close (void)
         W.seats = g_list_delete_link (W.seats, W.seats);
         wl_seat_free (seat);
     }
+    if (W.cursor_shape_mgr)
+        wp_cursor_shape_manager_v1_destroy (W.cursor_shape_mgr);
     while (W.outputs) {
         WlOut *o = W.outputs->data;
         W.outputs = g_list_delete_link (W.outputs, W.outputs);
@@ -3360,6 +3403,8 @@ static void wl_describe_globals (GString *s)
         g_string_append (s, ", xdg-shell");
     if (W.dmabuf_version)
         g_string_append_printf (s, ", linux-dmabuf v%u", W.dmabuf_version);
+    if (W.cursor_shape_mgr)
+        g_string_append (s, ", cursor-shape");
 }
 
 /* is there a seat with a pointer at all? (Whether wallpapers take pointer
@@ -3522,6 +3567,26 @@ static void wl_status (JsonBuilder *b)
     json_builder_add_string_value (b, "queue-per-surface");
     json_builder_set_member_name (b, "wl_seat_pointer");
     json_builder_add_string_value (b, wl_pointer_state ());
+    /* the pointer's image over a wallpaper that takes pointer input: who
+     * draws it, and how often it was set that way (once each time the
+     * pointer comes onto such a wallpaper) */
+    json_builder_set_member_name (b, "wl_cursor");
+    json_builder_begin_object (b);
+    json_builder_set_member_name (b, "from");
+#ifdef HAVE_WL_CURSOR
+    json_builder_add_string_value (b, W.cursor_shape_mgr ? "compositor" : "theme");
+#else
+    json_builder_add_string_value (b, W.cursor_shape_mgr ? "compositor" : "none");
+#endif
+    json_builder_set_member_name (b, "theme");      /* (used without cursor-shape) */
+    json_builder_add_string_value (b, W.cursor_theme_name ? W.cursor_theme_name : "");
+    json_builder_set_member_name (b, "size");
+    json_builder_add_int_value (b, W.cursor_size);
+    json_builder_set_member_name (b, "set_by_shape");
+    json_builder_add_int_value (b, W.cursor_by_shape);
+    json_builder_set_member_name (b, "set_by_theme");
+    json_builder_add_int_value (b, W.cursor_by_theme);
+    json_builder_end_object (b);
     json_builder_set_member_name (b, "wl_connection");
     json_builder_add_string_value (b, wl_is_dead () ? "lost" : "ok");
     json_builder_set_member_name (b, "wl_surfaces");

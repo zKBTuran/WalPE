@@ -287,7 +287,7 @@ if have_wayland
   # one name per protocol: protocols/<name>.xml becomes
   # <name>-client-protocol.h and <name>-protocol.c, compiled into the
   # daemon. The files are unchanged copies with their own licence notices:
-  # six from wayland-protocols, wlr-layer-shell from wlr-protocols
+  # seven from wayland-protocols, wlr-layer-shell from wlr-protocols
   # (protocols/README says which release each one is from).
   wl_protocol_names = [
     'xdg-shell',
@@ -296,6 +296,7 @@ if have_wayland
     'fractional-scale-v1',
     'presentation-time',
     'linux-dmabuf-v1',
+    'cursor-shape-v1',
     'wlr-layer-shell-unstable-v1',
   ]
   foreach wl_base : wl_protocol_names

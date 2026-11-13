@@ -161,6 +161,16 @@ renders on a laptop's discrete GPU where there is one (under Graphics cards;
   close it ("the Wayland compositor closed the connection during start-up"; COSMIC's
   compositor does that for a moment after it is told to end). It waits on now, for the
   time that was set, as it does for a socket that is not there yet.
+- The pointer's image over a wallpaper that takes pointer input (parallax of a scene that
+  reads the pointer, cursor scripts, a web page) is the compositor's own arrow now where
+  the compositor takes a shape by name (`wp_cursor_shape_v1`: sway, KWin, labwc, Wayfire,
+  river, niri, COSMIC). The daemon used to load the arrow itself, from `XCURSOR_THEME` and
+  `XCURSOR_SIZE` in its own environment and at 24 without them: where the session does
+  not hand these to the daemon (a start by `systemd --user`, a compositor whose cursor is
+  set in its configuration only) the pointer changed its look and size when it came onto
+  such a wallpaper (64 instead of 24 pixels in the test). On a compositor without that
+  protocol nothing changes. `WALPE_WL_IGNORE=wp_cursor_shape_manager_v1` gives the old
+  way; `walpe-ctl status` (`wl_cursor`) says which one is in use.
 - `wayland_reconnect`, three faults of a daemon that waits for its compositor. Under
   `kwin_wayland_wrapper` the socket stays while `kwin_wayland` is started again, so the
   daemon was connected at once and gave up when no answer came within 10 seconds, whatever

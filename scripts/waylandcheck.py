@@ -97,6 +97,12 @@ not what the daemon believes it drew. Each case starts its own daemon:
             the same way also with an X server there (in a session that
             is Xwayland, where the wallpaper would lie above every
             window) and says so; `--backend x11` takes X11 there.
+  cursor    the pointer's image over a wallpaper that takes pointer input:
+            the compositor's own where it takes a shape by name
+            (wp_cursor_shape_v1) - the same picture as over a wallpaper that
+            takes no input, though XCURSOR_SIZE in the daemon's environment
+            says 64 - and one from the theme where that protocol is treated
+            as absent (WALPE_WL_IGNORE), as before.
   reconnect the compositor ends and is started again in the same place under
             a daemon with wayland_reconnect: told to end, then killed (its
             socket's file stays behind). The daemon waits, the same process
@@ -1019,6 +1025,102 @@ def case_pointer(env, W):
     env.stop_daemon()
 
 
+# ------------------------------------------------------------------- cursor
+def pointer_image(env, name):
+    """where the pointer's image is in a picture of the output, over a wallpaper of one
+    colour: (width, height, x, y) of what is not that colour; None = nothing is drawn (or
+    no picture)"""
+    f = env.display.shot(name, cursor=True)
+    if not f:
+        return None
+    w, h, px = f
+    bg = px[0:3]
+    xs, ys = [], []
+    for y in range(h):
+        row = px[y * w * 3:(y + 1) * w * 3]
+        if row != bg * w:
+            ys.append(y)
+            xs += [x for x in range(w) if row[x * 3:x * 3 + 3] != bg]
+    return (max(xs) - min(xs) + 1, max(ys) - min(ys) + 1, min(xs), min(ys)) if ys else None
+
+
+def case_cursor(env, W):
+    """The pointer's image over a wallpaper that takes pointer input. Where the compositor
+    takes a shape by name (wp_cursor_shape_v1) the daemon asks for the default arrow and
+    the compositor draws its own: the same image, at the same place, as over a wallpaper
+    that takes no input - although the daemon's environment names another size
+    (XCURSOR_SIZE). With that protocol treated as absent the daemon sets an image from the
+    theme, as it did before.
+
+    It runs late, before the case that starts the compositor anew: once a picture was taken
+    with the pointer in it, sway and labwc leave the pointer in the pictures taken without,
+    and a case that compares pictures (`backend`) would see it."""
+    if not env.display.can_point():
+        print("skip cursor (the compositor gives no virtual pointer device)")
+        return
+    shape_global = "wp_cursor_shape_manager_v1"
+    for ignore in (None, shape_global):
+        what = "cursor, cursor-shape treated as absent" if ignore else "cursor"
+        extra = {"XCURSOR_SIZE": "64"}
+        if ignore:
+            extra["WALPE_WL_IGNORE"] = ignore
+        if not start(env, [("A", 640, 360, 0, 0)], what, extra=extra, config={"parallax": True}):
+            return
+        mark = env.mark()
+        name = env.mons[0][0]
+        st = env.state()
+        offered = "cursor-shape" in (st.get("wl_compositor_globals") or "")
+        if not ignore and not offered:
+            note("cursor: the compositor has no cursor-shape-v1: the theme's image is what there is")
+        want = "compositor" if offered else "theme"
+        cur = st.get("wl_cursor") or {}
+        check(cur.get("from") == want and cur.get("size") == 64,
+              f"{what}: status wl_cursor says who draws the pointer's image ({want}) and the size the "
+              "environment names", cur)
+        # a wallpaper that takes no pointer input: the image is the compositor's business
+        env.open(W["red"])
+        lc.loaded(env, W["red"])
+        env.display.pointer(100, 100)
+        env.display.pointer(300, 200)
+        time.sleep(0.5 * PATIENCE)
+        own = pointer_image(env, name)
+        cur = env.state().get("wl_cursor") or {}
+        check(cur.get("set_by_shape") == 0 and cur.get("set_by_theme") == 0,
+              f"{what}: over a wallpaper that takes no pointer input the daemon sets no image", cur)
+        # one that does
+        env.open(W["ptr"])
+        lc.loaded(env, W["ptr"])
+
+        def was_set():
+            # (a compositor tells a surface of the pointer when the pointer moves)
+            env.display.pointer(100, 100)
+            env.display.pointer(300, 200)
+            c = env.state().get("wl_cursor") or {}
+            return (c.get("set_by_shape") or 0) + (c.get("set_by_theme") or 0) > 0
+        wait_for(was_set, 10, 0.3)
+        time.sleep(0.5 * PATIENCE)
+        cur = env.state().get("wl_cursor") or {}
+        by_shape, by_theme = cur.get("set_by_shape") or 0, cur.get("set_by_theme") or 0
+        if offered:
+            check(by_shape >= 1 and by_theme == 0, f"{what}: the pointer comes onto a wallpaper that takes "
+                  "pointer input: the compositor is asked for its default arrow, no image is sent", cur)
+        else:
+            check(by_theme >= 1 and by_shape == 0, f"{what}: the pointer comes onto a wallpaper that takes "
+                  "pointer input: an image from the theme is set", cur)
+        over = pointer_image(env, name)
+        note(f"{what}: the pointer's image in the picture: {own} over a wallpaper without pointer input, "
+             f"{over} over one that takes it (width, height, x, y)")
+        if own is None:
+            note(f"{what}: this compositor's picture shows no pointer: what it looks like is not checked")
+        elif offered:
+            check(over == own, f"{what}: it is the compositor's own image there, the same and at the same "
+                  "place, whatever size the daemon's environment names", (own, over))
+        else:
+            check(over is not None, f"{what}: the pointer has an image there", over)
+        healthy(env, mark, what)
+        env.stop_daemon()
+
+
 # ------------------------------------------------------------------ covered
 def case_covered(env, W):
     gui = os.path.join(env.build, "walpe")
@@ -1640,7 +1742,8 @@ CASES = [("start", case_start), ("layer", case_layer), ("two", case_two), ("mode
          ("follow", case_follow), ("closed", case_closed), ("nosurface", case_nosurface),
          ("pointer", case_pointer), ("covered", case_covered), ("fullscreen", case_fullscreen),
          ("backend", case_backend),
-         ("noshell", case_noshell), ("cycles", case_cycles), ("reconnect", case_reconnect),
+         ("noshell", case_noshell), ("cycles", case_cycles), ("cursor", case_cursor),
+         ("reconnect", case_reconnect),
          ("lost", case_lost)]
 
 

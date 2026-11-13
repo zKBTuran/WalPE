@@ -889,14 +889,16 @@ class SwayDisplay:
         return list(mons)
 
     # ------------------------------------------------------------------ pictures
-    def shot(self, name, timeout=None):
+    def shot(self, name, timeout=None, cursor=False):
         """one output's picture in its own pixels (grim) -> (width, height, RGB bytes), None on
-        failure (grim waits for the output's next frame: at most `timeout` seconds)"""
+        failure (grim waits for the output's next frame: at most `timeout` seconds).
+        cursor: with the pointer's image in it"""
         env = dict(os.environ)
         self.client_env(env)
         env["XDG_RUNTIME_DIR"] = self.rt
         try:
-            p = subprocess.run(["grim", "-t", "ppm", "-o", name, "-"], env=env, stdin=subprocess.DEVNULL,
+            p = subprocess.run(["grim", "-t", "ppm"] + (["-c"] if cursor else []) + ["-o", name, "-"],
+                               env=env, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                timeout=(timeout or 30) * self.patience)
             return parse_ppm(p.stdout) if p.returncode == 0 else None

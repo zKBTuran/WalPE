@@ -57,6 +57,7 @@ The other way round, `WALPE_MEM_STATS=1` switches memory numbers by kind in
 | Variable | Default | Effect |
 |---|---|---|
 | `WALPE_BACKEND=auto\|x11\|wayland` | config `backend` (auto) | the window system the daemon draws on, for this start; `walpe-daemon --backend` beats it. An unknown word is a warning and then `auto` ([WAYLAND.md](WAYLAND.md)) |
+| `XCURSOR_THEME`, `XCURSOR_SIZE` | the session's | not WalPE's own. Wayland, on a compositor without `wp_cursor_shape_v1` only: theme and size (24 without it) of the pointer's image over a wallpaper that takes pointer input ([WAYLAND.md](WAYLAND.md)) |
 | `WAYLAND_DISPLAY`, `WAYLAND_SOCKET`, `DISPLAY` | the session's | not WalPE's own: `auto` picks Wayland when one of the first two is set and the compositor has the layer shell; X11 when `DISPLAY` is set and no Wayland compositor answers; on a Wayland compositor without the layer shell the daemon ends, whatever `DISPLAY` says, unless it is GNOME's with the WalPE extension for GNOME Shell switched on ([WAYLAND.md](WAYLAND.md)). `XDG_CURRENT_DESKTOP` is read only to word the message on a compositor without layer shell; `XCURSOR_THEME` / `XCURSOR_SIZE` for the pointer image over an interactive wallpaper |
 | `WALPE_WAYLAND_RECONNECT=s` | `gpu.conf` `wayland_reconnect` (0) | seconds to wait, restarted in place, for a Wayland compositor that went away ([GPU-PRESENT.md](GPU-PRESENT.md)) |
 | `WALPE_WAYLAND_FOLLOW=on\|off` | `gpu.conf` `wayland_follow` (on) | Wayland: `off` = the daemon restarts in place for every change of a monitor instead of following it in place ([WAYLAND.md](WAYLAND.md)) |
@@ -277,7 +278,7 @@ Not for daily use: test hooks, measuring aids and names the programs set for the
 |---|---|---|
 | `WALPE_FAKE_VSYNC=1` | daemon | every swap waits for an emulated vertical blank (X servers without vsync, such as Xvfb) |
 | `WALPE_FAKE_DPMS=file` / `WALPE_FAKE_POWER=file` | daemon | the display's power state / the power source is read from a file instead of from X / the kernel |
-| `WALPE_WL_IGNORE=interface[,interface...]` | daemon (Wayland) | behave as if the compositor lacked these protocols (`wp_viewporter`, `zwlr_layer_shell_v1`, ...) |
+| `WALPE_WL_IGNORE=interface[,interface...]` | daemon (Wayland) | behave as if the compositor lacked these protocols (`wp_viewporter`, `zwlr_layer_shell_v1`, ...). `wp_cursor_shape_manager_v1`: the pointer's image over a wallpaper comes from the theme again, as up to 0.14.0 |
 | `WALPE_WL_NO_CONFIGURE=n` | daemon (Wayland) | the first `n` wallpaper surfaces are made in a way the compositor does not answer (a monitor that gets no surface) |
 | `WALPE_SURFACE_RETRY_MS=n` | daemon (Wayland) | the time before the first new try for a monitor that got no surface (default 2000; each further one doubles it) |
 | `WALPE_WL_CLOSE_AFTER_MS=n` | daemon (Wayland) | `n` milliseconds after the start the first wallpaper surface is treated as if the compositor had closed it while its monitor stays |

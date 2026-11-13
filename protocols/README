@@ -30,6 +30,11 @@ distribution package (Ubuntu 24.04: wayland-protocols 1.45-1~ubuntu0.24.04.2):
       sha256 dffac93bcb2bb1d8c385e72b8a8c2c0d4d79a336866322f3ba886dce2b27b1e2
   linux-dmabuf-v1.xml              (stable/linux-dmabuf/)
       sha256 bd6fdb35e7551ae98c4d7fc1b3c47dd3e22d184ab92b69f51787750ddbf2927d
+  cursor-shape-v1.xml              (staging/cursor-shape/)
+      sha256 bb57d91e53a79dadab7c612dab87c233393cee73673feefa7442cfbfdd9aed2f
+      (one of its requests takes a tablet tool of tablet-v2, which is not in
+      this tree and not used: src/platform/wayland.c defines the interface
+      name the generated code refers to, without requests or events)
   ext-idle-notify-v1.xml           (staging/ext-idle-notify/)
       sha256 e56a9c22684e6b46655f7221b798328e304c1efc8f63f01241a1cf8c070f4c30
       (not in wl_protocol_names: for the pause-signal providers, src/signals)

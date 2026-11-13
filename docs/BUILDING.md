@@ -50,7 +50,7 @@ module is what `meson setup` looks for, to map them to another distribution.
 | `gtk4` | `gui-libs/gtk` | the library window `walpe` |
 | `xi` (optional, found automatically) | `x11-libs/libXi` | X11: clicks on the empty desktop |
 | `xrandr` (optional, found automatically) | `x11-libs/libXrandr` | X11: monitor names for per-monitor wallpapers |
-| `wayland-cursor` (optional, found automatically) | `dev-libs/wayland` | Wayland: the pointer image over a wallpaper that takes pointer input |
+| `wayland-cursor` (optional, found automatically) | `dev-libs/wayland` | Wayland: the pointer image over a wallpaper that takes pointer input, on a compositor that does not draw it itself on request (`wp_cursor_shape_v1`; see [WAYLAND.md](WAYLAND.md)) |
 | `wayland-client` and `wayland-server` 1.20 or newer, `gtk4-wayland` (optional, found automatically) | `dev-libs/wayland`, `gui-libs/gtk` with its Wayland backend | Wayland: pause rules from the compositor (idle time, window list); the private page host for web wallpapers, which needs no X |
 | `gtk4-x11` (optional, found automatically) | `gui-libs/gtk` with its X11 backend | the X11 page host for web wallpapers |
 
@@ -325,7 +325,7 @@ Wallpaper Engine is stated at the end of the [README](../README.md#disclaimer).
 - QuickJS: where `libquickjs` is linked statically (the usual case), the binaries contain
   it; its MIT notice is in [licenses/QuickJS-MIT.txt](../licenses/QuickJS-MIT.txt) and has to
   accompany them.
-- Wayland protocol descriptions: the ten XML files in `protocols/` are unchanged copies
+- Wayland protocol descriptions: the eleven XML files in `protocols/` are unchanged copies
   from the wayland-protocols and wlr-protocols projects (`protocols/README` names origin
   and checksum of each); they are not WalPE's own text. Each carries its own copyright
   and permission notice (MIT-style terms). The build generates C code from them that is
