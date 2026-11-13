@@ -165,6 +165,14 @@ esac
 # 5. the layout restart: the file behind fd 9 must not be open in the new
 # image (under whatever number)
 leaked () { ls -l "/proc/$dpid/fd" 2>/dev/null | grep -q -F -- "$tmp/leak"; }
+# the children of process $1 that have ended and were not collected. Read
+# from /proc (a stat line is "pid (name) state parent ...", and the name may
+# hold blanks and brackets): `ps --ppid` is procps's own, busybox's ps has
+# no way to ask for a parent and said nothing but its usage, which counted
+# as "no zombie".
+zombies_of () {
+    cat /proc/[0-9]*/stat 2>/dev/null | sed 's/^.*) //' | grep -c "^Z $1 "
+}
 if [ "$kind" = xvfb ] && leaked && command -v xrandr >/dev/null 2>&1; then
     echo "1280x720+0+0" > "$tmp/mons"
     n=0
@@ -183,7 +191,7 @@ if [ "$kind" = xvfb ] && leaked && command -v xrandr >/dev/null 2>&1; then
     if [ $restarted = 1 ]; then
         kill -0 "$dpid" 2>/dev/null || fail "the daemon is gone after the layout restart"
         leaked && fail "a descriptor of the old image is open in the daemon after the layout restart"
-        z=$(ps -o stat= --ppid "$dpid" 2>/dev/null | grep -c Z)
+        z=$(zombies_of "$dpid")
         [ "$z" = 0 ] || fail "$z zombie child(ren) after the layout restart"
     else
         echo "sec-daemon: no layout restart could be triggered on this X server; that part is skipped"
