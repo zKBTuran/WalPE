@@ -817,6 +817,20 @@ int main (void)
     walpe_sigprov_set_plasma_pointer (TRUE, "B", 16, pointer_event, NULL);
     settle ();
     CHECK (g_atomic_int_get (&F.pruns) == 2, "the same outputs and rate again load nothing");
+    /* not wanted for a moment (the wallpaper paused for a few hundredths of a second) */
+    walpe_sigprov_set_plasma_pointer (FALSE, NULL, 16, pointer_event, NULL);
+    CHECK (walpe_sig_kwin_pointer_state () == NULL, "not wanted: status has nothing about it at once");
+    fake_run (f_pointer, "B\t2\t2");
+    settle ();
+    CHECK (P.n == 4, "and a position is not handed on");
+    walpe_sigprov_set_plasma_pointer (TRUE, "B", 16, pointer_event, NULL);
+    g_usleep (800000);
+    settle ();
+    g_mutex_lock (&F.lock);
+    CHECK (g_atomic_int_get (&F.pruns) == 2 && g_atomic_int_get (&F.punloads) == 2 && F.ploaded &&
+           name_owned (other, PTR), "wanted again within half a second: the script and the name were left "
+           "alone (%d runs, %d unloads)", g_atomic_int_get (&F.pruns), g_atomic_int_get (&F.punloads));
+    g_mutex_unlock (&F.lock);
     fake_run (f_pointer, "ready");
     /* buttons and the wheel: from Plasma's shell, as before */
     int before = P.n;

@@ -79,7 +79,9 @@ static struct {
     GHashTable *ids;            /* output ids that have a value from it */
     char *address;              /* tests: the bus to use */
     /* the pointer from the Plasma add-on (see "the pointer" below) */
-    gboolean ptr_want;
+    gboolean ptr_want;          /* the name and the pointer script are kept */
+    gboolean ptr_now;           /* a wallpaper wants the pointer this moment: events are handed on */
+    guint ptr_linger;           /* no longer wanted: what is kept goes when this fires */
     char *ptr_outputs;          /* the outputs whose wallpaper wants it, one per line */
     guint ptr_ms;               /* the least time between two positions */
     char *ptr_on;               /* the output the pointer script last named; NULL = it is on none */
@@ -252,9 +254,11 @@ static void kwin_pointer_report (KScript *s, const char *where)
     }
     if (!s->heard) {
         ks_trouble (s, NULL, NULL);
+        char *outs = g_strdup (K.ptr_outputs && *K.ptr_outputs ? K.ptr_outputs : "no output");
         g_message ("kwin: the pointer script is loaded in KWin: it reports where the pointer is over "
-                   "Plasma's desktop on %s", K.ptr_outputs && *K.ptr_outputs ? "the outputs whose "
-                   "wallpaper uses it" : "no output");
+                   "Plasma's desktop on %s (the outputs whose wallpaper uses it), at most every %u ms",
+                   g_strdelimit (outs, "\n", ' '), K.ptr_ms);
+        g_free (outs);
     }
     s->heard = TRUE;
     switch (walpe_kwin_pointer_line (where, &name, &nlen, &x, &y)) {
@@ -263,13 +267,13 @@ static void kwin_pointer_report (KScript *s, const char *where)
             g_free (K.ptr_on);
             K.ptr_on = g_strndup (name, nlen);
         }
-        if (K.ptr_fn && K.ptr_want)
+        if (K.ptr_fn && K.ptr_now)
             K.ptr_fn (K.ptr_on, WALPE_KWIN_PTR_MOTION, x, y, 0, 0, K.ptr_user);
         break;
     case WALPE_KWIN_PTR_LEAVE: {
         char *on = g_strndup (name, nlen);
         g_clear_pointer (&K.ptr_on, g_free);
-        if (K.ptr_fn && K.ptr_want)
+        if (K.ptr_fn && K.ptr_now)
             K.ptr_fn (on, WALPE_KWIN_PTR_LEAVE, 0, 0, 0, 0, K.ptr_user);
         g_free (on);
         break;
@@ -705,7 +709,7 @@ static void ptr_method (GDBusConnection *c, const char *sender, const char *path
     guint32 what = 0;
     double x = 0, y = 0, a = 0, b = 0;
     g_variant_get (args, "(&sudddd)", &output, &what, &x, &y, &a, &b);
-    if (K.ptr_fn && K.ptr_want)
+    if (K.ptr_fn && K.ptr_now)
         K.ptr_fn (output, what, x, y, a, b, K.ptr_user);
     g_dbus_method_invocation_return_value (inv, NULL);
 }
@@ -821,17 +825,47 @@ void walpe_sig_kwin_set_rules (guint mask)
         kwin_arm ();
 }
 
+/* how long the name and the pointer script outlive the last wallpaper that
+ * wanted the pointer */
+#define PTR_LINGER_MS 500
+
+static gboolean kwin_pointer_lingered (gpointer user)
+{
+    (void) user;
+    K.ptr_linger = 0;
+    K.ptr_want = FALSE;
+    g_clear_pointer (&K.ptr_outputs, g_free);
+    if (K.started)
+        kwin_arm ();
+    return G_SOURCE_REMOVE;
+}
+
+/* "Wanted" comes and goes with every pause of a wallpaper that uses the
+ * pointer, and a pause can last a few hundredths of a second (a compositor
+ * that is late with a frame under load: seen with KWin on a software
+ * renderer, three times in forty seconds). Taking the script out of KWin
+ * and putting it back for each of those would be work for KWin for
+ * nothing: what is kept stays for PTR_LINGER_MS after the last want, and a
+ * want that returns in that time with the same outputs finds everything as
+ * it was. Events stop being handed on at once. */
 void walpe_sig_kwin_set_pointer (gboolean want, const char *outputs, guint ms, WalpeSigPointerFn fn,
                                  gpointer user)
 {
     K.ptr_fn = fn;
     K.ptr_user = user;
-    ms = CLAMP (ms, 4, 1000);
-    if (!want)
-        outputs = NULL;
-    if (!!want == K.ptr_want && ms == K.ptr_ms && !g_strcmp0 (outputs, K.ptr_outputs))
+    K.ptr_now = !!want;
+    if (!want) {
+        if (K.ptr_want && !K.ptr_linger)
+            K.ptr_linger = g_timeout_add (PTR_LINGER_MS, kwin_pointer_lingered, NULL);
         return;
-    K.ptr_want = !!want;
+    }
+    if (K.ptr_linger)
+        g_source_remove (K.ptr_linger);
+    K.ptr_linger = 0;
+    ms = CLAMP (ms, 4, 1000);
+    if (K.ptr_want && ms == K.ptr_ms && !g_strcmp0 (outputs, K.ptr_outputs))
+        return;
+    K.ptr_want = TRUE;
     K.ptr_ms = ms;
     g_free (K.ptr_outputs);
     K.ptr_outputs = g_strdup (outputs);
@@ -842,7 +876,7 @@ void walpe_sig_kwin_set_pointer (gboolean want, const char *outputs, guint ms, W
 const char *walpe_sig_kwin_pointer_state (void)
 {
     static char *text;
-    if (!K.started || !K.ptr_want)
+    if (!K.started || !K.ptr_want || !K.ptr_now)
         return NULL;
     if (!K.bus)
         return "wanted from the Plasma add-on, but there is no connection to the session bus";
@@ -920,7 +954,10 @@ static void kwin_stop (const WalpeSignalProvider *self)
         return;
     kwin_disconnect (TRUE);
     K.started = FALSE;
-    K.ptr_want = FALSE;
+    if (K.ptr_linger)
+        g_source_remove (K.ptr_linger);
+    K.ptr_linger = 0;
+    K.ptr_want = K.ptr_now = FALSE;
     g_clear_pointer (&K.ptr_outputs, g_free);
     g_clear_pointer (&K.ids, g_hash_table_unref);
     for (int i = 0; i < KS_N; i++) {
