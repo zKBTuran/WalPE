@@ -1070,7 +1070,9 @@ int walpe_video_cache_tidy (int max_days, WalpeCacheSaid said, gpointer user)
     int gone = 0;
     const char *n;
     while (d && (n = g_dir_read_name (d))) {
-        const gboolean part = g_str_has_suffix (n, ".mp4.part") || g_str_has_suffix (n, "-sound.flac.part");
+        /* (a sound track's: "<track>.<pid>-<number>.part", sound_extract; "<track>.part" before that) */
+        const gboolean part = g_str_has_suffix (n, ".mp4.part") ||
+                              (g_str_has_suffix (n, ".part") && strstr (n, "-sound.flac."));
         const gboolean flac = g_str_has_suffix (n, "-sound.flac");
         if (!part && !flac && !g_str_has_suffix (n, ".mp4"))
             continue;
@@ -1211,7 +1213,8 @@ int walpe_video_sound_extract_stoppable (const char *src, const char *dst, gbool
 static int sound_extract (const char *src, const char *dst, gboolean (*stop) (gpointer user), gpointer user,
                           char **err)
 {
-    static GMutex one;      /* one at a time in this process: they share the ".part" of a video */
+    static GMutex one;      /* one at a time in this process (and a second caller for the same
+                             * video finds the file made when its turn comes) */
     int res = -1;
     if (err)
         *err = NULL;
@@ -1233,7 +1236,19 @@ static int sound_extract (const char *src, const char *dst, gboolean (*stop) (gp
         return res;
     }
     char *dir = g_path_get_dirname (dst);
-    char *part = g_strconcat (dst, ".part", NULL);
+    /* The unfinished file has a name of this call's own. It was "<dst>.part"
+     * for everybody: a second daemon of the same user (a test run beside the
+     * one that runs, a second session) that took the same track out wrote
+     * the same file, and whichever ffmpeg ended first had "its" file renamed
+     * to the track's name - the other one's, as far as that had got. Seen
+     * with two daemons on one cache: the second one starts 4 s after the
+     * first and is killed 2 s later; the first one's log says the track was
+     * taken out, and the file under the track's name is the second one's
+     * 11.8 MB of 41, its header without a length - for good, the name says
+     * it is this video's track. Now each ffmpeg writes its own file, and a
+     * file that gets the track's name was written to its end by the ffmpeg
+     * this call waited for. */
+    char *part = g_strdup_printf ("%s.%d-%08x.part", dst, (int) getpid (), (guint) g_random_int ());
     char **argv = walpe_video_sound_argv (src, part);
     ChildSetup cs = { TRUE, (gint64) getpid () };
     GPid pid = 0;

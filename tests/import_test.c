@@ -21,6 +21,11 @@
  *    started ends too when the track is given up and when an import is
  *    cancelled - the child leads a process group of its own, and that is
  *    what is killed;
+ *  - two processes take the same track out at the same time (two daemons
+ *    of one user on one cache): each ffmpeg writes a file of its own, and
+ *    what gets the track's name is what this process's ffmpeg wrote, whole
+ *    (stand-in ffmpegs that sign what they write; this program, started
+ *    again with --extract, is the second process and is killed mid-way);
  *  - the process ends (walpe_video_sound_extract_end): a track that is being
  *    taken out is given up without its caller saying so, the program behind
  *    a wrapper script included, nothing is left, and nothing is begun after
@@ -63,6 +68,7 @@ static char *P (const char *rel)
 
 static long stat_field (long pid, int which, char *state);
 static gboolean pid_runs (long pid);
+static int count_suffix (const char *dir, const char *suffix);
 
 /* ---- a sound track given up (walpe_video_sound_extract_stoppable) ---- */
 static gint stop_a, stop_b;     /* what the two callers' stop functions say */
@@ -88,7 +94,7 @@ static gpointer extract_thread (gpointer data)
 static void test_sound_stop (const char *any_file)
 {
     char *dir = P ("slow"), *fake = P ("slow/ffmpeg"), *pidf = P ("slow/pid"), *dst_a = P ("slow/a-sound.flac"),
-         *dst_b = P ("slow/b-sound.flac"), *part_a = P ("slow/a-sound.flac.part"), *text = NULL;
+         *dst_b = P ("slow/b-sound.flac"), *text = NULL;
     char *q_pid = g_shell_quote (pidf);
     char *sh = g_strdup_printf ("#!/bin/sh\necho $$ > %s\nexec sleep 60\n", q_pid);
     char *old_path = g_strdup (g_getenv ("PATH")), *path = g_strconcat (dir, ":", old_path, NULL);
@@ -123,7 +129,7 @@ static void test_sound_stop (const char *any_file)
         el = (g_get_monotonic_time () - t0) / 1e6;
         CHECK (a.res == -2 && !a.err && el < 3.0);
         CHECK (child > 1 && kill (child, 0) != 0);
-        CHECK (!g_file_test (dst_a, G_FILE_TEST_EXISTS) && !g_file_test (part_a, G_FILE_TEST_EXISTS) &&
+        CHECK (!g_file_test (dst_a, G_FILE_TEST_EXISTS) && count_suffix (dir, ".part") == 0 &&
                !g_file_test (dst_b, G_FILE_TEST_EXISTS));
         g_free (a.err);
         g_setenv ("PATH", old_path, TRUE);
@@ -131,7 +137,7 @@ static void test_sound_stop (const char *any_file)
     g_remove (fake);
     g_remove (pidf);
     g_rmdir (dir);
-    g_free (dir); g_free (fake); g_free (pidf); g_free (dst_a); g_free (dst_b); g_free (part_a); g_free (text);
+    g_free (dir); g_free (fake); g_free (pidf); g_free (dst_a); g_free (dst_b); g_free (text);
     g_free (q_pid); g_free (sh); g_free (old_path); g_free (path);
 }
 
@@ -142,7 +148,7 @@ static void test_sound_stop (const char *any_file)
 static void test_sound_stop_wrapper (const char *any_file)
 {
     char *dir = P ("wrap"), *fake = P ("wrap/ffmpeg"), *pidf = P ("wrap/pid"), *pidt = P ("wrap/pid.tmp"),
-         *dst_a = P ("wrap/a-sound.flac"), *part_a = P ("wrap/a-sound.flac.part"), *text = NULL;
+         *dst_a = P ("wrap/a-sound.flac"), *text = NULL;
     char *q_pid = g_shell_quote (pidf), *q_tmp = g_shell_quote (pidt);
     char *sh = g_strdup_printf ("#!/bin/sh\nsleep 60 &\necho $! > %s\nmv %s %s\nwait $!\nexit $?\n", q_tmp, q_tmp, q_pid);
     char *old_path = g_strdup (g_getenv ("PATH")), *path = g_strconcat (dir, ":", old_path, NULL);
@@ -171,7 +177,7 @@ static void test_sound_stop_wrapper (const char *any_file)
         CHECK (gone);       /* the program behind the script has ended with it */
         if (real > 1 && !gone)
             kill ((pid_t) real, SIGKILL);       /* not left behind by a failing run */
-        CHECK (!g_file_test (dst_a, G_FILE_TEST_EXISTS) && !g_file_test (part_a, G_FILE_TEST_EXISTS));
+        CHECK (!g_file_test (dst_a, G_FILE_TEST_EXISTS) && count_suffix (dir, ".part") == 0);
         g_free (a.err);
         g_atomic_int_set (&stop_a, 0);
         g_setenv ("PATH", old_path, TRUE);
@@ -180,8 +186,80 @@ static void test_sound_stop_wrapper (const char *any_file)
     g_remove (pidf);
     g_remove (pidt);
     g_rmdir (dir);
-    g_free (dir); g_free (fake); g_free (pidf); g_free (pidt); g_free (dst_a); g_free (part_a); g_free (text);
+    g_free (dir); g_free (fake); g_free (pidf); g_free (pidt); g_free (dst_a); g_free (text);
     g_free (q_pid); g_free (q_tmp); g_free (sh); g_free (old_path); g_free (path);
+}
+
+/* import-test --extract <src> <dst>: the track of <src> into <dst> */
+static int extract_main (const char *src, const char *dst)
+{
+    char *err = NULL;
+    const int r = walpe_video_sound_extract (src, dst, &err);
+    g_free (err);
+    return r == 1 ? 0 : 3;
+}
+
+/* Two processes take the same track out. The stand-in ffmpeg writes its
+ * process id into its output when it begins and when it ends, 1.2 s
+ * apart. This process begins; 0.3 s later a second one begins the same
+ * and is killed after another 0.4 s, its ffmpeg with it. What then has the
+ * track's name was begun and ended by one ffmpeg - not begun by the
+ * other process's and "ended" by this one's. */
+static void test_sound_two_processes (const char *any_file)
+{
+    char *dir = P ("two"), *fake = P ("two/ffmpeg"), *dst = P ("two/a-sound.flac"), *text = NULL;
+    const char *sh = "#!/bin/sh\nfor a in \"$@\"; do out=$a; done\nout=${out#file:}\n"
+                     "echo \"$$ begins\" > \"$out\"\nsleep 1.2\necho \"$$ ends\" >> \"$out\"\n";
+    char *old_path = g_strdup (g_getenv ("PATH")), *path = g_strconcat (dir, ":", old_path, NULL);
+    char *self = g_file_read_link ("/proc/self/exe", NULL);
+    g_mkdir_with_parents (dir, 0700);
+    if (!self || !g_file_set_contents (fake, sh, -1, NULL) || g_chmod (fake, 0700)) {
+        CHECK (!"the stand-in ffmpeg could not be written");
+    } else {
+        g_setenv ("PATH", path, TRUE);
+        g_atomic_int_set (&stop_a, 0);
+        Extract a = { any_file, dst, 99, NULL };
+        GThread *t = g_thread_new ("extract", extract_thread, &a);
+        g_usleep (300000);
+        char *hargv[] = { self, (char *) "--extract", (char *) any_file, dst, NULL };
+        GPid helper = 0;
+        const gboolean up = g_spawn_async (NULL, hargv, NULL, G_SPAWN_DO_NOT_REAP_CHILD, NULL, NULL, &helper, NULL);
+        CHECK (up);
+        g_usleep (400000);
+        if (up) {
+            kill (helper, SIGKILL);
+            waitpid (helper, NULL, 0);
+        }
+        g_thread_join (t);
+        long p_begin = 0, p_end = 0;
+        CHECK (a.res == 1 && !a.err && g_file_get_contents (dst, &text, NULL, NULL) && text &&
+               sscanf (text, "%ld begins %ld ends", &p_begin, &p_end) == 2 && p_begin > 1 && p_begin == p_end);
+        if (text && !(p_begin > 1 && p_begin == p_end))
+            g_printerr ("     the track's file: %s", text);
+        g_free (a.err);
+        g_usleep (100000);
+        /* what the killed process left has a name of its own, which the
+         * daemon's start knows as unfinished: gone with the rest here */
+        GDir *d = g_dir_open (dir, 0, NULL);
+        const char *name;
+        int stray = 0;
+        while (d && (name = g_dir_read_name (d))) {
+            if (g_str_has_suffix (name, ".part") && strstr (name, "-sound.flac.")) {
+                char *f = g_build_filename (dir, name, NULL);
+                g_remove (f);
+                g_free (f);
+                stray++;
+            }
+        }
+        if (d)
+            g_dir_close (d);
+        CHECK (stray <= 1 && count_suffix (dir, ".part") == 0);
+        g_setenv ("PATH", old_path, TRUE);
+    }
+    g_remove (fake);
+    g_remove (dst);
+    g_rmdir (dir);
+    g_free (dir); g_free (fake); g_free (dst); g_free (text); g_free (old_path); g_free (path); g_free (self);
 }
 
 /* The process is about to end while a track is being taken out, and the
@@ -192,7 +270,7 @@ static void test_sound_stop_wrapper (const char *any_file)
 static void test_sound_end (const char *any_file)
 {
     char *dir = P ("end"), *fake = P ("end/ffmpeg"), *pidf = P ("end/pid"), *pidt = P ("end/pid.tmp"),
-         *dst_a = P ("end/a-sound.flac"), *part_a = P ("end/a-sound.flac.part"), *text = NULL;
+         *dst_a = P ("end/a-sound.flac"), *text = NULL;
     char *q_pid = g_shell_quote (pidf), *q_tmp = g_shell_quote (pidt);
     char *sh = g_strdup_printf ("#!/bin/sh\nfor a in \"$@\"; do out=$a; done\n: > \"${out#file:}\"\nsleep 60 &\n"
                                 "echo $! > %s\nmv %s %s\nwait $!\nexit $?\n", q_tmp, q_tmp, q_pid);
@@ -208,7 +286,7 @@ static void test_sound_end (const char *any_file)
         for (int i = 0; i < 5000 && !g_file_get_contents (pidf, &text, NULL, NULL); i++)
             g_usleep (1000);
         const long real = text ? atol (text) : 0;
-        CHECK (real > 1 && pid_runs (real) && g_file_test (part_a, G_FILE_TEST_EXISTS) && a.res == 99);
+        CHECK (real > 1 && pid_runs (real) && count_suffix (dir, ".part") == 1 && a.res == 99);
         const gint64 t0 = g_get_monotonic_time ();
         walpe_video_sound_extract_end (3000);
         const double el = (g_get_monotonic_time () - t0) / 1e6;
@@ -222,13 +300,13 @@ static void test_sound_end (const char *any_file)
         CHECK (gone);
         if (real > 1 && !gone)
             kill ((pid_t) real, SIGKILL);
-        CHECK (!g_file_test (dst_a, G_FILE_TEST_EXISTS) && !g_file_test (part_a, G_FILE_TEST_EXISTS));
+        CHECK (!g_file_test (dst_a, G_FILE_TEST_EXISTS) && count_suffix (dir, ".part") == 0);
         g_free (a.err);
         /* and nothing begins after that */
         g_remove (pidf);
         char *err = NULL;
         CHECK (walpe_video_sound_extract (any_file, dst_a, &err) == -2 && !err &&
-               !g_file_test (pidf, G_FILE_TEST_EXISTS) && !g_file_test (part_a, G_FILE_TEST_EXISTS));
+               !g_file_test (pidf, G_FILE_TEST_EXISTS) && count_suffix (dir, ".part") == 0);
         g_free (err);
         g_setenv ("PATH", old_path, TRUE);
     }
@@ -236,7 +314,7 @@ static void test_sound_end (const char *any_file)
     g_remove (pidf);
     g_remove (pidt);
     g_rmdir (dir);
-    g_free (dir); g_free (fake); g_free (pidf); g_free (pidt); g_free (dst_a); g_free (part_a); g_free (text);
+    g_free (dir); g_free (fake); g_free (pidf); g_free (pidt); g_free (dst_a); g_free (text);
     g_free (q_pid); g_free (q_tmp); g_free (sh); g_free (old_path); g_free (path);
 }
 
@@ -250,7 +328,7 @@ static void test_sound_end (const char *any_file)
 static void test_sound_stop_floor (const char *any_file)
 {
     char *dir = P ("slow2"), *fake = P ("slow2/ffmpeg"), *pidf = P ("slow2/pid"), *dst_a = P ("slow2/a-sound.flac"),
-         *part_a = P ("slow2/a-sound.flac.part"), *text = NULL;
+         *text = NULL;
     char *q_pid = g_shell_quote (pidf);
     char *sh = g_strdup_printf ("#!/bin/sh\necho $$ > %s\nexec sleep 60\n", q_pid);
     char *old_path = g_strdup (g_getenv ("PATH")), *path = g_strconcat (dir, ":", old_path, NULL);
@@ -275,7 +353,7 @@ static void test_sound_stop_floor (const char *any_file)
         const double el = (g_get_monotonic_time () - t0) / 1e6;
         CHECK (a.res == -2 && !a.err && el < 3.0);
         CHECK (child > 1 && kill (child, 0) != 0);
-        CHECK (!g_file_test (dst_a, G_FILE_TEST_EXISTS) && !g_file_test (part_a, G_FILE_TEST_EXISTS));
+        CHECK (!g_file_test (dst_a, G_FILE_TEST_EXISTS) && count_suffix (dir, ".part") == 0);
         g_free (a.err);
         /* the floor comes first: nothing is started, and the answer is the
          * floor's, not "given up" */
@@ -287,7 +365,7 @@ static void test_sound_stop_floor (const char *any_file)
         const int rb = walpe_video_sound_extract_stoppable (any_file, dst_a, stop_b_cb, NULL, &err);
         CHECK (rb == -1 && err && strstr (err, "left on the disk") && g_atomic_int_get (&asked_b) == 0);
         CHECK (!g_file_test (pidf, G_FILE_TEST_EXISTS) && !g_file_test (dst_a, G_FILE_TEST_EXISTS) &&
-               !g_file_test (part_a, G_FILE_TEST_EXISTS));
+               count_suffix (dir, ".part") == 0);
         g_free (err);
         g_unsetenv ("WALPE_CONVERT_FREE_MB");
         g_atomic_int_set (&stop_a, 0);
@@ -297,7 +375,7 @@ static void test_sound_stop_floor (const char *any_file)
     g_remove (fake);
     g_remove (pidf);
     g_rmdir (dir);
-    g_free (dir); g_free (fake); g_free (pidf); g_free (dst_a); g_free (part_a); g_free (text);
+    g_free (dir); g_free (fake); g_free (pidf); g_free (dst_a); g_free (text);
     g_free (q_pid); g_free (sh); g_free (old_path); g_free (path);
 }
 
@@ -722,7 +800,8 @@ static void test_runs (void)
         char *vdir = g_build_filename (g_get_user_cache_dir (), "walpe", "video", NULL);
         g_mkdir_with_parents (vdir, 0700);
         const struct { const char *name; int mb, days; } f[] = {
-            { "a.mp4", 3, 100 }, { "b-sound.flac", 1, 95 }, { "c.mp4.part", 1, 0 }, { "d-sound.flac.part", 1, 0 },
+            { "a.mp4", 3, 100 }, { "b-sound.flac", 1, 95 }, { "c.mp4.part", 1, 0 },
+            { "d-sound.flac.4711-0badcafe.part", 1, 0 },
             { "e.mp4", 2, 50 }, { "f-sound.flac", 2, 40 }, { "g-scene-640x360.mp4", 2, 30 }, { "h.mp4", 2, 20 },
             { "i-sound.flac", 3, 1 }, { "notes.txt", 1, 400 },
         };
@@ -746,7 +825,8 @@ static void test_runs (void)
                 /* no limit named: only the age and the unfinished ones */
                 g_unsetenv ("WALPE_VIDEO_CACHE_MB");
                 CHECK (walpe_video_cache_tidy (90, NULL, NULL) == 4);
-                CHECK (!HAS ("a.mp4") && !HAS ("b-sound.flac") && !HAS ("c.mp4.part") && !HAS ("d-sound.flac.part"));
+                CHECK (!HAS ("a.mp4") && !HAS ("b-sound.flac") && !HAS ("c.mp4.part") &&
+                       !HAS ("d-sound.flac.4711-0badcafe.part"));
                 CHECK (HAS ("e.mp4") && HAS ("f-sound.flac") && HAS ("g-scene-640x360.mp4") && HAS ("h.mp4") &&
                        HAS ("i-sound.flac") && HAS ("notes.txt"));
             } else if (round == 1) {
@@ -764,6 +844,13 @@ static void test_runs (void)
             }
         }
         g_unsetenv ("WALPE_VIDEO_CACHE_MB");
+        {
+            /* (the name an unfinished track had before each run got its own) */
+            char *old = CF ("z-sound.flac.part");
+            g_file_set_contents (old, "x", 1, NULL);
+            CHECK (walpe_video_cache_tidy (90, NULL, NULL) == 1 && !HAS ("z-sound.flac.part") && HAS ("i-sound.flac"));
+            g_free (old);
+        }
         for (guint i = 0; i < G_N_ELEMENTS (f); i++) {
             char *p = CF (f[i].name);
             g_remove (p);
@@ -804,11 +891,11 @@ static void test_runs (void)
              * no disk reaches): not begun, the reason said, nothing left
              * behind; and taken out again once the floor is the usual one */
             {
-                char *p1 = g_strconcat (f1, ".part", NULL);
+                char *p1 = g_path_get_dirname (f1);     /* (where its ".part" would be) */
                 g_remove (f1);
                 g_setenv ("WALPE_CONVERT_FREE_MB", "100000000", TRUE);
                 CHECK (walpe_video_sound_extract (snd, f1, &err) == -1 && err && strstr (err, "left on the disk") &&
-                       !g_file_test (f1, G_FILE_TEST_EXISTS) && !g_file_test (p1, G_FILE_TEST_EXISTS));
+                       !g_file_test (f1, G_FILE_TEST_EXISTS) && count_suffix (p1, ".part") == 0);
                 g_free (err);
                 err = NULL;
                 g_setenv ("WALPE_CONVERT_FREE_MB", "0", TRUE);
@@ -819,9 +906,9 @@ static void test_runs (void)
                 g_free (p1);
             }
             /* not a video: an error that says what ffmpeg said, nothing left behind */
-            char *part = g_strconcat (f3, ".part", NULL);
+            char *part = g_path_get_dirname (f3);
             CHECK (walpe_video_sound_extract (junk, f3, &err) == -1 && err && *err &&
-                   !g_file_test (f3, G_FILE_TEST_EXISTS) && !g_file_test (part, G_FILE_TEST_EXISTS));
+                   !g_file_test (f3, G_FILE_TEST_EXISTS) && count_suffix (part, ".part") == 0);
             g_free (err);
             g_free (part);
             g_remove (f1);
@@ -1072,6 +1159,8 @@ int main (int argc, char **argv)
 {
     if (argc == 4 && !strcmp (argv[1], "--hold"))
         return hold_main (argv[2], argv[3]);
+    if (argc == 4 && !strcmp (argv[1], "--extract"))
+        return extract_main (argv[2], argv[3]);
     tmp = g_dir_make_tmp ("walpe-import-test-XXXXXX", NULL);
     g_assert (tmp);
     g_setenv ("HOME", tmp, TRUE);
@@ -1088,6 +1177,7 @@ int main (int argc, char **argv)
         test_sound_stop (any);
         test_sound_stop_floor (any);
         test_sound_stop_wrapper (any);
+        test_sound_two_processes (any);
         g_remove (any);
         g_free (any);
     }
