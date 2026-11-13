@@ -101,6 +101,19 @@ static GByteArray *hand_jpeg (guint w, guint h, guint ncomp, int kind, gboolean 
         guint64 blocks = (guint64) ((w + 7) / 8) * ((h + 7) / 8) * (sub ? 4 : 1);
         guint zeros = (guint) (((blocks + 16383) / 16384 * 15 + 7) / 8 + 2);
         guint8 *z = g_malloc0 (zeros);
+        /* A small progressive picture gets its DC scans as well, in front
+         * (one bit a block, "no change"): libjpeg shows a progressive file
+         * of AC scans alone, the JPEG decoder behind gdk-pixbuf 2.44
+         * (glycin's) says "Marker missing where expected". The large ones
+         * stay as short as they are; no decoder is to see them. */
+        if (kind == 0 && !sub && blocks <= 64) {
+            const guint8 none[9] = { 0 };
+            for (guint c = 0; c < ncomp; c++) {
+                guint8 sos[6] = { 1, (guint8) (c + 1), 0, 0, 0, 0 };
+                SEG (0xDA, sos, 6);
+                g_byte_array_append (o, none, (guint) ((blocks + 7) / 8 + 1));
+            }
+        }
         for (guint c = 0; c < ncomp; c++) {
             guint8 sos[6] = { 1, (guint8) (c + 1), 0, (guint8) (kind == 0 ? 1 : 0), 63, 0 };
             SEG (0xDA, sos, 6);
