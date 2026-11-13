@@ -67,6 +67,7 @@
 #include "common/audio.h"
 #include "common/media.h"
 #include "webhostsel.h"
+#include "webbg.h"
 #include <gtk/gtk.h>
 #include <webkit/webkit.h>
 #include <libsoup/soup.h>
@@ -3892,7 +3893,24 @@ static gboolean sh_create_real (WebShared *sh)
     if (!sound_pages)
         sound_pages = g_ptr_array_new ();
     g_ptr_array_add (sound_pages, sh);
-    webkit_web_view_set_background_color (sh->view, &(GdkRGBA) { 0, 0, 0, 0 });
+    {   /* see-through where the page paints nothing, unless this WebKit
+         * loses the rest of the page with that (webbg.h) */
+        static gboolean said;
+        gboolean opaque = web_bg_opaque (g_getenv ("WALPE_WEB_OPAQUE"), webkit_get_major_version (),
+                                         webkit_get_minor_version (), webkit_get_micro_version ());
+        webkit_web_view_set_background_color (sh->view, &(GdkRGBA) { 0, 0, 0, opaque ? 1 : 0 });
+        if (!said && opaque != web_bg_wiped_by (webkit_get_major_version (), webkit_get_minor_version (),
+                                               webkit_get_micro_version ())) {
+            g_message ("web: WALPE_WEB_OPAQUE: the background of a page's view is %s",
+                       opaque ? "opaque black" : "see-through");
+        } else if (!said && opaque) {
+            g_message ("web: WebKitGTK %u.%u.%u wipes what a page does not repaint from the frame of a "
+                       "see-through view (2.53.1 - 2.54.2): the background of a page's view is opaque "
+                       "black instead (WALPE_WEB_OPAQUE=0 for see-through)",
+                       webkit_get_major_version (), webkit_get_minor_version (), webkit_get_micro_version ());
+        }
+        said = TRUE;
+    }
     WebKitSettings *st = webkit_web_view_get_settings (sh->view);
     gboolean files = use_file_urls ();
     g_object_set (st,

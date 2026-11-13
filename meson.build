@@ -842,6 +842,15 @@ test('webhost-select', executable('webhost-select-test', 'tests/webhost_select_t
   dependencies: [glib],
   install: false, build_by_default: false))
 
+# the background of a page's view (src/engine/webbg.h): see-through, and
+# opaque black with the WebKitGTK releases that wipe what a page did not
+# repaint from the frame of a see-through view (2.53.1 - 2.54.2);
+# WALPE_WEB_OPAQUE. Pure.
+test('webbg', executable('webbg-test', 'tests/webbg_test.c',
+  include_directories: inc,
+  dependencies: [glib],
+  install: false, build_by_default: false))
+
 # the sound output of the page process (gst/walpesound.c) as GStreamer's
 # playback elements meet it: autoaudiosink takes it before pulsesink, and
 # playbin's search for the element that keeps the volume ends at the

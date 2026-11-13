@@ -18,7 +18,8 @@ that into the daemon's log). Nothing of the user's is read or written.
             viewport and screen, and the output shows its picture: four coloured
             quarters, a canvas, the colour of a wallpaper option.
   live      requestAnimationFrame runs at about the frame rate limit, the canvas and a
-            CSS animation move on the output.
+            CSS animation move on the output, and what stands still in the page stays
+            in the picture while they do.
   props     the Wallpaper Engine listener: applyUserProperties with the option values
             on load, with the changed one after `walpe-ctl setprop` (and the picture
             follows), applyGeneralProperties with the frame rate limit.
@@ -554,6 +555,12 @@ def case_live(env, W):
     bars.discard(-1)
     check(len(xs) >= 3, "live: the CSS animation moves on the output", sorted(xs))
     check(len(bars) >= 3, "live: the canvas animation moves on the output", sorted(bars))
+    # a frame of the page is the whole page, not what the page painted anew for it. (With
+    # WebKitGTK 2.54 and a see-through view the frames after the third held only what had
+    # moved: the quarters were black a tenth of a second after the page came up, behind
+    # an animation that ran on - and the look at the page above was over by then.)
+    lk = look(env, mon)
+    check(lk["ok"], "live: what stands still in the page is in the picture while the rest moves", lk["bad"])
     healthy(env, mark, "live")
 
 

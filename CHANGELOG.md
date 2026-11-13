@@ -326,6 +326,26 @@ it was). A bare window manager on X11 - dwm, i3, openbox - gets the window of 0.
   started by hand in Xvfb (XFCE 4.18, LXQt 1.4, LXDE, MATE 1.26, Cinnamon 6.0, GNOME
   Shell 46, KDE Plasma 5.27); none in a real session, none with a graphics card.**
 
+### Web wallpapers
+
+- With WebKitGTK 2.54 (Arch, and what follows it; 2.53.1 to 2.54.2) an animated web
+  wallpaper no longer goes black around what moves. There a page showed all of itself
+  for its first three frames, and from then on only what it painted anew in each frame -
+  the moving parts - on black: a still background behind an animation was gone a tenth
+  of a second after the page came up. A page that never repaints, and one that redraws
+  all of itself in every frame, looked right. WalPE gives the page's view a see-through
+  background, and these WebKitGTK releases clear the whole frame of such a view before
+  they paint what changed (WebKit's own repair is in its development branch). With them
+  the view's background is opaque black now, which WebKit does not clear; the daemon
+  draws pages over black anyway, so the picture is the one a page always had - except
+  for a page without a background of its own that blends its elements with what is
+  behind it (`mix-blend-mode`): they blend with black there. Other WebKitGTK versions
+  keep the see-through background, nothing changes for them. `WALPE_WEB_OPAQUE=1` or `0`
+  in the daemon's environment chooses by hand
+  ([ENVIRONMENT.md](docs/ENVIRONMENT.md)); a daemon without this change shows right
+  pictures there with `WALPE_WEB_SNAPSHOT=1`, at the price of processor time. Found in
+  the checks on Arch with the software renderer; not seen on a desktop.
+
 ### Sound
 
 - Wallpaper sound is on by default, at half volume: a new configuration has `scene_sound`
