@@ -182,7 +182,10 @@ it was). A bare window manager on X11 - dwm, i3, openbox - gets the window of 0.
   "eglCreateWindowSurface failed for monitor 0 (0x3000)" on Wayland also where no EGL
   call had been made, and 0x3000 is EGL's number for success: it says "no surface to draw
   on" there now and points to the line above it, which has the reason. On X11 and
-  wherever an EGL call did fail the line is the old one.)
+  wherever an EGL call did fail the line is the old one.) A new try waits half a second
+  for the compositor's answer, and the daemon answers nothing else meanwhile; on GNOME
+  Shell with the extension, where wallpapers are windows, it waited the three seconds of
+  the start, longer than `walpe-ctl` waits for an answer. Half a second there too now.
 - A still wallpaper (a picture, a scene in which nothing moves, anything paused) on an
   output whose scale or resolution changes: until the daemon had restarted for the new
   layout - two to ten seconds - it was shown at its old size: its top left quarter

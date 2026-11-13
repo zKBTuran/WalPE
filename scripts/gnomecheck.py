@@ -55,6 +55,12 @@ Cases (--only NAME runs one):
   bus-bounds     a "see-through windows" list of 100 000 characters sent to
                  the extension's method Windows: it keeps 64 names at most
                  and answers
+  retry          the shell does not answer the daemon's first two wallpaper
+                 windows (made up with WALPE_WL_NO_CONFIGURE): the daemon
+                 starts without a monitor and tries again; `walpe-ctl status`
+                 is answered throughout the try that fails (a try waits half
+                 a second for the shell, not the three seconds of the start),
+                 and the third window becomes the desktop window
 
 Exit status 0 = passed, 1 = failed, 77 = cannot run here (no gnome-shell,
 gdbus or dbus-daemon, a build without the Wayland backend, or a shell that
@@ -302,8 +308,9 @@ class Shell:
 class Daemon:
     """One walpe-daemon in the shell's session, showing a scene of one colour."""
 
-    def __init__(self, shell, build, name):
+    def __init__(self, shell, build, name, extra=None):
         self.shell = shell
+        self.env = dict(shell.env, **(extra or {}))     # (the daemon's own; walpe-ctl gets the shell's)
         self.exe = os.path.join(build, "walpe-daemon")
         self.ctl = os.path.join(build, "walpe-ctl")
         self.logname = os.path.join(shell.top, name + ".log")
@@ -311,7 +318,7 @@ class Daemon:
 
     def start(self):
         log = open(self.logname, "wb")
-        self.p = subprocess.Popen([self.exe], env=self.shell.env, cwd=self.shell.home, stdin=subprocess.DEVNULL,
+        self.p = subprocess.Popen([self.exe], env=self.env, cwd=self.shell.home, stdin=subprocess.DEVNULL,
                                   stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         log.close()
         scene = os.path.join(self.shell.top, "scene")
@@ -732,11 +739,43 @@ def case_bus_bounds(shell, build):
     return bad
 
 
+def case_retry(shell, build):
+    """A wallpaper window the shell does not answer is tried again, and a try does not
+    hold the control socket for the three seconds the start waits: where wallpapers are
+    windows the shorter wait of a new try was not used, and `walpe-ctl status` sent at
+    the beginning of a try was not answered in time (walpe-ctl gives up after 2 s)."""
+    d = Daemon(shell, build, "daemon-retry", extra={"WALPE_WL_NO_CONFIGURE": "2", "WALPE_SURFACE_RETRY_MS": "2000"})
+    d.start()
+    try:
+        bad, asked, longest, unanswered = [], 0, 0.0, 0
+        end = time.monotonic() + WAIT_S
+        # from the start (which has waited its three seconds by now) to the window of the third try
+        while time.monotonic() < end and d.p.poll() is None and "wallpaper surface now" not in d.log():
+            t0 = time.monotonic()
+            r = subprocess.run([d.ctl, "status"], env=shell.env, capture_output=True, text=True, timeout=WAIT_S)
+            asked += 1
+            longest = max(longest, time.monotonic() - t0)
+            unanswered += 0 if r.returncode == 0 and '"monitors"' in r.stdout else 1
+            time.sleep(0.05)
+        log = d.log()
+        if log.count("did not configure the wallpaper window on") != 2 or "wallpaper surface now (try 3" not in log:
+            bad.append("not two windows without an answer and a third with one:\n%s" % log[-1500:])
+        if unanswered or longest >= 2.0 or asked < 10:
+            bad.append("walpe-ctl status while the daemon tried again: %d of %d not answered, the longest took %.1f s "
+                       "(a try may hold the socket for half a second)" % (unanswered, asked, longest))
+        w, why = d.wait_window()
+        if not w:
+            bad.append(why)
+        return bad
+    finally:
+        d.stop()
+
+
 CASES = [("desktop", case_desktop, False), ("helper-killed", case_helper_killed, True),
          ("pkill", case_pkill, True), ("socket-bound", case_socket_bound, True),
          ("stranger", case_stranger, False), ("covered", case_covered, False),
          ("lock", case_lock, False), ("crash", case_crash, False),
-         ("bus-bounds", case_bus_bounds, False)]
+         ("bus-bounds", case_bus_bounds, False), ("retry", case_retry, False)]
 
 
 TMP_MAX = 45    # bytes of a directory for the private one: below it are "walpe-gn.XXXXXXXX/rt/" and the

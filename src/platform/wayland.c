@@ -1875,7 +1875,11 @@ static gboolean wl_toplevel_create_locked (WlSurf *s, gint64 now_us)
     xdg_toplevel_set_app_id (s->toplevel, s->kind == WALPE_SURFACE_WALLPAPER ? WL_GNOME_APP_ID : "walpe");
     xdg_toplevel_set_title (s->toplevel, s->title ? s->title : "WalPE");
     s->role_on_rq = TRUE;
-    wl_surface_commit (s->surface);
+    /* (WALPE_WL_NO_CONFIGURE, tests, as in wl_layer_create_locked: a
+     * wallpaper's window that the shell does not answer) */
+    if (!(s->kind == WALPE_SURFACE_WALLPAPER && g_atomic_int_get (&W.test_no_configure) > 0 &&
+          g_atomic_int_add (&W.test_no_configure, -1) > 0))
+        wl_surface_commit (s->surface);
     wl_ls_event (&s->ls, WL_LS_EV_CREATE, 0, 0, 0, now_us);
     return TRUE;
 }
@@ -2187,9 +2191,12 @@ static WalpeSurface *wl_surface_new (const WalpeSurfaceSpec *spec, EGLDisplay dp
     if (s->role != WL_ROLE_NONE) {
         gint64 now = g_get_monotonic_time ();
         /* (a wallpaper surface that is tried again waits a shorter time:
-         * walpe_wayland_surface_wait) */
-        const gint64 wait = s->role == WL_ROLE_LAYER && W.first_wait_us > 0 ? W.first_wait_us
-                                                                           : WL_FIRST_CONFIGURE_US;
+         * walpe_wayland_surface_wait - whichever role a wallpaper has
+         * here. This asked for the layer-shell role: where wallpapers are
+         * windows, on GNOME Shell, each new try stood still for the three
+         * seconds of the start, and the control socket with it.) */
+        const gint64 wait = s->kind == WALPE_SURFACE_WALLPAPER && W.first_wait_us > 0
+                                ? W.first_wait_us : WL_FIRST_CONFIGURE_US;
         g_mutex_lock (&s->rq_lock);
         g_mutex_lock (&s->lock);
         gboolean ok = s->role == WL_ROLE_LAYER ? wl_layer_create_locked (s, now)
@@ -2205,7 +2212,8 @@ static WalpeSurface *wl_surface_new (const WalpeSurfaceSpec *spec, EGLDisplay dp
         g_mutex_unlock (&s->rq_lock);
         if (!ok) {
             g_warning ("wayland: the compositor did not configure the %s%s within %.1f s: no surface",
-                       s->role == WL_ROLE_LAYER ? "wallpaper surface on " : "window",
+                       s->role == WL_ROLE_LAYER ? "wallpaper surface on "
+                       : s->kind == WALPE_SURFACE_WALLPAPER ? "wallpaper window on " : "window",
                        s->out_name ? s->out_name : "", (double) wait / G_USEC_PER_SEC);
             wl_surf_destroy (s);
             return NULL;
