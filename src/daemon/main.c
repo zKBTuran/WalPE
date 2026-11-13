@@ -3487,6 +3487,30 @@ static void noshare_reset (void)
     g_clear_pointer (&D.shared_note, g_free);
 }
 
+/* The folders of the wallpapers whose load failed, for the summary of
+ * diag.h: the reason a monitor's line quotes names the failed wallpaper by
+ * its path, and the monitor itself is back on the one it showed before, so
+ * nothing else the daemon holds says which folder that was. The last 32
+ * different ones; touched when a load fails, read when a summary is made. */
+static GPtrArray *load_failed_dirs;
+
+static void load_failed_note (const char *path)
+{
+    if (!path || path[0] != '/')
+        return;
+    char *dir = g_path_get_dirname (path);
+    if (!load_failed_dirs)
+        load_failed_dirs = g_ptr_array_new_with_free_func (g_free);
+    for (guint i = 0; i < load_failed_dirs->len; i++)
+        if (!strcmp (g_ptr_array_index (load_failed_dirs, i), dir)) {
+            g_free (dir);
+            return;
+        }
+    if (load_failed_dirs->len >= 32)
+        g_ptr_array_remove_index (load_failed_dirs, 0);
+    g_ptr_array_add (load_failed_dirs, dir);
+}
+
 /* main: the load of `path` on m's render thread ended (msg NULL = well).
  * The result counts for m and for the monitors following it, as far as
  * they are still to show that wallpaper: one that arrives after they were
@@ -3515,6 +3539,8 @@ static void load_ended (Mon *m, const char *path, const char *msg, gboolean kept
 {
     if (g_strcmp0 (m->want_path, path))
         return;
+    if (msg)
+        load_failed_note (path);
     guint n = g_list_length (D.mons), i = 0;
     Mon **ms = g_new0 (Mon *, n);
     WalpeRestoreMon *rm = g_new0 (WalpeRestoreMon, n);

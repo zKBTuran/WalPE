@@ -26,8 +26,9 @@
  * Everything is read from what the daemon holds anyway, on the main
  * thread, when it is asked or when the thing happens: no timer, no
  * thread, nothing on a frame's path. A wallpaper is named by the last part
- * of its path and the home directory is written as "~": the text is made
- * to be posted. */
+ * of its path, the home directory is written as "~" and a path anywhere
+ * else is cut down to its last part (diag_no_paths): the text is made to
+ * be posted. */
 
 /* the last component of a wallpaper's path ("" = none) */
 static char *diag_base (const char *path)
@@ -40,20 +41,43 @@ static char *diag_base (const char *path)
     return r;
 }
 
-/* a message from somewhere else (a load error, a note) may name a file
- * under the home directory */
-static void diag_no_home (GString *s)
+#include "diagpath.h"     /* walpe_diag_no_folders, walpe_diag_no_home, walpe_diag_short_paths */
+
+/* the folder that path lies in */
+static void diag_folder_add (GPtrArray *folders, const char *path)
 {
-    const char *home = g_get_home_dir ();
-    const gsize hl = home ? strlen (home) : 0;
-    if (hl < 2)
-        return;
-    for (char *p = strstr (s->str, home); p; p = strstr (s->str + (p - s->str) + 1, home)) {
-        const gssize at = p - s->str;
-        g_string_erase (s, at, (gssize) hl);
-        g_string_insert_c (s, at, '~');
-        p = s->str + at;
+    if (path && path[0] == '/')
+        g_ptr_array_add (folders, g_path_get_dirname (path));
+}
+
+/* A message from somewhere else (the reason a load failed, a note) names
+ * files by the paths the loaders were given. Under the home directory
+ * that is "~/..." in the summary; anywhere else - a library on /mnt, a
+ * wallpaper opened from /tmp or from a stick - the whole path stood there,
+ * in a text that is made to be posted (daemon/diagpath.h). The folders the
+ * daemon knows go first: the folder each wallpaper lies in, shown or
+ * failed (so a failed load reads "noscene: scene.json not found in
+ * noscene", next to the name the monitor's line gives the wallpaper), and
+ * what lies above the library and the Wallpaper Engine assets. */
+static void diag_no_paths (GString *s)
+{
+    GPtrArray *folders = g_ptr_array_new_with_free_func (g_free);
+    for (GList *l = D.mons; l; l = l->next) {
+        const Mon *m = l->data;
+        diag_folder_add (folders, m->want_path);
+        diag_folder_add (folders, m->good_path);
+        diag_folder_add (folders, m->loaded_path);
+        diag_folder_add (folders, walpe_config_monitor_path (D.cfg, m->name));
     }
+    for (guint i = 0; load_failed_dirs && i < load_failed_dirs->len; i++)
+        g_ptr_array_add (folders, g_strdup (g_ptr_array_index (load_failed_dirs, i)));
+    diag_folder_add (folders, D.cfg->current);
+    diag_folder_add (folders, D.cfg->wallpapers_dir);
+    diag_folder_add (folders, D.cfg->we_assets);
+    walpe_diag_no_folders (s, folders, g_get_home_dir ());
+    g_ptr_array_free (folders, TRUE);
+    walpe_diag_no_home (s, g_get_home_dir ());
+    walpe_diag_short_paths (s);
 }
 
 /* the name of a process as /proc has it (g_free; NULL = it is gone) */
@@ -207,7 +231,7 @@ static char *diag_text (void)
         g_string_append_c (s, '\n');
         g_free (base);
     }
-    diag_no_home (s);
+    diag_no_paths (s);
     g_string_truncate (s, s->len ? s->len - 1 : 0);    /* (no newline at the end) */
     return g_string_free (s, FALSE);
 }

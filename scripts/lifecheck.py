@@ -149,6 +149,10 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
   settings  what `walpe-ctl set` answers and what status and config.json
             hold afterwards: video_backend=mpv is stored and status shows
             the video backend that plays (ffmpeg).
+  diag      the text of `walpe-ctl diag` names no folder of a wallpaper
+            that lies outside the home directory, also in the reason a
+            load failed (a broken scene, a folder with a blank in its
+            name); below the home directory it is "~/..." as before.
 
 The display is Xvfb, or with --display sway (or WALPE_CHECK_DISPLAY=sway) a
 headless Wayland compositor (scripts/displayenv.py); the cases are the same
@@ -2963,6 +2967,56 @@ def case_settings(env, W):
           "settings: video_backend=ffmpeg is stored without a note", rep)
 
 
+# --------------------------------------------------------------------- diag
+def case_diag(env, W):
+    """`walpe-ctl diag` is made to be posted: a wallpaper by the last part of
+    its path, the home directory as "~". The wallpapers of this check lie
+    outside its home directory, as a library on another disk does."""
+    A = ("A", 320, 180, 0, 0)
+    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False})
+    if not check(env.start_daemon([A]), "diag: daemon started"):
+        return
+    home = env.env["HOME"]
+    spaced = os.path.join(env.tmp, "my walls", "gone scene")       # no scene.json in it
+    rc.jdump(os.path.join(spaced, "project.json"), {"file": "scene.json", "title": "gone", "type": "scene"})
+    inhome = os.path.join(home, "walls", "homescene")
+    rc.jdump(os.path.join(inhome, "project.json"), {"file": "scene.json", "title": "home", "type": "scene"})
+
+    def text():
+        return (env.ipc({"cmd": "diag"}) or {}).get("text") or ""
+
+    def mon_line(want):
+        got = []
+
+        def ok():
+            got[:] = [l for l in text().splitlines() if l.startswith("monitor 0 ")]
+            return bool(got) and want in got[0]
+        wait_for(ok, 20)
+        return got[0] if got else ""
+
+    env.open(W["red"])
+    loaded(env, W["red"])
+    line = mon_line('"red"')
+    check('scene "red"' in line and "LOAD ERROR" not in line, "diag: a wallpaper that is shown, by its name", line)
+    for path, name in ((W["broken"], "broken"), (spaced, "gone scene")):
+        env.open(path)
+        line = mon_line("LOAD ERROR: " + name)
+        t = text()
+        check("LOAD ERROR: " + name in line, f"diag: the reason \"{name}\" did not load is in the monitor's line", line)
+        check(env.tmp not in t and os.path.dirname(path) not in t and "/wallpapers" not in t and "my walls" not in t,
+              f"diag: ... and no folder above \"{name}\" is in the text (the wallpapers are outside the home directory)",
+              [l for l in t.splitlines() if env.tmp in l or "walls" in l])
+    env.open(inhome)
+    line = mon_line("LOAD ERROR: ~/walls/homescene")
+    check("~/walls/homescene" in line and home not in text(),
+          "diag: a wallpaper below the home directory is still named from \"~\" on", line)
+    p = subprocess.run([os.path.join(env.build, "walpe-ctl"), "diag"], env=env.env, stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, timeout=60 * PATIENCE)
+    out = p.stdout.decode(errors="replace")
+    check(p.returncode == 0 and out.startswith("walpe-daemon ") and env.tmp not in out,
+          "diag: walpe-ctl diag prints the same text and exits with 0", out[:200])
+
+
 # -------------------------------------------------------------------- panel
 def case_panel(env, W):
     """tests/perf_panel_test.c needs a display: it gets this check's"""
@@ -3092,7 +3146,7 @@ def case_scan(env, W):
     env.stop_daemon()
 
 
-CASES = [("logcap", case_logcap), ("settings", case_settings), ("pointer", case_pointer), ("reload", case_reload), ("restart", case_restart),
+CASES = [("logcap", case_logcap), ("settings", case_settings), ("diag", case_diag), ("pointer", case_pointer), ("reload", case_reload), ("restart", case_restart),
          ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("scan", case_scan), ("tray", case_tray), ("traymenu", case_traymenu), ("trayreg", case_trayreg), ("window", case_window), ("panel", case_panel), ("busy", case_busy), ("probe", case_probe),
          ("fullscreen", case_fullscreen), ("video", case_video), ("webunload", case_webunload),
          ("winlost", case_winlost), ("convert", case_convert),

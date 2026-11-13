@@ -1764,6 +1764,16 @@ test('child-end', executable('childend-test', 'tests/childend_test.c',
   dependencies: [glib],
   install: false, build_by_default: false), timeout: 60)
 
+# the text of `walpe-ctl diag` names no directory of the user's
+# (daemon/diagpath.h): the home directory as "~", the folders the daemon
+# knows taken out, any other absolute path cut down to its last part - and
+# what is no path left alone. Sentences only; no daemon, no display. (On a
+# running daemon: scripts/lifecheck.py, case `diag`.)
+test('diag-paths', executable('diagpath-test', 'tests/diagpath_test.c',
+  include_directories: inc,
+  dependencies: [glib],
+  install: false, build_by_default: false))
+
 # the daemon end to end (scripts/lifecheck.py with its harness
 # scripts/checkenv.py: a private Xvfb and a private walpe-daemon on
 # generated scenes): the pointer after a load, settings
