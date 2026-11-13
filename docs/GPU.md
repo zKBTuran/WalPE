@@ -81,7 +81,8 @@ values mean here"):
 | one GPU of any kind | that GPU. Nothing is set, no test process is started |
 | a card drives the displays (with or without an unused integrated GPU, or a second card) | that card. Nothing is set, no test process is started |
 | an integrated GPU drives the displays and a discrete GPU with a driver sits beside it (a laptop with two GPUs) | the discrete GPU, after the test described below. If the test fails, or takes longer than 5 seconds, the integrated GPU renders, and the log (`gpu = auto: ...`) and `gpu_note` say why |
-| the same, and the X server or compositor turns out to render on the discrete GPU itself | that GPU. Nothing is set (two test processes were started to find out) |
+| the same list of devices, but on X11 the X server itself is drawn by NVIDIA's driver (the server runs on the card; the kernel's driver for the unused processor graphics is loaded all the same). The server says so: a RandR provider named `NVIDIA-0` in `xrandr --listproviders` | that card. Nothing is set, no test process is started: the daemon asks the X server for its providers first, on one short connection |
+| the same, and the X server or compositor turns out to render on the discrete GPU itself in a way the line above does not cover (another driver, Wayland) | that GPU. Nothing is set (a test process was started to find out) |
 | the same, but the discrete GPU has no kernel driver, or NVIDIA's driver runs without its DRM module | the integrated GPU. Nothing is tested; `gpu_note` names the reason |
 | several discrete GPUs beside the integrated one | the first that can be used: the firmware's primary one, else the lowest DRM card number. Name another one by its PCI address |
 | `DRI_PRIME`, `__NV_PRIME_RENDER_OFFLOAD` or another of the variables below is set in the daemon's environment | whatever that variable says. Nothing is tested; `gpu_note` names the variable |

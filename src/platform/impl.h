@@ -94,6 +94,12 @@ typedef struct {
 extern const WalpePlatformOps walpe_x11_ops;
 extern const WalpePlatformOps walpe_wayland_ops;
 
+/* X11 only, callable without an open backend: the names of the X
+ * server's RandR providers behind walpe_platform_x11_providers (a
+ * connection of its own: connect, a handful of requests, disconnect; no
+ * EGL). g_strfreev; NULL = none or not known. */
+char **walpe_x11_provider_names (void);
+
 /* Wayland only, callable without an open backend: the look at the
  * compositor behind walpe_platform_probe_wayland (a connection of its own:
  * connect, one or two round trips over the registry, disconnect; no EGL).

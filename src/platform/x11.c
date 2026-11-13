@@ -2565,6 +2565,66 @@ static const WalpeSignalProvider x11_provider = {
     .recheck = x11_provider_recheck,
 };
 
+/* ------------------------------------- the X server's RandR providers */
+
+#ifdef HAVE_XRANDR
+static int x11_error_ignored (Display *d, XErrorEvent *e)
+{
+    (void) d;
+    (void) e;
+    return 0;
+}
+#endif
+
+/* The names of the X server's RandR providers (impl.h), asked on a
+ * connection of its own that is closed again before this returns: the
+ * backend is not open yet when the GPU choice wants them. One request for
+ * the screen's resources as the server has them (no output is probed),
+ * one for the list, one for each provider. NULL: no server, no RandR 1.4,
+ * a build without libXrandr. */
+char **walpe_x11_provider_names (void)
+{
+#ifdef HAVE_XRANDR
+    XInitThreads ();    /* (x11_open's first call too; before any other Xlib call) */
+    Display *d = XOpenDisplay (NULL);
+    if (!d)
+        return NULL;
+    /* (walpe_xerror is installed when the backend opens; until then an X
+     * error ends the process) */
+    XErrorHandler before = XSetErrorHandler (x11_error_ignored);
+    GPtrArray *names = g_ptr_array_new ();
+    int ev = 0, er = 0, major = 0, minor = 0;
+    if (XRRQueryExtension (d, &ev, &er) && XRRQueryVersion (d, &major, &minor) &&
+        (major > 1 || (major == 1 && minor >= 4))) {
+        Window root = DefaultRootWindow (d);
+        XRRScreenResources *res = XRRGetScreenResourcesCurrent (d, root);
+        XRRProviderResources *pr = res ? XRRGetProviderResources (d, root) : NULL;
+        for (int i = 0; pr && i < pr->nproviders; i++) {
+            XRRProviderInfo *pi = XRRGetProviderInfo (d, res, pr->providers[i]);
+            if (pi && pi->name && pi->nameLen > 0)
+                g_ptr_array_add (names, g_strndup (pi->name, (gsize) MIN (pi->nameLen, 127)));
+            if (pi)
+                XRRFreeProviderInfo (pi);
+        }
+        if (pr)
+            XRRFreeProviderResources (pr);
+        if (res)
+            XRRFreeScreenResources (res);
+    }
+    XSync (d, False);
+    XSetErrorHandler (before);
+    XCloseDisplay (d);
+    if (!names->len) {
+        g_ptr_array_free (names, TRUE);
+        return NULL;
+    }
+    g_ptr_array_add (names, NULL);
+    return (char **) g_ptr_array_free (names, FALSE);
+#else
+    return NULL;
+#endif
+}
+
 const WalpePlatformOps walpe_x11_ops = {
     .name = "x11",
     .backend = WALPE_BACKEND_X11,

@@ -29,6 +29,18 @@ void walpe_platform_probe_wayland (WalpePlatformProbe *out)
 #endif
 }
 
+char **walpe_platform_x11_providers (void)
+{
+    const char *t = g_getenv ("WALPE_X11_PROVIDERS");
+    if (t)
+        return *t ? g_strsplit (t, ",", -1) : NULL;
+#ifdef HAVE_X11
+    return walpe_x11_provider_names ();
+#else
+    return NULL;
+#endif
+}
+
 gboolean walpe_platform_open (WalpeBackend backend, const WalpePlatformOpts *opts, char **err)
 {
     const WalpePlatformOps *want = NULL;

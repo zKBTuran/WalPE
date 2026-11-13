@@ -563,6 +563,30 @@ static void test_auto (void)
            !walpe_gpu_renderer_is_vendor ("NVIDIA GeForce", 0) &&
            !walpe_gpu_renderer_is_vendor ("NVIDIA GeForce", 0x1ed5));
 
+    {
+        /* X11: the server's RandR providers say whose driver draws the
+         * screen. "NVIDIA-0" is an X screen of NVIDIA's driver - the
+         * window system renders on that card, whatever the list of
+         * devices suggests; "NVIDIA-G0" is the card that only renders on
+         * request beside another driver's screen (a laptop as auto means
+         * it), and no other name says anything. */
+        static const char *const nv[] = { "NVIDIA-0", NULL };
+        static const char *const nv_sink[] = { "NVIDIA-0", "modesetting", NULL };
+        static const char *const nv_second[] = { "modesetting", "NVIDIA-1", NULL };
+        static const char *const offload[] = { "modesetting", "NVIDIA-G0", NULL };
+        static const char *const mesa[] = { "modesetting", NULL };
+        static const char *const odd[] = { "NVIDIA-", "NVIDIA-0x", "nvidia-0", "xNVIDIA-0", "", NULL };
+        static const char *const none[] = { NULL };
+        CHECK (walpe_gpu_x11_screen_is_nvidia (nv));
+        CHECK (walpe_gpu_x11_screen_is_nvidia (nv_sink));
+        CHECK (walpe_gpu_x11_screen_is_nvidia (nv_second));
+        CHECK (!walpe_gpu_x11_screen_is_nvidia (offload));
+        CHECK (!walpe_gpu_x11_screen_is_nvidia (mesa));
+        CHECK (!walpe_gpu_x11_screen_is_nvidia (odd));
+        CHECK (!walpe_gpu_x11_screen_is_nvidia (none));
+        CHECK (!walpe_gpu_x11_screen_is_nvidia (NULL));
+    }
+
     /* the second GPU has no driver: nothing is tried, and the reason is told */
     CHECK (auto_on ("laptop-nvidia-undriven", -2, &why) == -1);
     CHECK (why && strstr (why, "no kernel driver") && strstr (why, "rendering stays on"));

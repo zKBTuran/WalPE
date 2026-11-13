@@ -31,7 +31,9 @@
  *                         vendor and the device list
  * WALPE_GPU_SYSFS_ROOT    another sysfs (tests)
  * WALPE_GPU_PROBE_TEST     hang | linger: a test process that does not end
- *                         / leaves a process holding its streams (tests) */
+ *                         / leaves a process holding its streams (tests)
+ * WALPE_X11_PROVIDERS     the X server's RandR provider names (tests;
+ *                         platform.h walpe_platform_x11_providers) */
 
 #ifndef EGL_DRM_RENDER_NODE_FILE_EXT
 #define EGL_DRM_RENDER_NODE_FILE_EXT 0x3377
@@ -370,6 +372,34 @@ static void gpu_setup (WalpeGpuWinsys winsys, const char *const *outputs, const 
             }
             gpu_mesa_hints ();
             return;
+        }
+        gboolean nv_card = FALSE;       /* a card NVIDIA's own driver runs is in the list */
+        for (guint i = 0; i < Gpu.devs->len; i++) {
+            const WalpeGpuDev *d = g_ptr_array_index (Gpu.devs, i);
+            nv_card |= d->klass == WALPE_GPU_DISCRETE && walpe_gpu_driver_is_nvidia (d->driver);
+        }
+        if (winsys == WALPE_GPU_WS_X11 && nv_card) {
+            /* The list of devices says "an integrated GPU has the
+             * displays" - and on X11 it cannot know whose driver draws
+             * the screen: an X server set up on the NVIDIA card alone,
+             * with the kernel's driver for the unused processor graphics
+             * loaded all the same and a panel on its connector, looks
+             * like a laptop that renders on the integrated GPU. The
+             * server says it itself, without a test process: a RandR
+             * provider "NVIDIA-0" is an X screen NVIDIA's driver draws.
+             * Then the window system renders on the card already, auto is
+             * `display`, and this start is the one of every version
+             * before: nothing is tested, nothing is set, nothing is said.
+             * (Asked only here, where a test would be started otherwise:
+             * one short X connection.) */
+            char **prov = walpe_platform_x11_providers ();
+            const gboolean nv_screen = walpe_gpu_x11_screen_is_nvidia ((const char *const *) prov);
+            g_strfreev (prov);
+            if (nv_screen) {
+                Gpu.target = -1;
+                gpu_mesa_hints ();
+                return;
+            }
         }
         Gpu.by_auto = TRUE;
     } else {

@@ -176,6 +176,17 @@ gboolean walpe_gpu_value_is_display (const char *value);
  * none of them can be used - the sentence that says which and why. NULL in
  * every case in which there is nothing to say. Reads nothing. */
 int walpe_gpu_auto_target (GPtrArray *devs, int display, char **why);
+/* X11: do the X server's RandR providers (their names, NULL-terminated;
+ * NULL = not known) say that NVIDIA's driver draws an X screen itself?
+ * That driver names the provider of an X screen it drives "NVIDIA-0"
+ * ("NVIDIA-1" ... for further screens), and "NVIDIA-G0" the one that only
+ * renders on request for a screen another driver draws (PRIME render
+ * offload) - its README, "Offloading Graphics Display with RandR 1.4" and
+ * "PRIME Render Offload". TRUE: the window system renders on an NVIDIA
+ * card when nothing is set, whatever sysfs suggests about the outputs.
+ * FALSE says nothing (other drivers' providers are named after the X
+ * driver, "modesetting", not after the device). */
+gboolean walpe_gpu_x11_screen_is_nvidia (const char *const *providers);
 /* the setting as it is stored: lower case and trimmed for the words,
  * the text as given otherwise; "" / NULL -> "auto". NULL = not acceptable
  * (longer than 127 bytes, control characters, not UTF-8). g_free */

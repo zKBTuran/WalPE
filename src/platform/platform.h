@@ -194,6 +194,18 @@ typedef struct {
 } WalpePlatformProbe;
 void walpe_platform_probe_wayland (WalpePlatformProbe *out);
 
+/* The names of the RandR providers of the X server named by the
+ * environment ("NVIDIA-0", "modesetting", "NVIDIA-G0" ...), asked on a
+ * short connection of its own that is closed again before this returns
+ * (main thread; fine before any other thread exists; makes no EGL call).
+ * g_strfreev. NULL: nothing answered, the server has no RandR 1.4, or
+ * this build has no X11 backend or no libXrandr. The GPU choice reads it
+ * (common/gpusel.h walpe_gpu_x11_screen_is_nvidia), and only on a machine
+ * where gpu = auto would otherwise start a test process.
+ * WALPE_X11_PROVIDERS (tests): the names, separated by commas, in place
+ * of the server's; set and empty = none. */
+char **walpe_platform_x11_providers (void);
+
 /* Connect. backend: WALPE_BACKEND_X11 or _WAYLAND (the result of
  * walpe_backend_choose). FALSE: *err says why (g_free). Must run before
  * any thread exists that touches the window system. */

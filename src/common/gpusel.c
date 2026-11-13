@@ -822,6 +822,21 @@ int walpe_gpu_auto_target (GPtrArray *devs, int display, char **why)
     return boot >= 0 ? boot : first;
 }
 
+gboolean walpe_gpu_x11_screen_is_nvidia (const char *const *providers)
+{
+    for (int i = 0; providers && providers[i]; i++) {
+        const char *p = providers[i];
+        if (!g_str_has_prefix (p, "NVIDIA-") || !g_ascii_isdigit (p[7]))
+            continue;
+        p += 7;
+        while (g_ascii_isdigit (*p))
+            p++;
+        if (!*p)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 char *walpe_gpu_value_normalize (const char *value)
 {
     if (!value)

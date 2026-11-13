@@ -22,6 +22,13 @@
 #  5. `walpe-ctl set gpu=display` on the laptop of 2: taken without a
 #     restart, and the next start tests nothing; `set gpu=auto`: the daemon
 #     restarts in place and tests again;
+#  7. X11 only: the same laptop's device list under an X server that
+#     NVIDIA's driver draws itself (a RandR provider "NVIDIA-0", given
+#     here as WALPE_X11_PROVIDERS: the kernel's driver for the processor
+#     graphics is loaded and has a panel, but the server runs on the
+#     card): no test process, no variable, no note, no line about a
+#     choice - the start of every version before. With "NVIDIA-G0" (the
+#     card renders on request only) and on Wayland the test runs as in 2.
 #  6. test processes that never end and ignore their alarm
 #     (WALPE_GPU_PROBE_TEST=hang): the daemon is up after its own limit
 #     (2 x 5 s), says so, has ended them and has no child left; test
@@ -213,6 +220,21 @@ if start laptop-nvidia-undriven; then
         fail "no driver: the log does not say why auto stays"
     status | grep -q '"gpu_note":"[^"]*no kernel driver loaded' || fail "no driver: no gpu_note"
     clean_env "no driver"
+fi
+
+# 7. the X server says that NVIDIA's driver draws the screen: nothing is tested
+if [ "$kind" = xvfb ]; then
+    start laptop-intel-nvidia WALPE_X11_PROVIDERS=NVIDIA-0,modesetting &&
+        untested "laptop list, X screen drawn by NVIDIA's driver"
+    if start laptop-intel-nvidia WALPE_X11_PROVIDERS=modesetting,NVIDIA-G0; then
+        grep -q "gpu = auto: .*could not be made the renderer" "$log" ||
+            fail "laptop, NVIDIA-G0: the discrete GPU was not tested: $(grep 'gpu' "$log" | head -3)"
+    fi
+else
+    if start laptop-intel-nvidia WALPE_X11_PROVIDERS=NVIDIA-0; then
+        grep -q "gpu = auto: .*could not be made the renderer" "$log" ||
+            fail "Wayland: an X server's providers kept auto from testing: $(grep 'gpu' "$log" | head -3)"
+    fi
 fi
 
 # 6. test processes that do not end, and ones that leave something behind
