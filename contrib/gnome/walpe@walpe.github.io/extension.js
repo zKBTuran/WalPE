@@ -493,8 +493,18 @@ export default class WalpeExtension extends Extension {
     Windows(seeThrough) {
         this._seeThrough = seeThrough.slice(0, SEE_THROUGH_CHARS).split(',')
             .map(s => s.trim().toLowerCase()).filter(s => s).slice(0, SEE_THROUGH_NAMES);
-        this._state = this._look();
-        return this._state;
+        /* What this look finds new is also sent as the signal: the state
+         * that was told last is one for all who listen, and a caller of
+         * this method must not be the only one to learn of a change (a
+         * second program that asks - a test, a second daemon - would
+         * otherwise take a change away from the daemon, which would stay
+         * paused or running by the old state). */
+        const state = this._look();
+        if (state !== this._state) {
+            this._state = state;
+            this._object.emit_signal('WindowsChanged', new GLib.Variant('(s)', [state]));
+        }
+        return state;
     }
 
     /* GNOME Shell 46 to 48. back: one end of a socket pair of the caller.

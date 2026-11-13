@@ -138,5 +138,6 @@ of another extension is in it. Run on a headless GNOME Shell 46.0 (Mutter 46.2, 
 51.1 (Mutter 51.1, Arch Linux, one monitor), with Mesa's software renderer only: no real
 session, no GPU, no NVIDIA driver, no HDR. On 46.0 also: two monitors that change places
 and a monitor whose scale changes to 2 and to 1.5 while the daemon runs (it restarts in
-place and its windows are on the right monitors at the right size); the lock screen.
-Not run on 51.1: the lock screen, more than one monitor, a scale other than 1.
+place and its windows are on the right monitors at the right size). The lock screen on
+both (with a stand-in for the display manager: `scripts/gnomecheck.py`).
+Not run on 51.1: more than one monitor, a scale other than 1.

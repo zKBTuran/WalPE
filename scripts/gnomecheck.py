@@ -7,8 +7,10 @@ can only be checked there. This starts a shell of its own: `gnome-shell
 --headless` on Mesa's software renderer with one virtual monitor, a private
 HOME and runtime directory, a private session bus and an empty stand-in for
 the system bus (the shell wants one to exist; nothing owns a name on it).
-No gnome-session, no login manager, no display manager, and therefore no
-lock screen. The daemon shows a scene of one colour (scripts/checkenv.py);
+No gnome-session and no login manager. GNOME Shell has a lock screen only
+where a display manager answers on the system bus: with gjs installed a
+stand-in of a dozen lines does that (it has a version and nothing else),
+without gjs the case "lock" is skipped. The daemon shows a scene of one colour (scripts/checkenv.py);
 without a wallpaper it shows no window at all. The extension is copied from the source tree into that HOME
 (with the shell's version added to the list in its metadata.json, so that
 the check runs on a version the extension does not list yet) and the shell
@@ -40,6 +42,11 @@ Cases (--only NAME runs one):
                  focus and does not cover the monitor, a maximized one
                  covers it, and its application id in the "see-through
                  windows" list takes the covering away; skipped without gjs
+  lock           the screen is locked and unlocked: the extension stays
+                 enabled, reports the monitor as covered while it is locked
+                 (the daemon pauses) and as free again afterwards (it runs),
+                 and the window is a desktop window throughout; skipped
+                 without gjs
   crash          the daemon is killed (SIGKILL): its window, the process
                  the shell started for it and what the extension kept of
                  both are gone
@@ -96,6 +103,21 @@ SYSBUS = """<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configurat
     <allow own="*"/>
   </policy>
 </busconfig>
+"""
+
+# the stand-in display manager (gjs -m): GNOME Shell makes a lock screen only
+# when org.gnome.DisplayManager answers with a version
+GDM_JS = """import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
+const xml = `<node><interface name="org.gnome.DisplayManager.Manager">
+  <property name="Version" type="s" access="read"/>
+  <method name="RegisterDisplay"><arg type="a{ss}" direction="in"/></method>
+  <method name="RegisterSession"><arg type="a{sv}" direction="in"/></method>
+</interface></node>`;
+const obj = Gio.DBusExportedObject.wrapJSObject(xml, {Version: '46.0', RegisterDisplay() {}, RegisterSession() {}});
+obj.export(Gio.DBus.system, '/org/gnome/DisplayManager/Manager');
+Gio.bus_own_name_on_connection(Gio.DBus.system, 'org.gnome.DisplayManager', Gio.BusNameOwnerFlags.NONE, null, null);
+new GLib.MainLoop(null, false).run();
 """
 
 # what the shell is asked: every window, lowest first, and the pictures of
@@ -197,6 +219,20 @@ class Shell:
             if time.monotonic() > end:
                 raise CannotRun("dbus-daemon made no socket")
             time.sleep(0.05)
+        if shutil.which("gjs"):
+            gdm = os.path.join(self.top, "gdm.js")
+            with open(gdm, "w") as f:
+                f.write(GDM_JS)
+            self._spawn("gdm", ["gjs", "-m", gdm], env)
+            end = time.monotonic() + WAIT_S
+            while time.monotonic() < end:
+                r = subprocess.run(["gdbus", "call", "--address", env["DBUS_SYSTEM_BUS_ADDRESS"], "--dest",
+                                    "org.freedesktop.DBus", "--object-path", "/org/freedesktop/DBus", "--method",
+                                    "org.freedesktop.DBus.NameHasOwner", "org.gnome.DisplayManager"],
+                                   env=env, capture_output=True, text=True)
+                if "true" in r.stdout:
+                    break
+                time.sleep(0.1)
         shell = self._spawn("shell", SHELL + ["--headless", "--wayland", "--no-x11", "--unsafe-mode",
                                       "--virtual-monitor", "800x600", "--wayland-display", "walpe-check"], env)
         self.env = dict(env, WAYLAND_DISPLAY="walpe-check")
@@ -553,6 +589,64 @@ def case_covered(shell, build):
     return bad
 
 
+def case_lock(shell, build):
+    if shell.eval("Main.screenShield != null") is not True:
+        return None         # (no stand-in display manager: no gjs)
+    d = Daemon(shell, build, "daemon-lock")
+    d.start()
+
+    def paused():
+        r = subprocess.run([d.ctl, "status"], env=shell.env, capture_output=True, text=True, timeout=WAIT_S)
+        try:
+            return json.loads(r.stdout)["state"]["monitors"][0]["paused"]
+        except (ValueError, KeyError, IndexError):
+            return None
+
+    def wait(fn, want):
+        end = time.monotonic() + WAIT_S
+        while True:
+            got = fn()
+            if got == want or time.monotonic() > end:
+                return got
+            time.sleep(0.25)
+
+    try:
+        w, why = d.wait_window()
+        if not w:
+            return [why]
+        bad = []
+        if wait(paused, False) is not False:
+            bad.append("the wallpaper is paused before the screen is locked")
+        shell.eval("Main.screenShield.lock(false); 1")
+        mode = wait(lambda: shell.eval("Main.sessionMode.currentMode"), "unlock-dialog")
+        if mode != "unlock-dialog":
+            return bad + ["the screen did not lock (session mode %r)" % mode]
+        x = shell.extension()
+        if x["state"] != 1:
+            bad.append("the extension is not enabled while the screen is locked (state %s)" % x["state"])
+        got = wait_report(shell, "c", "")
+        if got != "c":
+            bad.append("locked: the monitor's flags are %r, not 'c'" % got)
+        if wait(paused, True) is not True:
+            bad.append("locked: the daemon does not pause the wallpaper")
+        shell.eval("Main.screenShield.deactivate(false); 1")
+        mode = wait(lambda: shell.eval("Main.sessionMode.currentMode"), "user")
+        if mode != "user":
+            bad.append("the screen did not unlock (session mode %r)" % mode)
+        got = wait_report(shell, "", "")
+        if got != "":
+            bad.append("unlocked: the monitor's flags are %r, not none" % got)
+        if wait(paused, False) is not False:
+            bad.append("unlocked: the wallpaper stays paused")
+        if not any((t["title"] or "").startswith(TITLE) and t["type"] == DESKTOP
+                   for t in shell.windows()["windows"]):
+            bad.append("after the lock the daemon's window is no desktop window")
+        d.stop()
+        return bad + leftovers(shell)
+    finally:
+        d.stop()
+
+
 def case_crash(shell, build):
     d = Daemon(shell, build, "daemon-crash")
     d.start()
@@ -619,7 +713,8 @@ def case_bus_bounds(shell, build):
 CASES = [("desktop", case_desktop, False), ("helper-killed", case_helper_killed, True),
          ("pkill", case_pkill, True), ("socket-bound", case_socket_bound, True),
          ("stranger", case_stranger, False), ("covered", case_covered, False),
-         ("crash", case_crash, False), ("bus-bounds", case_bus_bounds, False)]
+         ("lock", case_lock, False), ("crash", case_crash, False),
+         ("bus-bounds", case_bus_bounds, False)]
 
 
 def main():

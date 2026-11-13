@@ -564,8 +564,8 @@ is no way out: an X11 window there lies above the other windows.
 > NVIDIA's driver, GNOME Shell 47 to 50 (the extension lists the versions it was run on,
 > and GNOME Shell loads it on those only: [contrib/gnome](../contrib/gnome/README.md#versions)),
 > a monitor plugged in or pulled while the daemon runs. On 46.0 two monitors changed
-> places and one changed its scale to 2 and to 1.5 under the running daemon; on 51.1
-> neither that nor the lock screen was run.
+> places and one changed its scale to 2 and to 1.5 under the running daemon, which was
+> not run on 51.1.
 
 ## Compositors that were run
 
