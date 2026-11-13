@@ -58,6 +58,19 @@
  * 65641 systems (a file that lists itself), each with its own pool and
  * sprite texture */
 #define MAX_SYSTEMS 128
+/* ... and of all particle objects of the process together. A scene has as
+ * many particle objects as its file lists, and each object that names a
+ * file with children brought MAX_SYSTEMS systems of its own: 2000 objects
+ * (a scene.json of 300 KB and a particle file of 4 KB that lists itself 40
+ * times) were 256000 systems - every one a parsed particle file and
+ * material, a random number generator, 4 KB of state: 66 s and 1088 MiB
+ * before the first frame, and a scene file may be a hundred times as long.
+ * Past the total an object gets no further system (its first one missing:
+ * no particles at all). 4096 is 32 objects with the most systems an object
+ * may have, or 400 objects of ten systems each; Wallpaper Engine's own
+ * presets have one to four. */
+#define PT_SYSTEMS_CAP 4096
+static gint pt_systems;     /* systems of every particle object (atomic: several render threads) */
 
 enum { EM_BOX, EM_SPHERE };
 enum { OP_MOVE, OP_ANGMOVE, OP_ALPHAFADE, OP_ALPHACHANGE, OP_SIZECHANGE, OP_COLORCHANGE,
@@ -1246,6 +1259,8 @@ static void parse_children (WeSys *s, JsonArray *ch, const char *dir, const char
             cx->warned = TRUE;
             break;
         }
+        if (g_atomic_int_get (&pt_systems) >= PT_SYSTEMS_CAP)
+            break;      /* (sys_new would refuse each of them, after its file was read) */
         char *pp = resolve_asset2 (dir, we, name);
         /* a file that (directly or through its children) lists itself */
         gboolean cycle = FALSE;
@@ -1328,6 +1343,18 @@ static WeSys *sys_new (JsonObject *j, const char *dir, const char *we,
 {
     if (!j || depth > MAX_DEPTH || !json_object_has_member (j, "emitter"))
         return NULL;
+    if (g_atomic_int_add (&pt_systems, 1) >= PT_SYSTEMS_CAP) {
+        static gint said;
+        g_atomic_int_add (&pt_systems, -1);
+        if (g_atomic_int_compare_and_exchange (&said, 0, 1)) {
+            char *in = g_path_get_basename (dir ? dir : "");
+            g_warning ("weparticles: %d particle systems are loaded, the limit for all particle "
+                       "objects together: the objects and child systems beyond it get none "
+                       "(first met in %s)", PT_SYSTEMS_CAP, walpe_log_str (in));
+            g_free (in);
+        }
+        return NULL;
+    }
     cx->nsys++;
     WeSys *s = g_new0 (WeSys, 1);
     s->ov = *ov;
@@ -1450,6 +1477,7 @@ static WeSys *sys_new (JsonObject *j, const char *dir, const char *we,
         parse_material (s, dir, we, mat);
     parse_children (s, wpj_arr (j, "children"), dir, we, depth, cx);
     if (s->nem == 0 && s->nchild == 0) {
+        g_atomic_int_add (&pt_systems, -1);
         g_rand_free (s->rng);
         g_free (s->tex_path);
         g_free (s->ntex_path);   /* (a refracting material's normal map leaked here) */
@@ -4846,6 +4874,7 @@ static void sys_free (WeSys *s)
     if (s->ftex)
         glDeleteTextures (1, &s->ftex);
     pt_live_sub (s->count);
+    g_atomic_int_add (&pt_systems, -1);
     g_free (s->frames);
     g_free (s->tex_path);
     g_free (s->ntex_path);

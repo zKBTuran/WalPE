@@ -513,6 +513,13 @@ microphone.
   another wallpaper, and how long a frame may take is not judged. With a graphics card
   such a frame is the driver's and the card's to end; that has not been run
   ([SECURITY.md](docs/SECURITY.md#scripts-and-shaders)). 0.14.0 has this too.
+- A scene with very many particle objects: every object that names a particle file with
+  children could bring 128 particle systems, and nothing limited the objects. 2000 of
+  them - a `scene.json` of 300 KB and one particle file of 4 KB - took 66 seconds and
+  1088 MiB before the first frame, and a scene file may be a hundred times as long. All
+  particle objects together now have 4096 systems (the same scene: 6 seconds, 161 MiB);
+  an object beyond that gets no further system and the log says so once. 0.14.0 has
+  this too.
 - New with the changes above, and closed before anybody had them: a web page could undo
   mute and "off" for its own sound (now WebKit's own mute, under Sound), and with the
   Plasma add-on another program of the session could take the pointer's bus name and be

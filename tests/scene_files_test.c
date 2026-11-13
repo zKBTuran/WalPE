@@ -743,6 +743,46 @@ static void test_particles (void)
         }
         CHECK (in_child (pt_full_emitters, dir, 900, 15) == 32);
     }
+
+    /* 5. all particle objects together hold 4096 systems: 40 objects of a
+     * file that comes to 128 systems (top.json above) get 32 x 128 between
+     * them, the eight after that none at all; a plain system is refused
+     * as well then, and what a freed object held is free again */
+    {
+        WalpeWeParticles *big[40];
+        int sum = 0, none = 0;
+        for (int i = 0; i < 40; i++) {
+            big[i] = pt_load (dir, "top.json");
+            sum += walpe_weparticles_systems (big[i]);
+            none += big[i] == NULL;
+        }
+        CHECK (walpe_weparticles_systems (big[0]) == 128);
+        CHECK (sum == 4096);
+        CHECK (none == 8);
+        w = pt_load (dir, "full.json");
+        CHECK (w == NULL);
+        walpe_weparticles_free (w);
+        walpe_weparticles_free (big[3]);
+        big[3] = NULL;
+        w = pt_load (dir, "full.json");
+        CHECK (w != NULL && walpe_weparticles_systems (w) == 1);
+        walpe_weparticles_free (w);
+        /* an object that meets the limit half way keeps what it got */
+        w = pt_load (dir, "top.json");
+        CHECK (w != NULL && walpe_weparticles_systems (w) == 128);
+        walpe_weparticles_free (big[4]);
+        big[4] = NULL;
+        WalpeWeParticles *one = pt_load (dir, "full.json"), *part = pt_load (dir, "top.json");
+        CHECK (one != NULL && part != NULL && walpe_weparticles_systems (part) == 127);
+        walpe_weparticles_free (one);
+        walpe_weparticles_free (part);
+        walpe_weparticles_free (w);
+        for (int i = 0; i < 40; i++)
+            walpe_weparticles_free (big[i]);
+        w = pt_load (dir, "top.json");
+        CHECK (w != NULL && walpe_weparticles_systems (w) == 128);
+        walpe_weparticles_free (w);
+    }
     g_free (dir);
 }
 
