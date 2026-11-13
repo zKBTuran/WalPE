@@ -324,9 +324,7 @@ Running the tests under emulation:
   `binfmt_misc` it is `QEMU_CPU=max,pauth-impdef=on` in the environment.
 - Tests that start another program of the build, or themselves again (`sec-local`,
   `limits`, every test that is a shell or Python script), need the kernel to start arm64
-  programs: `binfmt_misc` with qemu registered. The developer tool `binfmt-ns.py` does
-  that inside a user namespace of its own (Linux 6.7 or newer), without changing the
-  system.
+  programs: `binfmt_misc` with qemu registered.
 - What fails there for the emulation's sake, with qemu-user 8.2.2: `memreport` (the
   emulator makes up `/proc/self/smaps` without resident sizes), `limits` (the emulator
   itself ends with "QEMU internal SIGSEGV" when one thread reads `/proc/self/maps` while
@@ -335,8 +333,8 @@ Running the tests under emulation:
   kernel (the emulated machine); the others need a CPU that is not emulated.
 
 The developer tools have `arm64-sysroot.sh` (the arm64 libraries in a directory of their
-own, without touching the system's packages), `arm64cross.py` (configure, build and run
-the tests under emulation) and `binfmt-ns.py`. The suite `portable` (`meson test --suite
+own, without touching the system's packages) and `arm64cross.py` (configure, build and
+run the tests under emulation). The suite `portable` (`meson test --suite
 portable`) compares this machine's results with numbers fixed in the source, needs no
 display and no OpenGL, and is the first thing to run on a real ARM machine: a failure
 there is a portability bug.
