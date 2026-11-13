@@ -296,6 +296,30 @@ run "uninstall, the user's directory under another name" 0 -- uninstall
 want "$tmp/log" "readConfig('Previous'" "uninstall, the user's directory under another name: the type is taken off the desktops"
 want "$tmp/out" "Removed. walpe-daemon" "uninstall, the user's directory under another name"
 is "uninstall, the user's directory under another name: the package is gone" ! -e "$pkg"
+# ... and where a directory above the user's copy is a link into a system directory (the
+# user's plasma/ is the system's): one copy with two names again, and the same holds.
+# A link that is the user's package directory itself is another matter: `uninstall` can
+# remove that name alone, the package's files stay, and so do the desktops' types
+mkdir -p "$tmp/sys2/share/plasma/wallpapers"
+cp -R "$src" "$tmp/sys2/share/plasma/wallpapers/$type_id"
+mv "$home/.local/share/plasma" "$tmp/plasma-was"
+ln -s "$tmp/sys2/share/plasma" "$home/.local/share/plasma"
+sysdirs="$tmp/none:$tmp/sys2/share"
+run "status, the user's plasma/ is a link to the system's" 0 FAKE_SHELL=down -- status
+lacks "$tmp/out" "installed twice" "status, the user's plasma/ is a link to the system's"
+printf '[Containments][1]\nwallpaperplugin=%s\n' "$type_id" > "$rc_file"
+run "uninstall, the user's plasma/ is a link, type in use, no shell" 1 FAKE_SHELL=down -- uninstall
+want "$tmp/err" "would be black" "uninstall, the user's plasma/ is a link, no shell"
+is "uninstall, the user's plasma/ is a link, no shell: nothing removed" -f "$tmp/sys2/share/plasma/wallpapers/$type_id/metadata.json"
+rm "$home/.local/share/plasma"
+mv "$tmp/plasma-was" "$home/.local/share/plasma"
+ln -s "$tmp/sys2/share/plasma/wallpapers/$type_id" "$pkg"
+run "status, the user's package directory is a link to the system's" 0 FAKE_SHELL=down -- status
+want "$tmp/out" "installed twice" "status, the user's package directory is a link to the system's"
+run "uninstall, the user's package directory is a link, type in use, no shell" 0 FAKE_SHELL=down -- uninstall
+want "$tmp/out" "The package's copy stays: $tmp/sys2/share/plasma/wallpapers/$type_id" "uninstall, the user's package directory is a link"
+is "uninstall, the user's package directory is a link: the link is gone" ! -L "$pkg"
+is "uninstall, the user's package directory is a link: the package's files stay" -f "$tmp/sys2/share/plasma/wallpapers/$type_id/metadata.json"
 sysdirs=$sysdirs_was
 run "install (5)" 0 -- install
 mkdir -p "$tmp/cwd/relative/share/plasma/wallpapers"

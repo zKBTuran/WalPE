@@ -100,6 +100,10 @@ system_copy() {
 		# "//" or "/." in the entry: it is the user's own and only copy, not one that stays)
 		if [ "$dir" -ef "$data" ] 2>/dev/null; then continue; fi
 		if [ -f "$dir/plasma/wallpapers/$type_id/metadata.json" ]; then
+			# (nor the user's own copy reached through a directory above it that is a link
+			# into this one: what `uninstall` removes there is this copy. A link that is the
+			# user's package directory itself is a name `uninstall` removes alone: a copy)
+			if [ ! -L "$own" ] && [ "$dir/plasma/wallpapers/$type_id" -ef "$own" ] 2>/dev/null; then continue; fi
 			printf '%s\n' "$dir/plasma/wallpapers/$type_id"
 			return 0
 		fi
