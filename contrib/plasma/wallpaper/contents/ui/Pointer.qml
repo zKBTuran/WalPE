@@ -3,7 +3,12 @@
  * Plasma's desktop window lies over the wallpaper and gets every pointer event. This item is
  * put on top of everything in that window and only looks: its handlers take passive grabs
  * (PointHandler, HoverHandler) or do not block (WheelHandler), so the icons, the widgets and
- * the desktop's own menu get every event as before. What it sees goes to the daemon over
+ * the desktop's own menu get every press, release and wheel event as before. Not the hover:
+ * with the HoverHandler here, on an item above theirs, Plasma's items are not hovered while
+ * this file is loaded (no frame around the icon under the pointer, no tool tips), whatever
+ * `blocking` says - Qt 6.12 gives the hover to the topmost item that asks for it. A MouseArea
+ * in its place does the same; a handler on the window's content item is not told the position
+ * over the bare desktop. What it sees goes to the daemon over
  * D-Bus (io.github.walpe.Pointer.Event on the daemon's connection; the daemon has the name
  * io.github.walpe.Pointer only while a wallpaper wants the pointer, and main.qml loads this
  * file only then, after Script.qml has made sure whose connection that is):

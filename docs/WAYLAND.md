@@ -193,7 +193,11 @@ bus and no script. With one on, the daemon holds one more connection (it owns no
 the bus) and KWin runs the script when a window comes, goes, moves or changes state; the
 daemon hears from it only when one of the answers changes. The script is taken out of
 KWin when the last rule is switched off and when the daemon exits, and loaded again when
-KWin was restarted. The status member `pause_kwin_script` says what the provider is
+KWin was restarted. A daemon that is killed or crashes cannot take it out: the script
+stays in KWin and goes on reporting to a connection that is gone (the bus answers that
+nobody is there)
+until the next daemon starts, which removes it before it loads its own, or until KWin
+ends with the session. The status member `pause_kwin_script` says what the provider is
 doing, and why when it cannot report (no session bus, KWin not on it, a KWin older than
 Plasma 6: the rules then read `"works": false` with that reason). `WALPE_KWIN_SCRIPT=0`
 keeps the daemon from using it.
@@ -420,9 +424,12 @@ the session bus, and has no name there at any other time):
 | the right and the middle button | never: they are Plasma's (the desktop's menu, paste) |
 | the pointer leaves the desktop (onto a window, the panel, a menu) | the wallpaper is told that it left |
 
-Plasma goes on getting everything as before: a click on the bare desktop also takes the
-selection off Plasma's icons, and a drag there also draws Plasma's selection frame over
-the wallpaper. A web wallpaper that needs the right button, or a drag without that
+Plasma goes on getting every click and the wheel as before: a click on the bare desktop
+also takes the selection off Plasma's icons, and a drag there also draws Plasma's
+selection frame over the wallpaper. What Plasma does not get while a wallpaper uses the
+pointer is the hover: its icons and widgets do not react to the pointer resting on them
+(no frame around the icon under the pointer, no tool tips) until a wallpaper that does
+not use the pointer is shown ([why](../contrib/plasma/README.md#what-it-cannot-do)). A web wallpaper that needs the right button, or a drag without that
 frame, wants a desktop with another wallpaper type (it is then in front and has the
 pointer to itself). `wayland_pointer` = off switches this off with the rest of the
 pointer. If the add-on is installed while a wallpaper that uses the pointer is shown,
@@ -475,9 +482,16 @@ wallpaper; the add-on works there as on the bottom layer.
 > (press, drag, release) and the wheel over the bare desktop, and neither over an icon;
 > the right click opened Plasma's menu and did not reach the page. Not run: a scene that
 > uses the pointer with the add-on (it reads the same position), a touchpad, a touch
-> screen, a real mouse wheel. Not run at all: a real Plasma session, a GPU, NVIDIA's driver, a restart of KWin under
-> the running shell, activities, fractional scales with the add-on, Plasma versions
-> between 6.5 and 6.8.
+> screen, a real mouse wheel. In a second pass, with KWin's permission checks for
+> clients on (the runs above had them off, for the virtual pointer): KWin is still told
+> by its protocols and both scripts load; two activities with the type on one desktop
+> (the wallpaper is in front in the other one, and the icons are over it again on the
+> way back); two outputs at the scales 1.5 and 1.25 side by side (the page got the
+> pointer at the right place on each); an output switched off and on; the type chosen
+> and taken away a hundred times in a row (nothing grew in KWin or in Plasma's shell,
+> no script left behind); the panel in each of its visibility modes (its window stays in
+> a layer above the wallpaper's). Not run at all: a real Plasma session, a GPU, NVIDIA's driver, a restart
+> of KWin under the running shell, Plasma versions between 6.5 and 6.8.
 
 ## Compositors that were run
 

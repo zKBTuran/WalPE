@@ -104,8 +104,9 @@ software renderer only ([Known limitations](#known-limitations)).
   `contrib/plasma/install.sh install`) shows them over the wallpaper; on a desktop that
   uses it the wallpaper gets the pointer's position, the left button and the wheel from
   the add-on, the last two over the bare desktop only, never the right or the middle
-  button, and a drag also draws Plasma's selection frame; the Overview shows the desktop
-  without the wallpaper. Seen on a headless Plasma 6.8.2 only
+  button, and a drag also draws Plasma's selection frame; while a wallpaper uses the
+  pointer Plasma's icons and widgets do not react to the pointer resting on them; the
+  Overview shows the desktop without the wallpaper. Seen on a headless Plasma 6.8.2 only
   (the bottom layer also on 5.27); no real session, no GPU.
   [WAYLAND.md](WAYLAND.md#kde-plasma).
 - **AMD and Intel graphics, GPU choice, OpenGL ES: written, not run on hardware.** The

@@ -20,7 +20,9 @@
  *     and the script in KWin. KWin calls only when an answer changes.
  *     KWin leaving the bus drops the answers; KWin coming back (it was
  *     restarted) gets the script again. The script is unloaded when the
- *     last rule is switched off and when the daemon stops.
+ *     last rule is switched off and when the daemon stops. A daemon that
+ *     is killed leaves it in KWin, reporting to a name nobody has; the
+ *     next one unloads it by its name before it loads its own (kwin_load).
  * The same connection takes the pointer from the add-on for Plasma while
  * a wallpaper wants it ("the pointer" below): that is the one time the
  * daemon owns a name on the bus.

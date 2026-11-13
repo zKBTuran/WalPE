@@ -24,6 +24,13 @@ type when that names a file).
     ./install.sh unselect    # every desktop back to the wallpaper type it had before
     ./install.sh uninstall   # unselect and remove
 
+`unselect` knows the type a desktop had before from `select`; a desktop that got "WalPE"
+in Plasma's dialog goes back to Plasma's "Image" with the picture it had. `select` and
+`unselect` go through the desktops of every activity. `uninstall` has to be run in the
+Plasma session: it removes nothing while a desktop still has the type and Plasma's
+shell is not there to give it another one (a desktop whose wallpaper type has no files
+is black behind its icons).
+
 `install` may be run again (after an update of WalPE it replaces the type; Plasma's shell
 keeps the version it has loaded until it is restarted, e.g. by logging out and in).
 Needs Plasma 6.5 or newer and the tools `kpackagetool6` and `dbus-send`: `install.sh`
@@ -74,6 +81,7 @@ in front of it), and a black desktop (a see-through desktop with nothing behind 
 | Plasma's shell is killed and started again | the wallpaper alone, then the icons over it again |
 | "Peek at Desktop" | the colour or picture, icons over it |
 | the type on one screen only | that screen: icons over the wallpaper; the others: the wallpaper in front |
+| the type on the desktop of one activity only | in that activity: icons over the wallpaper; in the others: the wallpaper in front |
 
 One case is left: somebody who takes the script out of KWin by hand
 (`org.kde.kwin.Scripting.unloadScript` on D-Bus with the name the shell gave it; no
@@ -89,8 +97,9 @@ gone when KWin is restarted, with the next login at the latest.
 Plasma's desktop window is above the wallpaper, and KWin gives it every pointer event.
 `Pointer.qml` sits on top of everything in that window and only looks (Qt's pointer
 handlers with passive grabs): the icons, the widgets and the desktop's menu get every
-event as before. What it sees it sends to the daemon (`io.github.walpe.Pointer.Event` on
-the daemon's connection to the session bus):
+press, release and turn of the wheel as before. They do not get the hover while it is
+loaded, see "What it cannot do". What it sees it sends to the daemon
+(`io.github.walpe.Pointer.Event` on the daemon's connection to the session bus):
 
 - the position, wherever the pointer is on the desktop, at most once per frame of the
   screen, in the screen's logical pixels;
@@ -134,6 +143,17 @@ Who is believed. Any program of the session can take a name on the session bus, 
   over the wallpaper: Plasma cannot be told that the wallpaper has used the event. A web
   wallpaper that needs more wants a desktop with another wallpaper type (the icons are
   then hidden and the wallpaper has the pointer to itself).
+- **While a wallpaper uses the pointer, Plasma's icons and widgets do not react to the
+  pointer resting on them**: no frame around the icon under the pointer, no tool tips,
+  none of what a widget shows only under the pointer. Clicks, the wheel and the menus
+  work. The position is read by a hover handler on an item above everything in the
+  window, and Qt gives the hover to the topmost item that asks for it and to nothing
+  beneath, whatever the handler's `blocking` says (seen on Plasma 6.8.2 with Qt 6.12; a
+  `MouseArea` in its place does the same, and a handler on the window's own content item
+  is not told the position over the bare desktop). With a wallpaper that does not use
+  the pointer (a video, a picture, a scene without it) `Pointer.qml` is not loaded and
+  nothing changes; `wayland_pointer` = off in WalPE's settings keeps it from being
+  loaded at all.
 - If the add-on is installed while a wallpaper that uses the pointer is already shown,
   the daemon notices when that wallpaper is opened again.
 - The Overview shows the desktop's icons without the wallpaper behind them (the small
@@ -157,6 +177,8 @@ scripts KWin has loaded, so after another script was unloaded it is the id, and 
 object, of a script that is still there, and `run` reaches that one (seen on KWin 6.8.2).
 
 Run on a headless Plasma 6.8.2 (KWin 6.8.2, Qt 6.12) with Mesa's software renderer only,
-with one and two outputs and a virtual pointer: no real session, no GPU, no NVIDIA driver,
-no restart of KWin under the running shell, no activities, no touchpad or touch screen,
-and of the wallpapers that use the pointer a web page only.
+with one and two outputs (also at the scales 1.5 and 1.25 side by side, and with one of
+them switched off and on), two activities, KWin's permission checks for clients on and
+off, and a virtual pointer: no real session, no GPU, no NVIDIA driver, no restart of KWin
+under the running shell, no touchpad or touch screen, and of the wallpapers that use the
+pointer a web page only.
