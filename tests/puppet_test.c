@@ -41,6 +41,7 @@ static void s_read (const void *d, GLsizeiptr sz)
     const unsigned char *p = d;
     for (GLsizeiptr i = 0; p && i < sz; i++)
         s += p[i];
+    (void) s;   /* only added to: GCC 16 says so (-Wunused-but-set-variable=3) */
 }
 static void s_bufdata (GLenum t, GLsizeiptr sz, const void *d, GLenum u) { (void) t; (void) u; s_read (d, sz); }
 /* the vertex buffer "on the GPU" of the puppet being drawn, and how often it was written */

@@ -103,6 +103,7 @@ static int h_find (gpointer u, const char *name)
         for (double until = thread_cpu () + 1.8; thread_cpu () < until; )
             for (int i = 0; i < 200000; i++)
                 work += (guint) i;
+        (void) work;    /* only added to: GCC 16 says so (-Wunused-but-set-variable=3) */
         slow_calls++;
         g_mutex_unlock (&slow_lock);
         return 1;
