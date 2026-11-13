@@ -132,10 +132,20 @@ loads the script only on KWin, with the add-on installed, while a wallpaper it s
 the pointer; the type watches for the name and loads `Pointer.qml` only while somebody
 has it and the daemon's surface is under the desktop. The daemon treats what comes like
 a pointer of its own: the same coordinates per output, the same button and wheel events.
-Measured on a headless Plasma 6.8.2 (software rendering, a page that follows the
-pointer): 55 to 59 calls a second from the script with the pointer moving at 1000 and at
-125 positions a second, 2 in ten seconds with the pointer nearly at rest; see the commit
-that brought the script for the CPU time beside the QML path.
+What is kept for the pointer stays for half a second after the last wallpaper that
+wanted it, so that a pause of a moment does not unload and load the script.
+
+Measured on a headless Plasma 6.8.2 (KWin and the page drawn on the CPU, the machine
+busy with other work), ten seconds of the pointer moving at 1000 positions a second
+over a page that follows it: the script made 425 to 513 calls to the daemon (at 125
+positions a second 440 to 464; the wallpaper type before it, at most once per frame of
+the screen: 237 to 459); Plasma's shell used 0.3 to 0.7 s of CPU time (1.6 to 2.9 s
+when it handed the position on; 0.5 to 0.6 s with a video as the wallpaper, where
+nothing is handed on); KWin 5.0 to 5.9 s (4.6 to 7.7 s before; 4.5 to 5.0 s with a
+video - nearly all of it is drawing the screen on the CPU); the daemon 4.3 to 4.4 s
+(2.2 to 4.0 s before: it draws the page anew for every position that arrives, and
+more arrive). With the pointer nearly at rest: 2 calls in ten seconds. With a video:
+none, the script is not in KWin.
 
 The daemon and the add-on have to be of the same version: this `Pointer.qml` with a
 daemon that has no pointer script gives the wallpaper clicks without a position.
@@ -193,4 +203,6 @@ with one and two outputs (also at the scales 1.5 and 1.25 side by side, and with
 them switched off and on), two activities, KWin's permission checks for clients on and
 off, and a virtual pointer: no real session, no GPU, no NVIDIA driver, no restart of KWin
 under the running shell, no touchpad or touch screen, and of the wallpapers that use the
-pointer a web page only.
+pointer a web page only. The pointer script: one output and two (scales 1 and 1.25),
+KWin's permission checks on, Plasma's own popup over the desktop, a window maximized
+over the wallpaper and closed again.

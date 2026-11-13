@@ -488,7 +488,10 @@ wallpaper; the add-on works there as on the bottom layer.
 > pointer at the right place on each); an output switched off and on; the type chosen
 > and taken away a hundred times in a row (nothing grew in KWin or in Plasma's shell,
 > no script left behind); the panel in each of its visibility modes (its window stays in
-> a layer above the wallpaper's). Not run at all: a real Plasma session, a GPU, NVIDIA's driver, a restart
+> a layer above the wallpaper's); the pointer's position from the daemon's script in KWin,
+> on one output and on two (the frame around the icon under the pointer is there, the
+> page has the pointer where it is, clicks and the wheel arrive from the wallpaper type,
+> a popup of Plasma's over the desktop and the panel count as "left"). Not run at all: a real Plasma session, a GPU, NVIDIA's driver, a restart
 > of KWin under the running shell, Plasma versions between 6.5 and 6.8.
 
 ## Compositors that were run
