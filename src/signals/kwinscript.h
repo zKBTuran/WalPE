@@ -29,7 +29,14 @@
  * The report is one string: a line per output, "NAME<tab>FLAGS", FLAGS a
  * subset of "c" (covered), "a" (an application has the focus there), "f"
  * (that window is fullscreen). "unsupported" alone: a KWin whose script
- * interface is older than Plasma 6. */
+ * interface is older than Plasma 6.
+ *
+ * Every script the daemon loads reports to an object path of its own
+ * (WALPE_KWIN_OBJECT "/<number>"). When the script is replaced (the
+ * see-through list changed), the one that is leaving can still have a
+ * report on its way; it arrives at a path that is no longer there and
+ * is nobody's - it must not be taken for the first word of the new
+ * script (kwin.c). */
 #pragma once
 #include <glib.h>
 #include <string.h>
@@ -70,12 +77,14 @@ static inline char *walpe_kwin_see_through_js (const char *list)
 }
 
 /* dest: the daemon's unique name on the session bus (":1.42"), where the
- * script sends its reports; pid: the daemon's, whose own windows are no
- * application's; see_through: the setting. g_free. */
-static inline char *walpe_kwin_script_text (const char *dest, guint pid, const char *see_through)
+ * script sends its reports; path: the object there that is this script's;
+ * pid: the daemon's, whose own windows are no application's; see_through:
+ * the setting. g_free. */
+static inline char *walpe_kwin_script_text (const char *dest, const char *path, guint pid,
+                                            const char *see_through)
 {
     static const char body[] =
-        "    function send(state) { callDBus(DEST, \"" WALPE_KWIN_OBJECT "\", \"" WALPE_KWIN_IFACE "\", \"Report\", state); }\n"
+        "    function send(state) { callDBus(DEST, PATH, \"" WALPE_KWIN_IFACE "\", \"Report\", state); }\n"
         "    if (typeof workspace.windowList !== \"function\") { send(\"unsupported\"); return; }\n"
         "    let sent = null;\n"
         "    const soon = new QTimer();\n"
@@ -140,9 +149,10 @@ static inline char *walpe_kwin_script_text (const char *dest, guint pid, const c
         "// per output and only when it changes, whether the windows cover the output and whether\n"
         "// the active window is an application's and fullscreen. src/signals/kwinscript.h in WalPE.\n"
         "(function () {\n"
-        "    const DEST = \"%s\", PID = %u, SEE = %s, GRID = %d, NEED = %d;\n%s",
+        "    const DEST = \"%s\", PID = %u, SEE = %s, GRID = %d, NEED = %d;\n"
+        "    const PATH = \"%s\";\n%s",
         dest, pid, see, WALPE_KWIN_GRID,
-        (int) (WALPE_KWIN_COVER * WALPE_KWIN_GRID * WALPE_KWIN_GRID + 0.999), body);
+        (int) (WALPE_KWIN_COVER * WALPE_KWIN_GRID * WALPE_KWIN_GRID + 0.999), path, body);
     g_free (see);
     return text;
 }

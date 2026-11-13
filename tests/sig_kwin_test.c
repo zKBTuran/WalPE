@@ -18,6 +18,10 @@
  *   follow the daemon's outputs when their ids change;
  *   load the script again when the see-through list changes and when KWin
  *   comes back on the bus, and report nothing while it is away;
+ *   give every script an object of its own to report to, so that what the
+ *   script that is being replaced still reports is nobody's: it changes
+ *   nothing and does not count as the new script's first report (which
+ *   removes the new script's file - before KWin has read it);
  *   say why when KWin is too old for the script;
  *   unload the script when the last rule goes off and when it is stopped;
  *   not start with WALPE_KWIN_SCRIPT=0;
@@ -64,6 +68,7 @@ static struct {
     char *file, *name;      /* of the last loadScript */
     char *text;             /* what the file held when it was run */
     char *dest;             /* the connection the script reports to */
+    char *path;             /* and the object there */
     gint report_ok, report_denied;
 } F;
 
@@ -124,6 +129,13 @@ static void fake_method (GDBusConnection *c, const char *sender, const char *pat
         if (d) {
             d += strlen ("const DEST = \"");
             F.dest = g_strndup (d, strcspn (d, "\""));
+        }
+        g_free (F.path);
+        F.path = NULL;
+        d = text ? strstr (text, "const PATH = \"") : NULL;
+        if (d) {
+            d += strlen ("const PATH = \"");
+            F.path = g_strndup (d, strcspn (d, "\""));
         }
         g_mutex_unlock (&F.lock);
         g_atomic_int_inc (&F.runs);
@@ -204,21 +216,30 @@ static void fake_run (void (*fn) (gpointer), gpointer arg)
     }
 }
 
-/* what the script would do: call Report on the daemon's connection */
-static void report_from (GDBusConnection *from, const char *state)
+/* what the script would do: call Report on the daemon's connection, at the
+ * object its text names (path NULL: the script that was run last) */
+static void report_to (GDBusConnection *from, const char *path, const char *state)
 {
     g_mutex_lock (&F.lock);
     char *dest = g_strdup (F.dest);
+    char *at = g_strdup (path ? path : F.path);
     g_mutex_unlock (&F.lock);
-    if (!dest)
-        return;
-    g_dbus_connection_call (from, dest, WALPE_KWIN_OBJECT, WALPE_KWIN_IFACE, "Report",
-                            g_variant_new ("(s)", state), NULL, G_DBUS_CALL_FLAGS_NONE, 3000, NULL, NULL,
-                            NULL);
+    if (dest && at)
+        g_dbus_connection_call (from, dest, at, WALPE_KWIN_IFACE, "Report", g_variant_new ("(s)", state),
+                                NULL, G_DBUS_CALL_FLAGS_NONE, 3000, NULL, NULL, NULL);
     g_free (dest);
+    g_free (at);
+}
+
+static void report_from (GDBusConnection *from, const char *state)
+{
+    report_to (from, NULL, state);
 }
 
 static void f_report (gpointer state) { report_from (F.bus, state); }
+/* the script that was in KWin before the last one, which KWin has not taken out yet */
+static char *old_path;
+static void f_report_old (gpointer state) { report_to (F.bus, old_path, state); }
 static void f_own (gpointer a)        { fake_own (GPOINTER_TO_INT (a)); }
 
 /* ---- the daemon's outputs: "A" and "B", ids that the test changes */
@@ -389,12 +410,13 @@ int main (void)
     see = walpe_kwin_see_through_js (NULL);
     CHECK (!strcmp (see, "[]"), "no list: %s", see);
     g_free (see);
-    char *js = walpe_kwin_script_text (":1.99", 4242, "st");
+    char *js = walpe_kwin_script_text (":1.99", WALPE_KWIN_OBJECT "/s7", 4242, "st");
     CHECK (strstr (js, "const DEST = \":1.99\", PID = 4242, SEE = [\"st\"], GRID = 24, NEED = 490;") != NULL,
            "the script carries where to report, whose windows do not count, the list and the X11 "
            "backend's grid and threshold (85 %% of 576 cells)");
-    CHECK (strstr (js, "\"" WALPE_KWIN_OBJECT "\", \"" WALPE_KWIN_IFACE "\", \"Report\"") != NULL,
-           "and the method it calls");
+    CHECK (strstr (js, "const PATH = \"" WALPE_KWIN_OBJECT "/s7\";") != NULL &&
+           strstr (js, "callDBus(DEST, PATH, \"" WALPE_KWIN_IFACE "\", \"Report\", state)") != NULL,
+           "and the method it calls, at the object that is this script's");
     g_free (js);
     const char *name;
     gsize nlen;
@@ -527,12 +549,30 @@ int main (void)
     CHECK (stub_value (&walpe_sig_kwin, WALPE_SIG_COVERED, 1) == 1, "and has it again when it is back");
 
     /* 8. the see-through list is part of the script */
+    g_mutex_lock (&F.lock);
+    old_path = g_strdup (F.path);
+    g_mutex_unlock (&F.lock);
     walpe_sigprov_set_see_through ("st, Alacritty");
     WAIT_COUNT (F.runs, 2, "a new list loads the script again");
     text = text_now ();
     CHECK (strstr (text, "SEE = [\"st\",\"alacritty\"]") != NULL, "with the list in it");
     g_free (text);
     WAIT_VALUE (WALPE_SIG_COVERED, id_a, 0, "what the old script said is dropped until the new one reports");
+    /* the script that was replaced had a report on its way (a window closed
+     * in that moment): it is not the new script's */
+    g_mutex_lock (&F.lock);
+    CHECK (old_path && F.path && strcmp (old_path, F.path), "the new script reports to an object of its "
+           "own: %s, the one before to %s", F.path ? F.path : "(none)", old_path ? old_path : "(none)");
+    g_mutex_unlock (&F.lock);
+    fake_run (f_report_old, "A\tcaf\nB\tcaf");
+    settle ();
+    CHECK (stub_value (&walpe_sig_kwin, WALPE_SIG_COVERED, id_a) == 0 &&
+           stub_value (&walpe_sig_kwin, WALPE_SIG_FULLSCREEN, 0) == 0,
+           "a late report of the script that was replaced changes nothing");
+    CHECK (!file_gone (NULL), "and does not remove the new script's file (KWin may not have read it yet)");
+    CHECK (state_has ("loading"), "nor count as its first report: %s", walpe_sig_kwin_state ());
+    g_free (old_path);
+    old_path = NULL;
     walpe_sigprov_set_see_through ("st, Alacritty");
     settle ();
     CHECK (g_atomic_int_get (&F.runs) == 2, "the same list again loads nothing");

@@ -43,6 +43,8 @@ static struct {
     GCancellable *cancel;       /* of everything asked on `bus` */
     gboolean connecting;
     guint watch, object;
+    guint script;               /* counts the scripts loaded: each has an object path of its own */
+    char *path;                 /* the one `object` is at: the script that is (being) loaded */
     char *owner;                /* KWin's unique name; NULL = not on the bus */
     gboolean loaded;            /* the script has reported */
     char *see;                  /* the see-through list the loaded script was given */
@@ -153,9 +155,10 @@ static const char kwin_xml[] =
 static void kwin_method (GDBusConnection *c, const char *sender, const char *path, const char *iface,
                          const char *method, GVariant *args, GDBusMethodInvocation *inv, gpointer user)
 {
-    (void) c; (void) path; (void) iface; (void) user;
-    /* only KWin's own connection is believed (its scripts call from it) */
-    if (g_strcmp0 (method, "Report") || !K.owner || g_strcmp0 (sender, K.owner)) {
+    (void) c; (void) iface; (void) user;
+    /* only KWin's own connection is believed (its scripts call from it),
+     * and of its scripts only the one loaded last (kwin_object) */
+    if (g_strcmp0 (method, "Report") || !K.owner || g_strcmp0 (sender, K.owner) || g_strcmp0 (path, K.path)) {
         g_dbus_method_invocation_return_error_literal (inv, G_DBUS_ERROR, G_DBUS_ERROR_ACCESS_DENIED,
                                                        "only KWin reports here");
         return;
@@ -187,6 +190,33 @@ static void kwin_method (GDBusConnection *c, const char *sender, const char *pat
 }
 
 static const GDBusInterfaceVTable kwin_vt = { kwin_method, NULL, NULL, { 0 } };
+
+static void kwin_object_off (void)
+{
+    if (K.bus && K.object)
+        g_dbus_connection_unregister_object (K.bus, K.object);
+    K.object = 0;
+    g_clear_pointer (&K.path, g_free);
+}
+
+/* The object the next script reports to, at a path no script before it was
+ * given. The script that is replaced (the see-through list changed) runs
+ * until KWin has taken it out, and what it reports in that time used to
+ * arrive at the one object there was: it counted as the new script's first
+ * report, so the new script's file was removed before KWin had read it -
+ * KWin then drops the script without a word - and the old script's last
+ * answer stood for good, with "loaded" in status (seen on KWin 6.8.2: a
+ * window closed in the moment the list changed, two times out of six).
+ * Now such a report finds no object. */
+static void kwin_object (void)
+{
+    kwin_object_off ();
+    K.path = g_strdup_printf (WALPE_KWIN_OBJECT "/s%u", ++K.script);
+    GDBusNodeInfo *info = g_dbus_node_info_new_for_xml (kwin_xml, NULL);
+    K.object = g_dbus_connection_register_object (K.bus, K.path, info->interfaces[0], &kwin_vt, NULL, NULL,
+                                                  NULL);
+    g_dbus_node_info_unref (info);
+}
 
 /* ---- the script in KWin */
 
@@ -307,7 +337,8 @@ static void kwin_load (void)
     }
     GError *e = NULL;
     char *file = kwin_script_file ();
-    char *text = walpe_kwin_script_text (g_dbus_connection_get_unique_name (K.bus), (guint) getpid (),
+    kwin_object ();
+    char *text = walpe_kwin_script_text (g_dbus_connection_get_unique_name (K.bus), K.path, (guint) getpid (),
                                          walpe_sigprov_see_through ());
     gboolean ok = g_file_set_contents (file, text, -1, &e);
     g_free (text);
@@ -371,6 +402,7 @@ static void kwin_rules_off (gboolean unload)
     K.watch = 0;
     g_clear_pointer (&K.owner, g_free);
     g_clear_pointer (&K.see, g_free);
+    kwin_object_off ();
     kwin_forget ();
     char *f = kwin_script_file ();
     g_unlink (f);
@@ -390,8 +422,6 @@ static void kwin_disconnect (gboolean unload)
     kwin_rules_off (unload);
     kwin_pointer_off ();
     if (K.bus) {
-        if (K.object)
-            g_dbus_connection_unregister_object (K.bus, K.object);
         g_signal_handlers_disconnect_by_data (K.bus, &K);
         if (!g_dbus_connection_is_closed (K.bus))
             g_dbus_connection_close_sync (K.bus, NULL, NULL);
@@ -423,10 +453,6 @@ static void kwin_connected (GObject *src, GAsyncResult *res, gpointer user)
     K.connecting = FALSE;
     K.bus = bus;
     g_dbus_connection_set_exit_on_close (bus, FALSE);
-    GDBusNodeInfo *info = g_dbus_node_info_new_for_xml (kwin_xml, NULL);
-    K.object = g_dbus_connection_register_object (bus, WALPE_KWIN_OBJECT, info->interfaces[0], &kwin_vt,
-                                                  NULL, NULL, NULL);
-    g_dbus_node_info_unref (info);
     g_signal_connect (bus, "closed", G_CALLBACK (kwin_closed), &K);
     kwin_arm ();        /* what the connection is wanted for */
 }
