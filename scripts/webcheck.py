@@ -108,6 +108,7 @@ PATIENCE = lc.PATIENCE
 CONFIG = {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False}
 fails = 0
 checks = 0
+failed = []             # what failed, with its detail: said once more in the last lines (lc.said_again)
 HOST = "auto"           # --host
 HASHES = None           # --hashes
 
@@ -117,6 +118,7 @@ def check(ok, what, detail=None):
     checks += 1
     if not ok:
         fails += 1
+        failed.append((what, detail))
     print(("ok   " if ok else "FAIL ") + what, flush=True)
     if not ok and detail is not None:
         print("       " + str(detail), flush=True)
@@ -1885,6 +1887,8 @@ def main():
                 env.stop_daemon()
     finally:
         env.close()
+    for ln in lc.said_again(failed):
+        print(ln)
     print(f"webcheck: {checks} checks, {fails} failed")
     return 1 if fails else 0
 

@@ -213,6 +213,7 @@ import displayenv       # noqa: E402  (which display, and whether it can be used
 PATIENCE = rc.PATIENCE
 fails = 0
 checks = 0
+failed = []     # what failed, with its detail: said once more in the last lines (said_again)
 
 
 def check(ok, what, detail=None):
@@ -220,10 +221,27 @@ def check(ok, what, detail=None):
     checks += 1
     if not ok:
         fails += 1
+        failed.append((what, detail))
     print(("ok   " if ok else "FAIL ") + what, flush=True)
     if not ok and detail is not None:
         print("       " + str(detail), flush=True)
     return ok
+
+
+def said_again(failed, room=80, width=400):
+    """the failed checks once more, for the end of the output: a test runner that shows
+    only the last lines of a long log (`meson test` prints 100) shows which check it was.
+    At most `room` lines; of each detail eight lines, each cut to `width` characters."""
+    out = []
+    for i, (what, detail) in enumerate(failed):
+        if len(out) + 10 > room:
+            out.append("failed: ... and %d more" % (len(failed) - i))
+            break
+        out.append("failed: " + what)
+        if detail is not None:
+            for ln in str(detail).splitlines()[:8]:
+                out.append("        " + ln[:width] + (" ..." if len(ln) > width else ""))
+    return out
 
 
 def put(path, text):
@@ -3957,6 +3975,8 @@ def main():
                 env.stop_daemon()
     finally:
         env.close()
+    for ln in said_again(failed):
+        print(ln)
     print(f"lifecheck: {checks} checks, {fails} failed")
     return 1 if fails else 0
 

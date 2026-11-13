@@ -179,6 +179,7 @@ QUAD = ["red", "green", "blue", "white"]     # top left, top right, bottom left,
 GUI_APP_ID = "io.github.walpe.ui"            # the library window's application id
 fails = 0
 checks = 0
+failed = []     # what failed, with its detail: said once more in the last lines (lc.said_again)
 
 
 def check(ok, what, detail=None):
@@ -186,6 +187,7 @@ def check(ok, what, detail=None):
     checks += 1
     if not ok:
         fails += 1
+        failed.append((what, detail))
     print(("ok   " if ok else "FAIL ") + what, flush=True)
     if not ok and detail is not None:
         print("       " + str(detail), flush=True)
@@ -2366,6 +2368,8 @@ def main():
                 env.stop_daemon()
     finally:
         env.close()
+    for ln in lc.said_again(failed):
+        print(ln)
     print(f"waylandcheck: {checks} checks, {fails} failed")
     return 1 if fails else 0
 
