@@ -10471,6 +10471,16 @@ static gboolean layout_check (gpointer user)
                  * in place any more: the restart makes one for it */
                 layout_owed = FALSE;
                 layout_force = TRUE;
+                /* ... now: this layout has held for every one of those
+                 * looks. Left to be "seen twice" like a change that has
+                 * just come, it was looked at once more a second later -
+                 * by layout_follow, which found the same thread still
+                 * busy, took the force back and began the wait again:
+                 * the restart never came, and an output whose render
+                 * thread is in a frame that does not end stayed empty. */
+                walpe_output_list_free (&layout_pending);
+                walpe_output_list_copy (&layout_pending, &l);
+                layout_pending_set = TRUE;
             }
         }
     }

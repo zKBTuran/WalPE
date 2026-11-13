@@ -55,6 +55,12 @@ not what the daemon believes it drew. Each case starts its own daemon:
             the output where it lies afterwards. This is the daemon with
             wayland_follow on; without the setting (the default) and with it
             off: the restart in place for a change, as before.
+  busy      (wayland_follow on) an output is switched off and on again while
+            its render thread is in a frame that does not end (the scene of
+            lifecheck's `held`): the thread cannot be given the output that
+            came back, and after twenty seconds of waiting for it the daemon
+            restarts in place - the same process, the wallpaper that was
+            asked for on that output is shown.
   closed    the compositor closes a wallpaper surface while its output
             stays (made up with WALPE_WL_CLOSE_AFTER_MS): the surface gets
             its role back, or with WALPE_WL_RECREATE=0 and wayland_follow on
@@ -872,6 +878,45 @@ def case_follow(env, W):
         check(env.state().get("render_threads_waiting") == 0, f"follow: {what}: no render thread waits for an "
               "output", env.state().get("render_threads_waiting"))
         env.stop_daemon()
+
+
+# --------------------------------------------------------------------- busy
+def case_busy(env, W):
+    """wayland_follow on. The second output's render thread is in a frame that does not
+    end when its output is switched off and on again: the thread never comes to wait for
+    an output, so the one that came back cannot be given to it. The daemon waits twenty
+    seconds for it and then restarts in place (it waited again and again, and the output
+    stayed empty for good)."""
+    held = os.path.join(os.path.dirname(W["red"]), "held")
+    lc.gen_fx_scene(held, lc.HELD_FRAG, "held")
+    if not start(env, [("A", 640, 360, 0, 0), ("B", 480, 270, 640, 0)], "busy", extra=FOLLOW_ON):
+        return
+    (a, *_), (b, *_) = env.mons
+    pid = env.daemon.pid
+    env.open(W["red"])
+    lc.loaded(env, W["red"])
+    bi = index_of(env, b)
+    check(env.open(held, bi), "busy: the wallpaper whose frame does not end is accepted on the second output")
+    time.sleep(3.0)
+    # (saved for the output; its thread never takes it)
+    check(env.open(W["blue"], bi), "busy: another wallpaper is asked for there")
+    check(env.display.output(b, enable=False), "busy: the compositor switches the second output off")
+    ok, _ = follow(env, lambda: rects(env) == {a: [0, 0, 640, 360]})
+    check(ok, "busy: status drops it", rects(env))
+    mark = env.mark()
+    t0 = time.time()
+    check(env.display.output(b, enable=True, mode=(480, 270), pos=(640, 0)), "busy: ... and on again")
+    ok = wait_for(lambda: "restarting to follow it" in env.since(mark) and
+                  rects(env) == {a: [0, 0, 640, 360], b: [640, 0, 480, 270]}, 75)
+    log = env.since(mark)
+    check(bool(ok), "busy: the daemon restarts in place for the output its render thread never came to "
+          "(%.0f s)" % (time.time() - t0), [ln[-160:] for ln in log.splitlines() if "monitor layout" in ln][-4:])
+    check(log.count("an output has waited") == 1, "busy: after one wait of twenty seconds",
+          log.count("an output has waited"))
+    got = [shows(env, a, "red"), shows(env, b, "blue")]
+    check(got == ["red", "blue"], "busy: both outputs show what was asked for", got)
+    check(env.daemon.poll() is None and env.daemon.pid == pid, "busy: the same process throughout")
+    env.stop_daemon()
 
 
 # ------------------------------------------------------------------- closed
@@ -2221,7 +2266,7 @@ def case_fullscreen(env, W):
 OPT_IN = ("cycles",)
 CASES = [("start", case_start), ("layer", case_layer), ("two", case_two), ("mode", case_mode), ("scale", case_scale),
          ("noviewport", case_noviewport), ("rotate", case_rotate), ("hotplug", case_hotplug),
-         ("follow", case_follow), ("closed", case_closed), ("nosurface", case_nosurface),
+         ("follow", case_follow), ("busy", case_busy), ("closed", case_closed), ("nosurface", case_nosurface),
          ("pointer", case_pointer), ("covered", case_covered), ("fullscreen", case_fullscreen),
          ("backend", case_backend),
          ("noshell", case_noshell), ("cycles", case_cycles), ("cursor", case_cursor),
