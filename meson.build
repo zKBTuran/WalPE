@@ -2351,6 +2351,50 @@ if have_tray
   endif  # with_tests
 endif
 
+# ------------------------------------------------- the daemon on KDE Plasma
+# The daemon, the add-on of contrib/plasma and the tray in a private
+# Plasma session (scripts/kwincheck.py: its own runtime directory and
+# session bus, `kwin_wayland --virtual` with software rendering on two
+# virtual outputs, Plasma's shell where it is installed): where the
+# wallpaper is among Plasma's windows before and after a click on the
+# desktop (what 0.14.0 got wrong and no test with sway or a stand-in could
+# see), the pause rules through the script in KWin, the add-on installed,
+# selected and taken away, the tray's menu at Plasma's own
+# StatusNotifierWatcher. KWin's own screenshots, stacking order and window
+# states are what is looked at. Skipped (77) without the kwin_wayland of
+# Plasma 6 or dbus-daemon; the parts that need plasmashell say so where it
+# is missing. `meson test -C build daemon-kwin` or `--suite kwin`
+# Its two helpers: kwin-bus (method calls and KWin's screenshot on the
+# session bus) and a stand-in for /dev/udmabuf that is preloaded into KWin
+# only on a machine without a device KWin can draw on (a container). The
+# stand-in runs inside KWin, which no sanitizer build of ours has built: it
+# is compiled without one whatever the build's options say.
+if with_tests and lifecheck_py.found() and have_wayland
+  # (GUnixFDList, for the pipe KWin writes its screenshot to: a part of GLib)
+  kwin_fd_dep = dependency('gio-unix-2.0', required: false)
+  if kwin_fd_dep.found()
+    kwin_bus = executable('kwin-bus', 'tests/kwin/kwin_bus.c',
+      dependencies: [gio, kwin_fd_dep, jsonglib],
+      install: false, build_by_default: false)
+    kwin_shim = shared_module('kwincheck-udmabuf', 'tests/kwin/udmabuf_shim.c',
+      name_prefix: '',
+      dependencies: [cc.find_library('dl', required: false)],
+      override_options: ['b_sanitize=none', 'b_lundef=false', 'b_lto=false'],
+      install: false, build_by_default: false)
+    kwin_check_deps = [daemon, ctl, kwin_bus, kwin_shim]
+    if have_tray
+      kwin_check_deps += tray
+    endif
+    test('daemon-kwin', lifecheck_py,
+      args: ['-I', meson.current_source_dir() / 'scripts/kwincheck.py',
+             '--build', meson.current_build_dir()],
+      depends: kwin_check_deps,
+      suite: 'kwin',
+      is_parallel: false,
+      timeout: 900)
+  endif
+endif
+
 summary({'x11': have_x11, 'wayland': have_wayland},
   section: 'Display backends (walpe-daemon)', bool_yn: true)
 if have_web
