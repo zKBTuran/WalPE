@@ -114,6 +114,25 @@ if cc.sizeof('off_t', prefix: '#include <sys/types.h>') == 4
   add_project_arguments('-D_FILE_OFFSET_BITS=64', language: 'c')
 endif
 
+# The stack of a thread. glibc gives every thread the stack limit of the
+# session (8 MiB unless somebody changed it); musl gives it 128 KiB, unless
+# the program names another size in its PT_GNU_STACK header, which is what
+# -z stack-size writes (musl reads it up to 8 MiB; the kernel and glibc do
+# not look at it). The render thread of a monitor runs wallpaper scripts
+# with 512 KiB of C stack for their calls (scenescript.c: SS_STACK_BYTES),
+# on top of what the scene, the GL driver and - on a software renderer -
+# its compiler take: with 128 KiB a script that calls itself without end
+# was a stack overflow of the daemon instead of the error the script is
+# given (tests/script_hostile_test.c, part 7). Asked for where the C
+# library is not glibc: a build for glibc has the link line it had. The
+# memory of a stack is the kernel's to give when it is touched: a larger
+# limit costs address space, not memory.
+if cc.get_define('__GLIBC__', prefix: '#include <limits.h>') == ''
+  add_project_link_arguments(cc.get_supported_link_arguments([
+    '-Wl,-z,stack-size=8388608',
+  ]), language: 'c')
+endif
+
 # CPU tuning (-Dnative_tuning=...). It only lets GCC/clang auto-vectorise
 # and schedule for the target CPU. The hand-written kernels do not depend
 # on it: on x86-64 the SSE2 ones (glutil.c, video_custom.c) are part of the
