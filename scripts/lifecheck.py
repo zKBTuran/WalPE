@@ -3227,6 +3227,11 @@ def case_desktop(env, W):
         d3 = xc.window(0, 0, 640, 360)
         xc.wtype(d3, DESKTOP)
         xc.clients([d3])
+        # (the desktop window has the focus and says it is fullscreen when the daemon starts:
+        # the daemon looks at the focus before it has seen any window, and must not keep the
+        # first monitor paused for "a fullscreen window" once it knows what that window is)
+        xc.focus(d3)
+        xc.fullscreen(d3, True)
         mark = env.mark()
         if not check(env.start_daemon([A, B], extra={"WALPE_X11_DESKTOP": "root"}),
                      "desktop: daemon started with WALPE_X11_DESKTOP=root"):
@@ -3244,8 +3249,11 @@ def case_desktop(env, W):
         check(env.since(mark).count("the wallpaper is behind it (WALPE_X11_DESKTOP=root)") == 1,
               "desktop: root: the log says once that the wallpaper is behind the desktop window",
               env.since(mark)[-300:])
-        check(paused() == [False, False], "desktop: root: nothing is paused for it", paused())
+        check(paused() == [False, False] and not env.state().get("fullscreen"),
+              "desktop: root: nothing is paused for it, though it had the focus and the fullscreen "
+              "state when the daemon started", (paused(), env.state().get("fullscreen")))
         env.stop_daemon()
+        xc.focus(0)
         xc.destroy(d3)
         xc.clients([])
 

@@ -625,6 +625,7 @@ static gboolean client_is_watched (Window w)
 }
 
 static void fs_place_report (void);
+static void update_active_window (void);
 
 /* ------------------------------------- a desktop's own desktop window
  * (x11desk.h: what it is, and why the wallpaper window goes into an
@@ -1046,6 +1047,14 @@ static void recompute_covered (void)
     if (tree_clients)
         XFree (tree_clients);
     desk_set (desks);   /* the wallpaper windows follow the desktop windows found */
+    /* The window that has the focus and says it is fullscreen is a desktop
+     * window, which is known only now: the daemon started while it had the
+     * focus (the first look at the focus comes before the first scan), or
+     * the window was made with both. What its state meant is asked again;
+     * until the focus moved the monitor stayed paused for "a fullscreen
+     * window". */
+    if (X.fs_active && window_is_desk (X.fs_win))
+        update_active_window ();
     /* the focused fullscreen window may have been moved to another monitor
      * (the scan runs after every change of a window's place) */
     if (X.fs_active)
