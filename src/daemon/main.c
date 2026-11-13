@@ -5715,6 +5715,47 @@ static void status_monitor_output (JsonBuilder *b, Mon *m)
     }
 }
 
+/* status "sound": the player's line (scenes, videos) with the pages of web
+ * wallpapers in it (scenesound.h walpe_sound_status_with) - a page's sound is
+ * WebKit's, the player has no stream for it, and its line alone said
+ * "nothing is playing" under a page that was heard. A page is the wallpaper
+ * of one or more monitors (shared); it is paused when all of them are. Main
+ * thread, only when somebody asks. */
+static char *sound_status_line (void)
+{
+    WalpeSoundPages pages = { 0 };
+#ifdef HAVE_WEB
+    GHashTable *seen = NULL;    /* wallpaper path -> one of its monitors runs */
+    for (GList *l = D.mons; l; l = l->next) {
+        Mon *m = l->data;
+        const char *wp = m->want_path ? m->want_path : walpe_config_monitor_path (D.cfg, m->name);
+        if (g_atomic_int_get (&m->content_type) != WALPE_TYPE_WEB || !wp || !*wp)
+            continue;
+        g_mutex_lock (&m->lock);
+        const gboolean runs = !m->pause_wanted;
+        g_mutex_unlock (&m->lock);
+        if (!seen)
+            seen = g_hash_table_new (g_str_hash, g_str_equal);
+        g_hash_table_insert (seen, (gpointer) wp,
+                             GINT_TO_POINTER (runs || GPOINTER_TO_INT (g_hash_table_lookup (seen, wp))));
+    }
+    if (seen) {
+        GHashTableIter it;
+        gpointer wp, runs;
+        g_hash_table_iter_init (&it, seen);
+        while (g_hash_table_iter_next (&it, &wp, &runs)) {
+            char *sw = walpe_config_get_prop (wp, "walpe_sound"), *vol = walpe_config_get_prop (wp, "walpe_volume");
+            walpe_sound_pages_add (&pages, walpe_sound_switch_parse (sw), walpe_sound_volume_parse (vol),
+                                   !GPOINTER_TO_INT (runs), D.cfg->scene_sound, D.cfg->mute, D.cfg->volume);
+            g_free (sw);
+            g_free (vol);
+        }
+        g_hash_table_destroy (seen);
+    }
+#endif
+    return walpe_sound_status_with (&pages);
+}
+
 static void ipc_status (JsonBuilder *b)
 {
     Mon *m0 = D.mons ? D.mons->data : NULL;
@@ -5961,7 +6002,7 @@ static void ipc_status (JsonBuilder *b)
     jb_bool (b, "scene_sound", D.cfg->scene_sound);
     jb_bool (b, "mute", D.cfg->mute);
     {
-        char *snd = walpe_sound_status ();
+        char *snd = sound_status_line ();
         jb_str (b, "sound", snd);
         g_free (snd);
     }
@@ -8005,7 +8046,7 @@ static void ipc_mem (JsonBuilder *b, JsonObject *o)
         walpe_web_stats (&snaps);
 #endif
         jb_int (b, "web_snapshots", snaps);
-        char *snd = walpe_sound_status ();
+        char *snd = sound_status_line ();
         jb_str (b, "sound", snd);
         g_free (snd);
     }

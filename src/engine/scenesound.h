@@ -103,6 +103,32 @@ void walpe_sound_use_null (gboolean fast);
 /* one line for `walpe-ctl status`: why nothing may be heard, or what plays
  * (g_free) */
 char *walpe_sound_status (void);
+/* Wallpaper sound that is not this player's and obeys the same settings:
+ * the pages of web wallpapers, whose sound WebKit plays (web.h
+ * walpe_web_sound). The player has no stream for them, so its line alone
+ * said "nothing is playing (0 wallpaper(s) with sound shown)" while a page
+ * was heard. Counted by who knows the pages (the daemon), one call of
+ * walpe_sound_pages_add for each page that is shown:
+ *   sw, own_volume  the wallpaper's own switch (-1 none, 0 off, 1 on) and
+ *                   volume (0..1), as walpe_sound_switch_parse and
+ *                   walpe_sound_volume_parse give them
+ *   paused          every monitor that shows the page is paused
+ *   setting_on, mute, volume   the three settings
+ * A page that the settings alone silence (sound off without a switch of its
+ * own that is on, mute, volume 0) is not counted: the line says that of all
+ * wallpaper sound. Whether a page makes any sound nobody knows without
+ * running it: "heard" is "its level is above 0 and it runs". */
+typedef struct {
+    int heard;      /* pages that run at a level above 0 */
+    int paused;     /* pages with a level above 0 that are paused: silent until they go on */
+    int silent;     /* pages silenced by their own switch or their own volume of 0 */
+    int own_on;     /* of the heard and paused ones: the wallpaper's own switch is on */
+    int percent;    /* the level of the heard pages in percent (1..100), 0 = none yet, -1 = they differ */
+} WalpeSoundPages;
+void walpe_sound_pages_add (WalpeSoundPages *w, int sw, double own_volume, gboolean paused,
+                            gboolean setting_on, gboolean mute, double volume);
+/* walpe_sound_status with those pages in it (NULL, or all 0: the same line) */
+char *walpe_sound_status_with (const WalpeSoundPages *web);
 /* player threads alive right now (they end a moment after their group is
  * freed; tests wait for 0) */
 int walpe_sound_threads (void);

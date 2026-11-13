@@ -469,6 +469,115 @@ static void test_gates (const char *sine)
 }
 
 /* ---- 5 ---- */
+/* The pages of web wallpapers in the status line. WebKit plays them, so the
+ * player has no stream for them and said "nothing is playing (0
+ * wallpaper(s) with sound shown)" under a page that was heard. Called with
+ * sound allowed, nothing loaded. */
+static void test_status_pages (const char *sine)
+{
+    char *line;
+    /* which pages count: the three settings and the wallpaper's own two */
+    WalpeSoundPages w = { 0 };
+    walpe_sound_pages_add (&w, -1, 1.0, FALSE, TRUE, FALSE, 0.5);    /* heard at 50 % */
+    walpe_sound_pages_add (&w, 1, 0.5, FALSE, FALSE, FALSE, 1.0);    /* its own switch on, own volume: 50 % */
+    walpe_sound_pages_add (&w, -1, 1.0, TRUE, TRUE, FALSE, 0.5);     /* paused */
+    walpe_sound_pages_add (&w, 0, 1.0, FALSE, TRUE, FALSE, 0.5);     /* its own switch off */
+    walpe_sound_pages_add (&w, -1, 0.0, FALSE, TRUE, FALSE, 0.5);    /* its own volume 0 */
+    walpe_sound_pages_add (&w, -1, 1.0, FALSE, FALSE, FALSE, 0.5);   /* sound is off: not counted */
+    walpe_sound_pages_add (&w, 0, 1.0, FALSE, FALSE, FALSE, 0.5);    /* ... also with its own switch off */
+    walpe_sound_pages_add (&w, -1, 1.0, FALSE, TRUE, TRUE, 0.5);     /* muted: not counted */
+    walpe_sound_pages_add (&w, 1, 1.0, FALSE, TRUE, FALSE, 0.0);     /* volume 0: not counted */
+    CHECK (w.heard == 2 && w.paused == 1 && w.silent == 2 && w.own_on == 1 && w.percent == 50,
+           "pages counted: heard %d paused %d silent %d own_on %d percent %d", w.heard, w.paused, w.silent,
+           w.own_on, w.percent);
+    walpe_sound_pages_add (&w, -1, 0.2, FALSE, TRUE, FALSE, 0.5);    /* another level */
+    CHECK (w.heard == 3 && w.percent == -1, "pages at two levels: percent %d", w.percent);
+    const WalpeSoundPages heard = { .heard = 1, .percent = 50 }, own = { .heard = 1, .own_on = 1, .percent = 100 },
+                          paused = { .paused = 1 }, silent = { .silent = 1 }, zero = { 0 };
+
+    /* the setting off: off - unless a page's own switch is on */
+    walpe_sound_set_enabled (FALSE);
+    walpe_sound_set_muted (FALSE);
+    walpe_sound_set_master (0.5);
+    line = walpe_sound_status_with (&zero);
+    CHECK (g_str_has_prefix (line, "off (") && !strstr (line, "web"), "off, no page: %s", line);
+    g_free (line);
+    line = walpe_sound_status_with (&own);
+    CHECK (g_str_has_prefix (line, "off, on for a wallpaper of its own") && strstr (line, "1 web wallpaper(s) at 100 %") &&
+           !strstr (line, "nothing is playing"), "off, a page with its own switch on: %s", line);
+    g_free (line);
+
+    /* on, and only a page is shown: something is playing */
+    walpe_sound_set_enabled (TRUE);
+    line = walpe_sound_status_with (NULL);
+    CHECK (g_str_has_prefix (line, "on") && !strstr (line, "web"), "on, nothing shown (no pages given): %s", line);
+    g_free (line);
+    line = walpe_sound_status_with (&zero);
+    CHECK (g_str_has_prefix (line, "on") && !strstr (line, "web"), "on, nothing shown: %s", line);
+    g_free (line);
+    line = walpe_sound_status_with (&heard);
+    CHECK (g_str_has_prefix (line, "on: 1 web wallpaper(s) at 50 %") && strstr (line, "WebKit") &&
+           !strstr (line, "nothing is playing") && !strstr (line, "0 wallpaper(s)"), "on, a page: %s", line);
+    g_free (line);
+    line = walpe_sound_status_with (&w);
+    CHECK (strstr (line, "3 web wallpaper(s) at levels of their own") && strstr (line, "1 web wallpaper(s) paused") &&
+           strstr (line, "2 web wallpaper(s) silent by their own switch or volume"), "on, pages of every kind: %s", line);
+    g_free (line);
+    /* the page is paused: that is why nothing is heard */
+    line = walpe_sound_status_with (&paused);
+    CHECK (strstr (line, "nothing is playing") && strstr (line, "1 web wallpaper(s) paused") &&
+           strstr (line, "walpe-ctl pause"), "on, a paused page: %s", line);
+    g_free (line);
+    line = walpe_sound_status_with (&silent);
+    CHECK (strstr (line, "1 web wallpaper(s) silent by their own switch or volume"), "on, a page switched off: %s", line);
+    g_free (line);
+    /* mute and volume 0 are said of all wallpaper sound, pages included */
+    walpe_sound_set_muted (TRUE);
+    line = walpe_sound_status_with (&zero);
+    CHECK (g_str_has_prefix (line, "on, muted") && !strstr (line, "web"), "muted: %s", line);
+    g_free (line);
+    walpe_sound_set_muted (FALSE);
+    walpe_sound_set_master (0.0);
+    line = walpe_sound_status_with (&zero);
+    CHECK (strstr (line, "volume setting is 0") && !strstr (line, "web"), "volume 0: %s", line);
+    g_free (line);
+    walpe_sound_set_master (1.0);
+
+    /* a scene that sounds and a page: both are in the line; the scene
+     * paused and the page running: the page is what plays */
+    WalpeSoundGroup *g = walpe_sound_group_new ("/w/status-pages", -1);
+    WalpeSoundSpec loop = { &sine, 1, 1.0f, WALPE_SOUND_LOOP, 0.0f, 0.0f, "sine" };
+    WalpeSound *s = walpe_sound_new (g, &loop);
+    walpe_sound_group_set_active (g, TRUE);
+    walpe_sound_play (s);
+    WAIT (stats_of (s).frames > 0, 5000);
+    line = walpe_sound_status_with (&heard);
+#ifdef HAVE_PULSE
+    CHECK (strstr (line, "1 wallpaper(s) with sound shown") && strstr (line, "; 1 web wallpaper(s) at 50 %"),
+           "a scene and a page: %s", line);
+#else
+    CHECK (strstr (line, "scenes and videos") && strstr (line, "; 1 web wallpaper(s) at 50 %"), "a scene and a page: %s", line);
+#endif
+    g_free (line);
+    walpe_sound_group_set_active (g, FALSE);
+    WAIT (!stats_of (s).running, 5000);
+    line = walpe_sound_status_with (&heard);
+#ifdef HAVE_PULSE
+    CHECK (strstr (line, "1 wallpaper(s) with sound paused") && strstr (line, "; 1 web wallpaper(s) at 50 %"),
+           "a paused scene and a page: %s", line);
+#endif
+    g_free (line);
+    line = walpe_sound_status_with (&paused);
+#ifdef HAVE_PULSE
+    CHECK (strstr (line, "1 wallpaper(s) with sound paused") && strstr (line, "; 1 web wallpaper(s) paused"),
+           "a paused scene and a paused page: %s", line);
+#endif
+    g_free (line);
+    walpe_sound_group_free (g);
+    CHECK (threads_gone (), "status with pages: the threads end");
+    walpe_sound_set_enabled (FALSE);
+}
+
 static void test_one_instance (const char *sine)
 {
     WalpeSoundGroup *a = group_on ("/w/same"), *b = group_on ("/w/same"), *c = group_on ("/w/other");
@@ -920,6 +1029,7 @@ int main (void)
         g_free (line);
     }
 
+    test_status_pages (sine);
     test_players (dir, sine);
     test_pace (dir);
     test_random_pace (dir);

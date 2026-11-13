@@ -56,7 +56,14 @@ on, but the volume setting is 0: silent (walpe-ctl set volume=0.5)
 on: 2 stream(s) through PulseAudio, 1 wallpaper(s) with sound shown
 on: 2 stream(s) play into nothing, no sound server (Connection refused); 0 heard
 on: nothing is playing: 1 wallpaper(s) with sound paused - sound stops while its wallpaper is paused (...)
+on: 1 web wallpaper(s) at 50 % (what the page plays, through WebKit: the stream "WebKit" in the system's mixer)
+on: nothing is playing: 1 web wallpaper(s) paused - sound stops while its wallpaper is paused (...)
 ```
+
+The streams counted are those of scenes and videos. A web wallpaper's sound is WebKit's own
+stream, so the line names the pages that are shown and the level they are given (the volume
+setting times the wallpaper's own volume); whether a page makes any sound cannot be known
+from outside it. A page silenced by its own switch or volume is named as that.
 
 The log has one line per scene with sound layers and one line for every file that is
 refused, with the reason.

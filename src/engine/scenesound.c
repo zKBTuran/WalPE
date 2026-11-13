@@ -1614,11 +1614,44 @@ void walpe_sound_stats (WalpeSound *s, WalpeSoundStats *out)
     g_mutex_unlock (&s->lock);
 }
 
+void walpe_sound_pages_add (WalpeSoundPages *w, int sw, double own_volume, gboolean paused,
+                            gboolean setting_on, gboolean mute, double volume)
+{
+    if (!w)
+        return;
+    if (!(sw > 0 || (sw < 0 && setting_on))) {
+        w->silent += sw == 0 && setting_on;     /* (off for all: the line says so) */
+        return;
+    }
+    if (mute || !(volume > 0.0))
+        return;                                 /* (the line says so of all wallpaper sound) */
+    if (!(own_volume > 0.0)) {
+        w->silent++;
+        return;
+    }
+    w->own_on += sw > 0;
+    if (paused) {
+        w->paused++;
+        return;
+    }
+    const int pct = CLAMP ((int) (MIN (volume, 1.0) * MIN (own_volume, 1.0) * 100.0 + 0.5), 1, 100);
+    w->percent = w->heard == 0 ? pct : w->percent == pct ? pct : -1;
+    w->heard++;
+}
+
 char *walpe_sound_status (void)
+{
+    return walpe_sound_status_with (NULL);
+}
+
+char *walpe_sound_status_with (const WalpeSoundPages *web)
 {
     if (!walpe_sound_allowed ())
         return g_strdup ("not available in this program");
-    int own_on = 0, speaking = 0, held = 0;
+    static const WalpeSoundPages none;
+    if (!web)
+        web = &none;
+    int own_on = web->own_on, speaking = 0, held = 0;
     char *why = NULL;
     g_mutex_lock (&reg_lock);
     for (guint i = 0; groups && i < groups->len; i++) {
@@ -1643,6 +1676,8 @@ char *walpe_sound_status (void)
     else {
         int real = g_atomic_int_get (&n_real), nowhere = g_atomic_int_get (&n_nowhere);
         const char *scope = walpe_sound_enabled () ? "on" : "off, on for a wallpaper of its own";
+        /* nothing of the player's own to report: no stream, nothing paused */
+        gboolean idle = FALSE;
 #ifdef HAVE_PULSE
         if (nowhere > 0)
             r = g_strdup_printf ("%s: %d stream(s) play into nothing, no sound server (%s); %d heard", scope,
@@ -1654,20 +1689,56 @@ char *walpe_sound_status (void)
             r = g_strdup_printf ("%s: nothing is playing: %d wallpaper(s) with sound paused - sound stops while its "
                                  "wallpaper is paused (windows cover the monitor, a fullscreen window, the display "
                                  "sleeps, walpe-ctl pause)", scope, held);
-        else
+        else {
+            idle = speaking == 0;
             r = g_strdup_printf ("%s: nothing is playing (%d wallpaper(s) with sound shown)", scope, speaking);
+        }
 #else
         (void) real;
         (void) nowhere;
         (void) speaking;
         (void) held;
-        r = g_strdup_printf ("%s, but built without libpulse: nothing can be heard", scope);
+        r = g_strdup_printf ("%s, but built without libpulse: %s", scope,
+                             web->heard + web->paused + web->silent > 0 ? "the sound of scenes and videos cannot be heard"
+                                                                        : "nothing can be heard");
 #endif
-        if (g_atomic_int_get (&n_streams) >= WALPE_SOUND_MAX_STREAMS) {
-            char *t = g_strdup_printf ("%s; %d layers have an output, the limit: further ones wait", r,
-                                       WALPE_SOUND_MAX_STREAMS);
+        /* the pages of web wallpapers: WebKit plays them, not this player */
+        GString *t = g_string_new (NULL);
+        if (web->heard > 0) {
+            g_string_printf (t, "%d web wallpaper(s) ", web->heard);
+            if (web->percent > 0)
+                g_string_append_printf (t, "at %d %%", web->percent);
+            else
+                g_string_append (t, "at levels of their own");
+            g_string_append (t, " (what the page plays, through WebKit: the stream \"WebKit\" in the system's mixer)");
+        }
+        if (web->paused > 0)
+            g_string_append_printf (t, "%s%d web wallpaper(s) paused%s", t->len ? "; " : "", web->paused,
+                                    idle && !web->heard
+                                        ? " - sound stops while its wallpaper is paused (windows cover the monitor, "
+                                          "a fullscreen window, the display sleeps, walpe-ctl pause)"
+                                        : ": silent until shown again");
+        if (web->silent > 0)
+            g_string_append_printf (t, "%s%d web wallpaper(s) silent by their own switch or volume (the rows "
+                                    "\"Sound\" and \"Volume\" of their options; walpe-ctl setprop walpe_sound=on "
+                                    "walpe_volume=1)", t->len ? "; " : "", web->silent);
+        if (t->len) {
+            char *all;
+            if (idle && web->heard > 0)             /* (something is playing: the page) */
+                all = g_strdup_printf ("%s: %s", scope, t->str);
+            else if (idle && web->paused > 0)
+                all = g_strdup_printf ("%s: nothing is playing: %s", scope, t->str);
+            else
+                all = g_strdup_printf ("%s; %s", r, t->str);
             g_free (r);
-            r = t;
+            r = all;
+        }
+        g_string_free (t, TRUE);
+        if (g_atomic_int_get (&n_streams) >= WALPE_SOUND_MAX_STREAMS) {
+            char *t2 = g_strdup_printf ("%s; %d layers have an output, the limit: further ones wait", r,
+                                        WALPE_SOUND_MAX_STREAMS);
+            g_free (r);
+            r = t2;
         }
     }
     g_free (why);
