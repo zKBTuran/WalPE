@@ -68,6 +68,17 @@ it was). A bare window manager on X11 - dwm, i3, openbox - gets the window of 0.
   the icons are hidden and which command brings them back
   ([WAYLAND.md](docs/WAYLAND.md#kde-plasma),
   [contrib/plasma/README.md](contrib/plasma/README.md)).
+- KDE Plasma add-on that a package installed: `contrib/plasma/install.sh` works with a
+  wallpaper type that a package put into `/usr/share/plasma/wallpapers` for every user.
+  There it said "not installed", `select` refused and `install` failed inside Plasma's
+  package tool. `status` now says whose copy is installed, with its version - and, with a
+  copy of the user's own beside the package's, that Plasma takes the user's, which may be
+  the older one; `select` and `unselect` work with the package's copy; `install` and
+  `uninstall` are about the user's own copy, and `uninstall` leaves the desktops their
+  wallpaper type while the package's copy stays. The daemon's line about the hidden icons
+  names Plasma's "Desktop and Wallpaper" dialog first and `install.sh` as what the source
+  tree has: an installed WalPE has no such script
+  ([contrib/plasma/README.md](contrib/plasma/README.md)).
 - KDE Plasma with the add-on: the wallpaper gets the pointer from the add-on. Plasma's
   desktop window is then above the wallpaper and KWin gives it every pointer event. The
   wallpaper type hands on the position, everywhere on the desktop, and the left button
@@ -550,6 +561,22 @@ microphone.
   KWin sees under the desktop). What a name on the session bus is worth in the other
   direction is written down in
   [contrib/plasma/README.md](contrib/plasma/README.md#the-pointer).
+
+### Building
+
+- No compiler warnings on a current distribution. Arch Linux of November 2026 (GCC 16,
+  GTK 4.24, gdk-pixbuf 2.44, GLib 2.90) built WalPE with 31 warnings, each a note about
+  a call one of these libraries has marked as deprecated since the versions of Ubuntu
+  24.04, which builds without any. Where the library has a successor that does the same,
+  it is used (`g_sort_array` from GLib 2.82 on; a texture over a pixbuf's own pixels
+  instead of `gdk_texture_new_for_pixbuf`). gdk-pixbuf's animation interface (animated
+  GIFs) and GDK's X11 calls have none; they stay as they are, and the note is switched off
+  around each such call and nowhere else. No picture, no frame timing and no particle
+  changes, and no library has to be newer than before. The default, the X11-only and the
+  Wayland-only build are warning-free on both systems, with `-Dtests=true` too.
+- `walpe-collect --help` says how the installed command is called (it printed `sh
+  walpe-collect.sh`), and the two messages of the video import about a missing ffmpeg or
+  H.264 encoder no longer answer with a Gentoo command alone.
 
 ### Log and bug reports
 
