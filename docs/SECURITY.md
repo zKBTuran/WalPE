@@ -151,6 +151,13 @@ What it gets and what it does not, as the code is today:
   and does not switch it off. It keeps a page process that was taken over away from your
   files and from the control socket. It is WebKit's sandbox with WebKit's rules: it gives
   that process the socket of the display its toolkit is on, and the sound server's.
+  - It also gives it, to write in, the directory of GStreamer's plugin list. Left alone
+    that is the whole of `~/.cache` - every program's cache, and `~/.cache/walpe` with the
+    converted videos and sound tracks the daemon reads - not `~/.cache/gstreamer-1.0`
+    (WebKitGTK 2.52.6 and 2.54.2; so it was in WalPE up to 0.14.0). The daemon therefore
+    names a file of its own for that list, `~/.cache/walpe/gstreamer/registry.bin`
+    (`GST_REGISTRY`, for its page processes only), and the page process gets that one
+    directory. A `GST_REGISTRY` or `GST_REGISTRY_1_0` you set yourself is left as it is.
   - With the X11 page host that is the X server's socket, on X11 and under Xwayland
     alike: such a process has what any X client has.
   - With the private page host WebKit would give it the session compositor's socket

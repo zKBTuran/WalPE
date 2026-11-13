@@ -9707,12 +9707,44 @@ static void web_env_sound_sink (void)
     g_free (dir);
 }
 
+/* GStreamer's list of plugins (its "registry") for the page processes: a
+ * file of WalPE's own, in a directory that holds nothing else.
+ *
+ * WebKit's sandbox gives a page process the directory of that file to write
+ * in. With nothing set that is not ~/.cache/gstreamer-1.0 but the whole of
+ * the user's cache directory (seen in the mount table of the page process,
+ * WebKitGTK 2.52.6 and 2.54.2, and in WalPE 0.14.0 as well): every program's
+ * cache - a browser's, a compiler's, ~/.cache/walpe with the converted
+ * videos and sound tracks this daemon decodes outside any sandbox - can be
+ * read and rewritten by a page that has broken into its own process, which
+ * is the one thing the sandbox is there to contain. With GST_REGISTRY set
+ * the sandbox binds the directory of the named file instead (the same two
+ * versions; GST_REGISTRY_1_0 is read by GStreamer but not by that code).
+ * It also ends a quarrel over the shared file: GStreamer rewrites it (1 MB)
+ * whenever a program with another plugin path than the last one starts,
+ * and WalPE's pages have a path of their own (web_env_sound_sink).
+ * A value the user set, under either name, is the user's. Costs a mkdir at
+ * start; the file is written by the first page that plays media. */
+static void web_env_gst_registry (void)
+{
+    if (g_getenv ("GST_REGISTRY") || g_getenv ("GST_REGISTRY_1_0"))
+        return;
+    char *dir = g_build_filename (g_get_user_cache_dir (), "walpe", "gstreamer", NULL);
+    if (g_mkdir_with_parents (dir, 0700) == 0) {
+        char *file = g_build_filename (dir, "registry.bin", NULL);
+        g_setenv ("GST_REGISTRY", file, TRUE);
+        g_free (file);
+    }
+    g_free (dir);
+}
+
 static void web_env_setup (gboolean want_accel, int fps)
 {
 #ifdef HAVE_WEBHOST_WL
     web_env_wayland_socket ();
 #endif
     web_env_sound_sink ();
+    web_env_gst_registry ();
     /* what an earlier image of this process set (it restarts itself after
      * a monitor layout or web_accel change) is not the user's choice */
     web_env_undo (g_getenv ("WALPE_WEB_ENV_OURS"));

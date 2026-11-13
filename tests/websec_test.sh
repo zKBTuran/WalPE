@@ -42,6 +42,11 @@
 #     directory and nothing listens under its name, so no second client
 #     can ever connect; with the X11 page host it is not started at all
 #     (no thread of it in the daemon).
+# 12. the page process cannot write into the user's cache directory: its
+#     sandbox has only the directory of GStreamer's plugin list, which the
+#     daemon keeps in a directory of its own - WebKit used to hand it the
+#     whole of ~/.cache, every program's, to write in. (Not exercised
+#     where WebKit runs its page process without a sandbox.)
 #
 # Skipped (exit 77) without Xvfb / python3 / the web module, or when WebKit
 # does not come up here. Run: meson test -C build websec -v
@@ -447,5 +452,27 @@ if [ -s "$T/aport" ] && grep -q 'NP auth page' "$T/daemon3.log"; then
 else
     echo "note: the page for the authentication request did not come up here (not exercised)"
 fi
+
+# ---- 12: what of the cache directory the page process can write to
+# (the daemon of step 9 and its page; a page process is one that has this
+# run's runtime directory and a mount table of its own)
+dns=$(readlink "/proc/$DPID/ns/mnt" 2>/dev/null)
+seen=0
+for st in /proc/[0-9]*/status; do
+    p=${st#/proc/}; p=${p%/status}
+    cat "/proc/$p/cmdline" 2>/dev/null | tr '\0' ' ' | grep -q '^[^ ]*WebKitWebProcess' || continue
+    cat "/proc/$p/environ" 2>/dev/null | tr '\0' '\n' | grep -qx "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" || continue
+    pns=$(readlink "/proc/$p/ns/mnt" 2>/dev/null)
+    [ -n "$pns" ] && [ "$pns" != "$dns" ] || continue
+    seen=1
+    # mount point (field 5) and its options (field 6)
+    if awk -v c="$XDG_CACHE_HOME" '$5 == c && $6 ~ /^rw/ { f = 1 } END { exit !f }' "/proc/$p/mountinfo"; then
+        bad "the page process can write to the whole cache directory ($XDG_CACHE_HOME is bound into its sandbox)"
+    fi
+    awk -v c="$XDG_CACHE_HOME/walpe/gstreamer" '$5 == c { f = 1 } END { exit !f }' "/proc/$p/mountinfo" ||
+        bad "the page process's sandbox has no $XDG_CACHE_HOME/walpe/gstreamer (GStreamer's plugin list)"
+    awk -v c="$XDG_CACHE_HOME/" 'index ($5, c) == 1 && $5 != c "walpe/gstreamer" { print "   also bound: " $5 }' "/proc/$p/mountinfo"
+done
+[ $seen = 1 ] || echo "note: no sandboxed page process here (not exercised: the page process's cache directory)"
 [ $fail -eq 0 ] && echo "websec: ok"
 exit $fail
