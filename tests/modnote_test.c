@@ -21,7 +21,7 @@ int main (void)
     }
     g_clear_error (&err);
     if (!walpe_video_module (FALSE)) {
-        printf ("SKIP: walpe-video.so is not next to this program\n");
+        printf ("SKIP: walpe-video.so was not loaded (not next to this program, or the loader's reason above)\n");
         return 77;
     }
     JsonBuilder *b = json_builder_new ();

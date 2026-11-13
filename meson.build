@@ -1469,10 +1469,18 @@ if have_ffmpeg
   test('video', video_test, timeout: 300)
   test('video-nv12', video_test, env: ['WALPE_VIDEO_TEST_NV12=1'], timeout: 300)
   # what `walpe-ctl mem` says the video module was loaded for, when a
-  # scene's video texture is the first to ask (the module itself is loaded)
+  # scene's video texture is the first to ask (the module itself is loaded).
+  # The module takes the core functions it calls from the program that
+  # loads it, so the test exports them as the daemon does (modules.dynlist).
+  # Without that it loaded only where a library's pkg-config file happened
+  # to put -Wl,--export-dynamic on every link line (libsoup-3.0 on Ubuntu
+  # 24.04 does, through gmodule-2.0; on Debian 13 and Alpine 3.24 it does
+  # not), and was skipped everywhere else.
   test('modnote', executable('modnote-test', 'tests/modnote_test.c',
     include_directories: inc,
     dependencies: [core_dep],
+    link_args: ['-Wl,--dynamic-list=' + dynlist],
+    link_depends: 'src/daemon/modules.dynlist',
     install: false, build_by_default: false), depends: [video_mod])
 endif
 
