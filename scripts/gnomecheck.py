@@ -34,6 +34,8 @@ Cases (--only NAME runs one):
                  (tests/gnome_caller.c) asks for a dozen connections and
                  keeps them: it gets eight, the rest is refused with a
                  sentence, and when it has ended a daemon gets its own
+                 (skipped in a build without the tests: the program is
+                 one of them)
   stranger       a window of another program (a GTK 4 window made with gjs)
                  that uses the application id and the title of a wallpaper
                  window stays an ordinary window; skipped without gjs
@@ -59,6 +61,9 @@ gdbus or dbus-daemon, a build without the Wayland backend, or a shell that
 does not come up headless); WALPE_CHECK_STRICT=1 makes that a failure.
 
     python3 -I scripts/gnomecheck.py --build BUILD_DIR [--only NAME] [--keep] [--tmp DIR]
+
+The private directory (home, sockets, the logs a failure leaves) is made in
+--tmp, else in TMPDIR, else in /tmp: walpe-gn.XXXXXXXX.
 
 Another version of GNOME Shell than the installed one, from a chroot or a
 container: WALPE_CHECK_GNOME_SHELL is the command that runs its gnome-shell
@@ -463,10 +468,27 @@ def case_pkill(shell, build):
         d.stop()
 
 
+def caller_missing(build):
+    """The case "socket-bound" needs gnome-caller-test, which only a build with the tests
+    (-Dtests=true) has, and only once it was built. A build that knows no such target - the
+    default one of ./build.sh - skips the case: a string, the reason. A build that knows the
+    target and has no program fails it (a list): there the program should be."""
+    target = False
+    try:
+        with open(os.path.join(build, "build.ninja"), "rb") as f:
+            target = any(line.startswith(b"build gnome-caller-test:") for line in f)
+    except OSError:
+        pass
+    if target:
+        return ["%s is not built (ninja -C %s gnome-caller-test)" % (os.path.join(build, "gnome-caller-test"), build)]
+    return ("this build is without the tests, and gnome-caller-test is one of them "
+            "(meson setup -Dtests=true, then ninja gnome-caller-test)")
+
+
 def case_socket_bound(shell, build):
     caller = os.path.join(build, "gnome-caller-test")
     if not os.access(caller, os.X_OK):
-        return ["%s is not built (ninja gnome-caller-test)" % caller]
+        return caller_missing(build)
     p = subprocess.Popen([caller, "12"], env=shell.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     lines = []
     try:
@@ -717,12 +739,35 @@ CASES = [("desktop", case_desktop, False), ("helper-killed", case_helper_killed,
          ("bus-bounds", case_bus_bounds, False)]
 
 
+TMP_MAX = 45    # bytes of a directory for the private one: below it are "walpe-gn.XXXXXXXX/rt/" and the
+                # sockets of the buses, the shell and the daemon, and a socket's path has 107
+
+
+def tmp_dir(environ=None):
+    """Where the private directory is made when --tmp does not say: TMPDIR (the logs went to
+    /tmp whatever it said), /tmp where it is not set. A TMPDIR that is no directory, or one
+    whose path leaves no room for the sockets, is said in a line and /tmp is taken."""
+    t = (os.environ if environ is None else environ).get("TMPDIR", "")
+    if not t:
+        return "/tmp"
+    t = os.path.abspath(t)
+    if not os.path.isdir(t):
+        print("gnomecheck: TMPDIR (%s) is not a directory: /tmp is used" % t)
+        return "/tmp"
+    if len(os.fsencode(t)) > TMP_MAX:
+        print("gnomecheck: TMPDIR (%s) is too long for the sockets of the session (%d bytes at most): "
+              "/tmp is used, or --tmp" % (t, TMP_MAX))
+        return "/tmp"
+    return t
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--build", required=True)
     ap.add_argument("--only")
     ap.add_argument("--keep", action="store_true", help="keep the directory with the logs")
-    ap.add_argument("--tmp", default="/tmp", help="where the private directory is made (a short path)")
+    ap.add_argument("--tmp", help="where the private directory is made (a short path); "
+                                  "without it TMPDIR, and /tmp where that is not set")
     a = ap.parse_args()
     build = os.path.abspath(a.build)
     source = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -738,7 +783,7 @@ def main():
         if b"--wayland-socket-to" not in f.read():
             print("gnomecheck: this walpe-daemon is built without the Wayland backend, skipped")
             return SKIP
-    top = tempfile.mkdtemp(prefix="walpe-gn.", dir=a.tmp)      # (short: socket paths)
+    top = tempfile.mkdtemp(prefix="walpe-gn.", dir=a.tmp or tmp_dir())      # (short: socket paths)
     shell = Shell(top, source)
     failed = 0
     try:
@@ -772,6 +817,9 @@ def main():
                 bad = ["%s" % e]
             if bad is None:
                 print("%-14s skipped (what it needs is not installed)" % name)
+                continue
+            if isinstance(bad, str):
+                print("%-14s skipped (%s)" % (name, bad))
                 continue
             for b in bad:
                 print("FAIL: %s: %s" % (name, b))

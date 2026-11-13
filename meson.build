@@ -1991,6 +1991,15 @@ endif
 # connection, ends in whatever order. Skipped (77) without gnome-shell,
 # gdbus and dbus-daemon, where the shell does not come up headless, and in
 # a build without the Wayland backend.
+# What gnomecheck.py decides before it starts a shell: its case "socket-bound"
+# where the build has no gnome-caller-test (skipped in a build without the
+# tests, failed in one with them), and where its private directory is made.
+if lifecheck_py.found()
+  test('gnomecheck-decides', lifecheck_py,
+    args: ['-I', meson.current_source_dir() / 'tests/gnomecheck_test.py',
+           meson.current_source_dir() / 'scripts/gnomecheck.py'],
+    timeout: 60)
+endif
 if lifecheck_py.found() and have_wayland
   # (a program that is not walpe-daemon and asks the extension for more
   # connections than a daemon needs: the check's case "socket-bound")
