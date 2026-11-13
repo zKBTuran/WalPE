@@ -22,7 +22,13 @@
  *     writer of the test's own (skipped without the encoders): the three
  *     Vorbis headers in a comment packet of megabytes, Opus pre-skip, the
  *     end position of the last page.
- *  5. A FLAC file through a player (scenesound.c) on the null device. */
+ *  5. A FLAC file through a player (scenesound.c) on the null device.
+ *  6. A place in a FLAC file (walpe_sounddec_skip, what the sound track of
+ *     a video wallpaper is entered with): the samples from any place on are
+ *     the ones decoding from the start gives, to the end of the file; the
+ *     file in front of a far place is not read; a file whose description
+ *     does not say its length, or lies about its frames, and one with a
+ *     hole in it are read as before, without a crash. */
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <libavcodec/avcodec.h>
@@ -711,7 +717,8 @@ static void test_ogg (void)
 /* ---- 5 ---- */
 static void test_player (void)
 {
-    static const WalpeSoundDecoder dec = { walpe_sounddec_open, walpe_sounddec_read, walpe_sounddec_close };
+    static const WalpeSoundDecoder dec = { walpe_sounddec_open, walpe_sounddec_read, walpe_sounddec_close,
+                                          walpe_sounddec_skip };
     gint16 *pcm = sine_pcm (44100, 2, 30000);
     char *p = write_flac ("player.flac", pcm, 44100, 2, 30000);
     g_free (pcm);
@@ -744,6 +751,202 @@ static void test_player (void)
     g_free (p);
 }
 
+/* ---- 6 ---- */
+
+/* bytes this process has read from files so far (/proc/self/io), -1 = not known */
+static gint64 bytes_read (void)
+{
+    char *text = NULL;
+    gint64 n = -1;
+    if (g_file_get_contents ("/proc/self/io", &text, NULL, NULL)) {
+        const char *at = strstr (text, "rchar:");
+        if (at)
+            n = g_ascii_strtoll (at + 6, NULL, 10);
+    }
+    g_free (text);
+    return n;
+}
+
+/* skip (place), then everything to the end: the samples have to be pcm's
+ * from MIN (place, frames) on. *io (optional): bytes read from files by
+ * the skip. */
+static void place_check (const char *what, const char *path, const gint16 *pcm, gint64 frames, gint64 place,
+                         gint64 *io)
+{
+    int rate = 0, ch = 0;
+    char *err = NULL;
+    gpointer d = walpe_sounddec_open (path, &rate, &ch, &err);
+    CHECK (d && ch == 1, "%s: opened (%s)", what, err ? err : "");
+    g_free (err);
+    if (!d || ch != 1)
+        return;
+    const gint64 io0 = bytes_read ();
+    const gint64 passed = walpe_sounddec_skip (d, place);
+    if (io)
+        *io = io0 >= 0 ? bytes_read () - io0 : -1;
+    const gint64 at = MIN (place, frames);
+    gint64 got = 0, wrong = -1;
+    gint16 buf[1024];
+    for (int guard = 0; guard < 4000000; guard++) {
+        int n = walpe_sounddec_read (d, buf, 1000 + guard % 24);
+        if (n <= 0)
+            break;
+        for (int i = 0; i < n && wrong < 0; i++)
+            if (at + got + i >= frames || buf[i] != pcm[at + got + i])
+                wrong = at + got + i;
+        got += n;
+    }
+    walpe_sounddec_close (d);
+    CHECK (passed == at && got == frames - at && wrong < 0,
+           "%s, place %" G_GINT64_FORMAT ": %" G_GINT64_FORMAT " passed over, %" G_GINT64_FORMAT " read (of %"
+           G_GINT64_FORMAT "), first wrong sample at %" G_GINT64_FORMAT, what, place, passed, got, frames - at, wrong);
+}
+
+static void test_place (void)
+{
+    /* 300 s at 16 kHz, one channel: noise that says where it is (it does
+     * not compress), a stretch of silence (it compresses to nearly
+     * nothing, so a place is far from where its share of the bytes is),
+     * a tone, noise again */
+    enum { RATE = 16000, FRAMES = 300 * RATE };
+    gint16 *pcm = g_new (gint16, FRAMES);
+    for (guint32 i = 0; i < FRAMES; i++) {
+        guint32 h = i * 2654435761u;
+        h ^= h >> 15;
+        h *= 2246822519u;
+        h ^= h >> 13;
+        const int part = (int) (i / (60u * RATE));
+        pcm[i] = part == 1 ? 0 : part == 3 ? (gint16) lrint (9000.0 * sin (i * 0.05) + (h & 7)) : (gint16) (h >> 16);
+    }
+    char *p = write_flac ("place.flac", pcm, RATE, 1, FRAMES);
+    gsize len = 0;
+    guint8 *file = NULL;
+    if (!p || !g_file_get_contents (p, (char **) &file, &len, NULL) || len < 42) {
+        printf ("sounddec: SKIP a place in a FLAC file (no FLAC encoder)\n");
+        skipped++;
+        g_free (pcm);
+        g_free (p);
+        return;
+    }
+    const int block = file[8] << 8 | file[9];
+    CHECK (block == (file[10] << 8 | file[11]) && block >= 16, "the encoder writes frames of one size (%d)", block);
+    /* as FFmpeg writes the file when it can go back to its header (the
+     * test's writer cannot: the encoder is asked for the header first):
+     * the number of samples */
+    guint8 *with = g_memdup2 (file, len);
+    with[21] = (guint8) ((with[21] & 0xf0) | 0);
+    put32be (with + 22, FRAMES);
+    char *pw = put_file ("place-len.flac", with, len);
+
+    /* places: the start, around the distance below which nothing is
+     * jumped, around frame borders, each part and each border between
+     * parts, the last samples, the end, behind the end */
+    GArray *places = g_array_new (FALSE, FALSE, sizeof (gint64));
+    const gint64 fixed[] = { 0, 1, 2 * RATE - 1, 2 * RATE, 2 * RATE + 1, 3 * RATE, 10 * (gint64) block - 1,
+                             10 * (gint64) block, 10 * (gint64) block + 1, 59 * RATE, 60 * RATE - 1, 60 * RATE,
+                             60 * RATE + 1, 90 * RATE, 119 * RATE + 7, 120 * RATE, 121 * RATE, 150 * RATE,
+                             180 * RATE - 1, 180 * RATE + 3, 200 * RATE, 240 * RATE, 285 * RATE, FRAMES - block - 1,
+                             FRAMES - block, FRAMES - 2, FRAMES - 1, FRAMES, FRAMES + 5, 100 * (gint64) FRAMES };
+    g_array_append_vals (places, fixed, G_N_ELEMENTS (fixed));
+    GRand *rng = g_rand_new_with_seed (7);
+    for (int i = 0; i < 40; i++) {
+        gint64 v = g_rand_int_range (rng, 0, FRAMES);
+        g_array_append_val (places, v);
+    }
+    g_rand_free (rng);
+    for (guint i = 0; i < places->len; i++) {
+        const gint64 place = g_array_index (places, gint64, i);
+        place_check ("FLAC that says its length", pw, pcm, FRAMES, place, NULL);
+        if (i % 6 == 0)     /* (decoded from the start each time: fewer of them) */
+            place_check ("FLAC that does not say its length", p, pcm, FRAMES, place, NULL);
+    }
+    g_array_free (places, TRUE);
+    /* what the skip is for: the file in front of a far place is not read
+     * (it was decoded whole) */
+    {
+        gint64 io_len = -1, io_no = -1;
+        place_check ("far place", pw, pcm, FRAMES, 290 * (gint64) RATE, &io_len);
+        place_check ("far place, no length", p, pcm, FRAMES, 290 * (gint64) RATE, &io_no);
+        if (io_len < 0 || io_no < 0)
+            printf ("sounddec: no /proc/self/io: bytes read not checked\n");
+        else
+            CHECK (io_len < (gint64) len / 8 && io_no > (gint64) len * 3 / 4,
+                   "a place at 290 s of 300: %" G_GINT64_FORMAT " bytes read of %" G_GSIZE_FORMAT
+                   " (and %" G_GINT64_FORMAT " when the file does not say its length)", io_len, len, io_no);
+    }
+    /* a description that lies. Twice the length: the offsets tried are
+     * wrong, the place is still found (or the file read from its start).
+     * A larger frame size than the frames have (a smaller one the decoder
+     * refuses): no frame is taken for one, the file is read from its
+     * start. */
+    {
+        guint8 *lie = g_memdup2 (with, len);
+        put32be (lie + 22, 2 * FRAMES);
+        char *pl = put_file ("place-lie.flac", lie, len);
+        place_check ("FLAC that says twice its length", pl, pcm, FRAMES, 100 * (gint64) RATE, NULL);
+        place_check ("FLAC that says twice its length", pl, pcm, FRAMES, 299 * (gint64) RATE, NULL);
+        g_remove (pl);
+        g_free (pl);
+        memcpy (lie, with, len);
+        lie[8] = lie[10] = (guint8) ((block * 2) >> 8);
+        lie[9] = lie[11] = (guint8) (block * 2);
+        pl = put_file ("place-lie.flac", lie, len);
+        place_check ("FLAC that says twice its frame size", pl, pcm, FRAMES, 100 * (gint64) RATE, NULL);
+        place_check ("FLAC that says twice its frame size", pl, pcm, FRAMES, 250 * (gint64) RATE, NULL);
+        g_remove (pl);
+        g_free (pl);
+        g_free (lie);
+    }
+    /* a hole: 3 MiB of zeros where frames were, and a file cut off. No
+     * crash, no endless read; what comes out is not compared (frames are
+     * missing). */
+    {
+        guint8 *hole = g_memdup2 (with, len);
+        const gsize a = len / 2, n = MIN ((gsize) 3 << 20, len / 4);
+        memset (hole + a, 0, n);
+        char *ph = put_file ("place-hole.flac", hole, len);
+        char *pc = put_file ("place-cut.flac", with, len / 2);
+        const char *files[2] = { ph, pc };
+        for (int k = 0; k < 2; k++) {
+            for (int q = 1; q <= 9; q += 2) {
+                int rate = 0, ch = 0;
+                char *err = NULL;
+                gpointer d = walpe_sounddec_open (files[k], &rate, &ch, &err);
+                CHECK (d != NULL, "damaged file %d opens (%s)", k, err ? err : "");
+                g_free (err);
+                if (!d)
+                    continue;
+                const gint64 want = (gint64) FRAMES * q / 10;
+                const gint64 passed = walpe_sounddec_skip (d, want);
+                gint64 got = 0;
+                gint16 buf[1024];
+                for (int guard = 0; guard < 4000000; guard++) {
+                    int r = walpe_sounddec_read (d, buf, 1024);
+                    if (r <= 0)
+                        break;
+                    got += r;
+                }
+                CHECK (passed >= 0 && passed <= want && passed + got <= FRAMES,
+                       "damaged file %d, place %d/10: %" G_GINT64_FORMAT " passed over, %" G_GINT64_FORMAT " read",
+                       k, q, passed, got);
+                walpe_sounddec_close (d);
+            }
+        }
+        g_remove (ph);
+        g_remove (pc);
+        g_free (ph);
+        g_free (pc);
+        g_free (hole);
+    }
+    g_remove (p);
+    g_remove (pw);
+    g_free (p);
+    g_free (pw);
+    g_free (with);
+    g_free (file);
+    g_free (pcm);
+}
+
 int main (void)
 {
     tmp = g_dir_make_tmp ("walpe-sounddec-XXXXXX", NULL);
@@ -756,6 +959,7 @@ int main (void)
     test_flac ();
     test_ogg ();
     test_player ();
+    test_place ();
     g_rmdir (tmp);
     g_free (tmp);
     if (fails) {

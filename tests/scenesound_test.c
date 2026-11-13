@@ -29,7 +29,8 @@
  *     one gets its output when another falls silent.
  *  9. walpe_sound_restart_at (the sound track of a video): the file from a
  *     place inside it, from its beginning again, from behind its end, and
- *     a place asked for while the player is not heard.
+ *     a place asked for while the player is not heard. A decoder that can
+ *     go to a place is asked to: what lies in front of it is not decoded.
  * 10. walpe_sound_set_period (the loop of a video's sound track): every
  *     pass is exactly that long - a file that is longer is cut, one that
  *     is shorter is followed by silence - and a place in the silence. */
@@ -635,7 +636,7 @@ static int fake_read (gpointer dec, gint16 *out, int max_frames)
     return max_frames;
 }
 static void fake_close (gpointer dec) { g_free (dec); }
-static const WalpeSoundDecoder fake = { fake_open, fake_read, fake_close };
+static const WalpeSoundDecoder fake = { fake_open, fake_read, fake_close, NULL };
 
 static void test_limits (const char *dir, const char *sine)
 {
@@ -896,6 +897,42 @@ static void test_stream_cap (const char *dir)
 }
 
 /* ---- 9 ---- */
+
+/* a decoder of the test's own: 125 s at 8000 Hz, which counts what it is
+ * made to decode and what it is asked to pass over */
+enum { SEEK_FRAMES = 125 * 8000 };
+static gint seek_decoded, seek_skips, seek_skipped;
+static gpointer seek_open (const char *path, int *rate, int *channels, char **err)
+{
+    (void) path;
+    (void) err;
+    *rate = 8000;
+    *channels = 1;
+    return g_new0 (gint64, 1);
+}
+static int seek_read (gpointer dec, gint16 *out, int max_frames)
+{
+    gint64 *at = dec;
+    const int n = (int) MIN ((gint64) max_frames, SEEK_FRAMES - *at);
+    for (int i = 0; i < n; i++)
+        out[i] = (gint16) ((*at + i) % 1000);
+    *at += n;
+    g_atomic_int_add (&seek_decoded, n);
+    return n;
+}
+static gint64 seek_skip (gpointer dec, gint64 frames)
+{
+    gint64 *at = dec;
+    const gint64 n = MIN (frames, SEEK_FRAMES - *at);
+    *at += n;
+    g_atomic_int_inc (&seek_skips);
+    g_atomic_int_add (&seek_skipped, (gint) n);
+    return n;
+}
+static void seek_close (gpointer dec) { g_free (dec); }
+static const WalpeSoundDecoder seek_dec = { seek_open, seek_read, seek_close, seek_skip };
+static const WalpeSoundDecoder seek_dec_plain = { seek_open, seek_read, seek_close, NULL };
+
 static void test_restart (const char *dir)
 {
     WalpeSoundStats st;
@@ -950,6 +987,38 @@ static void test_restart (const char *dir)
            "in the middle of the file: ended %.2f s later, %d open(s), %" G_GINT64_FORMAT " frames",
            el, st.opens, st.frames);
     walpe_sound_use_null (TRUE);
+    /* a compressed file of 125 s, from 100 s: a decoder that can pass
+     * sound over is asked for the 100 s in one piece, and decodes the 25 s
+     * that are played; one that cannot decodes all 125 s, as before */
+    {
+        char *file = g_build_filename (dir, "long.bin", NULL);
+        g_file_set_contents (file, "not RIFF: the decoder of the test", -1, NULL);
+        for (int with = 1; with >= 0; with--) {
+            walpe_sound_set_decoder (with ? &seek_dec : &seek_dec_plain);
+            g_atomic_int_set (&seek_decoded, 0);
+            g_atomic_int_set (&seek_skips, 0);
+            g_atomic_int_set (&seek_skipped, 0);
+            WalpeSound *c = snd_new (g, file, NULL, WALPE_SOUND_SINGLE, 1.0f);
+            walpe_sound_restart_at (c, 100.0);
+            WAIT (stats_of (c).plays == 1, 10000);
+            st = stats_of (c);
+            const int dec = g_atomic_int_get (&seek_decoded), skips = g_atomic_int_get (&seek_skips),
+                      skipped = g_atomic_int_get (&seek_skipped);
+            CHECK (st.plays == 1 && st.frames == 25 * 8000 && st.pos == 125 * 8000,
+                   "a place in a compressed file (%s): %d play(s), %" G_GINT64_FORMAT " frames, place %"
+                   G_GINT64_FORMAT, with ? "decoder passes over" : "decoder reads only", st.plays, st.frames, st.pos);
+            if (with)
+                CHECK (skips == 1 && skipped == 100 * 8000 && dec == 25 * 8000,
+                       "the decoder was asked to pass over %d frames in %d call(s) and decoded %d (wanted: 800000 "
+                       "in 1, 200000)", skipped, skips, dec);
+            else
+                CHECK (skips == 0 && dec == 125 * 8000, "a decoder without it decoded %d frames (wanted: 1000000)",
+                       dec);
+        }
+        walpe_sound_set_decoder (NULL);
+        g_remove (file);
+        g_free (file);
+    }
     walpe_sound_group_free (g);
     CHECK (threads_gone (), "restart: the threads end");
     g_remove (two);

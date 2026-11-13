@@ -375,6 +375,25 @@ static int src_read (Src *src, gint16 *out, int max_frames)
     return MIN (n, max_frames);
 }
 
+/* The next `frames` frames are passed over; returns how many (fewer: the
+ * file ended). A decoder that can go to a place does (sounddec.c); from any
+ * other source they are read and dropped, into buf (WALPE_SOUND_BLOCK frames). */
+static gint64 src_skip (Src *src, gint16 *buf, gint64 frames)
+{
+    if (!src->wav && src->mod->skip) {
+        const gint64 n = src->mod->skip (src->dec, frames);
+        return CLAMP (n, 0, frames);    /* (a decoder is not taken at its word) */
+    }
+    gint64 done = 0;
+    while (done < frames) {
+        int n = src_read (src, buf, (int) MIN ((gint64) WALPE_SOUND_BLOCK, frames - done));
+        if (n <= 0)
+            break;
+        done += n;
+    }
+    return done;
+}
+
 static void src_close (Src *src)
 {
     if (src->wav) {
@@ -1104,17 +1123,18 @@ static gpointer sound_thread (gpointer data)
             if (pass_n > 0 && skip_s > 0)   /* a place in the pass */
                 skip_s = fmod (skip_s, (double) pass_n / src.rate);
             if (skip_s > 0) {
-                /* a place inside the file: the decoders have no seek, the
-                 * sound before it is decoded and dropped (a FLAC track
-                 * decodes some hundred times faster than it plays) */
+                /* A place inside the file. The sound in front of it is not
+                 * decoded where the decoder can do without (src_skip: the
+                 * FLAC track of a video): that took a second of one CPU for
+                 * every twenty minutes of track in front of the place, in
+                 * which nothing was heard and the picture went on - so the
+                 * track came in late by that much, was told its place
+                 * again (video.c), and from some minutes into a long video
+                 * on did nothing else. */
                 gint64 want = (gint64) (MIN (skip_s, (double) WALPE_SOUND_MAX_SECONDS) * src.rate);
-                while (want > 0) {
-                    int n = src_read (&src, buf, (int) MIN ((gint64) WALPE_SOUND_BLOCK, want));
-                    if (n <= 0)
-                        break;
-                    want -= n;
-                    played += n;
-                }
+                const gint64 passed = src_skip (&src, buf, want);
+                want -= passed;
+                played += passed;
                 if (pass_n > 0) {
                     /* (behind the file's end: in the silence that follows it) */
                     pass_out = MIN (played + MAX (want, 0), pass_n - 1);

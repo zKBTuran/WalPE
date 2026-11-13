@@ -57,6 +57,9 @@
  * 14: WalpeWebModule ends with `web_sound` (the volume setting for the
  * sound of web pages, web.h walpe_web_sound); WalpeVideo ends with `pos`
  * (where in the clip the picture on screen is, for its sound track).
+ * 15: WalpeSoundDecoder ends with `skip` (a place in a sound file without
+ * decoding what lies in front of it), which moves what follows `sound` in
+ * WalpeVideoModule.
  *
  * NEVER UNLOADED. A module that was loaded stays loaded until the process
  * ends (modload.c closes a library only when it has no entry symbol). The
@@ -68,7 +71,7 @@
  * (scenesound.c). Whoever adds a dlclose of walpe-video.so has to wait for
  * walpe_sound_threads () == 0 first - and those threads may be blocked in
  * the sound server without a time limit. */
-#define WALPE_MODULE_ABI 14
+#define WALPE_MODULE_ABI 15
 
 typedef struct {
     int abi;

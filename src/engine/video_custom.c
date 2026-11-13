@@ -5787,7 +5787,7 @@ WALPE_API const WalpeVideoModule *walpe_video_module_entry (void)
         WALPE_MODULE_ABI, walpe_video_custom_new, walpe_video_tex_new, walpe_video_tex_update,
         walpe_video_tex_interval_us, walpe_video_tex_set_view, walpe_video_tex_set_paused,
         walpe_video_tex_free,
-        { walpe_sounddec_open, walpe_sounddec_read, walpe_sounddec_close },   /* sounddec.c */
+        { walpe_sounddec_open, walpe_sounddec_read, walpe_sounddec_close, walpe_sounddec_skip },   /* sounddec.c */
         cv_tex_new_copy, cv_tex_set_copy, cv_tex_info, cv_scene_note,
         cv_mem_stats,
     };

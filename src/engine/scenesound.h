@@ -236,11 +236,17 @@ typedef struct {
     /* interleaved 16-bit frames; 0 = end, < 0 = error */
     int (*read) (gpointer dec, gint16 *out, int max_frames);
     void (*close) (gpointer dec);
+    /* The next `frames` frames are passed over as if they had been read;
+     * returns how many (fewer: the file ended). May be NULL: the player
+     * then reads and drops them. With it a decoder can go to a place
+     * without decoding all that lies in front of it (sounddec.c: FLAC). */
+    gint64 (*skip) (gpointer dec, gint64 frames);
 } WalpeSoundDecoder;
 
 /* sounddec.c (part of walpe-video.so; tests compile it in) */
 gpointer walpe_sounddec_open (const char *path, int *rate, int *channels, char **err);
 int walpe_sounddec_read (gpointer dec, gint16 *out, int max_frames);
+gint64 walpe_sounddec_skip (gpointer dec, gint64 frames);
 void walpe_sounddec_close (gpointer dec);
 
 /* tests: this decoder instead of the module's (NULL = the module's again) */

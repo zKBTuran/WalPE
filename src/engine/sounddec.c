@@ -30,6 +30,18 @@
  * what a Vorbis or Opus stream decodes beyond the position its last page
  * gives. (The pre-skip of Opus is dropped by the decoder itself.)
  *
+ * A PLACE IN A FILE (walpe_sounddec_skip). The decoders read forward only;
+ * sound in front of a place is decoded and dropped. A FLAC file whose
+ * header says how long it is and that all its frames have one size - what
+ * FFmpeg's encoder writes, so every sound track taken out of a video
+ * (common/import.h) - is entered near the place instead: a frame is looked
+ * for at the byte offset the place should have, its header says which
+ * frame it is, and a few such steps end within FLAC_NEAR_S seconds in
+ * front of the place. A FLAC frame decodes by itself, so what follows is
+ * sample for sample what decoding from the start gives. A file that does
+ * not fit the description, or in which no frame is found where one should
+ * be, is read from its start as before.
+ *
  * Output: interleaved 16-bit frames, one or two channels. One decoder
  * belongs to one thread. Files are data: every length read from one is
  * checked before it is used. */
@@ -93,6 +105,11 @@ typedef struct {
     GByteArray *opkt;
     int pre;                      /* Opus: pre-skip (samples the page positions count
                                    * and the decoder does not deliver) */
+    /* FLAC, from the stream description (flac_jump) */
+    gint64 fl_total;              /* samples in the file, 0 = not said */
+    int fl_block;                 /* samples of every frame but the last, 0 = they differ */
+    int fl_frame_max;             /* bytes of the largest frame, 0 = not said */
+    gint64 fl_data, fl_size;      /* where the frames begin; the file's size */
 } Dec;
 
 static guint32 rd_le32 (const guint8 *p) { return p[0] | p[1] << 8 | p[2] << 16 | (guint32) p[3] << 24; }
@@ -381,7 +398,7 @@ int walpe_sounddec_read (gpointer dec, gint16 *out, int max_frames)
             const int sch = frame_channels (fr);
             const gboolean planar = av_sample_fmt_is_planar (fr->format);
             const enum AVSampleFormat packed = av_get_packed_sample_fmt (fr->format);
-            for (int c = 0; c < d->channels; c++) {
+            for (int c = 0; out && c < d->channels; c++) {
                 const int sc = MIN (c, sch - 1);     /* a mono frame in a stereo stream: both sides */
                 const guint8 *p = planar ? fr->extended_data[sc] : fr->extended_data[0];
                 if (!p) {
@@ -404,6 +421,209 @@ int walpe_sounddec_read (gpointer dec, gint16 *out, int max_frames)
         }
     }
     return n;
+}
+
+/* ---- FLAC: entering the file near a place ---- */
+#define FLAC_NEAR_S 2             /* a frame this close in front of the place: read on from there */
+#define FLAC_JUMPS 10             /* offsets tried for one place, at most */
+#define FLAC_SCAN_MAX (2 << 20)   /* bytes read from an offset without a frame showing up */
+
+/* p: what the parser gave out as a frame. Where in the stream that frame
+ * begins (samples), read from its header; -1 when p is no header of a
+ * frame of this stream - the bytes between an offset and the first frame
+ * behind it, or a stream that is not what its description says. */
+static gint64 flac_frame_at (const Dec *d, const guint8 *p, int size)
+{
+    /* the sync code, a reserved bit, "all frames have one size" */
+    if (size < 6 || p[0] != 0xff || p[1] != 0xf8)
+        return -1;
+    const int bs_code = p[2] >> 4, sr_code = p[2] & 15;
+    if (!bs_code || sr_code == 15 || (p[3] & 1))
+        return -1;
+    /* the frame's number, written the way UTF-8 writes a character (31 bits) */
+    int more = p[4] < 0x80 ? 0 : p[4] < 0xc0 ? -1 : p[4] < 0xe0 ? 1 : p[4] < 0xf0 ? 2 : p[4] < 0xf8 ? 3 :
+               p[4] < 0xfc ? 4 : p[4] < 0xfe ? 5 : -1;
+    if (more < 0)
+        return -1;
+    guint64 num = more ? (guint64) (p[4] & (0x3f >> more)) : p[4];
+    int i = 5;
+    for (; more > 0; more--, i++) {
+        if (i >= size || (p[i] & 0xc0) != 0x80)
+            return -1;
+        num = num << 6 | (p[i] & 0x3f);
+    }
+    /* its own size: a code, or 8 / 16 bits behind the number */
+    int bs;
+    if (bs_code == 1) {
+        bs = 192;
+    } else if (bs_code <= 5) {
+        bs = 576 << (bs_code - 2);
+    } else if (bs_code == 6) {
+        if (i >= size)
+            return -1;
+        bs = p[i++] + 1;
+    } else if (bs_code == 7) {
+        if (i + 1 >= size)
+            return -1;
+        bs = (p[i] << 8 | p[i + 1]) + 1;
+        i += 2;
+    } else {
+        bs = 256 << (bs_code - 8);
+    }
+    i += sr_code == 12 ? 1 : sr_code == 13 || sr_code == 14 ? 2 : 0;
+    if (i >= size)
+        return -1;
+    /* the header's check sum (x^8 + x^2 + x + 1) */
+    guint8 crc = 0;
+    for (int k = 0; k < i; k++) {
+        crc ^= p[k];
+        for (int b = 0; b < 8; b++)
+            crc = (guint8) (crc & 0x80 ? crc << 1 ^ 7 : crc << 1);
+    }
+    if (crc != p[i])
+        return -1;
+    /* every frame but the last has the stream's size; the last ends the stream */
+    const gint64 at = (gint64) num * d->fl_block;
+    if (at >= d->fl_total || bs > d->fl_block || (bs != d->fl_block && at + bs != d->fl_total))
+        return -1;
+    return at;
+}
+
+/* The file is read from byte offset `off` on: parser and decoder begin
+ * anew. FALSE: the decoder cannot go on at all. */
+static gboolean flac_from (Dec *d, gint64 off)
+{
+    if (fseeko (d->f, (off_t) off, SEEK_SET))
+        return FALSE;
+    av_parser_close (d->parser);
+    d->parser = av_parser_init (AV_CODEC_ID_FLAC);
+    if (!d->parser)
+        return FALSE;
+    avcodec_flush_buffers (d->ctx);
+    av_frame_unref (d->frame);
+    d->have_frame = FALSE;
+    d->frame_pos = 0;
+    d->in_len = d->in_pos = 0;
+    d->in_eof = d->drained = d->parser_flushed = d->finished = FALSE;
+    d->held = 0;
+    d->bad = 0;
+    d->consumed = 0;              /* (feed: bytes read without a frame, counted from here) */
+    return TRUE;
+}
+
+/* ... and the first frame that shows up behind `off` is handed to the
+ * decoder (the next frame decoded is that one). Returns where it begins
+ * (samples); -1 when none shows up; -2 when the decoder cannot go on. */
+static gint64 flac_land (Dec *d, gint64 off)
+{
+    if (!flac_from (d, off))
+        return -2;
+    for (gint64 scanned = 0; scanned < FLAC_SCAN_MAX;) {
+        if (d->in_pos >= d->in_len && !d->in_eof) {
+            size_t n = fread (d->in, 1, IN_SIZE, d->f);
+            d->in_len = (int) n;
+            d->in_pos = 0;
+            memset (d->in + n, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+            if (!n)
+                d->in_eof = TRUE;
+        }
+        const int left = d->in_len - d->in_pos;
+        guint8 *data = NULL;
+        int size = 0;
+        int used = av_parser_parse2 (d->parser, d->ctx, &data, &size, left ? d->in + d->in_pos : NULL, left,
+                                     AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
+        if (used < 0 || used > left)
+            return -1;
+        d->in_pos += used;
+        d->consumed += used;
+        scanned += used;
+        if (size > 0) {
+            const gint64 at = flac_frame_at (d, data, size);
+            if (at >= 0) {
+                if (send (d, data, size) < 0)
+                    return -2;
+                d->decoded = at;
+                return at;
+            }
+        } else if (!left) {
+            return -1;            /* the end of the file */
+        }
+    }
+    return -1;
+}
+
+/* The decoder is moved to a frame that begins at most FLAC_NEAR_S seconds
+ * in front of sample `target` (d->given then says where it is). FALSE:
+ * not a file this works for, or the place is near anyway - nothing was
+ * touched. A file in which no frame is found where there should be one is
+ * read from its start again, as it was before there was this function. */
+static gboolean flac_jump (Dec *d, gint64 target)
+{
+    if (d->kind != K_FLAC || d->fl_block <= 0 || d->fl_total <= 0 || d->fl_size <= d->fl_data || d->skip ||
+        d->end || d->finished || d->rate <= 0)
+        return FALSE;
+    target = MIN (target, d->fl_total - 1);
+    const gint64 near = (gint64) FLAC_NEAR_S * d->rate;
+    if (target - d->given <= near)
+        return FALSE;
+    /* Two byte offsets are known at any time: one whose next frame begins
+     * at or in front of the target (lo: at first the file's first frame)
+     * and one behind which no frame is of use (hi: at first the file's
+     * end). The next offset to try lies between them, where the target
+     * would be if every sample took the same number of bytes, and a few
+     * frames earlier than that. */
+    gint64 lo_off = d->fl_data, lo_at = 0, hi_off = d->fl_size, hi_at = d->fl_total;
+    const gint64 early = MAX (2 * (gint64) d->fl_frame_max, 32768);
+    gint64 landed = -1, at = -1;
+    for (int i = 0; i < FLAC_JUMPS && at != -2; i++) {
+        const gint64 off = lo_off - early +
+            (gint64) ((double) (hi_off - lo_off) * (double) (target - lo_at) / (double) (hi_at - lo_at));
+        if (off <= lo_off || off >= hi_off)
+            break;                /* no nearer than lo */
+        at = flac_land (d, off);
+        landed = off;
+        if (at < 0 || at > target) {
+            hi_off = off;
+            if (at > target)
+                hi_at = at;
+            continue;
+        }
+        lo_off = off;
+        lo_at = at;
+        if (target - at <= near)
+            break;
+    }
+    if (landed < 0)
+        return FALSE;             /* (never left where it was) */
+    if (landed != lo_off && at != -2)
+        at = lo_off == d->fl_data ? -1 : flac_land (d, lo_off);
+    if (at == lo_at) {
+        d->given = lo_at;
+        return TRUE;
+    }
+    /* No frame where the description says there are frames: the file as
+     * it was read before, from its first byte of sound, whatever is there
+     * - and no second try with this file. */
+    d->fl_block = 0;
+    d->decoded = d->given = 0;
+    if (at == -2 || !flac_from (d, d->fl_data))
+        d->finished = TRUE;       /* (it cannot be read at all any more: its sound ends) */
+    return TRUE;
+}
+
+gint64 walpe_sounddec_skip (gpointer dec, gint64 frames)
+{
+    Dec *d = dec;
+    if (!d || frames <= 0)
+        return 0;
+    const gint64 from = d->given;
+    const gint64 target = from + MIN (frames, (gint64) WALPE_SOUND_MAX_RATE * WALPE_SOUND_MAX_SECONDS);
+    flac_jump (d, target);
+    while (!d->finished && d->given < target) {
+        if (walpe_sounddec_read (d, NULL, (int) MIN (target - d->given, (gint64) 1 << 20)) <= 0)
+            break;
+    }
+    return MAX (d->given - from, 0);
 }
 
 void walpe_sounddec_close (gpointer dec)
@@ -712,10 +932,18 @@ gpointer walpe_sounddec_open (const char *path, int *rate, int *channels, char *
             long len = (long) bh[1] << 16 | bh[2] << 8 | bh[3];
             if ((bh[0] & 0x7f) == 0 && len == 34 && !extra->len) {
                 guint8 si[34];
-                if (fread (si, 1, 34, d->f) != 34)
+                if (fread (si, 1, 34, d->f) != 34) {
                     bad = "FLAC: the file ends in its header";
-                else
+                } else {
                     g_byte_array_append (extra, si, 34);
+                    /* (for walpe_sounddec_skip: the smallest and the largest
+                     * frame in samples, the largest in bytes, all samples) */
+                    const int smin = si[0] << 8 | si[1], smax = si[2] << 8 | si[3];
+                    d->fl_block = smin == smax ? smax : 0;
+                    d->fl_frame_max = si[7] << 16 | si[8] << 8 | si[9];
+                    d->fl_total = (gint64) (si[13] & 15) << 32 | (gint64) si[14] << 24 | si[15] << 16 |
+                                  si[16] << 8 | si[17];
+                }
             } else if (fseek (d->f, len, SEEK_CUR)) {
                 bad = "FLAC: the file ends in its header";
             }
@@ -725,6 +953,11 @@ gpointer walpe_sounddec_open (const char *path, int *rate, int *channels, char *
         if (!bad && !extra->len)
             bad = "FLAC: no stream description";
         data_at = -1;   /* the frames follow the blocks: the file is there */
+        {
+            struct stat st;
+            d->fl_data = (gint64) ftello (d->f);
+            d->fl_size = fstat (fileno (d->f), &st) == 0 ? (gint64) st.st_size : 0;
+        }
     } else {
         data_at = -1;
         if (fseek (d->f, start, SEEK_SET))
