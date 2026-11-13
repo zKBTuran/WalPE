@@ -5,6 +5,7 @@
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <epoxy/gl.h>
 #include "common/tex.h"
+#include "common/pichead.h"
 
 typedef struct { GLuint tex; gboolean premult; int width, height; } WalpeGlTex;
 
@@ -227,6 +228,19 @@ void walpe_gl_mem_report (const char *tag);
  * width / height are the picture's; inside a walpe_gl_tex_scope with a
  * budget the texture itself may be stored smaller. */
 WalpeGlTex walpe_gl_tex_from_file (const char *path);
+
+/* The two gdk-pixbuf steps of the above for a caller that has settled the
+ * format itself (kind, tga: walpe_pichead_file_kind () of common/pichead.h -
+ * never a name gdk-pixbuf or the file's name suggested).
+ * _size: the size the loader of that one name reports. Only for "tiff",
+ * "avif" and "jxl"; the other formats' is walpe_pichead_file_size ().
+ * _decode: the picture (the first frame of an animation), decoded by that
+ * loader; tw x th > 0: at that size. tga (may be NULL): the header a TGA's
+ * decoder is given. anim (may be NULL): the loader's animation as well, a
+ * reference of the caller's. */
+gboolean walpe_gl_picture_file_size (const char *path, const char *kind, int *w, int *h);
+GdkPixbuf *walpe_gl_picture_file_decode (const char *path, const char *kind, const WalpeTga *tga, int tw,
+                                         int th, GdkPixbufAnimation **anim, GError **err);
 
 typedef enum {
     WALPE_BLEND_NONE = 0,

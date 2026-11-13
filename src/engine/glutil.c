@@ -2832,23 +2832,59 @@ static void tex_file_scale (GdkPixbufLoader *ld, int w, int h, gpointer user)
     gdk_pixbuf_loader_set_size (ld, to[0], to[1]);
 }
 
-/* the picture (the first frame of an animation), decoded by the loader of
- * that one name; tw x th > 0: at that size, as gdk_pixbuf_new_from_file_
- * at_scale gives it */
-static GdkPixbuf *tex_file_decode (const char *path, const char *kind, int tw, int th, GError **err)
+/* n bytes of the file from position pos on to the loader - of a TGA whose
+ * header is not the one its decoders are given (pichead.h, walpe_tga_head):
+ * that header in place of the first 18 bytes, and nothing of the colour
+ * map no pixel uses */
+static gboolean tex_file_feed (GdkPixbufLoader *ld, const WalpeTga *tga, guint64 pos, const guint8 *buf,
+                               gsize n, GError **err)
+{
+    if (!tga || !tga->changed)
+        return gdk_pixbuf_loader_write (ld, buf, n, err);
+    const guint64 cut0 = tga->skip_off, cut1 = cut0 + tga->skip_len;
+    gsize i = 0;
+    if (pos < 18) {
+        const gsize k = MIN ((gsize) (18 - pos), n);
+        if (!gdk_pixbuf_loader_write (ld, tga->head + pos, k, err))
+            return FALSE;
+        i = k;
+    }
+    while (i < n) {
+        const guint64 at = pos + i;
+        gsize k = n - i;
+        if (at >= cut0 && at < cut1) {
+            i += (gsize) MIN ((guint64) k, cut1 - at);
+            continue;
+        }
+        if (at < cut0)
+            k = (gsize) MIN ((guint64) k, cut0 - at);
+        if (!gdk_pixbuf_loader_write (ld, buf + i, k, err))
+            return FALSE;
+        i += k;
+    }
+    return TRUE;
+}
+
+GdkPixbuf *walpe_gl_picture_file_decode (const char *path, const char *kind, const WalpeTga *tga, int tw,
+                                         int th, GdkPixbufAnimation **anim, GError **err)
 {
     GdkPixbufLoader *ld = gdk_pixbuf_loader_new_with_type (kind, err);
     FILE *f = ld ? fopen (path, "rb") : NULL;
     GdkPixbuf *pb = NULL;
     int to[2] = { tw, th };
     gboolean ok = f != NULL;
+    if (anim)
+        *anim = NULL;
     if (f) {
         guint8 *buf = g_malloc (65536);
         gsize n;
+        guint64 pos = 0;
         if (tw > 0 && th > 0)
             g_signal_connect (ld, "size-prepared", G_CALLBACK (tex_file_scale), to);
-        while (ok && (n = fread (buf, 1, 65536, f)) > 0)
-            ok = gdk_pixbuf_loader_write (ld, buf, n, err);
+        while (ok && (n = fread (buf, 1, 65536, f)) > 0) {
+            ok = tex_file_feed (ld, tga, pos, buf, n, err);
+            pos += n;
+        }
         fclose (f);
         g_free (buf);
     }
@@ -2857,11 +2893,25 @@ static GdkPixbuf *tex_file_decode (const char *path, const char *kind, int tw, i
         pb = ok ? gdk_pixbuf_loader_get_pixbuf (ld) : NULL;
         if (pb)
             g_object_ref (pb);
+        if (pb && anim) {
+            /* (deprecated in gdk-pixbuf 2.44 with its whole animation
+             * interface, without a successor inside the library) */
+            G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+            *anim = gdk_pixbuf_loader_get_animation (ld);
+            G_GNUC_END_IGNORE_DEPRECATIONS
+            if (*anim)
+                g_object_ref (*anim);
+        }
         g_object_unref (ld);
     }
     if (!pb && err && !*err)
         g_set_error_literal (err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "no picture in it");
     return pb;
+}
+
+gboolean walpe_gl_picture_file_size (const char *path, const char *kind, int *w, int *h)
+{
+    return tex_file_size (path, kind, w, h);
 }
 
 WalpeGlTex walpe_gl_tex_from_file (const char *path)
@@ -2916,7 +2966,8 @@ WalpeGlTex walpe_gl_tex_from_file (const char *path)
     int iw = 0, ih = 0;
     /* (a "BM" file without the header sizes of a BMP file: refused by the
      * loader above for what its decoder would reserve, not read here either) */
-    const char *kind = walpe_bmp_file_header_ok (path) ? walpe_pichead_file_kind (path, NULL) : NULL;
+    WalpeTga tga = { 0 };
+    const char *kind = walpe_bmp_file_header_ok (path) ? walpe_pichead_file_kind (path, &tga) : NULL;
     const gint64 max_side = 16384, max_px = (gint64) 8192 * 8192;
     /* (and a JPEG, under whatever name, that is arithmetic-coded: its decoder
      * may never come back - util.h) */
@@ -2978,9 +3029,9 @@ WalpeGlTex walpe_gl_tex_from_file (const char *path)
                         sqrt ((double) max_px / ((double) iw * ih)));
         int tw = MAX (1, (int) (iw * k)), th = MAX (1, (int) (ih * k));
         g_message ("texture %s: %d x %d pixels, loaded at %d x %d", walpe_log_str (path), iw, ih, tw, th);
-        pb = tex_file_decode (path, kind, tw, th, &err);
+        pb = walpe_gl_picture_file_decode (path, kind, &tga, tw, th, NULL, &err);
     } else {
-        pb = tex_file_decode (path, kind, 0, 0, &err);
+        pb = walpe_gl_picture_file_decode (path, kind, &tga, 0, 0, NULL, &err);
     }
     if (err || !pb) {
         g_debug ("texture %s: %s", walpe_log_str (path), err ? err->message : "not loaded");
