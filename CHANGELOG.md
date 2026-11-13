@@ -732,6 +732,28 @@ microphone.
   still loading is left to load (the 20 seconds count from the end of the load). With a graphics card
   such a frame is the driver's and the card's to end; that has not been run
   ([SECURITY.md](docs/SECURITY.md#scripts-and-shaders)). 0.14.0 has this too.
+- A wallpaper's shader could get around the limit on its macros. A shader whose text
+  comes to more than a million tokens once its macros are replaced is not handed to the
+  driver (eight macros that each name the next eight times are a kilobyte of source and
+  16.7 million tokens: gigabytes and a crash in the driver's compiler). That number was
+  estimated line by line from the `#define` lines, and where the driver's preprocessor
+  reads a text differently a few bytes went past it: lines that end in a carriage return,
+  a call's argument behind a `;` or on the next lines, a call no compiler takes (another
+  number of arguments than the macro has, no `)`), a second `#else`, a `#version` line
+  that is not the first, an `#undef` of one of the driver's own names, and empty
+  arguments, which the driver's preprocessor copies like tokens and which leave none.
+  Shaders of 134 to 190 bytes that counted as a few dozen tokens took 1.9 to 2.5 GB and 6
+  to 13 seconds in Mesa 25.2's compiler, others more than the 3 GiB the process was
+  allowed. The text is now preprocessed here to be counted (`src/engine/fx_preproc.h`; it
+  only reads, the driver gets the text as it was written), and what that pass may cost is
+  bounded as well: 12 million tokens moved, 24 MiB of text - what `##` copies included -,
+  calls nested 512 deep in each other's arguments. A condition only the driver can answer
+  is counted both ways and the shader must fit in each; a shader with more than 6 of them
+  is not compiled. A shader that is refused fails like one that does not compile: its
+  effect is not drawn. Of 8625 shader sources built from real scenes and effects none was
+  refused (measured while the changes were written, before the last two of them; not
+  repeated since) ([SECURITY.md](docs/SECURITY.md#scripts-and-shaders)). 0.14.0 has this
+  too.
 - A scene with very many particle objects: every object that names a particle file with
   children could bring 128 particle systems, and nothing limited the objects. 2000 of
   them - a `scene.json` of 300 KB and one particle file of 4 KB - took 66 seconds and
