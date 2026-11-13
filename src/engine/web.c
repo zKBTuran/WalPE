@@ -2786,7 +2786,16 @@ static const char *WE_API_JS =
  * when a period of 1/lim has passed (periods counted from when a frame
  * was due, so the average rate is the limit): same order, same time
  * stamp argument, cancelAnimationFrame works, a throwing callback does not
- * stop the others. __walpeRaf(n) sets the limit (walpe-ctl set fps=N). */
+ * stop the others. __walpeRaf(n) sets the limit (walpe-ctl set fps=N).
+ *
+ * WebKit's own throttle (WEBKIT_DISPLAY_REFRESH_THROTTLE_FPS, which the
+ * daemon sets for a limit that divides 60) counts as its rate only in a
+ * WebKitGTK that reads the variable: 2.52.6 does, 2.48.1 has the 60 Hz
+ * timer and not the throttle (the name is not in its library). There the
+ * daemon had asked for 30, took the rate for 30 and left the page's
+ * requestAnimationFrame alone, which ran 54 times a second (Alpine 3.24).
+ * Older than 2.52: the rate is the timer's 60, and a limit below it is
+ * kept here. */
 static char *raf_limit_js (int lim)
 {
     int nat = 0;
@@ -2795,7 +2804,9 @@ static char *raf_limit_js (int lim)
     if (tim && *tim && strcmp (tim, "0")) {
         nat = 60;
         int t = thr ? atoi (thr) : 0;
-        if (t > 0 && 60 % t == 0)
+        gboolean throttles = webkit_get_major_version () > 2 ||
+                             (webkit_get_major_version () == 2 && webkit_get_minor_version () >= 52);
+        if (t > 0 && 60 % t == 0 && throttles)
             nat = t;
     }
     return g_strdup_printf (
