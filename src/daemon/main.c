@@ -9686,8 +9686,20 @@ static WalpeSurface *mon_surface_make (Mon *m, const WalpeOutput *out, const Wal
     };
     WalpeSurface *ps = walpe_surface_new (&spec, D.egl_dpy, D.egl_conf, surf, sw, sh);
     if (!ps) {
-        g_warning ("eglCreateWindowSurface failed for monitor %d (0x%x)",
-                   idx, eglGetError ());
+        EGLint err = eglGetError ();
+#ifdef HAVE_WAYLAND
+        /* On Wayland a surface mostly fails before EGL is asked for
+         * anything: the compositor did not answer it, its output is gone
+         * (the backend has said which, in the line before this one). The
+         * line below then named a call that was never made, with
+         * "0x3000", which is EGL's word for success. */
+        if (err == EGL_SUCCESS && D.backend == WALPE_BACKEND_WAYLAND) {
+            g_warning ("monitor %d: no surface to draw on (no EGL call failed: the reason is in "
+                       "the line above)", idx);
+            return NULL;
+        }
+#endif
+        g_warning ("eglCreateWindowSurface failed for monitor %d (0x%x)", idx, err);
         return NULL;
     }
     {

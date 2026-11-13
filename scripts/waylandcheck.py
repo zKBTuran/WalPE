@@ -962,6 +962,12 @@ def case_nosurface(env, W):
           "tries again in 1 s" in log, "nosurface: no surface at the start: the daemon says so and that it "
           "tries again; the second try gets one", (rects(env), unanswered(begun), log[-600:]))
     check("has given it a wallpaper surface now (try 3" in log, "nosurface: the log says at which try", log[-400:])
+    # (each try that got no surface was "eglCreateWindowSurface failed for monitor 0
+    # (0x3000)": a call that was never made, and EGL's number for success)
+    check(log.count("monitor 0: no surface to draw on (no EGL call failed") == 2 and
+          "eglCreateWindowSurface failed" not in log and "(0x3000)" not in log,
+          "nosurface: the daemon's own line about each try names no EGL call that did not fail",
+          [ln for ln in log.splitlines() if "surface" in ln and "WARNING" in ln][:6])
     check(lc.loaded(env, W["quad"], timeout=30), "nosurface: the saved wallpaper is loaded on it",
           rc.brief(env.monitors()))
     ok, lk = shows_quad(env, name, size=(640, 360))
