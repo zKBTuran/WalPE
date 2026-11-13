@@ -3355,6 +3355,13 @@ static void test_pichead (void)
         { "\0\0\0\x18" "ftypheic\0\0\0\0mif1heic", 24, NULL },
         { "BM\0\0ftypheic\0\0\0\0", 16, NULL }, { "\xff\xd8\xff\xe0" "ftypheic\0\0\0\0", 16, NULL },
         { "II*\0ftypheic\0\0\0\0", 16, NULL }, { "\0\0\2\0ftypheic\0\0\0\0", 16, NULL },
+        /* a box length that is a TGA header's map flag and picture type (bytes 1 and 2) to
+         * glycin, which ranks that above the brand: 0x0A00 with a brand list that names avif
+         * (a run-length picture there), 0x0200 with avif as the major brand (true colour) */
+        { "\0\0\x0a\0" "ftypmif1\xe0\x2e\xe0\x2e\x20\x28\0\0avif", 24, NULL },
+        { "\0\0\2\0" "ftypavif\x64\0\x64\0\x20\x28\0\0", 20, NULL },
+        { "\0\1\1\0" "ftypmif1\0\0\0\0avif", 20, NULL }, { "\x20\0\0\x20" "ftypavif\0\0\0\0", 16, NULL },
+        { "\0\0\0\xff" "ftypavif\0\0\0\0", 16, "avif" },
         { "<svg xmlns", 10, NULL }, { "P6\n4 4\n", 7, NULL }, { "qoif", 4, NULL }, { "DDS ", 4, NULL },
         { "\0\0\1\0", 4, NULL }, { "/* XPM */", 9, NULL }, { "", 0, NULL },
     };

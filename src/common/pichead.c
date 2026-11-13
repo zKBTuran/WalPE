@@ -12,6 +12,18 @@ const char *walpe_pichead_kind (const guint8 *d, gsize len)
     if (!d)
         return NULL;
     if (len >= 12 && !memcmp (d + 4, "ftyp", 4)) {
+        /* The first four bytes are the box's length, and any four bytes
+         * can stand there. glycin (2.2) knows a TGA file by its bytes 1
+         * and 2, an icon or cursor by bytes 0 to 3, and ranks a TGA header
+         * of two rules above "ftypavif": a length of 0x0A00 with a brand
+         * list that names avif is a run-length TGA picture to it, of the
+         * width and height that stand where an ISO file has its minor
+         * version (seen: 3 MB of file, 9000 x 9000 pixels decoded for a
+         * picture that was an AVIF without a size here). A brand list of
+         * less than 256 bytes - 60 brands; the files have two to ten -
+         * leaves bytes 0 to 2 zero, which none of those headers has. */
+        if (d[0] || d[1] || d[2])
+            return NULL;
         /* the major brand, or one of the compatible brands after it (the
          * box's own length, at most 128 bytes of it) */
         gsize box = ((gsize) d[0] << 24) | ((gsize) d[1] << 16) | ((gsize) d[2] << 8) | d[3];

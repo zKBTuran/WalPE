@@ -33,10 +33,12 @@ G_BEGIN_DECLS
  * that has them: an ISO media file's brands).
  *   - A file with "ftyp" at offset 4 is an ISO media file and nothing else:
  *     "avif" when its major brand or one of the compatible brands is avif
- *     or avis, else NULL - also when its first bytes are another format's
- *     signature ("BM", a JPEG start, a TIFF's). glycin goes by that box
- *     before it looks for those signatures and hands such a file to
- *     libheif.
+ *     or avis and the box is shorter than 256 bytes, else NULL - also when
+ *     its first bytes are another format's signature ("BM", a JPEG start,
+ *     a TIFF's). glycin hands a file with "ftypavif" or "ftypheic" there
+ *     to libheif before it looks for those signatures - but after a TGA
+ *     header, which it knows by bytes 1 and 2 (and 16), the bytes of the
+ *     box's length: a length of 256 and more is no AVIF here.
  *   - "tiff" is the classic file ("II*\0", "MM\0*"); the 64-bit kind
  *     ("II+\0", "MM\0+") is told by walpe_pichead_is_bigtiff ().
  * TGA has no signature: walpe_tga_head (). */
