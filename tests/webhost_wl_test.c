@@ -17,6 +17,7 @@
 #include "engine/webhost_wl.h"
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -53,6 +54,7 @@ static struct {
     /* output */
     int refresh, scale;
     int out_w, out_h, out_modes;
+    int out_mm_w, out_mm_h;         /* its size in millimetres */
     gboolean output_done;
     /* seat */
     guint32 caps;
@@ -115,10 +117,18 @@ static void reg_remove (void *d, struct wl_registry *r, uint32_t name)
 
 static const struct wl_registry_listener reg_listener = { reg_global, reg_remove };
 
+/* the output's resolution the way WebKitGTK works it out (ScreenManagerGtk) */
+static double out_dpi (void)
+{
+    return hypot (C.out_w, C.out_h) / (hypot (C.out_mm_w, C.out_mm_h) / 25.4);
+}
+
 static void out_geometry (void *d, struct wl_output *o, int32_t x, int32_t y, int32_t pw, int32_t ph,
                           int32_t sp, const char *make, const char *model, int32_t tr)
 {
-    (void) d; (void) o; (void) x; (void) y; (void) pw; (void) ph; (void) sp; (void) make; (void) model; (void) tr;
+    (void) d; (void) o; (void) x; (void) y; (void) sp; (void) make; (void) model; (void) tr;
+    C.out_mm_w = pw;
+    C.out_mm_h = ph;
 }
 static void out_mode (void *d, struct wl_output *o, uint32_t flags, int32_t w, int32_t h, int32_t refresh)
 {
@@ -475,11 +485,22 @@ int main (void)
            C.refresh);
     CHECK (C.out_w == 2560 && C.out_h == 1440, "the output has the size asked for before the start (%d x %d)",
            C.out_w, C.out_h);
+    /* what WebKit makes of a monitor where GTK has no font resolution for
+     * it: the diagonal in pixels over the diagonal in inches, and the page
+     * is scaled by that over 96. A size of 0 x 0 mm ("unknown") made that
+     * infinite. */
+    CHECK (C.out_mm_w > 0 && C.out_mm_h > 0, "the output has a size in millimetres (%d x %d)", C.out_mm_w,
+           C.out_mm_h);
+    CHECK (fabs (out_dpi () - 96.0) < 0.5, "which says 96 pixels to the inch: a page is not scaled (%.2f)",
+           out_dpi ());
     {
         int modes = C.out_modes;
         walpe_webhost_output_size (3840, 2160);     /* a larger page came */
         CHECK (until (&C.out_modes, modes + 1) && C.out_w == 3840 && C.out_h == 2160,
                "a new size arrives as a mode change (%d x %d)", C.out_w, C.out_h);
+        CHECK (C.out_mm_w > 0 && C.out_mm_h > 0 && fabs (out_dpi () - 96.0) < 0.5,
+               "and the millimetres with it: still 96 to the inch (%d x %d mm, %.2f)", C.out_mm_w, C.out_mm_h,
+               out_dpi ());
         walpe_webhost_output_size (0, -5);          /* nonsense is ignored */
         walpe_webhost_output_size (3840, 2160);     /* and so is the size it has */
         wl_display_roundtrip (C.dpy);

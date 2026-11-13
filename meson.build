@@ -892,7 +892,7 @@ if have_wl_scan and wl_server_dep.found() and wl_client_dep.found()
     # (only `inc`: with src/engine itself on the include path the C library's
     # <features.h> would resolve to src/engine/features.h)
     include_directories: inc,
-    dependencies: [glib, wl_server_dep, wl_client_dep],
+    dependencies: [glib, wl_server_dep, wl_client_dep, cc.find_library('m', required: false)],
     install: false, build_by_default: false), timeout: 60)
 endif
 # GTK brought up on the private page host the way web.c does it

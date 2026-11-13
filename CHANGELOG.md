@@ -294,6 +294,17 @@ it was). A bare window manager on X11 - dwm, i3, openbox - gets the window of 0.
   a session with `DISPLAY` left over and no X server behind it. Found by running the
   checks on Arch (GTK 4.24.1, WebKitGTK 2.54.2); Ubuntu 24.04 has GTK 4.14, which allowed
   the old order.
+- On the private page host every page after the first is laid out at its real size
+  again where GTK has no font resolution to give. The page host's display said nothing
+  about the size of its screen in millimetres, WebKit works out a resolution from that
+  where the GTK setting for it is missing, and scales the page by the result: a second
+  page - the next wallpaper, or a page of its own on another monitor - had a viewport of
+  0 x 0 CSS pixels, `devicePixelRatio` Infinity and every pointer position at 0, 0; one
+  that sizes things in fractions of the window still looked right, one that uses pixels
+  did not. GTK from 4.22 on has that setting on Wayland only from the desktop's settings
+  portal, so this is a session without an X display and without such a portal (or
+  without a session bus); seen on Arch in the checks. The screen now has the size that
+  says 96 pixels to the inch, which is a scale of 1, as with the setting at its default.
 
 ### X11 desktops
 

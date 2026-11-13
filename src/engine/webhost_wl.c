@@ -634,6 +634,27 @@ static void wm_base_bind (struct wl_client *c, void *data, uint32_t version, uin
 
 static const struct wl_output_interface output_impl = { .release = res_destroy };
 
+/* The output's size in millimetres is its mode at 96 pixels to the inch.
+ * WebKit scales a page by the font resolution over 96, and where GTK has
+ * none to give (gtk-xft-dpi unset: GTK from 4.22 on takes its settings
+ * on Wayland from the settings portal only, and has none without a
+ * session bus or without a portal that knows them) it takes the
+ * monitor's: pixels over millimetres. Announced as "unknown" (0 x 0 mm)
+ * that was a division by nothing: every page made after the first got an
+ * infinite zoom - a viewport of 0 x 0 CSS pixels, devicePixelRatio
+ * Infinity, every pointer position 0, 0. With a size that says 96 the
+ * scale is 1, as it is where GTK has the setting at its default. */
+static int host_mm (int px)
+{
+    return MAX (1, (int) (px * 25.4 / 96.0 + 0.5));
+}
+
+static void output_send_geometry (struct wl_resource *r)
+{
+    wl_output_send_geometry (r, 0, 0, host_mm (H.out_w), host_mm (H.out_h), WL_OUTPUT_SUBPIXEL_UNKNOWN,
+                             "WalPE", "page host", WL_OUTPUT_TRANSFORM_NORMAL);
+}
+
 static void output_bind (struct wl_client *c, void *data, uint32_t version, uint32_t id)
 {
     (void) data;
@@ -643,8 +664,7 @@ static void output_bind (struct wl_client *c, void *data, uint32_t version, uint
     wl_resource_set_implementation (r, &output_impl, NULL, res_unlink);
     wl_list_insert (&H.outputs, wl_resource_get_link (r));
     /* scale 1: a page pixel is a wallpaper pixel */
-    wl_output_send_geometry (r, 0, 0, 0, 0, WL_OUTPUT_SUBPIXEL_UNKNOWN, "WalPE", "page host",
-                             WL_OUTPUT_TRANSFORM_NORMAL);
+    output_send_geometry (r);
     wl_output_send_mode (r, WL_OUTPUT_MODE_CURRENT | WL_OUTPUT_MODE_PREFERRED, H.out_w, H.out_h,
                          HOST_REFRESH_MHZ);
     if (version >= 2) {
@@ -866,6 +886,7 @@ static void host_cmd (const HostCmd *m)
         H.out_h = m->b;
         struct wl_resource *o;
         wl_resource_for_each (o, &H.outputs) {
+            output_send_geometry (o);       /* (its millimetres follow the mode) */
             wl_output_send_mode (o, WL_OUTPUT_MODE_CURRENT | WL_OUTPUT_MODE_PREFERRED, H.out_w, H.out_h,
                                  HOST_REFRESH_MHZ);
             if (wl_resource_get_version (o) >= WL_OUTPUT_DONE_SINCE_VERSION)
