@@ -205,6 +205,19 @@ static void with_the_test (gpointer user)
 #endif
 }
 
+/* main's own strings (the programs, the socket, the server's arguments):
+ * freed here, with everything else, so that the leak check of a
+ * sanitizer build has nothing to say about the test itself */
+static char *held[8];
+static int n_held;
+
+static char *hold (char *s)
+{
+    if (s && n_held < (int) G_N_ELEMENTS (held))
+        held[n_held++] = s;
+    return s;
+}
+
 static void cleanup (void)
 {
     if (server_pid > 0) {
@@ -220,22 +233,28 @@ static void cleanup (void)
         char *argv[] = { (char *) "rm", (char *) "-rf", tmpdir, NULL };
         g_spawn_sync (NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL, NULL, NULL);
     }
+    g_clear_pointer (&tmpdir, g_free);
+    while (n_held > 0)
+        g_free (held[--n_held]);
 }
 
 int main (void)
 {
-    char *pa = g_find_program_in_path ("pulseaudio"), *ctl = g_find_program_in_path ("pactl");
+    char *pa = hold (g_find_program_in_path ("pulseaudio")), *ctl = hold (g_find_program_in_path ("pactl"));
     if (!pa || !ctl) {
         printf ("audio-server: skipped, %s is not installed\n", pa ? "pactl" : "pulseaudio");
+        cleanup ();
         return 77;
     }
     /* everything of the server and of its clients in one directory (a
      * short name: the socket's path is limited) */
     tmpdir = g_dir_make_tmp ("walpe-au-XXXXXX", NULL);
-    if (!tmpdir)
+    if (!tmpdir) {
+        cleanup ();
         return 77;
-    char *sock = g_build_filename (tmpdir, "native", NULL);
-    char *srv = g_strdup_printf ("unix:%s", sock);
+    }
+    char *sock = hold (g_build_filename (tmpdir, "native", NULL));
+    char *srv = hold (g_strdup_printf ("unix:%s", sock));
     g_setenv ("XDG_RUNTIME_DIR", tmpdir, TRUE);
     g_setenv ("XDG_CONFIG_HOME", tmpdir, TRUE);
     g_setenv ("HOME", tmpdir, TRUE);
@@ -252,7 +271,7 @@ int main (void)
     g_unsetenv ("PULSE_SOURCE");
     g_unsetenv ("PULSE_COOKIE");
     g_unsetenv ("WALPE_AUDIO_SOURCE");
-    char *proto = g_strdup_printf ("module-native-protocol-unix auth-anonymous=1 socket=%s", sock);
+    char *proto = hold (g_strdup_printf ("module-native-protocol-unix auth-anonymous=1 socket=%s", sock));
     char *argv[] = { pa, (char *) "-n", (char *) "--daemonize=no", (char *) "--exit-idle-time=-1",
                      (char *) "--disable-shm=yes", (char *) "--use-pid-file=no",
                      (char *) "-L", proto, NULL };
