@@ -3,8 +3,9 @@
  * libwayland. Scale arithmetic at fractional scales and odd sizes, the
  * output rectangles and their order, buffer size / buffer scale / viewport
  * of a surface, the pointer mapping, wheel clicks, the frame-callback
- * visibility test, the life cycle of a layer surface and the layer a
- * wallpaper surface goes on. */
+ * visibility test, the life cycle of a layer surface, the layer a
+ * wallpaper surface goes on, and when a daemon that lost its display comes
+ * back to it (wayland_reconnect). */
 #include <glib.h>
 #include <math.h>
 #include <string.h>
@@ -993,6 +994,88 @@ static void test_plasma_addon (void)
     CHECK (!strcmp (WL_PLASMA_TYPE_ID, "io.github.walpe.plasma"));
 }
 
+/* wayland_reconnect: when a daemon that lost its display comes back and when
+ * it ends instead (wl_lost_decide), and its record across the restart */
+static void test_lost (void)
+{
+    const gint64 S = G_USEC_PER_SEC, SHORT = (gint64) WL_RECONNECT_SHORT_S * S;
+    WlStays st = { 0, 100 * S };
+    gint64 stay = 0;
+    /* the default: the daemon ends, nothing is counted, whatever else is so */
+    CHECK (wl_lost_decide (&st, 0, FALSE, 101 * S, SHORT, &stay) == WL_LOST_END);
+    CHECK (st.shorts == 0 && st.since_us == 100 * S && stay == S);
+    CHECK (wl_lost_decide (&st, 0, TRUE, 101 * S, SHORT, NULL) == WL_LOST_END);
+    CHECK (st.shorts == 0 && st.since_us == 100 * S);
+    /* a protocol error: no coming back, at the first loss and after a long stay */
+    CHECK (wl_lost_decide (&st, 60, TRUE, 101 * S, SHORT, NULL) == WL_LOST_END_REFUSED);
+    CHECK (wl_lost_decide (&st, 60, TRUE, 100 * S + 10 * SHORT, SHORT, NULL) == WL_LOST_END_REFUSED);
+    CHECK (wl_lost_decide (&st, 60, TRUE, 101 * S, 0, NULL) == WL_LOST_END_REFUSED);
+    /* a long stay: wait, the count is 0, the next image's stay has not begun */
+    CHECK (wl_lost_decide (&st, 60, FALSE, 100 * S + SHORT, SHORT, &stay) == WL_LOST_WAIT);
+    CHECK (st.shorts == 0 && st.since_us == 0 && stay == SHORT);
+    /* short stays in a row: the fifth ends the daemon, four are waited through */
+    gint64 now = 1000 * S;
+    for (int i = 1; i <= WL_RECONNECT_SHORT_MAX; i++) {
+        st.since_us = now;
+        now += 3 * S;
+        WlLostAct a = wl_lost_decide (&st, 60, FALSE, now, SHORT, &stay);
+        CHECK (stay == 3 * S && st.shorts == i);
+        CHECK (a == (i < WL_RECONNECT_SHORT_MAX ? WL_LOST_WAIT : WL_LOST_END_SHORT));
+        now += 20 * S;      /* (how long the compositor is away does not count) */
+    }
+    CHECK (WL_RECONNECT_SHORT_MAX == 5 && WL_RECONNECT_SHORT_S == 30);
+    /* three crashes in a minute, then a stay that is not short: the count begins anew */
+    st = (WlStays) { 0, 0 };
+    now = 5000 * S;
+    for (int i = 1; i <= 3; i++) {
+        st.since_us = now;
+        now += 19 * S;
+        CHECK (wl_lost_decide (&st, 60, FALSE, now, SHORT, NULL) == WL_LOST_WAIT && st.shorts == i);
+    }
+    st.since_us = now;
+    now += SHORT;
+    CHECK (wl_lost_decide (&st, 60, FALSE, now, SHORT, NULL) == WL_LOST_WAIT && st.shorts == 0);
+    /* one below the limit, a long stay, and four more short ones are waited through */
+    st = (WlStays) { WL_RECONNECT_SHORT_MAX - 1, now };
+    CHECK (wl_lost_decide (&st, 60, FALSE, now + SHORT + 1, SHORT, NULL) == WL_LOST_WAIT && st.shorts == 0);
+    for (int i = 1; i < WL_RECONNECT_SHORT_MAX; i++) {
+        st.since_us = now;
+        CHECK (wl_lost_decide (&st, 60, FALSE, now + 1, SHORT, NULL) == WL_LOST_WAIT && st.shorts == i);
+    }
+    /* a stay whose beginning is not known (the display went before it was
+     * ever answered) counts as short; it does not begin the count anew */
+    st = (WlStays) { 2, 0 };
+    CHECK (wl_lost_decide (&st, 60, FALSE, now, SHORT, &stay) == WL_LOST_WAIT && st.shorts == 3 && stay == -1);
+    st = (WlStays) { 2, now + S };      /* (a beginning after the end) */
+    CHECK (wl_lost_decide (&st, 60, FALSE, now, SHORT, &stay) == WL_LOST_WAIT && st.shorts == 3 && stay == -1);
+    /* nothing counts as short (the tests' switch): never the end, the count stays */
+    st = (WlStays) { 4, now };
+    CHECK (wl_lost_decide (&st, 60, FALSE, now + 1, 0, NULL) == WL_LOST_WAIT && st.shorts == 4);
+    st = (WlStays) { 0, now };
+    for (int i = 0; i < 50; i++)
+        CHECK (wl_lost_decide (&st, 60, FALSE, now + 1, 0, NULL) == WL_LOST_WAIT);
+    /* a shorter "short": 3 s stays are short at 8 s, not at 2 s */
+    st = (WlStays) { 0, now };
+    CHECK (wl_lost_decide (&st, 60, FALSE, now + 3 * S, 8 * S, NULL) == WL_LOST_WAIT && st.shorts == 1);
+    st.since_us = now;
+    CHECK (wl_lost_decide (&st, 60, FALSE, now + 3 * S, 2 * S, NULL) == WL_LOST_WAIT && st.shorts == 0);
+
+    /* the record across the restart in place */
+    wl_stays_parse ("3,123456", 200000, &st);
+    CHECK (st.shorts == 3 && st.since_us == 123456);
+    wl_stays_parse ("4,0", 200000, &st);
+    CHECK (st.shorts == 4 && st.since_us == 0);
+    wl_stays_parse ("0,200000", 200000, &st);
+    CHECK (st.shorts == 0 && st.since_us == 200000);
+    static const char *const bad[] = { NULL, "", "3", "3,", ",5", "x,5", "3,x", "-1,5", "3,-5", "6,5",
+                                       "3,200001", "3,5,7", "3,5 ", " 3,5", "3;5", "99999999999999999999,5" };
+    for (guint i = 0; i < G_N_ELEMENTS (bad); i++) {
+        st = (WlStays) { 7, 7 };
+        wl_stays_parse (bad[i], 200000, &st);
+        CHECK (st.shorts == 0 && st.since_us == 0);
+    }
+}
+
 int main (void)
 {
     test_scale ();
@@ -1007,6 +1090,7 @@ int main (void)
     test_layer_choice ();
     test_plasma_addon ();
     test_limits ();
+    test_lost ();
     if (fails) {
         g_printerr ("wayland-logic-test: %d check(s) failed\n", fails);
         return 1;

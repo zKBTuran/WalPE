@@ -282,6 +282,7 @@ Not for daily use: test hooks, measuring aids and names the programs set for the
 | `WALPE_FAKE_DPMS=file` / `WALPE_FAKE_POWER=file` | daemon | the display's power state / the power source is read from a file instead of from X / the kernel |
 | `WALPE_WL_IGNORE=interface[,interface...]` | daemon (Wayland) | behave as if the compositor lacked these protocols (`wp_viewporter`, `zwlr_layer_shell_v1`, ...). `wp_cursor_shape_manager_v1`: the pointer's image over a wallpaper comes from the theme again, as up to 0.14.0 |
 | `WALPE_LOST_LINGER_MS=n` | daemon (Wayland) | the main thread stands still for `n` ms when it has found the compositor gone, before it ends or restarts the daemon: the render threads come to their next frames meanwhile (`waylandcheck.py`, case `lost`) |
+| `WALPE_WL_SHORT_STAY_MS=n` | daemon (Wayland) | with `wayland_reconnect`: a display that is lost less than `n` ms after the daemon's connection to it was answered was there for a short stay (default 30000; the fifth in a row ends the daemon); `0`: no stay is short and the daemon never gives up for that (`waylandcheck.py`, cases `flap` and `reconnect`) |
 | `WALPE_WL_NO_CONFIGURE=n` | daemon (Wayland) | the first `n` wallpaper surfaces are made in a way the compositor does not answer (a monitor that gets no surface) |
 | `WALPE_SURFACE_RETRY_MS=n` | daemon (Wayland) | the time before the first new try for a monitor that got no surface (default 2000; each further one doubles it) |
 | `WALPE_WL_CLOSE_AFTER_MS=n` | daemon (Wayland) | `n` milliseconds after the start the first wallpaper surface is treated as if the compositor had closed it while its monitor stays |
@@ -291,7 +292,7 @@ Not for daily use: test hooks, measuring aids and names the programs set for the
 | `WALPE_GPU_SYSFS_ROOT=dir` | daemon, `walpe-ctl` | another directory in place of `/sys` for the list of graphics devices: made-up machines |
 | `WALPE_X11_PROVIDERS=names` | daemon | the names of the X server's RandR providers, separated by commas (`NVIDIA-0,modesetting`), in place of the server's own answer; empty = none. Read only where `gpu=auto` is about to test a discrete GPU on X11 |
 | `WALPE_GPU_PROBE_TEST=hang\|linger` | daemon | the test process of a GPU choice never ends and ignores its alarm / ends and leaves a process behind that holds its output: the daemon's start must wait no longer than its limit for either |
-| `WALPE_DISPLAY_LOST` | daemon | set by the daemon for its restart in place after the display went away |
+| `WALPE_DISPLAY_LOST`, `WALPE_DISPLAY_STAYS` | daemon | set by the daemon for its restart in place after the display went away: the window system it ran on, and (with `wayland_reconnect`) how many times in a row the display was not there for long and since when it is |
 | `WALPE_CHECK_DISPLAY=xvfb\|sway` | the end-to-end checks | the display of a check started by hand without `--display` (the registered tests name theirs) |
 | `WALPE_CHECK_STRICT=1` | the end-to-end checks | a check that cannot run for a missing program, or whose display does not start, fails instead of being skipped; a build without the backend still skips |
 | `WALPE_CHECK_WL_RENDERER=gles2` | the end-to-end checks | run the headless compositor on GLES 2 instead of pixman (needs a DRM render node) |

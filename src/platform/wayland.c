@@ -368,6 +368,26 @@ static void wl_mark_dead (const char *where)
     g_main_context_wakeup (NULL);
 }
 
+/* The connection failed because the compositor said so: wl_display.error,
+ * a protocol error - it objected to a request of this client (or to its
+ * own state: "implementation error") and closed the connection for it.
+ * libwayland reports that as EPROTO for an error on any object but the
+ * display itself; there "invalid object" and "invalid method" come as
+ * EINVAL and anything unknown as EFAULT, with the display named as the
+ * object. "No memory" is the one sentence that is no objection. */
+static gboolean wl_dpy_refused (struct wl_display *dpy)
+{
+    int e = dpy ? wl_display_get_error (dpy) : 0;
+    if (e == EPROTO)
+        return TRUE;
+    if (!e || e == ENOMEM)
+        return FALSE;
+    const struct wl_interface *itf = NULL;
+    uint32_t id = 0;
+    wl_display_get_protocol_error (dpy, &itf, &id);
+    return itf != NULL;
+}
+
 /* Read and dispatch one queue until done (data) says so or the time is
  * up. q = NULL: the default queue (main thread only). deadline_us in
  * g_get_monotonic_time (); a deadline in the past reads what is there
@@ -2273,6 +2293,17 @@ void walpe_wayland_surface_wait (int ms)
 gboolean walpe_wayland_display_gone (void)
 {
     return W.dpy && (wl_is_dead () || wl_display_get_error (W.dpy) != 0);
+}
+
+/* Main thread while the backend is open: the connection ended with a
+ * protocol error - the compositor is there, objected to a request of this
+ * client and closed the connection for it (wl_dpy_refused). (libwayland
+ * keeps the first error of a connection: a write that failed before the
+ * compositor's sentence was read would have been that one, and it does
+ * not count a closed socket as an error on the way out for this reason.) */
+gboolean walpe_wayland_display_refused (void)
+{
+    return wl_dpy_refused (W.dpy);
 }
 
 /* Main thread: the surface's output has this rectangle, scale and refresh

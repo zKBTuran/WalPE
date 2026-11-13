@@ -215,6 +215,21 @@ it was). A bare window manager on X11 - dwm, i3, openbox - gets the window of 0.
   the daemon ends when the compositor goes); [docs/WAYLAND.md](docs/WAYLAND.md) has what
   was measured with KWin 6.8 (`kwin_wayland --replace`, a crash) and sway, with and
   without the setting.
+- `wayland_reconnect`: a daemon that waits for its compositor came back to it without
+  end. A compositor that ended the daemon's connection every time - in the test a socket
+  in front of sway that closed each connection three seconds after it was made - had the
+  daemon restart in place every three seconds for as long as that went on, 29 times in 90
+  seconds. It gives up now: the fifth loss in a row that comes less than 30 seconds after
+  the connection was made ends the daemon with status 1 and one warning that names the
+  setting, the way it ends without the setting; after one stay of 30 seconds the count
+  begins anew, so a compositor that crashes three times in a minute is still waited for
+  each time. And it does not come back at all to a connection the compositor ended with a
+  protocol error: the compositor objected to something the daemon sent and would again
+  (it used to restart in place and connect anew). The reason for both: under
+  `kwin_wayland_wrapper` a Plasma session is over after about ten crashes of KWin, and a
+  daemon that KWin died of would have come back until they were used up. The two numbers
+  are fixed, there is no new setting, and the default is unchanged (0: the daemon ends at
+  the first loss).
 - More compositors than sway and KWin have been run now, all headless on the software
   renderer: sway 1.12, labwc 0.20.2, Wayfire 0.11.0, river 0.3.17 and 0.5.0, niri 26.04
   and COSMIC's compositor 1.11.0. [WAYLAND.md](docs/WAYLAND.md#compositors-that-were-run)

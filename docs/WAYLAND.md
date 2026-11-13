@@ -199,6 +199,20 @@ the compositor to come back: for its socket, and for its answer on a socket that
 already (under `kwin_wayland_wrapper`, as a Plasma session runs KWin, the socket never goes
 away: the wrapper holds it while `kwin_wayland` is started again). A compositor that comes
 back and goes again while the daemon starts on it is waited for again, the whole time anew.
+Not without end: a compositor that ends the daemon's connection every time it is made is
+given up. A *stay* of the display is the time from the daemon's connection being answered
+to its loss; the fifth stay in a row of less than 30 seconds ends the daemon with status 1
+and one warning that names the setting, the way `wayland_reconnect = 0` ends it at the
+first loss. That is four restarts in place in a row at most; one stay of 30 seconds or
+more and the count begins anew, so a compositor that crashes three times within a minute
+is waited for each time, and so is one that crashes every now and then for as long as the
+session lasts. And a connection the compositor ended with a protocol error - it objected
+to something the daemon sent - is not come back to at all: the same request would follow. (The compositor's sentence is in the log, in a
+line of libwayland's and in the daemon's warning; please report it.) The two numbers are
+fixed. The reason for them: under `kwin_wayland_wrapper` a Plasma session is over after
+about ten crashes of KWin, and a daemon that came back each time to a KWin that dies of
+something the daemon sends would use them up. Up to here the daemon came back every time
+(the last rows of the table under "Compositors that were run").
 The wallpapers begin anew then: the daemon is the same process, but nothing of what it
 showed is kept. While it waits, `walpe-ctl` reports that the daemon
 did not answer in time, and what was sent to it meanwhile is not carried out when it is back;
@@ -682,7 +696,9 @@ What a compositor that is started again does to the daemon, measured on KWin 6.8
 | `kwin_wayland` crashes (SIGSEGV), the wrapper starts it again | the same, 0.5 s | the same |
 | the new `kwin_wayland` needs 13 s before it answers | the same | the wallpaper is back when it answers (the daemon used to give up after 10 s) |
 | sway is told to end, or killed, and started again 2 s later | ends with status 1 | back with its wallpaper as soon as sway is up |
-| the compositor comes back and is killed again within a second, ten times | - | the daemon waits each time (it used to end when that caught it setting up EGL) |
+| the compositor comes back and is killed again within a second | - | the daemon waits again, at whatever moment of its start that catches it (it used to end when that caught it setting up EGL); the fifth time in a row it ends (next row) |
+| a stand-in socket in front of sway that ends every connection 3 s after it was made | ends with status 1 at the first | four restarts in place, then the fifth short stay ends the daemon with status 1, 15 s after the first loss, nothing left behind (it used to restart every 3 s for as long as that went on: 29 times in 90 s) |
+| the same socket ends the daemon's connection with a protocol error | ends with status 1 | ends with status 1 at once and makes no new connection (it used to restart in place and come back) |
 
 ## Notes per compositor
 

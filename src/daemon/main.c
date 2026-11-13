@@ -78,6 +78,7 @@
 #include "signals/providers.h"        /* logind and the compositor's idle / window-list providers */
 #ifdef HAVE_WAYLAND
 #include "platform/wl_gnome.h"        /* the process GNOME Shell 46 to 48 starts for the connection */
+#include "platform/wayland_logic.h"   /* wl_lost_decide: a compositor that does not stay */
 #endif
 #ifdef HAVE_WEB
 #include "engine/web.h"
@@ -488,6 +489,10 @@ static struct {
     dev_t ipc_dev;
     ino_t ipc_ino;
     struct timespec ipc_ctim;
+#ifdef HAVE_WAYLAND
+    WlStays stays;          /* Wayland: since when the display is there, and how many
+                             * times in a row it was not for long (lost_decide) */
+#endif
 } Bk = { .ipc_fd = -1 };
 
 /* ---- log guard
@@ -4950,6 +4955,9 @@ static void plat_button (int button, gboolean down, int x, int y, gboolean on_de
 }
 
 static int reconnect_wait_s (void);
+#ifdef HAVE_WAYLAND
+static int lost_decide (int wait);
+#endif
 
 /* The connection to the window system is gone for good (Wayland: the
  * compositor went away; on X11 Xlib ends the process before anything
@@ -4957,7 +4965,8 @@ static int reconnect_wait_s (void);
  * marker, running imports - and exits with status 1, as it does when the
  * X server goes away. With wayland_reconnect = <seconds> (gpu.conf /
  * WALPE_WAYLAND_RECONNECT; default 0) it restarts in place instead and
- * the new image waits that long for the display to come back. */
+ * the new image waits that long for the display to come back - unless
+ * the compositor is one that does not stay (lost_decide). */
 static void plat_connection_lost (gpointer user)
 {
     (void) user;
@@ -4965,6 +4974,10 @@ static void plat_connection_lost (gpointer user)
         return;
     D.display_lost = TRUE;
     int wait = D.windowed ? 0 : reconnect_wait_s ();
+#ifdef HAVE_WAYLAND
+    if (wait > 0)
+        wait = lost_decide (wait);
+#endif
     if (wait > 0) {
         g_message ("the display connection is gone: restarting in place, waiting up to %d s "
                    "for it to come back (wayland_reconnect)", wait);
@@ -9346,6 +9359,17 @@ static void restart_exec (gboolean layout_stamp)
      * nothing answers */
     if (D.display_lost)
         env = g_environ_setenv (env, "WALPE_DISPLAY_LOST", walpe_backend_name (D.backend), TRUE);
+#ifdef HAVE_WAYLAND
+    /* ... and knows how long the display has been there, or how many
+     * times in a row it was not for long (lost_decide). Only where the
+     * daemon would wait for its display at all. */
+    if (D.backend == WALPE_BACKEND_WAYLAND && (Bk.stays.shorts || Bk.stays.since_us) &&
+        reconnect_wait_s () > 0) {
+        char rec[48];
+        g_snprintf (rec, sizeof rec, "%d,%" G_GINT64_FORMAT, Bk.stays.shorts, Bk.stays.since_us);
+        env = g_environ_setenv (env, "WALPE_DISPLAY_STAYS", rec, TRUE);
+    }
+#endif
     sw_end_children ();
     /* nothing else may leak into the new image */
     exec_close_others (lfd);
@@ -11282,6 +11306,52 @@ static int start_failed (void)
 }
 
 #ifdef HAVE_WAYLAND
+/* The display is gone and the daemon is to wait for it (wayland_reconnect
+ * = wait seconds): does it? Not without end. A compositor that ends the
+ * daemon's connection every time it is made had the daemon restart in
+ * place every few seconds for as long as it ran, and a compositor that
+ * dies of something the daemon sends dies once per comeback
+ * (kwin_wayland_wrapper gives the session up after about ten). The rule
+ * and its two numbers: platform/wayland_logic.h (wl_lost_decide) - the
+ * fifth stay in a row of less than 30 seconds ends the daemon, and so
+ * does a protocol error at once. Returns wait, or 0 with the reason said:
+ * the daemon then ends as it does with wayland_reconnect = 0.
+ * WALPE_WL_SHORT_STAY_MS (tests): what counts as a short stay; 0 =
+ * nothing does. */
+static int lost_decide (int wait)
+{
+    gint64 short_us = (gint64) WL_RECONNECT_SHORT_S * G_USEC_PER_SEC, stay = -1;
+    const char *e = g_getenv ("WALPE_WL_SHORT_STAY_MS");
+    if (e && *e)
+        short_us = CLAMP (g_ascii_strtoll (e, NULL, 10), 0, 3600 * 1000) * 1000;
+    WlLostAct act = wl_lost_decide (&Bk.stays, wait, walpe_platform_display_refused (),
+                                    g_get_monotonic_time (), short_us, &stay);
+    stay = MAX (stay, 0);
+    switch (act) {
+    case WL_LOST_WAIT:
+        if (Bk.stays.shorts)
+            g_message ("the display was there for %.1f s: short stay %d in a row (at %d the "
+                       "daemon ends instead of waiting again)", stay / 1e6, Bk.stays.shorts,
+                       WL_RECONNECT_SHORT_MAX);
+        return wait;
+    case WL_LOST_END_REFUSED:
+        g_warning ("the compositor closed the display connection with a protocol error: it "
+                   "objected to a request of this daemon and would again, so the daemon does not "
+                   "come back to it (wayland_reconnect = %d does not apply). Please report the "
+                   "line above this one with the compositor's name and version", wait);
+        return 0;
+    case WL_LOST_END_SHORT:
+        g_warning ("the display went away %d times in a row less than %.0f s after the daemon "
+                   "had connected to it (this time after %.1f s): the compositor does not keep "
+                   "this daemon's connection, and the daemon does not come back to it once "
+                   "more (wayland_reconnect = %d gives up). Start walpe-daemon again when the "
+                   "session is steady", Bk.stays.shorts, short_us / 1e6, stay / 1e6, wait);
+        return 0;
+    default:
+        return 0;
+    }
+}
+
 /* The compositor went away again while the daemon was starting on it: one
  * that came back and crashed once more, kwin_wayland replaced twice in a
  * row. A start-up step that needs the display has just failed (EGL could
@@ -11296,6 +11366,9 @@ static void start_display_gone (gboolean windowed)
 {
     int wait = windowed ? 0 : reconnect_wait_s ();
     if (wait <= 0 || !walpe_platform_display_gone ())
+        return;
+    /* (not a fifth time in a row, and not after a protocol error) */
+    if (lost_decide (wait) <= 0)
         return;
     g_message ("the display connection went away during the start: restarting in place, waiting "
                "up to %d s for it to come back (wayland_reconnect)", wait);
@@ -11426,6 +11499,12 @@ int main (int argc, char **argv)
         if (dl && *dl)
             Bk.lost = g_strdup (dl);
         g_unsetenv ("WALPE_DISPLAY_LOST");
+#ifdef HAVE_WAYLAND
+        /* ... with how long the display has been there, or how many times
+         * in a row it was not for long (restart_exec, lost_decide) */
+        wl_stays_parse (g_getenv ("WALPE_DISPLAY_STAYS"), g_get_monotonic_time (), &Bk.stays);
+        g_unsetenv ("WALPE_DISPLAY_STAYS");
+#endif
         /* ... and when an image before this one restarted to unload the
          * web module (web_unload_due; it stays in the environment the next
          * restart hands on) */
@@ -11711,6 +11790,12 @@ int main (int argc, char **argv)
             g_printerr ("%s\n", perr ? perr : "cannot open the display");
             return start_failed ();
         }
+#ifdef HAVE_WAYLAND
+        /* the display is there from now (lost_decide), unless an image
+         * before this one, restarted for another reason, knew it longer */
+        if (D.backend == WALPE_BACKEND_WAYLAND && !Bk.stays.since_us)
+            Bk.stays.since_us = g_get_monotonic_time ();
+#endif
         /* An image that waited for its display to come back did not answer
          * the control socket in that time: walpe-ctl gives up after two
          * seconds and says that the daemon did not answer in time. What was

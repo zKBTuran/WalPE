@@ -252,6 +252,11 @@ gboolean walpe_platform_display_gone (void)
     return ops == &walpe_wayland_ops && walpe_wayland_display_gone ();
 }
 
+gboolean walpe_platform_display_refused (void)
+{
+    return ops == &walpe_wayland_ops && walpe_wayland_display_refused ();
+}
+
 void walpe_platform_surface_wait (int ms)
 {
     if (ops == &walpe_wayland_ops)

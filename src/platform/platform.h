@@ -423,6 +423,11 @@ gboolean walpe_surface_follow_output (WalpeSurface *s, const WalpeOutput *o, int
  * daemon's start, before the event source reports connection_lost, and
  * for a render thread before it presents a frame. */
 gboolean walpe_platform_display_gone (void);
+/* Main thread, between open and close, once the display is gone: it went
+ * with a protocol error (Wayland: the compositor objected to a request of
+ * this client and closed the connection). A daemon that would wait for its
+ * display to come back (wayland_reconnect) does not come back to that. */
+gboolean walpe_platform_display_refused (void);
 /* Main thread: how long the WALLPAPER surfaces made from now on wait for
  * the window system's first answer (walpe_surface_new stands still that
  * long at most); 0 = the backend's own time, which is the one of the

@@ -910,3 +910,89 @@ static inline const char *wl_ls_state_name (WlLsState st)
     static const char *const names[] = { "none", "wait", "ready", "lost", "dead" };
     return (guint) st < G_N_ELEMENTS (names) ? names[st] : "?";
 }
+
+/* ------------------------------------- a compositor that does not stay
+ * wayland_reconnect: a daemon whose compositor went away restarts in place
+ * and waits for it. A compositor that takes the daemon's connection and
+ * ends it again every time - one that dies of something this client
+ * sends, one that is started again and again by its session and never
+ * stays - would have the daemon come back without end (seen: 29 restarts
+ * in place in 90 seconds), and under kwin_wayland_wrapper, which gives a
+ * session up after about ten crashes of KWin, every one of them may be one
+ * of the ten. The rule, two fixed numbers:
+ *   a STAY of the display is the time from the moment the daemon's
+ *   connection was opened and answered to the moment its loss is noticed
+ *   (through restarts in place for other reasons: since the first
+ *   connection after the last loss);
+ *   a stay of less than WL_RECONNECT_SHORT_S seconds is short;
+ *   the WL_RECONNECT_SHORT_MAX-th short stay in a row ends the daemon the
+ *   way wayland_reconnect = 0 does, instead of one more restart; one stay
+ *   that is not short and the count begins anew.
+ * Three crashes of a compositor in a minute are waited through (three
+ * short stays), and so is a crash every now and then for as long as the
+ * session lasts. And whatever the count: a connection that ended with a
+ * PROTOCOL ERROR is not come back to - the compositor objected to a
+ * request of this client and would object to it again.
+ * The daemon keeps the two values of this record across its restart in
+ * place (the environment variable WALPE_DISPLAY_STAYS: "shorts,since"). */
+#define WL_RECONNECT_SHORT_S 30
+#define WL_RECONNECT_SHORT_MAX 5
+
+typedef struct {
+    int shorts;         /* short stays in a row so far */
+    gint64 since_us;    /* g_get_monotonic_time () when this stay began; 0 = not begun */
+} WlStays;
+
+typedef enum {
+    WL_LOST_END = 0,        /* wayland_reconnect is off: the daemon ends (the default) */
+    WL_LOST_WAIT,           /* restart in place and wait for the compositor */
+    WL_LOST_END_REFUSED,    /* a protocol error: no coming back */
+    WL_LOST_END_SHORT,      /* too many short stays in a row: no coming back */
+} WlLostAct;
+
+/* The display is lost at now_us: what the daemon does. wait_s: the
+ * setting (0 = off; nothing is counted then). short_us: what counts as a
+ * short stay (0 = nothing does: the count stays where it is and never
+ * ends the daemon). st is brought up to date for the image that comes
+ * next: its count, and no stay begun. *stay_us (may be NULL): how long
+ * this stay was, -1 = not known. */
+static inline WlLostAct wl_lost_decide (WlStays *st, int wait_s, gboolean protocol_error,
+                                        gint64 now_us, gint64 short_us, gint64 *stay_us)
+{
+    gint64 stay = st->since_us > 0 && now_us >= st->since_us ? now_us - st->since_us : -1;
+    if (stay_us)
+        *stay_us = stay;
+    if (wait_s <= 0)
+        return WL_LOST_END;
+    if (protocol_error)
+        return WL_LOST_END_REFUSED;
+    st->since_us = 0;
+    if (short_us > 0) {
+        /* (a stay of unknown length - no connection was ever answered -
+         * is no reason to begin the count anew) */
+        if (stay < 0 || stay < short_us)
+            st->shorts++;
+        else
+            st->shorts = 0;
+    }
+    return short_us > 0 && st->shorts >= WL_RECONNECT_SHORT_MAX ? WL_LOST_END_SHORT : WL_LOST_WAIT;
+}
+
+/* "shorts,since" as the image before wrote it -> st; anything else, a
+ * count out of range or a time that has not come yet: the empty record */
+static inline void wl_stays_parse (const char *text, gint64 now_us, WlStays *st)
+{
+    st->shorts = 0;
+    st->since_us = 0;
+    if (!text || !g_ascii_isdigit (*text))
+        return;
+    char *end = NULL;
+    gint64 n = g_ascii_strtoll (text, &end, 10);
+    if (!end || *end != ',' || !g_ascii_isdigit (end[1]) || n < 0 || n > WL_RECONNECT_SHORT_MAX)
+        return;
+    gint64 t = g_ascii_strtoll (end + 1, &end, 10);
+    if (!end || *end || t < 0 || t > now_us)
+        return;
+    st->shorts = (int) n;
+    st->since_us = t;
+}

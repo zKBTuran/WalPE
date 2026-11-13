@@ -119,6 +119,7 @@ gboolean walpe_wayland_surface_fit (WalpeSurface *s, int *w, int *h);
 /* ... and walpe_platform_surface_wait */
 void walpe_wayland_surface_wait (int ms);
 gboolean walpe_wayland_display_gone (void);
+gboolean walpe_wayland_display_refused (void);
 
 /* helpers of platform.c for the backends */
 /* a filled-in output record: name copied, canon derived; the other

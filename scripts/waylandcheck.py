@@ -116,6 +116,17 @@ not what the daemon believes it drew. Each case starts its own daemon:
             start that catches the daemon, it waits on (it ended when the
             display went while EGL was being set up), and shows its
             wallpaper when the compositor stays at last.
+  flap      a compositor that does not keep the daemon's connection, under a
+            daemon with wayland_reconnect (a stand-in socket in front of the
+            compositor's that hands every connection through and ends it
+            three seconds after it was made): the daemon does not come back
+            without end - the fifth stay in a row of less than 30 seconds
+            ends it with status 1, the way wayland_reconnect = 0 does, with
+            one sentence that names the setting; nothing of it is left. One
+            stay that is not short and the count begins anew (with "short"
+            made 8 seconds: WALPE_WL_SHORT_STAY_MS). A connection the
+            compositor ends with a protocol error is not come back to at
+            all.
   lost      the compositor goes away: the daemon ends with status 1 and
             leaves no socket behind; its render thread, which goes on for a
             moment (made long here: WALPE_LOST_LINGER_MS), presents nothing
@@ -135,6 +146,9 @@ not installed, or the build has no Wayland backend). WAYLANDCHECK_PATIENCE=N
 multiplies every wait (a software renderer on a busy machine: 3 or more).
 --tmp DIR: work in DIR (must not exist; removed afterwards); sockets live
 below it and a socket path is limited to 107 bytes."""
+import array
+import select
+import struct
 import threading
 import os, re, shutil, socket, subprocess, sys, time
 
@@ -1514,7 +1528,7 @@ def case_reconnect(env, W):
     to wait for it (wayland_reconnect). It runs before `lost`, which ends the compositor
     for good."""
     wait_s = 40
-    extra = {"WALPE_WAYLAND_RECONNECT": str(wait_s)}
+    extra = {"WALPE_WAYLAND_RECONNECT": str(wait_s), "WALPE_WL_SHORT_STAY_MS": "0"}
     if not start(env, [("A", 640, 360, 0, 0)], "reconnect", extra=extra):
         return
     env.open(W["quad"])
@@ -1571,6 +1585,10 @@ def case_reconnect(env, W):
         if p is not None:
             p.kill()
 
+    # (Ten short stays in a row end a daemon since it counts them, the fifth does: the
+    # case `flap`. What is looked at here is the moment of the daemon's start at which
+    # the display goes, and ten of them are tried: this daemon is told that no stay is
+    # short, WALPE_WL_SHORT_STAY_MS=0, and so counts none.)
     mark = away("killed", True)
     for delay in (0.0, 0.03, 0.06, 0.09, 0.12, 0.15, 0.2, 0.3, 0.5, 0.9):
         t = threading.Thread(target=cut_after, args=(delay,))
@@ -1589,6 +1607,262 @@ def case_reconnect(env, W):
     check(env.display.start(640, 360), "reconnect: after that the compositor is started and stays",
           env.display.log_tail())
     back("after ten short visits of the compositor", mark)
+
+
+# --------------------------------------------------------------------- flap
+class WlFront:
+    """A Wayland socket in front of the compositor's own: every connection is handed
+    through, descriptors too, and can be ended from here the two ways a compositor ends
+    one. cut = seconds: each connection is closed that long after it was made (a
+    compositor that dies and is started again, one that does not keep this client).
+    refuse (): the wallpaper client's connection gets the sentence a compositor sends
+    when it objects to a request (wl_display.error, here: about the client's registry,
+    its object 2) and is closed after it."""
+
+    class Conn:
+        def __init__(self):
+            self.t0, self.refuse, self.layer, self.live = time.time(), None, False, True
+            self.hdr, self.left = b"", 0    # where the compositor's stream stands in a message
+
+        def fed(self, data):
+            i = 0
+            while i < len(data):
+                if self.left:
+                    n = min(self.left, len(data) - i)
+                    self.left -= n
+                else:
+                    n = min(8 - len(self.hdr), len(data) - i)
+                    self.hdr += data[i:i + n]
+                    if len(self.hdr) == 8:
+                        self.left = max((struct.unpack("=II", self.hdr)[1] >> 16) - 8, 0)
+                        self.hdr = b""
+                i += n
+
+        def between(self):
+            return not self.left and not self.hdr
+
+    def __init__(self, path, target):
+        self.path, self.target, self.cut, self.n, self.on = path, target, None, 0, True
+        self.conns = []
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        self.srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.srv.bind(path)
+        self.srv.listen(8)
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self):
+        while self.on:
+            try:
+                c, _ = self.srv.accept()
+            except OSError:
+                return
+            self.n += 1
+            k = self.Conn()
+            self.conns.append(k)
+            threading.Thread(target=self._pump, args=(c, k), daemon=True).start()
+
+    def refuse(self):
+        """-> how many connections are told"""
+        told = [k for k in self.conns if k.live and k.layer]
+        for k in told:
+            k.refuse = (2, 7)
+        return len(told)
+
+    @staticmethod
+    def _error(obj, code, text):
+        # wl_display@1.error(object, code, text): header (object 1, size << 16 | opcode 0), body
+        raw = text.encode() + b"\0"
+        raw += b"\0" * (-len(raw) % 4)
+        body = struct.pack("=III", obj, code, len(text.encode()) + 1) + raw
+        return struct.pack("=II", 1, (8 + len(body)) << 16) + body
+
+    def _pump(self, c, k):
+        u = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            u.connect(self.target)
+            asked = False
+            while True:
+                if k.refuse and asked and k.between():
+                    c.sendall(self._error(k.refuse[0], k.refuse[1], "the stand-in compositor objects"))
+                    time.sleep(0.3)     # (its sentence is read before the socket's end)
+                    break
+                # (a connection that is to be refused is not cut before that)
+                left = None if self.cut is None or k.refuse else self.cut - (time.time() - k.t0)
+                if left is not None and left <= 0:
+                    break
+                r, _, _ = select.select([c, u], [], [], 0.1 if left is None else max(min(0.1, left), 0))
+                for s in r:
+                    o = u if s is c else c
+                    data, anc, _, _ = s.recvmsg(65536, socket.CMSG_SPACE(28 * 4))
+                    if not data and not anc:
+                        raise OSError("closed")
+                    fds = array.array("i")
+                    for lvl, typ, cd in anc:
+                        if lvl == socket.SOL_SOCKET and typ == socket.SCM_RIGHTS:
+                            fds.frombytes(cd[:len(cd) - (len(cd) % fds.itemsize)])
+                    if s is c:
+                        asked = True
+                        k.layer = k.layer or b"zwlr_layer_shell_v1" in data
+                    else:
+                        k.fed(data)
+                    o.sendmsg([data], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fds)] if len(fds) else [])
+                    for fd in fds:
+                        os.close(fd)
+        except OSError:
+            pass
+        finally:
+            k.live = False
+            c.close()
+            u.close()
+
+    def stop(self):
+        self.on = False
+        self.srv.close()
+        try:
+            os.unlink(self.path)
+        except OSError:
+            pass
+
+
+GAVE_UP = "(wayland_reconnect = %d gives up)"
+REFUSED = "(wayland_reconnect = %d does not apply)"
+RESTARTS = "restarting in place, waiting up to"
+
+
+def flap_start(env, W, front, what, wait_s, extra=None):
+    """a daemon with wayland_reconnect whose compositor is the stand-in; -> started"""
+    front.cut = None
+    cfg = dict(CONFIG, current=W["anim"])
+    ex = {"WAYLAND_DISPLAY": front.path, "WALPE_WAYLAND_RECONNECT": str(wait_s)}
+    ex.update(extra or {})
+    return start(env, [("A", 640, 360, 0, 0)], what, extra=ex, config=cfg) and lc.loaded(env, W["anim"])
+
+
+def flap_ended(env, timeout):
+    """wait for the daemon to end by itself -> (status or None, its children seen meanwhile)"""
+    pid, kids, t0 = env.daemon.pid, set(), time.time()
+    while time.time() - t0 < timeout and env.daemon.poll() is None:
+        kids.update(lc.children(pid))
+        time.sleep(0.2)
+    status = env.daemon.poll()
+    if status is not None:
+        env.daemon = None
+    return status, kids
+
+
+def flap_bound(env, W, front, wait_s):
+    """every connection ends 3 s after it was made: the fifth short stay in a row ends the
+    daemon. (Before: a restart in place every three seconds for as long as the compositor
+    went on like this, 29 in 90 seconds.)"""
+    what = "flap"
+    t_start = time.time()
+    if not flap_start(env, W, front, what, wait_s):
+        return
+    mark, n0 = env.mark(), front.n
+    first_short = time.time() - t_start < 25     # (the first stay is one of the five)
+    front.cut = 3.0
+    t0 = time.time()
+    status, kids = flap_ended(env, 60 + 40 * PATIENCE)
+    took, log = time.time() - t0, env.since(mark)
+    restarts = log.count(RESTARTS)
+    if not check(status == 1, f"{what}: a compositor that ends each of the daemon's connections after 3 s: "
+                 "the daemon ends by itself, with status 1", (status, restarts, log[-1500:])):
+        return
+    note(f"{what}: ended after {took:.1f} s, {restarts} restarts in place, {front.n - n0} more connections")
+    check(restarts == 4 if first_short else restarts in (4, 5), f"{what}: after four restarts in place: the "
+          "fifth stay of less than 30 s in a row is the last", (restarts, first_short, log[-1500:]))
+    check(log.count(GAVE_UP % wait_s) == 1 and log.count("the display connection is gone: shutting down") == 1,
+          f"{what}: it says once that wayland_reconnect gives up, and ends as it does without the setting",
+          log[-1500:])
+    check("short stay 4 in a row (at 5 the daemon ends instead of waiting again)" in log,
+          f"{what}: each short stay was counted in the log before that")
+    time.sleep(0.5)
+    check(not os.path.exists(env.sock) and not os.path.exists(env.sock + ".loading"),
+          f"{what}: no control socket and no marker of an unfinished start are left behind")
+    left = [k for k in kids if os.path.exists(f"/proc/{k}")]
+    check(not left, f"{what}: no child process of the daemon is left", left)
+    bad = [ln for ln in log.splitlines() if TROUBLE.search(ln)]
+    check(not bad, f"{what}: nothing else went wrong on the way", bad[:5])
+
+
+def flap_long_stay(env, W, front, wait_s):
+    """one stay that is not short and the count begins anew. "Short" is 8 s here."""
+    what = "flap, a long stay"
+    if not flap_start(env, W, front, what, wait_s, extra={"WALPE_WL_SHORT_STAY_MS": "8000"}):
+        return
+    pid = env.daemon.pid
+    fourth = "short stay 4 in a row"
+
+    def four_short(mark):
+        front.cut = 3.0
+        seen = wait_for(lambda: fourth in env.since(mark) or env.daemon.poll() is not None, 40)
+        front.cut = None
+        time.sleep(0.5)     # (the line of the restart follows the count's)
+        return bool(seen) and env.daemon.poll() is None
+
+    mark = env.mark()
+    if not check(four_short(mark), f"{what}: four short stays in a row, the daemon restarts in place for each",
+                 env.since(mark)[-1500:]):
+        return
+    back = wait_for(lambda: bool(env.state().get("monitors")), 40)
+    check(bool(back) and lc.loaded(env, W["anim"]), f"{what}: the compositor keeps the connection now: the "
+          "daemon is there with its wallpaper", env.since(mark)[-800:])
+    time.sleep(9.0)
+    mark2 = env.mark()
+    ok = four_short(mark2)
+    log = env.since(mark2)
+    check(ok and env.daemon.pid == pid and (GAVE_UP % wait_s) not in env.since(mark),
+          f"{what}: after a stay of more than 8 s four more short ones are waited through (eight short stays "
+          "and the daemon is the same process)", log[-1500:])
+    check(log.count(RESTARTS) == 5 and "short stay 1 in a row" in log,
+          f"{what}: the loss after the long stay was not counted, the next one was the first again",
+          (log.count(RESTARTS), log[-1500:]))
+    mark3 = env.mark()
+    front.cut = 3.0
+    status, _ = flap_ended(env, 30 + 20 * PATIENCE)
+    log = env.since(mark3)
+    check(status == 1 and log.count(GAVE_UP % wait_s) == 1 and log.count(RESTARTS) == 0,
+          f"{what}: the fifth in a row ends this daemon too", (status, log[-1500:]))
+
+
+def flap_refused(env, W, front, wait_s):
+    """the compositor objects to a request of the running daemon (a protocol error).
+    (Before: the daemon restarted in place and came back to it.)"""
+    what = "flap, a protocol error"
+    if not flap_start(env, W, front, what, wait_s):
+        return
+    mark, n0 = env.mark(), front.n
+    told = front.refuse()
+    t0 = time.time()
+    status, _ = flap_ended(env, 15 + 10 * PATIENCE)
+    took, log = time.time() - t0, env.since(mark)
+    check(told == 1 and status == 1 and "wayland: protocol error 7 on wl_registry@2" in log,
+          f"{what}: the daemon's connection is ended with one: it ends with status 1 and says which",
+          (told, status, log[-1500:]))
+    check(log.count(RESTARTS) == 0 and log.count(REFUSED % wait_s) == 1 and front.n == n0,
+          f"{what}: it does not restart in place and makes no new connection (wayland_reconnect does not "
+          "apply, said once)", (front.n - n0, log[-1500:]))
+    note(f"{what}: ended {took:.1f} s after the error")
+    time.sleep(0.5)
+    check(not os.path.exists(env.sock), f"{what}: no control socket is left behind")
+
+
+def case_flap(env, W):
+    """A compositor that does not keep the daemon's connection, and one that objects to
+    it: a daemon with wayland_reconnect does not come back to either without end. Runs
+    after `reconnect` (the compositor that goes and comes back and is waited for)."""
+    front = WlFront(os.path.join(env.display.rt, "wayland-front"), env.display.display)
+    try:
+        for part in (flap_bound, flap_long_stay, flap_refused):
+            try:
+                part(env, W, front, 20)
+            finally:
+                env.stop_daemon()
+    finally:
+        front.stop()
 
 
 # ------------------------------------------------------------------- cycles
@@ -1848,7 +2122,7 @@ CASES = [("start", case_start), ("layer", case_layer), ("two", case_two), ("mode
          ("pointer", case_pointer), ("covered", case_covered), ("fullscreen", case_fullscreen),
          ("backend", case_backend),
          ("noshell", case_noshell), ("cycles", case_cycles), ("cursor", case_cursor),
-         ("reconnect", case_reconnect),
+         ("reconnect", case_reconnect), ("flap", case_flap),
          ("lost", case_lost)]
 
 
