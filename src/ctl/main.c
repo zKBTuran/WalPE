@@ -1315,7 +1315,7 @@ static int run (int argc, char **argv)
          * could be named. (diag, backend, open and resetprops refused what
          * they did not take already.) */
         static const char *const bare[] = { "pause", "resume", "status", "quit", "cancel-import",
-                                            "steam-libraries", NULL };
+                                            "steam-libraries", "soundcheck", NULL };
         if (argc > 2 && cmd && g_strv_contains (bare, cmd)) {
             g_printerr ("%s takes no argument, not '%s'; nothing was done\n", cmd, argv[2]);
             return 1;

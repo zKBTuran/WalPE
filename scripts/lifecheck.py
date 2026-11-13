@@ -3549,6 +3549,30 @@ def case_diag(env, W):
     out = p.stdout.decode(errors="replace")
     check(p.returncode == 0 and out.startswith("walpe-daemon ") and env.tmp not in out,
           "diag: walpe-ctl diag prints the same text and exits with 0", out[:200])
+    # the sound server's line (what `walpe-ctl soundcheck` says of a web wallpaper's stream):
+    # in the text that is asked for, whole - the cutting of paths leaves it alone -, and not
+    # in the summary the daemon logs by itself (asking the server can cost a child process)
+    srv = [l for l in text().splitlines() if l.startswith("sound server: ")]
+    rep = env.ipc({"cmd": "soundcheck"}) or {}
+    check(len(srv) == 1 and rep.get("ok") is True and srv[0] == "sound server: " + rep.get("sound_server", "?") and
+          "not asked: no web wallpaper is shown" in srv[0],
+          "diag: one line \"sound server:\", the sentence of soundcheck as it is", (srv, rep))
+    snd = [l for l in text().splitlines() if l.startswith("sound: ")]
+    check(len(snd) == 1 and snd[0].startswith("sound: " + rep.get("sound", "?") + " ["),
+          "diag: its line \"sound:\" is the status line of soundcheck", (snd, rep.get("sound")))
+    try:
+        logged = open(env.log, errors="replace").read()
+    except OSError:
+        logged = ""
+    check("summary (walpe-ctl diag prints it again)" in logged and "sound server:" not in logged,
+          "diag: the summary in the log has no such line (nothing asks the sound server at start)")
+    for args, want in ((("soundcheck",), 0), (("soundcheck", "now"), 1)):
+        p = subprocess.run([os.path.join(env.build, "walpe-ctl"), *args], env=env.env, stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, timeout=60 * PATIENCE)
+        out = p.stdout.decode(errors="replace")
+        check(p.returncode == want and ("sound_server" in out if want == 0 else "takes no argument" in out),
+              f"diag: walpe-ctl {' '.join(args)} ends with {want}" +
+              (" and prints both lines" if want == 0 else ": it takes no argument and says so"), out[:300])
 
 
 # -------------------------------------------------------------------- panel

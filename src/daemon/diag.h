@@ -12,7 +12,9 @@
  * pause signals, and per monitor what it shows and whether it is paused
  * and by which rule. The daemon logs it once, when its first GL context is
  * there (diag_say), and `walpe-ctl diag` asks for it again at any time
- * ({"cmd":"diag"} -> {"ok":true,"text":...}).
+ * ({"cmd":"diag"} -> {"ok":true,"text":...}); asked for, it has one line
+ * more, "sound server:", what `walpe-ctl soundcheck` says of a web
+ * wallpaper's stream there.
  *
  * diag_quit_ipc (), diag_quit_signal (): who asked the daemon to stop.
  * diag_end_line (): the last line of a daemon that ends by its own doing,
@@ -142,7 +144,11 @@ static const char *diag_started_by (void)
     return by;
 }
 
-static char *diag_text (void)
+/* asked: by `walpe-ctl diag`, not for the log. Only then is the sound
+ * server looked at (sound_server_line, the second line of `walpe-ctl
+ * soundcheck`): while a web wallpaper is heard that is a child process,
+ * which a summary the daemon writes by itself at its start does not cost. */
+static char *diag_text (gboolean asked)
 {
     GString *s = g_string_new (NULL);
     g_string_append_printf (s, "walpe-daemon %s \"%s\", pid %d, started by %s, up for %.0f s\n",
@@ -181,10 +187,18 @@ static char *diag_text (void)
         g_free (ms);
     }
     {
-        char *snd = walpe_sound_status (), *au = walpe_audio_status ();
+        /* (the line of status and soundcheck: it knows the pages of web wallpapers) */
+        char *snd = sound_status_line (), *au = walpe_audio_status ();
         g_string_append_printf (s, "sound: %s [scene_sound %s, volume %.2f, mute %s]\n", snd,
                                 D.cfg->scene_sound ? "on" : "off", D.cfg->volume,
                                 D.cfg->mute ? "on" : "off");
+        if (asked) {
+            /* a web wallpaper's stream that the server holds muted or at
+             * 0 %: the one silence the line above cannot explain */
+            char *srv = sound_server_line ();
+            g_string_append_printf (s, "sound server: %s\n", srv);
+            g_free (srv);
+        }
         g_string_append_printf (s, "audio capture (for wallpapers that react to sound): %s\n", au);
         g_free (snd);
         g_free (au);
@@ -253,7 +267,7 @@ static gboolean diag_say (gpointer first_gl)
         if (((Mon *) l->data)->loading)
             return G_SOURCE_REMOVE;     /* (said when that load has reported) */
     diag_said = TRUE;
-    char *t = diag_text ();
+    char *t = diag_text (FALSE);
     g_message ("summary (walpe-ctl diag prints it again):\n%s", t);
     g_free (t);
     diag_sound_said = diag_sound_gate ();   /* (the summary has said it) */
@@ -263,7 +277,7 @@ static gboolean diag_say (gpointer first_gl)
 /* {"cmd":"diag"} */
 static void diag_ipc (JsonBuilder *b)
 {
-    char *t = diag_text ();
+    char *t = diag_text (TRUE);
     jb_bool (b, "ok", TRUE);
     jb_str (b, "text", t);
     g_free (t);

@@ -101,6 +101,21 @@ int main (void)
         "noscene/scene.json and shaders/a.frag",
         "http://example.com/a/b and https://host/x",
         "monitor 0 DP-1 2560x1440+0+0: scene \"1234\", running",
+        /* the line "sound server:" of `walpe-ctl diag` (daemon/main.c sound_server_line,
+         * engine/soundserver.c): commands, "/" between words and per cent signs, no path */
+        "sound server: not asked: no web wallpaper is shown at a level above 0 (the sound of scenes and "
+        "videos is WalPE's own stream \"walpe\", which the line above counts)",
+        "sound server: no stream of WebKit is muted or at 0 % in the sound server (a page that is silent "
+        "now plays nothing, or its stream is not there yet)",
+        "sound server: could not be asked: `pactl -f json list sink-inputs` did not answer (no pactl, "
+        "one older than 16, or no sound server)",
+        "sound server: the sound server holds 1 of 2 stream(s) of WebKit silent (1 muted, 0 at 0 %): a web "
+        "wallpaper's sound is such a stream, and it stays silent whatever the settings here say - WalPE "
+        "never changes a stream in the server, and the server gives the stored value to every later one. "
+        "Undo it once, while the page plays: in the desktop's mixer (Plasma: the volume applet, "
+        "Applications; pavucontrol: Playback) unmute \"WebKit\" and turn it up, or: pactl "
+        "set-sink-input-mute 57 0; pactl set-sink-input-volume 57 100%",
+        "sound: on: nothing is playing (0 wallpaper(s) with sound shown) [scene_sound on, volume 0.50, mute off]",
         "n/a, 50/60 Hz, and/or",
         "",
         "/",

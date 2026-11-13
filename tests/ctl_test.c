@@ -1084,7 +1084,7 @@ int main (int argc, char **argv)
          * before it looks for a daemon (`walpe-ctl pause 1` paused every
          * monitor and ended with 0; here, without a daemon, it ended with 2) */
         static const char *const bare[] = { "pause", "resume", "status", "quit", "cancel-import",
-                                            "steam-libraries" };
+                                            "steam-libraries", "soundcheck" };
         for (guint i = 0; i < G_N_ELEMENTS (bare); i++) {
             char *e = NULL;
             CHECK (run_ctl (&e, bare[i], "1", NULL) == 1);
@@ -1148,6 +1148,7 @@ int main (int argc, char **argv)
     NODAEMON ("props", "--monitor", "1");
     NODAEMON ("quality");
     NODAEMON ("cancel-import");
+    NODAEMON ("soundcheck");        /* (without an argument it is sent: the refusal above is for one) */
     /* resolution: a value that is not one never leaves walpe-ctl */
     BAD ("is not one of", "resolution", "HDMI-0", "1081q");
     BAD ("too small", "resolution", "HDMI-0", "10x10");
