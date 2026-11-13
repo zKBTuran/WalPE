@@ -287,11 +287,12 @@ static struct {
         int x, y;
     } ptr;
     gboolean sel_buttons, sel_motion;
-#ifdef HAVE_WL_CURSOR
     /* the pointer's image over a wallpaper: the compositor's own where it
-     * takes a shape by name (cursor-shape-v1), else one from the theme */
+     * takes a shape by name (cursor-shape-v1), else one from the theme
+     * (which needs libwayland-cursor: HAVE_WL_CURSOR) */
     struct wp_cursor_shape_manager_v1 *cursor_shape_mgr;
     guint cursor_by_shape, cursor_by_theme;     /* how often each was set (status) */
+#ifdef HAVE_WL_CURSOR
     struct wl_cursor_theme *cursor_theme;
     int cursor_theme_scale;
     struct wl_surface *cursor_surface;
