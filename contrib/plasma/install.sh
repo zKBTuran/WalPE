@@ -51,6 +51,21 @@ check_session() {
 	fi
 }
 
+# the session as its environment names it, "KDE on wayland"; what is not named is said so
+session_words() {
+	d=${XDG_CURRENT_DESKTOP:-}
+	t=${XDG_SESSION_TYPE:-}
+	if [ -n "$d" ] && [ -n "$t" ]; then
+		printf '%s\n' "$d on $t"
+	elif [ -n "$d" ]; then
+		printf '%s\n' "$d (XDG_SESSION_TYPE is not set)"
+	elif [ -n "$t" ]; then
+		printf '%s\n' "no desktop named (XDG_CURRENT_DESKTOP is not set) on $t"
+	else
+		printf '%s\n' "no desktop named (XDG_CURRENT_DESKTOP and XDG_SESSION_TYPE are not set)"
+	fi
+}
+
 # plasma_js SCRIPT: run SCRIPT in Plasma's shell (its desktop scripting), print what it prints
 plasma_js() {
 	dbus-send --session --print-reply=literal --dest=org.kde.plasmashell /PlasmaShell \
@@ -141,7 +156,16 @@ uninstall)
 	say "Removed. walpe-daemon shows its wallpaper over Plasma's desktop again (the icons are hidden while it runs)."
 	;;
 status)
-	say "session: ${XDG_CURRENT_DESKTOP:-?} on ${XDG_SESSION_TYPE:-?}, $(kwin_wayland --version 2>/dev/null | head -n 1 || true)"
+	# (outside a Plasma session the line read "session: ? on ?, " and ended in the comma)
+	kwin=$(kwin_wayland --version 2>/dev/null | head -n 1 || true)
+	if [ -z "$kwin" ]; then
+		command -v kwin_wayland >/dev/null 2>&1 && kwin="kwin_wayland gave no version" || kwin="no KWin (kwin_wayland was not found)"
+	fi
+	say "session: $(session_words), $kwin"
+	case ":${XDG_CURRENT_DESKTOP:-}:" in
+	*:KDE:*) ;;
+	*) say "  this is not a KDE Plasma session: the add-on is for Plasma on Wayland, elsewhere WalPE needs none" ;;
+	esac
 	installed && say "wallpaper type \"WalPE\": installed ($data/plasma/wallpapers/$type_id)" ||
 		say "wallpaper type \"WalPE\": not installed"
 	if plasma_runs; then

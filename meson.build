@@ -2099,6 +2099,12 @@ test('plasma-install', find_program('sh'),
   args: [meson.current_source_dir() / 'tests/plasma_install_test.sh',
          meson.current_source_dir() / 'contrib/plasma/install.sh'],
   timeout: 120)
+# The extension for GNOME Shell (contrib/gnome) is no part of the build either: what its
+# installer's `status` says where there is no GNOME, and in a GNOME session.
+test('gnome-install', find_program('sh'),
+  args: [meson.current_source_dir() / 'tests/gnome_install_test.sh',
+         meson.current_source_dir() / 'contrib/gnome/install.sh'],
+  timeout: 60)
 # Its KWin script between a stand-in KWin and a stand-in Plasma shell: which desktop
 # window is put above the daemon's surface (the one shown on that screen, of the type
 # "WalPE", and no other - not for a desktop of an activity that is not shown), what the

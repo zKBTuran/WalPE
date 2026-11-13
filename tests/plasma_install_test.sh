@@ -11,6 +11,7 @@
 #   cannot be done while a desktop still has the type (Plasma's shell not running, or
 #   not answering): a desktop whose wallpaper type has no files is black;
 #   uninstall with no desktop of the type removes the package without the shell.
+#   status outside Plasma, without KWin: no "?" and no line that ends in a comma.
 # The stand-ins: FAKE_SHELL=up|down|deaf (org.kde.plasmashell on the bus, not on it, on
 # it and not answering evaluateScript), FAKE_KWIN=<version>; what was sent to Plasma's
 # shell is appended to $FAKE_LOG.
@@ -151,8 +152,34 @@ is "uninstall without the shell: the package is gone" ! -e "$pkg"
 # 8. status and the usage line change nothing and need nothing
 run "status" 0 FAKE_SHELL=down -- status
 want "$tmp/out" "not installed" "status"
+want "$tmp/out" "session: KDE on wayland, kwin 6.8.2" "status: the session line in Plasma"
 run "no command" 2 --
 want "$tmp/out" "usage:" "no command"
+
+# 9. status outside Plasma, on a machine without KWin: every line says something (the
+# session line was "session: ? on ?, ", ending in the comma)
+mkdir -p "$tmp/bare"
+for t in sh sed grep head dirname id; do ln -s "$(command -v $t)" "$tmp/bare/$t"; done
+bare () {   # name, [VAR=value ...]: status with nothing of Plasma in PATH or the environment
+    name=$1; shift
+    # shellcheck disable=SC2086
+    env -i PATH="$tmp/bare" HOME="$home" "$@" sh "$script" status > "$tmp/out" 2> "$tmp/err"
+    is "$name: exit status 0" $? = 0
+    if grep -q -e '?' -e '[,:] *$' "$tmp/out" || [ -s "$tmp/err" ]; then
+        fails=$((fails + 1))
+        echo "FAIL: $name: a line with '?', or one that ends in a comma or colon, or an error:"
+        sed 's/^/    | /' "$tmp/out" "$tmp/err"
+    fi
+}
+bare "status, no session"
+want "$tmp/out" "session: no desktop named (XDG_CURRENT_DESKTOP and XDG_SESSION_TYPE are not set), no KWin (kwin_wayland was not found)" "status, no session"
+want "$tmp/out" "this is not a KDE Plasma session" "status, no session"
+want "$tmp/out" "not installed" "status, no session"
+bare "status, another desktop" XDG_CURRENT_DESKTOP=sway XDG_SESSION_TYPE=wayland
+want "$tmp/out" "session: sway on wayland, no KWin (kwin_wayland was not found)" "status, another desktop"
+want "$tmp/out" "this is not a KDE Plasma session" "status, another desktop"
+bare "status, only the desktop named" XDG_CURRENT_DESKTOP=KDE
+want "$tmp/out" "session: KDE (XDG_SESSION_TYPE is not set), no KWin" "status, only the desktop named"
 
 if [ $fails != 0 ]; then
     echo "$fails check(s) failed"

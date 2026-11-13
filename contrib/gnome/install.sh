@@ -50,6 +50,21 @@ check_session() {
 	fi
 }
 
+# the session as its environment names it, "GNOME on wayland"; what is not named is said so
+session_words() {
+	d=${XDG_CURRENT_DESKTOP:-}
+	t=${XDG_SESSION_TYPE:-}
+	if [ -n "$d" ] && [ -n "$t" ]; then
+		printf '%s\n' "$d on $t"
+	elif [ -n "$d" ]; then
+		printf '%s\n' "$d (XDG_SESSION_TYPE is not set)"
+	elif [ -n "$t" ]; then
+		printf '%s\n' "no desktop named (XDG_CURRENT_DESKTOP is not set) on $t"
+	else
+		printf '%s\n' "no desktop named (XDG_CURRENT_DESKTOP and XDG_SESSION_TYPE are not set)"
+	fi
+}
+
 # the versions of GNOME Shell the extension lists (GNOME Shell loads it on those only)
 listed() { sed -n 's/.*"shell-version"[^[]*\[\([^]]*\)\].*/\1/p' "$1/metadata.json" | tr -d '" '; }
 lists_this_shell() {
@@ -131,7 +146,18 @@ uninstall)
 	say "stops one that still runs)."
 	;;
 status)
-	say "session: ${XDG_CURRENT_DESKTOP:-?} on ${XDG_SESSION_TYPE:-?}, GNOME Shell $(shell_version)"
+	# (without GNOME Shell and outside a session the line read "session: ? on ?, GNOME Shell ")
+	v=$(shell_version)
+	if [ -n "$v" ]; then
+		v="GNOME Shell $v"
+	else
+		command -v gnome-shell >/dev/null 2>&1 && v="gnome-shell gave no version" || v="no GNOME Shell (gnome-shell was not found)"
+	fi
+	say "session: $(session_words), $v"
+	case ":${XDG_CURRENT_DESKTOP:-}:" in
+	*:GNOME:* | *:GNOME-Classic:* | *:ubuntu:* | *:Unity:*) ;;
+	*) say "  this is not a GNOME session: the extension is for GNOME Shell on Wayland, elsewhere WalPE needs none" ;;
+	esac
 	if installed; then
 		say "extension \"WalPE\": installed ($dest), lists GNOME Shell $(listed "$dest" | sed 's/,/, /g')"
 		lists_this_shell "$dest" || say "  this version is not in that list: GNOME Shell does not load it"
