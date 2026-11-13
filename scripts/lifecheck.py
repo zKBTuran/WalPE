@@ -148,7 +148,10 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             (the clip is made here); skipped without one.
   settings  what `walpe-ctl set` answers and what status and config.json
             hold afterwards: video_backend=mpv is stored and status shows
-            the video backend that plays (ffmpeg).
+            the video backend that plays (ffmpeg); a request with one
+            value that is not allowed is refused as a whole - the keys in
+            front of the bad one are not applied, for every key that
+            refuses values.
   diag      the text of `walpe-ctl diag` names no folder of a wallpaper
             that lies outside the home directory, also in the reason a
             load failed (a broken scene, a folder with a blank in its
@@ -2965,6 +2968,71 @@ def case_settings(env, W):
     rcode, rep = env.ctl("set", "video_backend=ffmpeg")
     check(rcode == 0 and "video_backend_note" not in (rep or {}) and saved().get("video_backend") == "ffmpeg",
           "settings: video_backend=ffmpeg is stored without a note", rep)
+
+    # One value that is not allowed: the whole request is refused and nothing of it is
+    # applied - not the keys in front of the bad one either (they were, and were saved,
+    # and the reply did not say so). Each request names a setting that would change
+    # first, then the value that is refused; status and config.json are read around it.
+    watch = ("fps", "volume", "mute", "pause_covered", "focus_action", "particle_density", "quality_preset",
+             "render_scale", "gpu", "we_assets", "scale_filter", "config_serial")
+
+    def view():
+        st = env.state()
+        try:
+            text = open(env.config).read()
+        except OSError:
+            text = None
+        return {k: st.get(k) for k in watch}, text
+
+    env.ctl("set", "fps=30", "volume=0.5", "mute=off", "preset=high", "covered=off")
+    refused = (
+        (("fps=31", "focus=sideways"), "focus_action"),
+        (("fps=32", "particle_density=3"), "particle_density"),
+        (("volume=0.9", "preview_anim=sometimes"), "preview_anim"),
+        (("mute=on", "particle_lowres=some"), "particle_lowres"),
+        (("covered=on", "hwdec=va api"), "video_hwdec"),
+        (("fps=33", "video_upload=fast"), "video_upload"),
+        (("fps=34", "fx_quality=best"), "fx_quality"),
+        (("fps=35", "fluid_quality=ultra"), "fluid_quality"),
+        (("fps=36", "steam_user=a b"), "steam_user"),
+        (("fps=37", "wayland_pointer=on"), "wayland_pointer"),
+        (("fps=38", "gl_api=vulkan"), "gl_api"),
+        (("fps=39", "backend=mir"), "backend"),
+        # ... what only the running daemon can tell
+        (("preset=low", "present=bogus"), "present"),           # the preset was in force unsaved
+        # (walpe-ctl checks the quality knobs itself and sends nothing: straight to the socket)
+        ({"cmd": "set", "fps": 40, "quality_preset": "best"}, "quality_preset"),
+        ({"cmd": "set", "scale_filter": "nearest", "fx_rate": 99}, "fx_rate"),
+        (("fps=41", "resolution=bogus"), "resolution"),
+        (("preset=low", "gpu=no-such-device-here"), "gpu"),
+        (("fps=42", "we_assets=" + os.path.join(env.tmp, "no-assets-here")), "we_assets"),
+        (("fps=43", "coverd=off"), "coverd"),                   # the unknown key, as before
+    )
+    for args, key in refused:
+        before = view()
+        if isinstance(args, dict):
+            rep = env.ipc(args)
+            rcode = 3 if rep and rep.get("ok") is False else 0
+            what = json.dumps(args)
+        else:
+            rcode, rep = env.ctl("set", *args)
+            what = "set " + " ".join(args)
+        err = (rep or {}).get("error", "")
+        after = view()
+        check(rcode == 3 and key in err and "nothing was changed" in err,
+              f"settings: {what} is refused, names {key} and says that nothing was changed", rep)
+        check(before == after and before[1] is not None,
+              "settings: ... and nothing was: status and config.json are as before",
+              {k: (before[0][k], after[0][k]) for k in watch if before[0][k] != after[0][k]} or "config.json differs")
+    # a request whose values are all allowed is applied as a whole
+    rcode, rep = env.ctl("set", "fps=44", "focus=limit", "particle_density=50", "preset=low", "preview_anim=hover")
+    st = env.state()
+    c = saved()
+    check(rcode == 0 and (rep or {}).get("ok") is True and st.get("fps") == 44 and st.get("focus_action") == "limit" and
+          st.get("particle_density") == 50 and st.get("quality_preset") == "low" and st.get("preview_anim") == "hover" and
+          c.get("fps") == 44 and c.get("focus_action") == "limit" and c.get("particle_density") == 50,
+          "settings: a request with several allowed values is applied and saved as a whole",
+          (rep, {k: st.get(k) for k in ("fps", "focus_action", "particle_density", "quality_preset", "preview_anim")}))
 
 
 # --------------------------------------------------------------------- diag

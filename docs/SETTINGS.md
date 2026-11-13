@@ -21,9 +21,11 @@ change is in effect in the running daemon all the same, the reply to the request
 the reason as `save_error` (`walpe-ctl` prints it) and `walpe-ctl status` shows
 `config_save_error` until a save succeeds.
 
-`walpe-ctl set` checks every pair before anything changes: one unknown key or one value of
-the wrong kind and the whole request is refused. A switch takes `on` / `off` (also `true` /
-`false` / `yes` / `no`).
+`walpe-ctl set` checks every pair before anything changes: one unknown key, one value of
+the wrong kind or one value its key does not allow (`focus=sideways`, a GPU that is not
+there) and the whole request is refused - the reply names the pair and ends with "nothing
+was changed", `walpe-ctl` exits with 3, and the pairs in front of it are not applied
+either. A switch takes `on` / `off` (also `true` / `false` / `yes` / `no`).
 
 ## config.json
 

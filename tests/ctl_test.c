@@ -18,7 +18,10 @@
  *     came, byte for byte, in the "C" locale and in a UTF-8 one;
  *  3. common/setkeys.h: an unknown member or a value of the wrong type
  *     refuses the whole request, and every member the daemon's ipc_set ()
- *     reads is in the table (read from the source file). */
+ *     reads is in the table (read from the source file);
+ *     common/setvalues.h: so does a value its key does not allow, whatever
+ *     stands in front of it in the request - and in the daemon's source
+ *     every check comes before the first change. */
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <string.h>
@@ -30,6 +33,7 @@
 #include "common/config.h"
 #include "common/ipc.h"
 #include "common/setkeys.h"
+#include "common/setvalues.h"
 #include "common/quality.h"
 #include "common/util.h"
 
@@ -799,6 +803,38 @@ static void scan_daemon (const char *path)
     }
     CHECK (found > 40);     /* the scan saw the functions */
 
+    /* and "set" changes nothing before every check has passed: in
+     * ipc_set_keys () the three checks and the render resolution's stand in
+     * front of gpu_ipc_set () - which checks its own value and changes
+     * nothing when it refuses -, and that in front of the first line that
+     * writes a setting or applies the quality knobs. (A key that refuses a
+     * value in its own branch, behind others, leaves those applied.) */
+    {
+        const char *a = strstr (txt, heads[0]);
+        const char *z = a ? strstr (a, "\n}\n") : NULL;
+        char *body = a && z ? g_strndup (a, (gsize) (z - a)) : g_strdup ("");
+        const char *c1 = strstr (body, "walpe_set_check (o)");
+        const char *c2 = strstr (body, "walpe_set_values_check (o)");
+        const char *c3 = strstr (body, "ipc_set_refused (o,");
+        const char *c4 = strstr (body, "res_set_parse (o,");
+        const char *gpu = strstr (body, "gpu_ipc_set (o,");
+        const char *first = NULL;
+        static const char *const writes[] = { "D.cfg->", "walpe_quality_ipc_set (", "res_changes_apply (",
+                                              "present_apply_spec (", "walpe_frame_align_set (" };
+        for (guint i = 0; i < G_N_ELEMENTS (writes); i++) {
+            /* (a read of D.cfg-> is no change; none stands in front of the checks either) */
+            const char *w = strstr (body, writes[i]);
+            if (w && (!first || w < first))
+                first = w;
+        }
+        CHECK (c1 && c2 && c3 && c4 && gpu && first);
+        CHECK (c1 && c2 && c1 < c2);
+        CHECK (c2 && c3 && c2 < c3);
+        CHECK (c3 && c4 && gpu && c3 < gpu && c4 < gpu);
+        CHECK (gpu && first && gpu < first);
+        g_free (body);
+    }
+
     /* and status shows every setting "set" takes, under the name it is set
      * by: a change could be made and saved that no `walpe-ctl status`
      * showed (pause_covered, parallax, focus_fps ...) */
@@ -927,6 +963,9 @@ static char *check_json (const char *req)
 {
     JsonNode *n = wpj_parse_data (req, -1);
     char *e = n && JSON_NODE_HOLDS_OBJECT (n) ? walpe_set_check (json_node_get_object (n)) : g_strdup ("?");
+    /* as the daemon asks: the members and their types, then the values */
+    if (!e)
+        e = walpe_set_values_check (json_node_get_object (n));
     if (n)
         json_node_unref (n);
     return e;
@@ -1145,6 +1184,48 @@ table:
     TAKEN ("{\"cmd\":\"set\",\"skip_hidden\":\"2\"}");          /* as walpe-ctl sends skip_hidden=2 */
     TAKEN ("{\"cmd\":\"set\",\"video_backend\":\"ffmpeg\"}");
     TAKEN ("{\"cmd\":\"set\",\"video_backend\":\"mpv\"}");
+    /* A value its key does not allow: refused before anything is changed,
+     * wherever it stands in the request (common/setvalues.h). The daemon
+     * found these in the branch that applies the key, with the keys in front
+     * of it applied and saved: `set fps=31 focus=sideways` was refused and
+     * the frame rate limit was 31. */
+    REFUSED ("{\"cmd\":\"set\",\"fps\":31,\"focus_action\":\"sideways\"}", "focus_action: run, limit or pause; nothing was changed");
+    REFUSED ("{\"cmd\":\"set\",\"fps\":32,\"particle_density\":\"3\"}", "particle_density: a percentage from 5 to 100; nothing was changed");
+    REFUSED ("{\"cmd\":\"set\",\"particle_density\":101}", "particle_density:");
+    REFUSED ("{\"cmd\":\"set\",\"particle_density\":\"many\"}", "particle_density:");
+    REFUSED ("{\"cmd\":\"set\",\"particle_density\":true}", "particle_density:");
+    TAKEN ("{\"cmd\":\"set\",\"particle_density\":5}");
+    TAKEN ("{\"cmd\":\"set\",\"particle_density\":\"100\"}");
+    REFUSED ("{\"cmd\":\"set\",\"volume\":0.5,\"preview_anim\":\"sometimes\"}", "preview_anim: always, hover or off; nothing was changed");
+    REFUSED ("{\"cmd\":\"set\",\"preview_anim\":3}", "preview_anim:");
+    TAKEN ("{\"cmd\":\"set\",\"preview_anim\":\"Hover\"}");
+    TAKEN ("{\"cmd\":\"set\",\"preview_anim\":true}");
+    REFUSED ("{\"cmd\":\"set\",\"pause_covered\":false,\"particle_lowres\":\"some\"}", "particle_lowres: off, auto or all; nothing was changed");
+    REFUSED ("{\"cmd\":\"set\",\"particle_lowres\":2}", "particle_lowres:");
+    TAKEN ("{\"cmd\":\"set\",\"particle_lowres\":\"2\"}");      /* as walpe-ctl sends it */
+    TAKEN ("{\"cmd\":\"set\",\"particle_lowres\":false}");
+    REFUSED ("{\"cmd\":\"set\",\"mute\":true,\"video_hwdec\":\"va api\"}", "video_hwdec: off, auto, or the name of one decoding API");
+    REFUSED ("{\"cmd\":\"set\",\"video_hwdec\":null}", "video_hwdec:");
+    TAKEN ("{\"cmd\":\"set\",\"video_hwdec\":\"vaapi\"}");
+    TAKEN ("{\"cmd\":\"set\",\"video_hwdec\":true}");
+    TAKEN ("{\"cmd\":\"set\",\"video_hwdec\":\"off\"}");
+    REFUSED ("{\"cmd\":\"set\",\"fps\":30,\"video_upload\":\"fast\"}", "video_upload: legacy, pbo, pbodata, persist or direct");
+    REFUSED ("{\"cmd\":\"set\",\"video_upload\":\"hold\"}", "video_upload:");          /* a measuring aid, no setting */
+    TAKEN ("{\"cmd\":\"set\",\"video_upload\":\"pbo+pingpong\"}");
+    REFUSED ("{\"cmd\":\"set\",\"fx_specialize\":true,\"fx_quality\":\"best\"}", "fx_quality: exact or fast; nothing was changed");
+    TAKEN ("{\"cmd\":\"set\",\"fx_quality\":\"fast\"}");
+    TAKEN ("{\"cmd\":\"set\",\"fx_quality\":\"best\",\"fx_fast\":true}");   /* fx_fast decides, as in ipc_fx_keys */
+    REFUSED ("{\"cmd\":\"set\",\"fluid_sim\":true,\"fluid_quality\":\"ultra\"}", "fluid_quality: full, reduced or low; nothing was changed");
+    TAKEN ("{\"cmd\":\"set\",\"fluid_quality\":\"Reduced\"}");
+    REFUSED ("{\"cmd\":\"set\",\"fps\":30,\"steam_user\":\"a b\"}", "steam_user: Steam account names");
+    TAKEN ("{\"cmd\":\"set\",\"steam_user\":\"\"}");             /* "" = none */
+    REFUSED ("{\"cmd\":\"set\",\"fps\":30,\"backend\":\"mir\"}", "backend: auto, x11 or wayland; nothing was changed");
+    REFUSED ("{\"cmd\":\"set\",\"fps\":30,\"wayland_pointer\":\"on\"}", "wayland_pointer: auto or off; nothing was changed");
+    TAKEN ("{\"cmd\":\"set\",\"wayland_pointer\":\"OFF\"}");
+    REFUSED ("{\"cmd\":\"set\",\"fps\":30,\"gl_api\":\"vulkan\"}", "gl_api: auto, gl or gles; nothing was changed");
+    TAKEN ("{\"cmd\":\"set\",\"gl_api\":\"gles\"}");
+    REFUSED ("{\"cmd\":\"set\",\"fps\":30,\"present\":\"vsync,HDMI-0=fast\"}", "present: \"HDMI-0=fast\" is not understood");
+    TAKEN ("{\"cmd\":\"set\",\"present\":\"auto,HDMI-0=limiter\"}");
     /* every quality key walpe-ctl knows is a member the daemon takes */
     static const char *const qk[] = { "preset", "quality_preset", "fx_rate", "fx_rate_mode", "fx_res",
                                       "fps_idle", "post", "post_processing", "render_scale", "scale",

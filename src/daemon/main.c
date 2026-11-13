@@ -5549,6 +5549,7 @@ static gboolean sound_props_apply (const char *wp)
 
 #include "layers_ipc.h"   /* "layers" / "layeradj": ipc_layers, ipc_layeradj */
 #include "common/setkeys.h"   /* "set": the members it may carry (walpe_set_check) */
+#include "common/setvalues.h"   /* walpe_set_values_check: the values of a "set" request */
 
 /* setprop / setprops: the keys of the request that wallpaper wp does not
  * declare (project.json, a preset's base item, WalPE's built-in options),
@@ -6913,16 +6914,109 @@ static void ipc_set (JsonBuilder *b, JsonObject *o)
     reload_flush ();
 }
 
+/* "software_render" / "software_threads" of a set request: the values it
+ * asks for (those in force where it names none), and whether the renderer
+ * that runs has to change for them - a restart in place. */
+static gboolean sw_set_wanted (JsonObject *o, gboolean *render, int *threads)
+{
+    gboolean sr = wpj_bool (o, "software_render", D.cfg->software_render);
+    int st = D.cfg->software_threads;
+    if (json_object_has_member (o, "software_threads")) {
+        JsonNode *n = json_object_get_member (o, "software_threads");
+        double v = st;
+        if (JSON_NODE_HOLDS_VALUE (n) && json_node_get_value_type (n) == G_TYPE_STRING) {
+            const char *t = json_node_get_string (n);   /* walpe-ctl sends text */
+            v = !g_strcmp0 (t, "auto") ? 0.0 : g_ascii_strtod (t ? t : "", NULL);
+        } else {
+            v = wpj_num (o, "software_threads", st);
+        }
+        /* "nan" is a number to g_ascii_strtod and passes CLAMP as it
+         * is: the cast was undefined (-2147483648 went into the config) */
+        st = v >= 0.0 ? (int) MIN (v, 32.0) : 0;
+    }
+    *render = sr;
+    *threads = st;
+    return (!Sw.env_forced && sr != Sw.wanted) ||
+           (Sw.active && st != D.cfg->software_threads && !g_getenv ("LP_NUM_THREADS"));
+}
+
+/* What only the running daemon can say about a set request, asked before
+ * anything is changed like the checks of common/setkeys.h and
+ * common/setvalues.h: the quality knobs against the values in force, a
+ * window system this build does not have, a folder that is no Wallpaper
+ * Engine assets folder (*we_assets: the folder as it will be stored, NULL
+ * for "" = find it), a restart in place that cannot be made while an
+ * import or a download runs. NULL = nothing against it, else the sentence
+ * for the reply (g_free). ("gpu" is checked by gpu_ipc_set, which
+ * ipc_set_keys calls in front of every other change.) */
+static char *ipc_set_refused (JsonObject *o, gboolean busy, char **we_assets)
+{
+    {
+        WalpeQuality q = D.cfg->quality;
+        guint given = 0;
+        char *qerr = NULL;
+        if (!walpe_quality_from_json (o, &q, &given, NULL, &qerr)) {
+            char *msg = g_strdup_printf ("%s" WALPE_SET_UNCHANGED, qerr ? qerr : "quality setting not allowed");
+            g_free (qerr);
+            return msg;
+        }
+    }
+    if (ipc_has_str (o, "backend")) {
+        int bk = walpe_backend_parse (wpj_str (o, "backend", ""), -1);
+        if (bk >= 0 && bk != WALPE_BACKEND_AUTO && !walpe_platform_built (bk))
+            return g_strdup_printf (
+                "backend: this build has no %s backend (built: %s)" WALPE_SET_UNCHANGED, walpe_backend_name (bk),
+                walpe_backends_built (walpe_platform_built (WALPE_BACKEND_X11),
+                                      walpe_platform_built (WALPE_BACKEND_WAYLAND)));
+    }
+    if (ipc_has_str (o, "we_assets")) {
+        /* "" = auto-detect; a dir must be a WE assets dir or install root */
+        const char *wa = wpj_str (o, "we_assets", "");
+        *we_assets = *wa ? walpe_we_assets_check (wa) : NULL;
+        if (*wa && !*we_assets)
+            return g_strdup ("we_assets: not a Wallpaper Engine assets dir (expected shaders/, "
+                             "effects/ or materials/ in it, or an install root with assets/)"
+                             WALPE_SET_UNCHANGED);
+    }
+    if (busy) {
+        gboolean sr;
+        int st;
+        WalpeGlApiPref ga;
+        if ((json_object_has_member (o, "software_render") || json_object_has_member (o, "software_threads")) &&
+            sw_set_wanted (o, &sr, &st))
+            return g_strdup ("software_render: the engine has to restart for this and an import / "
+                             "Workshop download is running; change it when that has finished"
+                             WALPE_SET_UNCHANGED);
+        if (ipc_has_str (o, "gl_api") && walpe_gl_api_parse (wpj_str (o, "gl_api", ""), &ga) &&
+            !Ga.env_forced && ga != Ga.pref)
+            return g_strdup ("gl_api: the engine has to restart for this and an import / "
+                             "Workshop download is running; change it when that has finished"
+                             WALPE_SET_UNCHANGED);
+    }
+    return NULL;
+}
+
 static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
 {
     gboolean changed = FALSE;
     gboolean backend_saved = FALSE;     /* "backend" changed: in force at the next start */
+    const gboolean busy = (Imp.job && Imp.active) || (Ws.job && Ws.active);
+    g_autofree char *we_assets = NULL;  /* "we_assets" as checked (ipc_set_refused) */
     {
-        /* a member this build does not know (a typo, a newer client) or a
-         * value of the wrong type for its key: refused as a whole, before
-         * anything is changed (common/setkeys.h; it used to be dropped
-         * without a word while the rest was applied) */
+        /* a member this build does not know (a typo, a newer client), a
+         * value of the wrong type for its key or a value its key does not
+         * allow: refused as a whole, before anything is changed
+         * (common/setkeys.h, common/setvalues.h, ipc_set_refused). An
+         * unknown member used to be dropped without a word while the rest
+         * was applied; a value that was not allowed ended the request at
+         * its key, with the keys in front of it applied and saved and
+         * nothing in the reply to say so (`set fps=31 focus=sideways`:
+         * refused, and the frame rate limit was 31). */
         char *bad = walpe_set_check (o);
+        if (!bad)
+            bad = walpe_set_values_check (o);
+        if (!bad)
+            bad = ipc_set_refused (o, busy, &we_assets);
         if (bad) {
             jb_fail (b, bad);
             g_free (bad);
@@ -6938,12 +7032,33 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
     {
         char *rerr = NULL;
         if (!res_set_parse (o, res_ch, res_notes, &rerr)) {
-            jb_fail (b, rerr ? rerr : "resolution setting not allowed");
+            char *msg = g_strdup_printf ("%s" WALPE_SET_UNCHANGED, rerr ? rerr : "resolution setting not allowed");
+            jb_fail (b, msg);
+            g_free (msg);
             g_free (rerr);
             g_array_unref (res_ch);
             g_string_free (res_notes, TRUE);
             return;
         }
+    }
+    gboolean gpu_restart = FALSE;
+    g_autofree char *gpu_note = NULL;   /* a sentence for the reply */
+    if (json_object_has_member (o, "gpu") || json_object_has_member (o, "preset_follow_gpu")) {
+        /* which GPU renders: saved, and the daemon restarts in place when
+         * another device has to render (the drivers read their variables
+         * when EGL starts). In front of every other change: gpu_ipc_set
+         * checks its value against the list of devices and changes nothing
+         * when it refuses - behind the other keys, a device that does not
+         * exist left those applied. */
+        char *gerr = NULL;
+        if (!gpu_ipc_set (o, busy, &gpu_restart, &gpu_note, &gerr)) {
+            jb_fail (b, gerr ? gerr : "gpu: not allowed");
+            g_free (gerr);
+            g_array_unref (res_ch);
+            g_string_free (res_notes, TRUE);
+            return;
+        }
+        changed = TRUE;
     }
     {
         /* quality knobs (quality_preset, fx_rate, fx_rate_mode, fx_res,
@@ -6952,6 +7067,7 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
         guint given = 0, diff = 0;
         char *qerr = NULL;
         if (!walpe_quality_ipc_set (D.cfg, o, &given, &diff, &qerr)) {
+            /* (a guard: ipc_set_refused has asked the same before anything changed) */
             jb_fail (b, qerr ? qerr : "quality setting not allowed");
             g_free (qerr);
             g_array_unref (res_ch);
@@ -7073,25 +7189,10 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
         /* "Render on CPU" and its thread count: saved, and the daemon
          * restarts in place when the running renderer has to change
          * (libglvnd picks the GL implementation once per process) */
-        gboolean sr = wpj_bool (o, "software_render", D.cfg->software_render);
-        int st = D.cfg->software_threads;
-        if (json_object_has_member (o, "software_threads")) {
-            JsonNode *n = json_object_get_member (o, "software_threads");
-            double v = st;
-            if (JSON_NODE_HOLDS_VALUE (n) && json_node_get_value_type (n) == G_TYPE_STRING) {
-                const char *t = json_node_get_string (n);   /* walpe-ctl sends text */
-                v = !g_strcmp0 (t, "auto") ? 0.0 : g_ascii_strtod (t ? t : "", NULL);
-            } else {
-                v = wpj_num (o, "software_threads", st);
-            }
-            /* "nan" is a number to g_ascii_strtod and passes CLAMP as it
-             * is: the cast was undefined (-2147483648 went into the config) */
-            st = v >= 0.0 ? (int) MIN (v, 32.0) : 0;
-        }
-        gboolean need = (!Sw.env_forced && sr != Sw.wanted) ||
-                        (Sw.active && st != D.cfg->software_threads &&
-                         !g_getenv ("LP_NUM_THREADS"));
-        if (need && ((Imp.job && Imp.active) || (Ws.job && Ws.active))) {
+        gboolean sr;
+        int st;
+        gboolean need = sw_set_wanted (o, &sr, &st);
+        if (need && busy) {     /* (a guard: ipc_set_refused has said so before anything changed) */
             jb_fail (b, "software_render: the engine has to restart for this and an import / "
                         "Workshop download is running; change it when that has finished");
             return;
@@ -7116,23 +7217,6 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
             g_message ("software rendering setting is back to what runs: no restart");
         }
     }
-    gboolean gpu_restart = FALSE;
-    if (json_object_has_member (o, "gpu") || json_object_has_member (o, "preset_follow_gpu")) {
-        /* which GPU renders: saved, and the daemon restarts in place when
-         * another device has to render (the drivers read their variables
-         * when EGL starts) */
-        char *gnote = NULL, *gerr = NULL;
-        if (!gpu_ipc_set (o, (Imp.job && Imp.active) || (Ws.job && Ws.active), &gpu_restart,
-                          &gnote, &gerr)) {
-            jb_fail (b, gerr ? gerr : "gpu: not allowed");
-            g_free (gerr);
-            return;
-        }
-        if (gnote)
-            jb_str (b, "gpu_note", gnote);
-        g_free (gnote);
-        changed = TRUE;
-    }
     if (json_object_has_member (o, "gl_api")) {
         /* desktop OpenGL or OpenGL ES: saved, and the daemon restarts in
          * place when what runs was decided by another value (the API of
@@ -7143,7 +7227,7 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
             return;
         }
         gboolean need = !Ga.env_forced && ga != Ga.pref;
-        if (need && ((Imp.job && Imp.active) || (Ws.job && Ws.active))) {
+        if (need && busy) {
             jb_fail (b, "gl_api: the engine has to restart for this and an import / "
                         "Workshop download is running; change it when that has finished");
             return;
@@ -7304,7 +7388,9 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
         else
             mode = walpe_particle_lowres_from_name (wpj_str (o, "particle_lowres", NULL), -1);
         if (mode < 0) {
-            if (changed)    /* the keys before this one were applied: keep them */
+            /* (a guard, here and at the keys below that refuse a value:
+             * walpe_set_values_check has refused it before anything changed) */
+            if (changed)
                 walpe_config_save (D.cfg);
             jb_fail (b, "particle_lowres: off, auto or all");
             return;
@@ -7413,7 +7499,7 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
         else
             ok = FALSE;
         if (!ok) {
-            if (changed)    /* the keys before this one were applied: keep them */
+            if (changed)
                 walpe_config_save (D.cfg);
             jb_fail (b, "video_hwdec: off, auto, or the name of one decoding API (vaapi, cuda, "
                         "vdpau, vulkan, drm, v4l2m2m, ...)");
@@ -7556,7 +7642,7 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
     if (ipc_has_str (o, "steam_user")) {
         const char *su = wpj_str (o, "steam_user", "");
         if (*su && !walpe_workshop_valid_user (su)) {
-            if (changed)    /* the keys before this one were applied: keep them */
+            if (changed)
                 walpe_config_save (D.cfg);
             jb_fail (b, "steam_user: Steam account names are letters, digits and _");
             return;
@@ -7567,15 +7653,8 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
     }
     if (ipc_has_str (o, "we_assets")) {
         /* "" = auto-detect; a dir must be a WE assets dir or install root */
-        const char *wa = wpj_str (o, "we_assets", "");
-        char *chk = *wa ? walpe_we_assets_check (wa) : NULL;
-        if (*wa && !chk) {
-            if (changed)
-                walpe_config_save (D.cfg);
-            jb_fail (b, "we_assets: not a Wallpaper Engine assets dir (expected shaders/, "
-                        "effects/ or materials/ in it, or an install root with assets/)");
-            return;
-        }
+        /* (checked by ipc_set_refused before anything changed) */
+        char *chk = g_steal_pointer (&we_assets);
         g_free (D.cfg->we_assets);
         D.cfg->we_assets = chk;
         walpe_we_assets_set_configured (chk);
@@ -7655,6 +7734,8 @@ static void ipc_set_keys (JsonBuilder *b, JsonObject *o)
         }
         if (res_note)
             jb_str (b, "note", res_note);
+        if (gpu_note)
+            jb_str (b, "gpu_note", gpu_note);
         if (mpv_word)
             jb_str (b, "video_backend_note", "stored; mpv means the same as " WALPE_VIDEO_BACKEND
                                              ": FFmpeg is the one video backend, and status shows "
