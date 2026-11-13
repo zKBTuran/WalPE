@@ -160,12 +160,19 @@ apt install build-essential meson ninja-build pkg-config python3 \
 ```
 
 At run time, besides what that section names (`ffmpeg`, a sound server, the GStreamer
-plugins): **`librsvg2-common`**. It is gdk-pixbuf's SVG loader, which `libgtk-4-1` only
-recommends, so a system set up without recommended packages lacks it. Without it the
-window `walpe` ends with a segmentation fault as it starts on X11, once WalPE's icon
-(`walpe.svg`) is where the icon theme finds it, which is where `meson install` puts it
-(the backtrace is a recursion without end inside `libgtk-4.so.1`, 4.18.6). Seen in the
-chroot above; with the package installed, or without the icon, the window starts.
+plugins): **`librsvg2-common`**, for the window's icon. It is gdk-pixbuf's SVG loader,
+which `libgtk-4-1` only recommends, so a system set up without recommended packages lacks
+it, and GTK 4.18 draws an SVG icon with nothing else. Without it the window `walpe` works,
+and what it hands a task bar on X11 as its icon is GTK's stand-in for a picture it cannot
+show instead of `walpe.svg` (tried with the icon where `meson install` puts it, in
+`/usr/share/icons/hicolor/scalable/apps` and under `/usr/local/share`, in a second chroot
+with only the libraries the window needs).
+
+(The test `ui-life` did end with a segmentation fault of the window in the chroot above
+before `librsvg2-common` was installed there. That was the test's doing: it gave the icon
+theme a directory with a hicolor `index.theme` of its own, which hid every icon GTK brings
+along, and GTK 4.18.6 looks up its stand-in by calling the same function again when it is
+not found, without end. The test no longer writes that file.)
 
 The tests that need a display were run on Xvfb and on a headless sway (`xvfb`, `sway`,
 `dbus-daemon`, `x11-xserver-utils` for `xrandr`, `xdotool`, `grim`, `procps`): the
