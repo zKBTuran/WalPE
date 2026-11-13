@@ -11,7 +11,8 @@ makes.
 > **State of testing.** Measured against PulseAudio 16.1 and against PipeWire 1.0.5
 > (`pipewire-pulse`, WirePlumber 0.4.17) with a null sink, by recording the sink's monitor
 > and analysing the recording: no loudspeaker, no sound card (so no drift against a device
-> clock). Web wallpapers also against PipeWire 1.6.11 with WirePlumber 0.5.19. The
+> clock). Web wallpapers, and a video's sound over pauses and resumes, also against
+> PipeWire 1.6.11 with WirePlumber 0.5.19. The
 > maintainer has heard scene sound on his own machine with 0.14.0.
 
 ## Hearing something
@@ -98,6 +99,21 @@ server still refuses is asked for again at once (up to four times, 10 ms apart),
 layer does not stay silent for those 5 seconds. A layer waits while the others get their
 streams; only behind a stream the server has not answered for a quarter of a second it
 plays into nothing meanwhile and asks for its turn again a quarter of a second later.
+
+No call into the sound server waits for ever. A new stream has 8 seconds; a write gives up
+after 4 seconds in which the server took nothing; when a layer falls silent (a pause, a
+covered monitor, mute) the server plays out what the stream holds and is waited for for
+one second more than that takes. A stream that runs out of time is given up without
+another word to it, and a new one is opened with the next sound - at once when it was the
+stream that stalled; after the usual 5 seconds when the new one stalls as well (a sink
+that is suspended takes nothing from any stream) or when none is given. For a stream that
+was played out and is then used again - a resume within two seconds of the pause - the
+limit is 0.3 seconds until the server asks for more sound for the first time:
+`pipewire-pulse` 1.0.5 (Ubuntu 24.04) now and then leaves such a stream standing - it
+takes what fits into it and never plays it, or does not answer the playing-out at all
+(about one pause in twenty to thirty here; not seen with PipeWire 1.6.11 or PulseAudio
+16.1). The wallpaper's sound is then back about half a second after the resume instead
+of at once; before these limits it was gone until the wallpaper was opened again.
 `WALPE_SOUND_SINK=<sink name>` plays into that sink instead of the default one;
 `WALPE_SOUND_NULL=1` plays into nothing (tests).
 

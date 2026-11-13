@@ -64,10 +64,10 @@ build needs are in the source tree (`protocols/`, see [Licence](#licence)), so n
 parts need no new library: graphics devices are read from sysfs, and VA-API, DRM and Vulkan
 devices go through FFmpeg's own interface.
 
-Three libraries are not linked: the daemon loads them by name when they are installed, and
-without one nothing but its use is missing (for the two X libraries with no message).
-`libpulse-simple.so.0` plays wallpaper sound; it is part of the libpulse the `audio` option
-needs. `libXss.so.1` tells
+Two libraries are not linked: the daemon loads them by name when they are installed, and
+without one nothing but its use is missing, with no message. (Wallpaper sound is played
+with the libpulse the `audio` option needs; `libpulse-simple.so.0`, which was loaded by
+name for it, is no longer used at run time.) `libXss.so.1` tells
 the X11 backend that the X screen saver is on, which pauses like a sleeping display
 (Debian and Ubuntu: `libxss1`, Arch: `libxss`). `libXfixes.so.3` reports the start and the
 end of a compositing manager to "pause when covered" on X11, which otherwise asks when a

@@ -636,6 +636,7 @@ core_srcs = files(
   'src/engine/bloom.c',
   'src/engine/camshake.c',
   'src/engine/scenesound.c',
+  'src/engine/scenesound_pulse.c',
   'src/engine/soundserver.c',
   'src/engine/video.c',
   'src/engine/modload.c',
@@ -978,7 +979,7 @@ if with_tests
 # wl_* symbol left, a build without the X11 backend and the X11 page host
 # (-Dx11=disabled, or no libX11 on the system) names no X library and has
 # no X function left, and no build's daemon names libpulse-simple (scene
-# sound loads it with its first stream). tests/linkage_test.sh reads the
+# sound makes its calls with libpulse itself). tests/linkage_test.sh reads the
 # two files with readelf and nm; skipped without them. No display, no daemon.
 linkage_deps = [daemon]
 if have_web
@@ -1387,7 +1388,7 @@ test('pkgsound', executable('pkgsound-test', 'tests/pkgsound_test.c',
   dependencies: [core_dep],
   install: false, build_by_default: false), env: ['WALPE_SOUND_NULL=1'], timeout: 180)
 # scene sound and the sound server (engine/scenesound.c, out_connect), with
-# stand-ins for the five functions of libpulse-simple: players that start
+# stand-ins for the five calls into it: players that start
 # together open their streams one at a time, one that is refused by a
 # server whose queue is full asks again in the same turn, a slow server
 # loses nobody, and a server that stops answering holds one player only.
@@ -1397,6 +1398,18 @@ if have_pulse
     include_directories: inc,
     dependencies: [core_dep],
     install: false, build_by_default: false), timeout: 120)
+  # the calls themselves (engine/scenesound_pulse.c: libpulse, each with a
+  # time limit) against a server that does not answer: a socket of the
+  # test's own that listens and says nothing; and a PulseAudio of the test's
+  # own with a null sink that is stopped (SIGSTOP) in the middle of a
+  # stream - write, drain, flush, a new stream come back within their
+  # limits, the stream is freed at once - and goes on. Nothing is heard, the
+  # user's server is not contacted; the second part is skipped where
+  # pulseaudio or pactl is not installed. No display.
+  test('scenesound-pulse', executable('scenesound-pulse-test', 'tests/scenesound_pulse_test.c',
+    include_directories: inc,
+    dependencies: [core_dep],
+    install: false, build_by_default: false), timeout: 180)
 endif
 # the decoders of compressed sound files (engine/sounddec.c, the part of
 # walpe-video.so that scene sound uses, compiled into the test): hostile

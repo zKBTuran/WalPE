@@ -22,9 +22,8 @@
 #include <math.h>
 #include <string.h>
 #ifdef HAVE_PULSE
-#include <pulse/simple.h>
+#include <pulse/simple.h>      /* (the type's name only: scenesound_pulse.c) */
 #include <pulse/error.h>
-#include <dlfcn.h>
 #include "scenesound_server.h"
 #endif
 
@@ -419,20 +418,27 @@ typedef struct {
     gboolean said;        /* that was reported */
     gboolean slot;        /* holds one of the process's streams (stream_take): from
                            * before the player opens a file until out_close */
+    gboolean drained;     /* the server has played all the stream was given (out_drain) */
     gint64 next_us;       /* null device: when the next block is due */
     gint64 retry_us;      /* nowhere: ask the server again then */
+    gint64 stall_us;      /* when a stream of this player last stalled (out_write); 0 = none did */
+    gboolean stall_said;  /* ... and that its successor stalled too was reported */
 } Out;
 
 #define SERVER_RETRY_US (5 * G_USEC_PER_SEC)
+/* a stream that stalls so soon after the one it replaced: not the stream */
+#define STALL_AGAIN_US (30 * G_USEC_PER_SEC)
 
 /* ---- the process's streams ----
  * Every player with an output has a connection of its own to the sound
- * server (pa_simple), and none of the calls into the server has a time
- * limit. Two things follow, and one count answers both:
+ * server, and a call into the server takes as long as the server lets it:
+ * up to the limits of scenesound_pulse.c (seconds; they had none, and a
+ * thread whose server did not answer one call stayed in it for good). Two
+ * things follow, and one count answers both:
  *  - a server takes a limited number of connections from all programs
  *    together (PulseAudio: 64). Two wallpapers with 32 sounding layers each
  *    left none for anything else;
- *  - a player whose thread is blocked in the server cannot be told to quit.
+ *  - a player whose thread is waiting in the server cannot be told to quit.
  *    Its group is freed without it (the thread is detached), and every
  *    load of a wallpaper added up to 32 such threads.
  * A player takes one of WALPE_SOUND_MAX_STREAMS slots before it opens a
@@ -479,13 +485,9 @@ static void server_error_set (const char *why)
     g_mutex_unlock (&err_lock);
 }
 
-/* libpulse-simple is loaded when the first stream is opened, not with the
- * program (as libXss in platform/x11.c): most wallpapers have no sound
- * layer, and a program that never plays one does not have the library
- * mapped. Only the five functions below come from it
- * (pa_strerror is libpulse's, which the audio capture links anyway). A
- * library that is not there is reported like a server that is not there:
- * the layer plays into nothing. */
+/* The five calls into the sound server: scenesound_pulse.c (libpulse, which
+ * the audio capture links anyway; each call with a time limit), or a test's
+ * stand-ins (walpe_sound_set_server_calls). */
 static struct {
     gsize once;
     gboolean ok;
@@ -497,21 +499,20 @@ static struct {
     int (*flush) (pa_simple *, int *);
 } Pas;
 
+static void server_calls_set (const WalpeSoundServerCalls *calls)
+{
+    Pas.new_stream = calls->new_stream;
+    Pas.free_stream = calls->free_stream;
+    Pas.write = calls->write;
+    Pas.drain = calls->drain;
+    Pas.flush = calls->flush;
+    Pas.ok = TRUE;
+}
+
 static gboolean pas_load (void)
 {
     if (g_once_init_enter (&Pas.once)) {
-        void *lib = dlopen ("libpulse-simple.so.0", RTLD_NOW | RTLD_LOCAL);
-        if (lib) {
-            Pas.new_stream = (pa_simple * (*) (const char *, const char *, pa_stream_direction_t, const char *,
-                                               const char *, const pa_sample_spec *, const pa_channel_map *,
-                                               const pa_buffer_attr *, int *))
-                dlsym (lib, "pa_simple_new");
-            Pas.free_stream = (void (*) (pa_simple *)) dlsym (lib, "pa_simple_free");
-            Pas.write = (int (*) (pa_simple *, const void *, size_t, int *)) dlsym (lib, "pa_simple_write");
-            Pas.drain = (int (*) (pa_simple *, int *)) dlsym (lib, "pa_simple_drain");
-            Pas.flush = (int (*) (pa_simple *, int *)) dlsym (lib, "pa_simple_flush");
-            Pas.ok = Pas.new_stream && Pas.free_stream && Pas.write && Pas.drain && Pas.flush;
-        }
+        server_calls_set (walpe_sound_pulse_calls ());
         g_once_init_leave (&Pas.once, 1);
     }
     return Pas.ok;
@@ -520,12 +521,7 @@ static gboolean pas_load (void)
 void walpe_sound_set_server_calls (const WalpeSoundServerCalls *calls)
 {
     if (g_once_init_enter (&Pas.once)) {
-        Pas.new_stream = calls->new_stream;
-        Pas.free_stream = calls->free_stream;
-        Pas.write = calls->write;
-        Pas.drain = calls->drain;
-        Pas.flush = calls->flush;
-        Pas.ok = TRUE;
+        server_calls_set (calls);
         g_once_init_leave (&Pas.once, 1);
     }
 }
@@ -631,7 +627,7 @@ static gboolean out_connect (Out *o, const char *name)
     const gboolean lib = pas_load ();
     /* (nowhere: the player is on the null device and keeps time there) */
     const gboolean busy = lib && !connect_turn_take (o->nowhere ? g_get_monotonic_time () + CONNECT_TURN_US : 0);
-    const char *why = "libpulse-simple.so.0 could not be loaded";
+    const char *why = "no calls into a sound server";
     if (busy) {
         why = "the sound server is busy with another stream";
     } else if (lib) {
@@ -683,25 +679,30 @@ static void out_set_nowhere (Out *o, gboolean nowhere)
         g_atomic_int_add (&n_nowhere, -1);
 }
 
-/* drain: what the server still holds is played to its end first */
-static void out_close (Out *o, gboolean drain)
+/* how: OUT_DRAIN = what the server still holds is played to its end first
+ * (not asked for again when out_drain has just had the answer); OUT_FLUSH =
+ * it is thrown away; OUT_DROP = the server is asked nothing: the stream did
+ * not answer the last call in time */
+enum { OUT_DROP, OUT_FLUSH, OUT_DRAIN };
+static void out_close (Out *o, int how)
 {
 #ifdef HAVE_PULSE
-    if (o->pa) {    /* (set by out_connect only: the library is loaded) */
-        if (drain)
+    if (o->pa) {    /* (set by out_connect only) */
+        if (how == OUT_DRAIN && !o->drained)
             Pas.drain (o->pa, NULL);
-        else
+        else if (how == OUT_FLUSH)
             Pas.flush (o->pa, NULL);
         Pas.free_stream (o->pa);
         o->pa = NULL;
         g_atomic_int_add (&n_real, -1);
     }
 #else
-    (void) drain;
+    (void) how;
 #endif
     out_set_nowhere (o, FALSE);
     o->rate = o->channels = 0;
     o->null_out = FALSE;
+    o->drained = FALSE;
     o->next_us = o->retry_us = 0;
     if (o->slot) {
         o->slot = FALSE;
@@ -716,13 +717,26 @@ static void out_close (Out *o, gboolean drain)
  * that, written and then left alone, is not played before more follows it
  * or the stream is drained: a "single" click was heard when its player
  * closed the stream, two seconds later (LINGER_US), or glued to the front
- * of the next sound. Blocks until the server has played it (at most the
- * 200 ms plus the sound). */
+ * of the next sound. Waits until the server has played it (at most the
+ * 200 ms plus the sound).
+ * A server that does not answer the drain within its time limit
+ * (scenesound_pulse.c) has a stream that will not be right again -
+ * PipeWire's pipewire-pulse 1.0.5 does that to a stream now and then, and
+ * takes no more data into it either: the output is closed without another
+ * word to the server, and the player opens a new one when it has
+ * something to play. (The call had no limit and its failure was not looked
+ * at: the thread stayed inside it, and the wallpaper was silent from that
+ * pause, mute or covered monitor on.) */
 static void out_drain (Out *o)
 {
 #ifdef HAVE_PULSE
-    if (o->pa)
-        Pas.drain (o->pa, NULL);
+    if (o->pa && !o->drained) {
+        int e = 0;
+        if (Pas.drain (o->pa, &e) == 0)
+            o->drained = TRUE;
+        else
+            out_close (o, OUT_DROP);
+    }
 #else
     (void) o;
 #endif
@@ -736,7 +750,7 @@ static void out_open (Out *o, int rate, int channels, const char *name)
         /* (another format: another stream, the same slot) */
         const gboolean slot = o->slot;
         o->slot = FALSE;
-        out_close (o, TRUE);
+        out_close (o, OUT_DRAIN);
         o->slot = slot;
     }
     o->rate = rate;
@@ -766,19 +780,47 @@ static void out_write (Out *o, const gint16 *buf, int frames, const char *name)
     }
     if (o->pa) {
         int e = 0;
-        if (Pas.write (o->pa, buf, (size_t) frames * (size_t) o->channels * 2, &e) == 0)
+        if (Pas.write (o->pa, buf, (size_t) frames * (size_t) o->channels * 2, &e) == 0) {
+            o->drained = FALSE;
             return;
-        g_message ("sound: %s: output lost (%s): playing into nothing, asking again every %d s", walpe_log_str (name),
-                   pa_strerror (e), (int) (SERVER_RETRY_US / G_USEC_PER_SEC));
+        }
+        /* A stream the server stopped taking data into (the time limit of
+         * the write is over) is asked for again with the next block: the
+         * server is there, it is this stream that stalled - after a drain
+         * on pipewire-pulse 1.0.5, see out_drain. Should the server itself
+         * have stopped, the new stream is not given and the usual wait
+         * begins. A new stream that stalls as well (within
+         * STALL_AGAIN_US): it is not the stream - a sink that is suspended
+         * takes nothing from any - and the player goes on into nothing and
+         * asks every SERVER_RETRY_US like after any other loss, which is
+         * said once for as long as that lasts. */
+        const gint64 now = g_get_monotonic_time ();
+        const gboolean stalled = e == PA_ERR_TIMEOUT;
+        const gboolean again = stalled && o->stall_us && now - o->stall_us < STALL_AGAIN_US;
+        if (!stalled)
+            g_message ("sound: %s: output lost (%s): playing into nothing, asking again every %d s",
+                       walpe_log_str (name), pa_strerror (e), (int) (SERVER_RETRY_US / G_USEC_PER_SEC));
+        else if (!again)
+            g_message ("sound: %s: the sound server took no more of the stream (%s): a new stream is asked for",
+                       walpe_log_str (name), pa_strerror (e));
+        else if (!o->stall_said)
+            g_message ("sound: %s: the sound server takes nothing of the new stream either (%s; a suspended sink "
+                       "does that): playing into nothing, asking again every %d s",
+                       walpe_log_str (name), pa_strerror (e), (int) (SERVER_RETRY_US / G_USEC_PER_SEC));
+        if (stalled) {
+            o->stall_said = again;
+            o->stall_us = now;
+        }
         server_error_set (pa_strerror (e));
         Pas.free_stream (o->pa);
         o->pa = NULL;
         g_atomic_int_add (&n_real, -1);
-        o->said = TRUE;
+        o->said = !stalled;     /* (a stalled stream: what there is to say was said above) */
         o->null_out = TRUE;
+        o->drained = FALSE;
         out_set_nowhere (o, TRUE);
         o->next_us = 0;
-        o->retry_us = g_get_monotonic_time () + SERVER_RETRY_US;
+        o->retry_us = now + (stalled && !again ? 0 : SERVER_RETRY_US);
     }
 #else
     (void) buf;
@@ -1111,7 +1153,7 @@ static gpointer sound_thread (gpointer data)
                 if (act == ACT_PARK && linger (s))
                     continue;
             }
-            out_close (&out, TRUE);   /* (also gives back a slot that never got its output:
+            out_close (&out, OUT_DRAIN);   /* (also gives back a slot that never got its output:
                                        * none of the player's files could be opened) */
             if (act == ACT_QUIT)
                 break;
@@ -1283,7 +1325,7 @@ static gpointer sound_thread (gpointer data)
                 until = MAX (until, now + 20000 - audio_us);
             if (until > now + 500000 && out.rate) {
                 /* the pause of random mode: without a stream */
-                out_close (&out, TRUE);
+                out_close (&out, OUT_DRAIN);
                 k_prev = -1;
             } else if (until) {
                 /* a shorter pause, with the stream: the file's sound is
@@ -1343,7 +1385,7 @@ static gpointer sound_thread (gpointer data)
     }
     if (have)
         src_close (&src);
-    out_close (&out, FALSE);
+    out_close (&out, OUT_FLUSH);
     g_rand_free (rng);
     g_mutex_lock (&s->lock);
     s->has_thread = FALSE;

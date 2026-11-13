@@ -18,7 +18,15 @@
  *     server said.
  *  4. A server that is slow but answers - more time for all the streams
  *     together than one turn may last - loses nobody: the limit is on the
- *     turn, not on the queue. */
+ *     turn, not on the queue.
+ *  5. A stream the server stops serving while the server itself is there
+ *     (the calls come back with "Timeout": scenesound_pulse.c gives each a
+ *     time limit; pipewire-pulse 1.0.5 does this to a stream now and then
+ *     when it is drained): a drain that is not answered when the wallpaper
+ *     is paused - the stream is given up without another call, and the
+ *     resume plays through a new one; a write that is not taken after a
+ *     resume - a new stream is asked for with the next block, not five
+ *     seconds later. In both cases the player is heard again. */
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <stdio.h>
@@ -45,13 +53,21 @@ static GPrivate asked;       /* calls of this thread (one player) so far */
 static gint open_us = 3000;  /* the round trips of opening a stream */
 /* the lines the players print when they are left without an output */
 static gint said_nothing;    /* "... playing into nothing ..." */
+static gint said_lines;      /* all of them */
 
 static void log_count (const gchar *domain, GLogLevelFlags level, const gchar *msg, gpointer user)
 {
     (void) domain; (void) level; (void) user;
     if (msg && strstr (msg, "playing into nothing"))
         g_atomic_int_inc (&said_nothing);
+    g_atomic_int_inc (&said_lines);
 }
+
+static gint stall_drain;     /* 1: drains are not answered (they fail with Timeout, as after the limit) */
+static gint stall_write;     /* so many writes are not taken (the same) */
+static gint drains, flushes; /* calls counted */
+static gint after_stall;     /* calls into a stream after it failed with Timeout, other than free */
+typedef struct { Stream st; gint stalled; } StreamS;   /* (Stream is its first member: what srv_new makes) */
 
 static pa_simple *srv_new (const char *server, const char *app, pa_stream_direction_t dir, const char *device,
                            const char *stream, const pa_sample_spec *spec, const pa_channel_map *map,
@@ -82,7 +98,7 @@ static pa_simple *srv_new (const char *server, const char *app, pa_stream_direct
     } else {
         g_usleep ((gulong) g_atomic_int_get (&open_us));
     }
-    Stream *st = g_new0 (Stream, 1);
+    Stream *st = (Stream *) g_new0 (StreamS, 1);
     st->bytes_per_s = MAX (spec->rate * spec->channels * 2u, 1u);
     g_atomic_int_inc (&opened);
     g_atomic_int_add (&inside, -1);
@@ -100,13 +116,46 @@ static void srv_free (pa_simple *s)
 /* blocks for as long as the data sounds, like a stream whose buffer is full */
 static int srv_write (pa_simple *s, const void *data, size_t bytes, int *error)
 {
-    (void) data; (void) error;
+    (void) data;
+    if (g_atomic_int_get (&((StreamS *) s)->stalled))
+        g_atomic_int_inc (&after_stall);
+    for (;;) {
+        const gint n = g_atomic_int_get (&stall_write);
+        if (n <= 0)
+            break;
+        if (g_atomic_int_compare_and_exchange (&stall_write, n, n - 1)) {
+            g_atomic_int_set (&((StreamS *) s)->stalled, 1);
+            if (error)
+                *error = PA_ERR_TIMEOUT;
+            return -1;
+        }
+    }
     g_usleep ((gulong) ((guint64) bytes * G_USEC_PER_SEC / ((Stream *) s)->bytes_per_s));
     return 0;
 }
 
-static int srv_drain (pa_simple *s, int *error) { (void) s; (void) error; return 0; }
-static int srv_flush (pa_simple *s, int *error) { (void) s; (void) error; return 0; }
+static int srv_drain (pa_simple *s, int *error)
+{
+    g_atomic_int_inc (&drains);
+    if (g_atomic_int_get (&((StreamS *) s)->stalled))
+        g_atomic_int_inc (&after_stall);
+    if (g_atomic_int_get (&stall_drain)) {
+        g_atomic_int_set (&((StreamS *) s)->stalled, 1);
+        if (error)
+            *error = PA_ERR_TIMEOUT;
+        return -1;
+    }
+    return 0;
+}
+
+static int srv_flush (pa_simple *s, int *error)
+{
+    (void) error;
+    g_atomic_int_inc (&flushes);
+    if (g_atomic_int_get (&((StreamS *) s)->stalled))
+        g_atomic_int_inc (&after_stall);
+    return 0;
+}
 
 static const WalpeSoundServerCalls srv = { srv_new, srv_free, srv_write, srv_drain, srv_flush };
 
@@ -322,6 +371,94 @@ static void test_slow_server (const char *wav)
            g_atomic_int_get (&closed), g_atomic_int_get (&opened));
 }
 
+/* ---- 5 ---- */
+static void test_stalled_stream (const char *wav)
+{
+    const gint opened0 = g_atomic_int_get (&opened), closed0 = g_atomic_int_get (&closed);
+    g_atomic_int_set (&after_stall, 0);
+    WalpeSoundGroup *g = walpe_sound_group_new ("/w/server-e", 1);
+    WalpeSound *p = player (g, wav);
+    walpe_sound_group_set_active (g, TRUE);
+    WAIT (frames_of (p) > 4800, 5000);
+    CHECK (g_atomic_int_get (&opened) == opened0 + 1 && frames_of (p) > 4800, "a player is heard through one stream");
+    /* paused; the drain is not answered */
+    g_atomic_int_set (&stall_drain, 1);
+    const gint d0 = g_atomic_int_get (&drains), f0 = g_atomic_int_get (&flushes);
+    walpe_sound_group_set_active (g, FALSE);
+    WAIT (g_atomic_int_get (&closed) == closed0 + 1, 3000);
+    g_usleep (50000);
+    CHECK (g_atomic_int_get (&drains) == d0 + 1 && g_atomic_int_get (&closed) == closed0 + 1 &&
+           g_atomic_int_get (&flushes) == f0 && g_atomic_int_get (&after_stall) == 0,
+           "paused, the drain not answered: the stream is given up at once (closed %d of 1), with %d more "
+           "call(s) into it (wanted: 0)", g_atomic_int_get (&closed) - closed0, g_atomic_int_get (&after_stall));
+    g_atomic_int_set (&stall_drain, 0);
+    gint64 f = frames_of (p);
+    gint64 t0 = g_get_monotonic_time ();
+    walpe_sound_group_set_active (g, TRUE);
+    WAIT (frames_of (p) > f + 4800, 3000);
+    double ms = (g_get_monotonic_time () - t0) / 1e3;
+    CHECK (frames_of (p) > f + 4800 && g_atomic_int_get (&opened) == opened0 + 2 && ms < 1000.0,
+           "resumed: heard again through a new stream (%d opened, wanted 2; %" G_GINT64_FORMAT " frames more "
+           "after %.0f ms)", g_atomic_int_get (&opened) - opened0, frames_of (p) - f, ms);
+    /* paused and resumed within the two seconds a silent stream is kept;
+     * the drain was answered, the write after the resume is not taken */
+    walpe_sound_group_set_active (g, FALSE);
+    g_usleep (300000);
+    CHECK (g_atomic_int_get (&closed) == closed0 + 1 && g_atomic_int_get (&opened) == opened0 + 2,
+           "paused, the drain answered: the stream is kept");
+    f = frames_of (p);
+    g_atomic_int_set (&stall_write, 1);
+    g_atomic_int_set (&said_nothing, 0);
+    t0 = g_get_monotonic_time ();
+    walpe_sound_group_set_active (g, TRUE);
+    WAIT (g_atomic_int_get (&opened) == opened0 + 3 && frames_of (p) > f + 9600, 3000);
+    ms = (g_get_monotonic_time () - t0) / 1e3;
+    CHECK (g_atomic_int_get (&opened) == opened0 + 3 && g_atomic_int_get (&closed) == closed0 + 2 &&
+           frames_of (p) > f + 9600 && ms < 1500.0 && g_atomic_int_get (&after_stall) == 0,
+           "resumed, the write not taken: a new stream with the next block (%d opened, wanted 3; %d closed, "
+           "wanted 2; heard again after %.0f ms; %d call(s) into the stalled one)",
+           g_atomic_int_get (&opened) - opened0, g_atomic_int_get (&closed) - closed0, ms,
+           g_atomic_int_get (&after_stall));
+    char *line = walpe_sound_status ();
+    CHECK (line && strstr (line, "1 stream(s) through") && !g_atomic_int_get (&said_nothing),
+           "... and nothing is said to play into nothing: %s", line ? line : "(null)");
+    g_free (line);
+    /* the new stream is not taken either, nor the next: it is not the
+     * stream (a suspended sink). No stream after stream: into nothing, the
+     * next one after the usual five seconds; said once. */
+    const gint o3 = g_atomic_int_get (&opened);
+    g_atomic_int_set (&stall_write, 1);
+    WAIT (g_atomic_int_get (&closed) == closed0 + 3, 3000);
+    f = frames_of (p);
+    g_usleep (2000000);
+    CHECK (g_atomic_int_get (&closed) == closed0 + 3 && g_atomic_int_get (&opened) == o3 &&
+           g_atomic_int_get (&said_nothing) == 1 && frames_of (p) > f + 48000,
+           "the new stream stalls too: no other one for now (%d opened in 2 s), the player goes on into nothing "
+           "(%" G_GINT64_FORMAT " frames) and says so once (%d)", g_atomic_int_get (&opened) - o3,
+           frames_of (p) - f, g_atomic_int_get (&said_nothing));
+    g_atomic_int_set (&stall_write, 1);
+    const gint lines0 = g_atomic_int_get (&said_lines);
+    WAIT (g_atomic_int_get (&closed) == closed0 + 4, 6000);
+    g_usleep (100000);
+    CHECK (g_atomic_int_get (&closed) == closed0 + 4 && g_atomic_int_get (&opened) == o3 + 1 &&
+           g_atomic_int_get (&said_lines) == lines0,
+           "... the stream asked for five seconds later stalls as well: given up (%d closed, wanted 4), and "
+           "nothing more is said (%d line(s))", g_atomic_int_get (&closed) - closed0,
+           g_atomic_int_get (&said_lines) - lines0);
+    WAIT (g_atomic_int_get (&opened) == o3 + 2 && frames_of (p) > 0, 7000);
+    f = frames_of (p);
+    g_usleep (300000);
+    line = walpe_sound_status ();
+    CHECK (g_atomic_int_get (&opened) == o3 + 2 && line && strstr (line, "1 stream(s) through") &&
+           frames_of (p) > f, "... and the one after that is taken: heard again (%s)", line ? line : "(null)");
+    g_free (line);
+    walpe_sound_group_free (g);
+    CHECK (threads_gone (), "the thread ends: %d left", walpe_sound_threads ());
+    CHECK (g_atomic_int_get (&closed) - closed0 == g_atomic_int_get (&opened) - opened0,
+           "every stream was closed: %d of %d", g_atomic_int_get (&closed) - closed0,
+           g_atomic_int_get (&opened) - opened0);
+}
+
 int main (void)
 {
     g_unsetenv ("WALPE_SOUND_NULL");       /* the output is the stand-in server */
@@ -340,6 +477,7 @@ int main (void)
     test_one_at_a_time (wav);
     test_refused_asks_again (wav);
     test_slow_server (wav);
+    test_stalled_stream (wav);
     test_server_does_not_answer (wav);   /* (last: it leaves its turn taken for a moment) */
 
     g_remove (wav);

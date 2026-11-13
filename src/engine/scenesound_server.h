@@ -1,7 +1,8 @@
-/* scenesound_server.h - tests only: stand-ins for the five functions of
- * libpulse-simple that scenesound.c calls, so that a test can stand in
- * for the sound server (how many streams are being opened at a time, a
- * server that does not answer) without one. Only in a build with libpulse. */
+/* scenesound_server.h - the five calls scenesound.c makes into the sound
+ * server (they have the shape of libpulse-simple's functions, which they
+ * once were): the real ones, and the way for a test to put stand-ins in
+ * their place (how many streams are being opened at a time, a server that
+ * does not answer) without a server. Only in a build with libpulse. */
 #ifndef WALPE_SCENESOUND_SERVER_H
 #define WALPE_SCENESOUND_SERVER_H
 #include <pulse/simple.h>
@@ -16,8 +17,12 @@ typedef struct {
     int (*flush) (pa_simple *s, int *error);
 } WalpeSoundServerCalls;
 
-/* These calls instead of the library's. Before the first stream is opened:
- * afterwards the library is loaded and the call changes nothing. */
+/* These calls instead of the real ones. Before the first stream is opened:
+ * afterwards the call changes nothing. */
 void walpe_sound_set_server_calls (const WalpeSoundServerCalls *calls);
+/* The real ones (scenesound_pulse.c): libpulse, each call with a time
+ * limit. A stream is the opaque pa_simple pointer they hand out. For
+ * scenesound.c, and for a test that runs them against a server. */
+const WalpeSoundServerCalls *walpe_sound_pulse_calls (void);
 
 #endif

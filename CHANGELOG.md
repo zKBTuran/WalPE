@@ -472,6 +472,25 @@ it was). A bare window manager on X11 - dwm, i3, openbox - gets the window of 0.
   of its own; building it needs GStreamer's core headers (`gstreamer-1.0`:
   `libgstreamer1.0-dev`, `media-libs/gstreamer`), which `-Dweb=enabled` now asks for and
   `-Dweb=auto` only warns about ([BUILDING.md](docs/BUILDING.md)).
+- **Sound that stayed away after a pause (PipeWire 1.0).** A wallpaper's sound could stay
+  silent after anything that had made it fall silent for a moment: `walpe-ctl pause`, a
+  window over the desktop ("pause when covered"), a fullscreen window, mute, volume 0,
+  sound off and on. When a wallpaper falls silent WalPE lets the sound server play out
+  what the stream holds and waits for its answer. `pipewire-pulse` 1.0.5 (Ubuntu 24.04)
+  now and then does not answer, or takes no more sound into that stream afterwards -
+  about one pause in twenty to thirty here -, and none of WalPE's calls into the sound
+  server had a time limit: the wallpaper's sound thread stayed inside the call, the
+  wallpaper was silent until it was opened again, and every such thread kept one of the
+  16 streams. The sound layers of scenes have this since 0.14.0, where sound was off by
+  default; a video's track with the changes above. Not seen with PipeWire 1.6.11
+  (WirePlumber 0.5.19) or PulseAudio 16.1. Every call into the sound server now has a
+  time limit, a stream that does not answer in time is given up, and a new one is opened
+  with the next sound: with PipeWire 1.0.5 the sound is then back about half a second
+  after the resume where it was gone before (no silent resume in 460; 11 in 270 before). A
+  sound server that is stopped, or a sink that is suspended, no longer holds a sound
+  thread either: the wallpaper plays on without sound and asks again every 5 seconds.
+  WalPE makes these calls with libpulse itself; `libpulse-simple.so.0` is no longer
+  loaded. [SOUND.md](docs/SOUND.md#what-is-played).
 
 ### Audio-reactive wallpapers and media integration
 

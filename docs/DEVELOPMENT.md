@@ -26,7 +26,8 @@ walpe-daemon (src/daemon/)   no GTK. Per monitor one EGL surface - an override-r
                                               plugin of its own: gst/walpesound.c)
                              gif.c, image.c, glutil.c, gpuprof.c (profiler)
                              fx_essl.h (effect shaders as GLSL ES), bloom.c, fx_sim.h
-                             (simulation effects), scenesound.c, sounddec.c (sound)
+                             (simulation effects), scenesound.c, scenesound_pulse.c,
+                             sounddec.c (sound)
    +- common (src/common/)   config, IPC, .tex parser, quality presets, pacing rules,
                              video import (ffmpeg), audio capture, media (MPRIS),
                              Workshop (steamcmd, Steam Web API), library, layer adjustments,

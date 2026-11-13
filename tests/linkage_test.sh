@@ -11,8 +11,8 @@
 #   XSetSelectionOwner (the selection guard of the X11 page host). What GTK
 #   and WebKit load by themselves is their business and is not looked at.
 #   every build: walpe-daemon does not name libpulse-simple as NEEDED
-#   (scene sound is off by default; engine/scenesound.c loads the library
-#   when the first stream is opened).
+#   (engine/scenesound_pulse.c makes the calls of wallpaper sound with
+#   libpulse itself; the build asks for libpulse-simple for its header).
 # Exit 77 (skipped) without readelf / nm. No display, no daemon.
 B=$1; WL=$2; X=${3:-x11}
 command -v readelf >/dev/null 2>&1 && command -v nm >/dev/null 2>&1 || { echo "linkage: no readelf / nm: skipped"; exit 77; }
@@ -44,6 +44,6 @@ if [ "$X" = nox11 ]; then
     check $([ "$d" = 0 ] && echo 1 || echo 0) "walpe-daemon, no X11 page host: the selection guard (XSetSelectionOwner) is not in it"
 fi
 n=$(needed "$B/walpe-daemon" | grep -c '^libpulse-simple')
-check $([ "$n" = 0 ] && echo 1 || echo 0) "walpe-daemon: libpulse-simple is not NEEDED (loaded with the first sound stream)"
+check $([ "$n" = 0 ] && echo 1 || echo 0) "walpe-daemon: libpulse-simple is not NEEDED (wallpaper sound calls libpulse itself)"
 echo "linkage: $checks checks, $fail failed"
 [ $fail = 0 ]
