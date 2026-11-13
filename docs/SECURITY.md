@@ -75,6 +75,16 @@ Limits on what a wallpaper's scripts and shaders may cost (fixed, no switch):
 | a combo name from a wallpaper's JSON or a `[COMBO]` annotation | an identifier of at most 128 characters | anything else is left out of the shader source |
 | a time zone name a script asks for | a zone of the system's zone directory | other names (files there that are no zones, `posix/`, `right/`) give no zone |
 
+What a shader costs per pixel is not limited: a loop in it runs as often as it says, and
+on the software renderer a frame of such a wallpaper can take minutes or never end. The
+daemon goes on answering then (its main thread does not draw), and the wallpaper can be
+left: a monitor that has not taken the wallpaper it was given 20 seconds after it was
+asked for is restarted with the daemon, in place, and the log names the wallpaper that
+held it; `walpe-ctl quit` and every restart in place wait 10 seconds for a render thread
+and go on without it. With a graphics card the frame is the driver's to end (it resets a
+context that keeps the card busy for seconds); that has not been run. Test:
+`meson test -C build daemon-life` (case `held`).
+
 A header is included once per file, whatever the `#include` line calls it (`"x.h"`, `"./x.h"`, a link).
 Tests: `meson test -C build script-hostile fx-hostile scene-hostile` (the last two need EGL
 surfaceless; `fx-hostile-test gl 1500` and `fx-hostile-test text 6000` run more seeds).

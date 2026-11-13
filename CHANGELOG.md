@@ -500,6 +500,19 @@ microphone.
   for a file of 32 MiB, each time the file is read - by the window whenever it lists the
   library, by the engine at every load of the wallpaper, by the tray for the title. Such
   a text is now refused before json-glib sees it. 0.14.0 has this too.
+- A wallpaper whose frame does not end could not be left. On the software renderer a
+  wallpaper's effect shader that loops a thousand million times per pixel (three lines
+  of a `.frag` file) keeps the monitor's render thread inside one frame for good:
+  another wallpaper was accepted with "ok" and never shown, `walpe-ctl quit` closed the
+  control socket and then waited for that thread for ever - a process nobody could
+  reach, with a CPU busy until it was killed by hand - and a restart in place did the
+  same with the socket open. Now a monitor that has not taken the wallpaper it was given
+  20 seconds after it was asked for is restarted with the daemon, in place (same process,
+  the log says which wallpaper held it), and an exit or a restart waits 10 seconds for a
+  render thread and then goes on without it. Nothing is done while nobody asks for
+  another wallpaper, and how long a frame may take is not judged. With a graphics card
+  such a frame is the driver's and the card's to end; that has not been run
+  ([SECURITY.md](docs/SECURITY.md#scripts-and-shaders)). 0.14.0 has this too.
 - New with the changes above, and closed before anybody had them: a web page could undo
   mute and "off" for its own sound (now WebKit's own mute, under Sound), and with the
   Plasma add-on another program of the session could take the pointer's bus name and be

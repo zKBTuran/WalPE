@@ -242,6 +242,11 @@ typedef struct Mon {
     gboolean loading;        /* main: that load has not reported yet (status
                               * "loading"; a setting that reloads scenes counts
                               * this monitor in: its type is not known yet) */
+    gint thread_ended;       /* atomic: its render thread has left its loop and freed
+                              * what it owned (mons_wait_end, load_held_check) */
+    char *given_path;        /* main: the wallpaper it was handed last (mon_assign) */
+    char *busy_path;         /* main: ... and the one before, while its thread has not
+                              * taken that one: what the thread is in (mon_thread_in) */
     gboolean reload_wanted;  /* main: load its wallpaper again at the next
                               * reload_flush () (scenes_reload_mark) */
     gboolean blank_req;      /* main -> thread (lock): that failure is final: black */
@@ -2314,6 +2319,7 @@ static gpointer mon_thread (gpointer data)
     if (m->ctx == EGL_NO_CONTEXT ||
         (begun && !eglMakeCurrent (D.egl_dpy, m->surf, m->surf, m->ctx))) {
         g_warning ("monitor %d: EGL context unusable; thread exits", m->index);
+        g_atomic_int_set (&m->thread_ended, 1);
         return NULL;
     }
     if (begun)
@@ -2794,6 +2800,7 @@ static gpointer mon_thread (gpointer data)
     eglDestroyContext (D.egl_dpy, m->ctx);
     m->ctx = EGL_NO_CONTEXT;
     eglReleaseThread ();
+    g_atomic_int_set (&m->thread_ended, 1);
     return NULL;
 }
 
@@ -3038,6 +3045,14 @@ static void mon_assign (Mon *m, const char *path, SharedFrame *sf, int idx, gboo
     g_mutex_lock (&m->lock);
     if (path) {
         static guint tags;
+        if (!m->load_path) {
+            /* the thread took the one before: that is what it draws or loads */
+            g_free (m->busy_path);
+            m->busy_path = m->given_path;
+            m->given_path = NULL;
+        }
+        g_free (m->given_path);
+        m->given_path = g_strdup (path);
         g_free (m->load_path);
         m->load_path = g_strdup (path);
         m->load_keep = keep;
@@ -3147,6 +3162,8 @@ static gboolean loadmark_clear (gpointer user)
     return G_SOURCE_REMOVE;
 }
 
+static gboolean loadmark_due (gpointer user);
+
 static void loadmark_add (const char *mon, const char *path)
 {
     if (!loadmark)
@@ -3170,7 +3187,7 @@ static void loadmark_add (const char *mon, const char *path)
     g_string_free (s, TRUE);
     if (loadmark_timer)
         g_source_remove (loadmark_timer);
-    loadmark_timer = g_timeout_add_seconds (LOADMARK_SECS, loadmark_clear, NULL);
+    loadmark_timer = g_timeout_add_seconds (LOADMARK_SECS, loadmark_due, NULL);
 }
 
 /* start-up, before the first apply_wallpapers */
@@ -9340,6 +9357,106 @@ static void restart_exec (gboolean layout_stamp)
     }
 }
 
+/* A render thread that does not come back. A wallpaper is handed to a
+ * monitor's render thread (mon_assign: load_path) and taken by it at the top
+ * of its loop - after the frame or the load it is in. A frame that does not
+ * end (on a software renderer: a wallpaper's shader that loops a thousand
+ * million times per pixel, or more to fill than the CPU manages in minutes)
+ * therefore kept the wallpaper on that monitor for good: `open` was answered
+ * with "ok" and nothing changed, and the daemon could not be told to quit
+ * either (mons_wait_end). The crash-loop window is the moment to look: it
+ * closes LOADMARK_SECS after the last wallpaper was handed out, on the main
+ * thread, and costs nothing new. A monitor whose thread has still not taken
+ * what it was given then is restarted with the daemon, in place: the new
+ * image loads the wallpapers of the saved configuration, the one that was
+ * asked for among them, and the thread that did not come back ends with the
+ * old image. Nothing is done while nobody asks for another wallpaper: there
+ * is no judgement here of how long a frame may take. */
+/* the name of the wallpaper a monitor's render thread draws or loads (the
+ * folder's or the file's own name, g_free), NULL = none */
+static char *mon_thread_in (Mon *m)
+{
+    g_mutex_lock (&m->lock);
+    const char *p = m->load_path ? m->busy_path : m->given_path;
+    char *n = p && *p ? g_path_get_basename (p) : NULL;
+    g_mutex_unlock (&m->lock);
+    return n;
+}
+
+static gboolean load_held_retry (gpointer user);
+static gboolean load_held;      /* main: the restart under way is that one */
+static gboolean term_pending (void);
+static void load_held_check (void)
+{
+    if (D.restart || Sw.restart || !D.loop || D.windowed || term_pending ())
+        return;
+    for (GList *l = D.mons; l; l = l->next) {
+        Mon *m = l->data;
+        g_mutex_lock (&m->lock);
+        const gboolean held = m->load_path != NULL && !g_atomic_int_get (&m->thread_ended);
+        g_mutex_unlock (&m->lock);
+        if (!held)
+            continue;
+        if (Imp.active || Ws.active) {
+            /* (as every restart in place: not under a running import or
+             * Workshop download, which it would end) */
+            g_timeout_add_seconds (LOADMARK_SECS, load_held_retry, NULL);
+            return;
+        }
+        if (!restart_begin ("a wallpaper that was asked for is not taken by its monitor"))
+            return;
+        if (!walpe_config_save (D.cfg))
+            return;     /* (the new image would read other wallpapers than were asked for) */
+        char *was = mon_thread_in (m);
+        g_warning ("monitor %d (%s): its render thread has been in one frame or load%s%s for more "
+                   "than %d s and has not taken the wallpaper it was given since: restarting in "
+                   "place to show it (a frame of that wallpaper does not end on this renderer)",
+                   m->index, m->name ? m->name : "?", was ? " of " : "",
+                   was ? walpe_log_str (was) : "", LOADMARK_SECS);
+        g_free (was);
+        load_held = TRUE;
+        D.restart = TRUE;
+        g_main_loop_quit (D.loop);
+        return;
+    }
+}
+
+static gboolean load_held_retry (gpointer user)
+{
+    (void) user;
+    load_held_check ();
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean loadmark_due (gpointer user)
+{
+    loadmark_clear (user);
+    load_held_check ();
+    return G_SOURCE_REMOVE;
+}
+
+/* The daemon ends or restarts in place: every render thread was told
+ * (quitting) and is waited for RENDER_END_WAIT_S in all. NULL = they have
+ * all ended; else a monitor whose thread is still inside a frame or a load
+ * - it cannot be joined, and what it owns cannot be freed under it. */
+#define RENDER_END_WAIT_S 10
+static Mon *mons_wait_end (void)
+{
+    /* (a thread this restart is for has been waited for already: one more
+     * second, for the others) */
+    const gint64 until = g_get_monotonic_time () +
+                         (gint64) (load_held ? 1 : RENDER_END_WAIT_S) * G_USEC_PER_SEC;
+    for (;;) {
+        Mon *left = NULL;
+        for (GList *l = D.mons; l && !left; l = l->next)
+            if (!g_atomic_int_get (&((Mon *) l->data)->thread_ended))
+                left = l->data;
+        if (!left || g_get_monotonic_time () >= until)
+            return left;
+        g_usleep (1000);
+    }
+}
+
 /* ------------------------------------------------------------- monitors */
 
 /* SIGTERM / SIGINT / SIGHUP: the clean shutdown of `quit`. The handler
@@ -11823,6 +11940,38 @@ int main (int argc, char **argv)
         g_cond_broadcast (&m->cond);
         g_mutex_unlock (&m->lock);
     }
+    {
+        /* A thread that does not come back from a frame or a load (see
+         * load_held_check) is not joined: the daemon waited for it for
+         * ever - after `quit` with the socket closed already, a process
+         * nobody could reach that kept a CPU busy until it was killed by
+         * hand, and before a restart in place with the socket open and
+         * nobody answering. The orderly tear-down below needs the threads
+         * gone, so it is left out: a restart goes straight to the new
+         * image, an exit to the end of the process (which closes the
+         * display connection and ends the helper processes with it). */
+        Mon *held = mons_wait_end ();
+        if (held) {
+            char *was = mon_thread_in (held);
+            const gboolean again = restarting && !term_pending ();
+            g_warning ("monitor %d (%s): its render thread has not come back from a frame or a "
+                       "load%s%s within %d s: the daemon %s without waiting for it",
+                       held->index, held->name ? held->name : "?", was ? " of " : "",
+                       was ? walpe_log_str (was) : "", load_held ? 1 : RENDER_END_WAIT_S,
+                       again ? "restarts" : "ends");
+            g_free (was);
+            walpe_import_settle (400);
+            if (again) {
+                restart_exec (D.restart);   /* returns only when it failed (socket released) */
+            } else if (sock_kept) {
+                char *sp = walpe_socket_path ();
+                walpe_ipc_release (sp);
+                g_free (sp);
+            }
+            fflush (NULL);
+            _exit (again || D.display_lost ? 1 : 0);
+        }
+    }
     for (GList *l = D.mons; l; l = l->next)
         g_thread_join (((Mon *) l->data)->thread); /* thread frees its content + context */
     for (GList *l = D.mons; l; l = l->next) {
@@ -11845,6 +11994,8 @@ int main (int argc, char **argv)
         g_free (m->reopen_for);
         g_free (m->restored);
         g_free (m->load_path);       /* a load its thread never took */
+        g_free (m->given_path);
+        g_free (m->busy_path);
         if (m->ptr_q)                /* (LeakSanitizer: one array per monitor that saw the pointer) */
             g_array_unref (m->ptr_q);
         g_free (m);

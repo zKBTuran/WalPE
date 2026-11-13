@@ -137,6 +137,15 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             screen stays through all of it, and a daemon built to look for
             leaks ends with status 0 afterwards. Needs the ffmpeg program;
             skipped without it.
+  held      a wallpaper whose frame does not end (a generated effect shader
+            that loops a thousand million times per pixel; the check's
+            renderer is always the software one): the daemon goes on
+            answering; another wallpaper that is asked for is on screen
+            within the crash-loop window plus a few seconds - the daemon
+            restarts in place for it, same process, and says why; `quit`
+            with such a wallpaper on screen ends the daemon with status 0
+            in little more than ten seconds, and the log says what was not
+            waited for.
   swaplost  eglSwapBuffers fails from some frame on (WALPE_SWAP_FAIL, a
             switch for this check). With the error of a lost GL context:
             status names it per monitor ("swap_error"), the log has ONE
@@ -1721,6 +1730,64 @@ def case_busy(env, W):
     check(env.state().get("web_accel") == (not st.get("web_accel")), "busy: the setting is the one asked for")
     check(not (spid > 0 and os.path.exists(f"/proc/{spid}")), "busy: no steamcmd left behind")
     env.stop_daemon()
+
+
+# --------------------------------------------------------------------- held
+# a frame that does not end on a software renderer: 1e9 rounds for every pixel
+HELD_FRAG = ("varying vec2 v_TexCoord;\nuniform sampler2D g_Texture0;\n"
+             "void main() {\n\tvec4 c = texSample2D(g_Texture0, v_TexCoord);\n\tfloat k = 0.0;\n"
+             "\tfor (int i = 0; i < 1000000000; i++)\n\t\tk += sin(v_TexCoord.x * float(i) + k);\n"
+             "\tc.r += k * 0.000001;\n\tgl_FragColor = c;\n}\n")
+
+
+def case_held(env, W):
+    """A wallpaper whose frame does not end holds neither the next wallpaper nor the daemon's end."""
+    A = ("A", 640, 360, 0, 0)
+    held = os.path.join(os.path.dirname(W["red"]), "held")
+    gen_fx_scene(held, HELD_FRAG, "held")
+    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False})
+    if not check(env.start_daemon([A]), "held: daemon started"):
+        return
+    pid = env.daemon.pid
+    # a session has other clients: the X server does not start over (and refuse
+    # connections for a moment) when the old image's connections close
+    xc = XClient(env.env["DISPLAY"]) if env.display.kind == "xvfb" else None
+    def is_blue(c):
+        return bool(c) and c[2] > 200 and c[0] < 60
+    check(env.open(W["red"]) and loaded(env, W["red"]), "held: a wallpaper is shown")
+    check(env.open(held), "held: the wallpaper whose frame does not end is accepted")
+    time.sleep(3.0)
+    check(bool(env.state()), "held: the daemon answers while that frame is being drawn")
+    mark = env.mark()
+    t0 = time.time()
+    check(env.open(W["blue"]), "held: another wallpaper is asked for")
+    ok = wait_for(lambda: "restarting in place to show it" in env.since(mark) and '" up (' in env.since(mark) and
+                  is_blue(env.colour(env.mons[0])), 60, 0.5)
+    check(bool(ok), "held: it is on screen within a minute (%.0f s)" % (time.time() - t0), env.since(mark)[-600:])
+    txt = env.since(mark)
+    check("has not taken the wallpaper it was given" in txt and "load of held for" in txt,
+          "held: the log names the monitor and the wallpaper that held it", txt[-600:])
+    check(env.daemon.poll() is None and env.daemon.pid == pid, "held: the same process went on (a restart in place)")
+    check(os.path.basename((env.monitors() or [{}])[0].get("current") or "") == "blue", "held: status names the new wallpaper")
+    # quit with such a wallpaper on screen
+    check(env.open(held), "held: the wallpaper is opened again")
+    time.sleep(3.0)
+    mark = env.mark()
+    t0 = time.time()
+    env.ipc({"cmd": "quit"})
+    try:
+        st = env.daemon.wait(timeout=40 * rc.PATIENCE)
+    except subprocess.TimeoutExpired:
+        st = None
+    check(st == 0, "held: quit ends the daemon with status 0 (%.0f s)" % (time.time() - t0), st)
+    check("without waiting for it" in env.since(mark), "held: the log says what was not waited for", env.since(mark)[-400:])
+    check(not os.path.exists(env.sock), "held: the control socket is gone")
+    if st is None:
+        env.daemon.kill()
+        env.daemon.wait()
+    env.daemon = None
+    if xc:
+        xc.close()
 
 
 # -------------------------------------------------------------------- probe
@@ -3705,7 +3772,7 @@ def case_scan(env, W):
 
 
 CASES = [("logcap", case_logcap), ("settings", case_settings), ("diag", case_diag), ("pointer", case_pointer), ("reload", case_reload), ("restart", case_restart),
-         ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("scan", case_scan), ("tray", case_tray), ("traymenu", case_traymenu), ("trayreg", case_trayreg), ("window", case_window), ("panel", case_panel), ("busy", case_busy), ("probe", case_probe),
+         ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("scan", case_scan), ("tray", case_tray), ("traymenu", case_traymenu), ("trayreg", case_trayreg), ("window", case_window), ("panel", case_panel), ("busy", case_busy), ("held", case_held), ("probe", case_probe),
          ("fullscreen", case_fullscreen), ("video", case_video), ("webunload", case_webunload),
          ("winlost", case_winlost), ("desktop", case_desktop), ("convert", case_convert),
          ("swaplost", case_swaplost), ("norestart", case_norestart),
