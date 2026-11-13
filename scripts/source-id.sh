@@ -33,6 +33,10 @@ if [ -r "$src/SOURCE-ID" ]; then
     [ -z "$id" ] || id=$(printf '%.7s' "$id")$plus
 fi
 if [ -z "$id" ] && [ -e "$src/.git" ] && command -v git > /dev/null 2>&1; then
+    # the repository is the one SOURCE_DIR has, not one the caller's environment names (a
+    # build started by a hook of another repository is given that one's GIT_DIR, a commit
+    # hook its index too: the id was that repository's commit, or a "+" from its index)
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX
     id=$(git -C "$src" rev-parse HEAD 2> /dev/null) || id=
     case "$id" in '' | *[!0-9a-f]*) id= ;; esac
     [ "${#id}" -ge 7 ] || id=

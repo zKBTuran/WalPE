@@ -11,6 +11,8 @@
 #   repository; a forge has its own) - and the archive's bytes do not depend on it;
 #   files without .git and with the placeholder say "unknown" - also inside somebody
 #   else's repository;
+#   a checkout says its own commit also where the environment names another repository
+#   (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE: a build started by a hook of that one);
 #   the header is written once: a second run leaves the file alone (nothing is compiled
 #   again), a new commit changes it, and a run that finds no id keeps the one it has.
 #   the Arch recipe (contrib/packaging/arch/PKGBUILD) builds a copy of the tree that has
@@ -56,6 +58,21 @@ git -C "$repo" commit -q -a -m two
 c2=$(seven "$repo")
 [ "$c1" != "$c2" ] || { echo "FAIL: the two commits have one id"; fails=$((fails + 1)); }
 is "after a commit (an untracked file is no change)" "$(id_of "$repo")" "$c2"
+
+# the build is started with another repository named in the environment - by a hook of
+# that repository, which git gives GIT_DIR (and a commit hook GIT_INDEX_FILE): the
+# checkout still says its own commit, and it is not "changed" by the other one's index
+mkdir "$tmp/other"
+git -C "$tmp/other" init -q
+echo other > "$tmp/other/o"
+git -C "$tmp/other" add -A
+git -C "$tmp/other" commit -q -m other
+is "a checkout, GIT_DIR names another repository" "$(GIT_DIR="$tmp/other/.git" sh "$script" "$repo")" "$c2"
+is "a checkout, GIT_DIR and GIT_WORK_TREE name another repository" \
+    "$(GIT_DIR="$tmp/other/.git" GIT_WORK_TREE="$tmp/other" sh "$script" "$repo")" "$c2"
+is "a checkout, GIT_DIR=. as in a hook of a bare repository" "$(GIT_DIR=. sh "$script" "$repo")" "$c2"
+is "a checkout, GIT_INDEX_FILE names another repository's index" \
+    "$(GIT_INDEX_FILE="$tmp/other/.git/index" sh "$script" "$repo")" "$c2"
 
 # the header: written, left alone, changed by a commit, kept where no id is found
 h=$tmp/walpe-source-id.h
