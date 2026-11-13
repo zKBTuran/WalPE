@@ -10,7 +10,8 @@ The current release is 0.14.0 "Flood". Changes per version: [CHANGELOG.md](CHANG
 - Scene wallpapers: effects, particle systems, puppet warp, text layers, video textures.
 - Video, web (`type: web`), GIF and still-image wallpapers.
 - X11 and Wayland (layer shell); a wallpaper and a render resolution per monitor.
-- x86-64 and AArch64 (arm64) support ([arm64 status](docs/BUILDING.md#64-bit-arm-aarch64)).
+- x86-64 and AArch64 (arm64) support; arm64 was built and tested in an emulated machine,
+  not on hardware ([arm64 status](docs/BUILDING.md#64-bit-arm-aarch64)).
 - Pauses under a fullscreen window, while covered and while the display sleeps.
 - Audio-reactive wallpapers, "now playing" data from any MPRIS player, a SceneScript subset.
 - Wallpaper options, quality presets and "Adjust layers" per wallpaper.
@@ -24,10 +25,11 @@ Not supported: 3D model scenes and `application` wallpapers. The full table is i
 
 Everything that is new since 0.12.2 (the Wayland backend, GPU choice, OpenGL ES, the
 arm64 build, scene sound and more) was built and tested only on Mesa's software renderer,
-a headless compositor, a null sound sink and - the arm64 build - under emulation, with one
-exception: the maintainer ran the X11 build of 0.14.0 on his own NVIDIA card before the
-release. Nothing else has been run on real AMD, Intel, NVIDIA or ARM hardware or on a real
-Wayland desktop.
+a headless compositor, a null sound sink and - the arm64 build - under emulation (built
+and tested in an emulated aarch64 machine, QEMU with software rendering, on 13 November
+2026; not on real hardware), with one exception: the maintainer ran the X11 build of
+0.14.0 on his own NVIDIA card before the release. Nothing else has been run on real AMD,
+Intel, NVIDIA or ARM hardware or on a real Wayland desktop.
 The details and the known limitations: [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 
 ## Requirements

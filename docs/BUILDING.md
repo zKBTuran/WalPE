@@ -187,8 +187,8 @@ of a build with both backends has the same threads and descriptors as the X11-on
 
 **Other architectures.** The source is written for x86-64 and aarch64 (little-endian, 64
 bit; a big-endian target stops at the configure step). The aarch64 side has been
-cross-compiled and run under emulation, not on ARM hardware: see
-[64-bit ARM](#64-bit-arm-aarch64) below.
+cross-compiled, tested under emulation and built and run in an emulated arm64 machine,
+not on ARM hardware: see [64-bit ARM](#64-bit-arm-aarch64) below.
 
 The code is plain C without hand-written SIMD for a particular `-march`; tuning only steers
 the compiler's auto-vectoriser and scheduling. Each tuning flag is probed first, so a
@@ -205,25 +205,28 @@ every monitor loads its wallpaper again as at a start. The video module stays lo
 
 ## 64-bit ARM (aarch64)
 
-> **Not run on ARM hardware.** The arm64 build was cross-compiled on an x86-64 machine
-> (both backends and every optional part, 0 warnings) and its tests were run under
-> emulation (qemu-user): of the 68 tests that need neither a display nor an OpenGL
-> context, 65 pass, 2 fail in a
-> timing check that means nothing under emulation (`formats`, `scenescript`) and 1 cannot
-> run there (`sec-local` starts itself again). Seven of the tests that draw were run on
-> the emulated software renderer and pass; the tests with a display and a daemon, the
-> window, the tray and the web module were only compiled. No ARM board, no ARM GPU or its
-> driver, no kernel with 16 or 64 KiB pages and no ARM CPU's memory ordering has seen
-> WalPE, and there is no speed figure. Treat all of this section as expected to work, and
-> report.
+> **Not run on ARM hardware.** State of 13 November 2026 (0.14.0 with the fixes since):
+> the arm64 build was cross-compiled on an x86-64 machine, its tests were run under
+> user-mode emulation (qemu-user), and it was built and run in an emulated arm64 machine
+> (QEMU, software rendering) on X11 and on Wayland. In short: it builds with 0 warnings,
+> the daemon starts, shows a picture, a video and scenes and quits on both window
+> systems, a picture and a scene come out byte for byte as on x86-64, and every test
+> failure that was looked into comes from the emulation's speed or from the emulator
+> itself (three failed checks of one Wayland test were not seen). What was run, and what
+> was not, is in [State of testing](#state-of-testing-on-arm64) below. No ARM
+> board, no ARM GPU or its driver, no kernel with 16 or 64 KiB pages and no ARM CPU's
+> memory ordering has seen WalPE, and there is no speed figure. Treat all of this section
+> as expected to work, and report.
 
 **Building on the ARM machine** is the same as on x86-64: `./build.sh -Dtests=true`, then
 `meson test -C build`. `--tuning=native` tunes for the CPU that builds (`-mcpu=native`; the binary
 may not run on another ARM CPU), `--tuning=alderlake` is refused. Packages by their
 Debian 13 / Ubuntu 24.04 names (the dependency table above has the pkg-config modules).
-**The list is untested on an ARM machine**: it follows the package names of an x86-64
-system and the library set of the cross build. Nothing was checked for Fedora, Arch
-Linux ARM or Raspberry Pi OS, whose GTK 4 and WebKitGTK can be older:
+The list was used as it stands on Ubuntu 24.04 for arm64 (in the emulated machine,
+installed with `--no-install-recommends`): `./build.sh -Dtests=true` configured with
+both backends and every optional part and built the programs with 0 warnings. Nothing
+was checked for Fedora, Arch Linux ARM or Raspberry Pi OS, whose GTK 4 and WebKitGTK can
+be older:
 
 ```
 build-essential meson ninja-build pkg-config python3
@@ -270,39 +273,144 @@ wallpapers is installed with it; `gstreamer1.0-libav` (H.264, AAC) is only sugge
   which of them exist depends on the FFmpeg of the distribution: Ubuntu 24.04's has the
   `v4l2m2m` ones only ([VIDEO.md](VIDEO.md)).
 - *Speed.* The two pixel loops that have SSE2 / AVX2 versions on x86 (halving a video
-  frame, halving a texture) run as plain C on ARM: the same bytes, slower. The video
+  frame, halving a texture) are plain C on ARM: the same bytes. GCC 13 at `-O3` turns
+  both into NEON code by itself (seen in the disassembly of the arm64 build); how fast
+  that is on an ARM CPU was not measured, emulation says nothing about speed. The video
   decoder's thread rules were measured on x86 desktop CPUs.
 - *Pictures.* What WalPE computes itself gives the same numbers on both architectures
   (the tests compare them, and the build forbids fused multiply-add). What the GPU or
   the software renderer rounds is its own: frames from Mesa's software renderer on
   arm64 differ from the x86-64 ones by up to 5 of 255.
 - *Hardening.* `-mbranch-protection=standard` takes the place of `-fcf-protection`
-  (return-address signing and branch target identification, on CPUs that have them). In
-  the Ubuntu 24.04 cross build the programs came out without the BTI mark, because the C
-  library's start files carry none: return addresses are signed there, branch targets
-  are not enforced.
+  (return-address signing and branch target identification, on CPUs that have them). On
+  Ubuntu 24.04, in the cross build and in the build on arm64 itself, the programs came
+  out without the BTI mark, because the C library's start files carry none: return
+  addresses are signed there (and were checked by the emulated CPU, which has pointer
+  authentication), branch targets are not enforced.
 
-**Cross-building on x86-64.** The tree has two meson cross files:
-`cross/aarch64-linux-gnu.ini` (the `aarch64-linux-gnu-gcc` toolchain and arm64 libraries)
-and `cross/aarch64-qemu-user.ini` (runs the test programs under `qemu-aarch64`; not
-tried yet).
+**Cross-building on x86-64.** The tree has three meson cross files:
+`cross/aarch64-linux-gnu.ini` (the `aarch64-linux-gnu-gcc` toolchain; arm64 libraries
+installed as multiarch packages), and two second layers to give after it:
+`cross/aarch64-sysroot.ini` for arm64 libraries in a directory of their own (a sysroot;
+it also names the emulator for the tests) and `cross/aarch64-qemu-user.ini` (the
+emulator for the multiarch case). The sysroot way is the one that was run:
 
 ```sh
-meson setup build-arm64 --cross-file cross/aarch64-linux-gnu.ini   # add -Dquickjs_libdir=... or -Dscenescript=disabled
-ninja -C build-arm64 programs      # (-Dtests=true at setup for the test programs)
+cp cross/aarch64-sysroot.ini my-sysroot.ini        # set `sysroot = '...'` in the copy
+meson setup build-arm64 -Dtests=true --cross-file cross/aarch64-linux-gnu.ini --cross-file my-sysroot.ini
+ninja -C build-arm64 programs                      # the installed programs
+meson test -C build-arm64 --suite portable -t 10   # two tests, under qemu-aarch64 (builds what is missing first)
 ```
 
-`--tuning=native` is refused in a cross build; name the target CPU with
-`-Dc_args=-mcpu=...` if you know it. The developer tools have `arm64-sysroot.sh` (the
-arm64 libraries in a directory of their own, without touching the system's packages) and
-`arm64cross.py` (configure, build and run tests under emulation). The figures above were
-made with them: `arm64cross.py --suite portable` made the build and ran the suite
-`portable`; the 68 tests were then started by hand, one by one, under qemu-user in that
-build. Tests that start another program of the build, or
-themselves again, need `binfmt_misc` with qemu registered; timing checks are not valid
-under emulation. The suite `portable` (`meson test --suite portable`) compares this
-machine's results with numbers fixed in the source, needs no display and no OpenGL, and
-is the first thing to run on a real ARM machine: a failure there is a portability bug.
+With multiarch packages it is `--cross-file cross/aarch64-linux-gnu.ini --cross-file
+cross/aarch64-qemu-user.ini` (**not run**: it needs arm64 as a foreign architecture of
+the build machine). Ubuntu 24.04 packages for the build machine: `gcc-aarch64-linux-gnu
+libc6-dev-arm64-cross qemu-user meson ninja-build pkg-config`. QuickJS is looked for in
+the sysroot (`<sysroot>/usr/lib/quickjs`), then in the target's multiarch directory; a
+`libquickjs.a` that does not link for the target - the build machine's own, in
+`/usr/lib/quickjs` - is not taken, and the configure step says so
+(`-Dquickjs_libdir=<dir>` names another one). `--tuning=native` and
+`-Dnative_tuning=alderlake` are refused in an arm64 cross build with a sentence that
+says why, `auto` adds nothing there; name the target CPU with `-Dc_args=-mcpu=...` if
+you know it.
+
+Running the tests under emulation:
+
+- The emulated CPU matters. The build signs return addresses, and QEMU 8.2 with its
+  default CPU computes the signature in software on every call and return: the tests
+  that limit CPU time (`formats`, `script-hostile`) then fail, `formats` took 4 min 51 s
+  instead of 33 s. Both wrapper files start the emulator with `-cpu
+  max,pauth-impdef=on` for that reason; for programs the kernel starts through
+  `binfmt_misc` it is `QEMU_CPU=max,pauth-impdef=on` in the environment.
+- Tests that start another program of the build, or themselves again (`sec-local`,
+  `limits`, every test that is a shell or Python script), need the kernel to start arm64
+  programs: `binfmt_misc` with qemu registered. The developer tool `binfmt-ns.py` does
+  that inside a user namespace of its own (Linux 6.7 or newer), without changing the
+  system.
+- What fails there for the emulation's sake, with qemu-user 8.2.2: `memreport` (the
+  emulator makes up `/proc/self/smaps` without resident sizes), `limits` (the emulator
+  itself ends with "QEMU internal SIGSEGV" when one thread reads `/proc/self/maps` while
+  another maps memory), and tests that hold wall-clock or CPU time against a limit
+  (`fx-hostile`, `video`, `video-nv12`, `scene-feat`). The first two pass on an arm64
+  kernel (the emulated machine); the others need a CPU that is not emulated.
+
+The developer tools have `arm64-sysroot.sh` (the arm64 libraries in a directory of their
+own, without touching the system's packages), `arm64cross.py` (configure, build and run
+the tests under emulation) and `binfmt-ns.py`. The suite `portable` (`meson test --suite
+portable`) compares this machine's results with numbers fixed in the source, needs no
+display and no OpenGL, and is the first thing to run on a real ARM machine: a failure
+there is a portability bug.
+
+### State of testing on arm64
+
+All of it on 12 and 13 November 2026, on one x86-64 machine with Ubuntu 24.04; the tree
+is 0.14.0 with the fixes since. Nothing here is a run on ARM hardware.
+
+*Cross build* (gcc-aarch64-linux-gnu 13.3.0, the arm64 packages of Ubuntu 24.04 in a
+sysroot): X11 and Wayland backends, video (FFmpeg 6.1), web (WebKitGTK 2.52), audio,
+SceneScript (QuickJS 2021-03-27), tray, LTO, hardening: 457 build steps with every test
+program, 0 warnings. Without LTO and with `native_tuning=auto`: 0 warnings, no `-mcpu`
+on any command line.
+
+*Tests under qemu-user 8.2.2* (`-cpu max,pauth-impdef=on`, arm64 Mesa 25.2.8 with the
+software renderer, also emulated). The same tree passes 154 of 154 tests on x86-64.
+
+| Tests | Run | Pass | Not passed |
+|---|---|---|---|
+| without a display or OpenGL | 102 | 102 | |
+| with OpenGL (surfaceless, software renderer) | 33 | 27 | 6: `memreport`, `limits` (the emulator, see above); `fx-hostile`, `video`, `video-nv12`, `scene-feat` (time) |
+| shell / Python tests that start the daemon | 4 of 19 | 4 (`linkage`, `sec-daemon`, `ctl`, `daemon-life`: 53 minutes) | the other 15 were not run under qemu-user (hours; the run was cut short) |
+| the parsers and file readers built with UndefinedBehaviorSanitizer (alignment, shifts, conversions) | 53 | 52, no report | `video`, at the same wall-clock check |
+| without a display or OpenGL, with 64 KiB pages (`qemu-aarch64 -p 65536`) | 102 | 100 | 2, both for what `-p` does: `scenescript` (the emulator answers "bad address" when `sigsetjmp` saves the signal mask, the time limit's signal then stays blocked), `videosec` (it multiplies the resident pages the host counts, of 4 KiB, by the emulated page size). Neither says anything about a kernel with 64 KiB pages |
+
+*An emulated arm64 machine* (QEMU 8.2.2 `qemu-system-aarch64 -machine virt -cpu max`: a
+CPU with pointer authentication, BTI and SVE; 2 CPUs, 3.5 GB; Ubuntu 24.04.5 for arm64,
+kernel 6.8 with 4 KiB pages; Mesa 25.2.8, software renderer; no GPU):
+
+- Built there from a source archive with the package list above: `./build.sh
+  -Dtests=true`, the programs with LTO, 0 warnings (33 minutes). The test programs were
+  not built there: each is linked with LTO, at 1.4 build steps a minute that is close to
+  four hours. The tests that ran in the machine are the cross build's programs (the same
+  compiler version and options), copied in.
+- The daemon built there, on X11 (Xvfb) and on Wayland (headless sway, layer shell),
+  with desktop OpenGL 4.5 and - on X11 - with OpenGL ES 3.2 (`WALPE_GL_API=gles`): it
+  starts, answers `walpe-ctl status` and `diag`, shows a PNG picture, an H.264 video,
+  two generated scenes (one that changes every frame), `walpe-tray` starts next to it,
+  `walpe-ctl quit` ends it with status 0; no critical line in its log. The screen with
+  the picture and the screen with the still scene are byte for byte the screens of the
+  x86-64 build (640x360, read with `import` on X11 and `grim` on Wayland), on both
+  window systems and with OpenGL ES. Video and the animated scene show moving pictures;
+  their frames were not compared, they are taken at different moments.
+- The test suite in that machine (the cross build's programs, `meson test -t 10`, while
+  the host was busy with other work: load 15 to 40 on 4 cores): 142 of the 154 tests were
+  started, 132 pass. Not passed: `fx-hostile`, `video`, `video-nv12`,
+  `script-hostile`, `formats`, `sprite-sheet` (a limit on CPU or wall-clock time;
+  `sprite-sheet` passes there when run alone, `formats` did once), `gpustat` (not finished
+  in 30 minutes: it starts a great many small programs, what the emulated machine is
+  slowest at; 81 s under qemu-user), `daemon-life` (two hours; 407 of its 412 checks
+  pass - the tray and its menu, the library window, web wallpapers and the restarts among
+  them - and the 5 others are one case, `swaplost`, that counts frames and restarts in a
+  time window; the whole test passes under qemu-user), `daemon-life-wayland` (the same
+  on headless sway, two hours: 210 of 220 checks; 7 of the others are `swaplost` again
+  and one look for WebKit's processes, 3 are further up in an output of which only the
+  end was kept) and `daemon-resolution` (its X server did not start in the time it
+  gives it; run by hand with `RESCHECK_PATIENCE=20`: 111 of 112 checks, the other is a
+  picture that was right a moment after the wait ended).
+  `memreport`, `limits` and `sec-local` pass there. Two more were started by hand with
+  the suite's command lines, on headless sway: `daemon-wayland` (the Wayland backend
+  end to end: outputs that come and go, scale, pointer, pause rules; 230 checks, 0
+  failed) and `tray-life-wayland` (the tray's menu up to "Quit WalPE"; 35 checks, 0
+  failed). **Not run to an end** (10, all shell / Python tests; the machine needs hours
+  for them): `tray-life` (its cases are part of `daemon-life`), `daemon-wayland-silent`,
+  `daemon-wayland-wait-socket`, `sec-daemon-wayland`, `daemon-scene-video`, `gpu-report`,
+  `websec`, `websec-private`, `web-wayland`, `web-x11`.
+
+*Not run at all*: ARM hardware of any kind; an ARM GPU or its driver (every picture
+above is Mesa's software renderer); hardware video decoding; a kernel with 16 or 64 KiB
+pages; a real ARM CPU's memory ordering (the emulator runs threads in the order an x86
+CPU would); sound output and capture with a sound server; Fedora, Arch Linux ARM,
+Raspberry Pi OS; clang; a native build of the test programs; the multiarch cross files;
+speed.
 
 ## Install
 

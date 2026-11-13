@@ -38,6 +38,19 @@ on an X11 desktop whose file manager owns the desktop the wallpaper is now seen,
 that desktop's own icons behind it (under X11 desktops; `WALPE_X11_DESKTOP=root` is what
 it was). A bare window manager on X11 - dwm, i3, openbox - gets the window of 0.14.0.
 
+### 64-bit ARM
+
+- Nothing changes in what an arm64 build does; what changed is how it is built across
+  and what is known about it. A cross build on an x86-64 machine that has QuickJS
+  installed took that machine's `libquickjs.a` and failed at the link; it now takes the
+  target's (from the sysroot of the cross file) or says which library does not fit.
+  `cross/aarch64-sysroot.ini` is new: the cross build against arm64 libraries in a
+  directory of their own, tests under `qemu-aarch64` included.
+- State of testing ([BUILDING.md](docs/BUILDING.md#state-of-testing-on-arm64)): built
+  and tested in an emulated aarch64 machine (QEMU, software rendering) on 13 November
+  2026, on X11 and on Wayland; a picture and a scene come out byte for byte as on
+  x86-64. Not run on real ARM hardware.
+
 ### Wayland
 
 - KDE Plasma: the wallpaper stays where it belongs. With 0.14.0 it covered Plasma's

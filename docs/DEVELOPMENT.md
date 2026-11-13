@@ -41,7 +41,7 @@ scripts/                     walpe-gpu-report.sh, walpe-collect.sh (installed); 
                              kwincheck.py, gnomecheck.py (GNOME Shell)
 contrib/gnome/               the extension for GNOME Shell (JavaScript; no build installs it)
 protocols/                   Wayland protocol descriptions (third-party, see Licence)
-cross/                       meson cross files for aarch64
+cross/                       meson cross files for aarch64 (compiler, sysroot, emulator)
 data/                        systemd user unit, autostart and desktop entries, style.css, icon
 tests/                       unit and end-to-end tests, test fixtures
 ```
@@ -208,7 +208,7 @@ WalPE only:
 | `optcheck.py` | option coverage: which wallpaper options reach the engine, over a wallpaper library |
 | `gensyn.py`, `genlayers.py`, `gencheck.py`, `gencontent.c` | generators of synthetic wallpapers |
 | `buildmatrix.py` | configures, builds and tests every combination of backends, sanitizers and tuning that has to keep working |
-| `arm64-sysroot.sh`, `arm64cross.py` | the arm64 libraries for a cross build, and the cross build with its tests under emulation |
+| `arm64-sysroot.sh`, `arm64cross.py`, `binfmt-ns.py` | the arm64 libraries for a cross build, the cross build with its tests under emulation, and a namespace in which the kernel starts arm64 programs through qemu (for the tests that start the daemon) |
 | `genworkshopfix.py` | regenerates the synthetic Workshop replies in `tests/fixtures/workshop/` |
 | `fxkey.py` | prints the hash key of a shader statement, for the recogniser tables in `src/engine/fx_keys.h` |
 | `mock-mpris-player.py` | a stand-in media player on the session bus |

@@ -136,9 +136,14 @@ software renderer only ([Known limitations](#known-limitations)).
   1 % of the pixels differ by more than 2 of 255; each is exactly the desktop picture
   without the bias).
   [GPU.md](GPU.md).
-- **64-bit ARM: cross-compiled and tested under emulation, never run on ARM hardware**
-  (65 of the 68 tests that need neither a display nor an OpenGL context pass there; no
-  ARM GPU, no board):
+- **64-bit ARM: built and tested in an emulated aarch64 machine (QEMU, software
+  rendering) on 13 November 2026; not on real hardware.** Cross-compiled with 0
+  warnings; all 102 tests that need neither a display nor OpenGL pass under user-mode
+  emulation; in the emulated machine the daemon runs on X11 and on Wayland and a picture
+  and a scene come out byte for byte as on x86-64. The tests that do not pass there hold
+  time against a limit, and an emulated CPU is many times slower; 10 tests that start
+  the daemon were not run to an end there. No ARM GPU or its
+  driver, no board, no kernel with 16 or 64 KiB pages, no ARM CPU's memory ordering:
   [64-bit ARM](BUILDING.md#64-bit-arm-aarch64).
 - **Sound was measured, not listened to.** Scene sound layers (on by default) were measured
   against a PulseAudio null sink and against PipeWire's `pipewire-pulse` by recording the
