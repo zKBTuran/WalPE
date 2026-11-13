@@ -6,7 +6,7 @@
         "Description": "The WalPE live wallpaper behind the desktop's icons and widgets (needs walpe-daemon; Plasma 6.5 or newer)",
         "Icon": "preferences-desktop-wallpaper",
         "License": "BSD-3-Clause",
-        "Version": "0.14.0",
+        "Version": "0.15.0",
         "Website": "https://github.com/Fired-Cloud/walpe"
     },
     "X-Plasma-API-Minimum-Version": "6.0",

@@ -5,5 +5,5 @@
     "url": "https://github.com/Fired-Cloud/walpe",
     "shell-version": ["46", "51"],
     "session-modes": ["user", "unlock-dialog"],
-    "version-name": "0.14.0"
+    "version-name": "0.15.0"
 }

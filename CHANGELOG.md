@@ -4,9 +4,9 @@ What changed in each released version of WalPE, newest first, written for people
 it. Version numbers are `0.<minor>.<patch>`; every release is tagged `v<version>` in git.
 Release names are album titles by the band Boris, one per release.
 
-## Unreleased
+## 0.15.0 "Heavy Rocks"
 
-What has changed since 0.14.0 "Flood" and is not in a release yet: answers to the first
+What has changed since 0.14.0 "Flood": answers to the first
 reports from other machines. On KDE Plasma (Wayland) the wallpaper was gone after a click
 on the desktop, Plasma's desktop icons could not be had together with it, nothing paused
 it behind a fullscreen window, and the tray's menu had no working "Quit WalPE"; wallpaper

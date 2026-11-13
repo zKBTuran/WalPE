@@ -3,7 +3,7 @@
 Animated desktop wallpapers for Linux, on X11 and on Wayland compositors with the layer
 shell. WalPE plays Wallpaper Engine scene, video and web projects, GIFs and still images.
 
-The current release is 0.14.0 "Flood". Changes per version: [CHANGELOG.md](CHANGELOG.md).
+The current release is 0.15.0 "Heavy Rocks". Changes per version: [CHANGELOG.md](CHANGELOG.md).
 
 ## Features
 
