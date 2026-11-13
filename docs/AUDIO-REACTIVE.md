@@ -58,6 +58,19 @@ WalPE listens to **what the computer plays**: the monitor of the default output 
   of a page is denied ([SECURITY.md](SECURITY.md)).
 - The capture runs only while a wallpaper that asked for it is shown and not paused.
 
+**The spectrum is not harmless.** 64 levels per channel 30 times a second say whether
+something plays and when, are enough to recognise a piece of music or a film, and are
+close to what a channel vocoder sends: speech that comes out of the output - the other
+side of a call, a video - may be made out from them (not tried here; assume it). The
+output's monitor also carries whatever is routed to the output, a microphone that is
+played back ("listen to this device", a loopback) included. A scene cannot send anything
+anywhere. A **web wallpaper** is a web page: with network access, which it has unless you
+switch it off, it can send what its listener gets to its author. So for a web wallpaper
+you do not trust: its option "Allow network access" off (`walpe-ctl setprop
+walpe_network=false`), or `WALPE_NO_AUDIO=1` for the daemon. `walpe-ctl status` shows
+`audio: capturing ...` whenever a wallpaper listens. There is no switch for this in the
+settings window yet.
+
 Because it listens to the output, an audio-reactive wallpaper also reacts to wallpaper
 sound (another wallpaper's, or its own).
 

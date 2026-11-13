@@ -126,7 +126,9 @@ What it gets and what it does not, as the code is today:
 - **What it can ask of the daemon**: three things, by a message of at most 64 KiB - the
   audio spectrum (128 numbers 30 times a second, of what the default output plays and
   never of a microphone: [AUDIO-REACTIVE.md](AUDIO-REACTIVE.md#where-the-sound-comes-from)),
-  the "now playing" state, and that a pointer event arrived. A page that
+  the "now playing" state, and that a pointer event arrived. With network access a page
+  can send both on: the spectrum tells what plays and may be enough to make out speech,
+  "now playing" is what you listen to (the same page says how to switch each off). A page that
   sends megabytes, or more than 20000 messages in ten seconds, is stopped (status:
   `web_error`). A page whose process dies is loaded again, three times within a minute at
   most.
