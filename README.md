@@ -32,7 +32,7 @@ The details and the known limitations: [docs/LIMITATIONS.md](docs/LIMITATIONS.md
 
 ## Requirements
 
-- GCC or clang, meson and ninja.
+- GCC or clang, meson, ninja and pkg-config.
 - GLib, json-glib, gdk-pixbuf, Pango, fontconfig, libepoxy, EGL, LZ4 and GTK 4.
 - The X11 libraries (libX11, libXext, libXinerama) or the Wayland ones (wayland-client,
   wayland-egl, wayland-scanner). At least one of the two backends has to be built.
@@ -86,7 +86,8 @@ More: [docs/USAGE.md](docs/USAGE.md).
 ## Documentation
 
 - [USAGE.md](docs/USAGE.md): what is played, `walpe-ctl`, pausing, Workshop, tray
-- [BUILDING.md](docs/BUILDING.md): dependencies, build options, arm64, install
+- [BUILDING.md](docs/BUILDING.md): dependencies, build options, arm64, install, the package
+  for Arch-based systems (`contrib/packaging/arch`)
 - [SETTINGS.md](docs/SETTINGS.md): every `config.json` key, quality presets, "Adjust layers"
 - [ENVIRONMENT.md](docs/ENVIRONMENT.md): every environment switch
 - [LIMITATIONS.md](docs/LIMITATIONS.md): known limitations, the state of testing
