@@ -1538,12 +1538,21 @@ def case_window(env, W):
             if check(ok, "window: it runs with the icon installed", f"exit status {win.poll()}"):
                 xc = XClient(env.env["DISPLAY"])
                 try:
+                    # The window is known by its WM_CLASS, the program's name, which
+                    # every toolkit window has. (_GTK_APPLICATION_ID, by which it was
+                    # looked for, is set only when GTK reached a session bus: on a
+                    # system without dbus-launch - Alpine, a minimal Debian - the
+                    # window had its icon and the check did not find the window.)
+                    name = os.path.basename(win_bin)
+
+                    def ours():
+                        return [w for w in xc.tree(xc.root, 3) if name in xc.wm_class(w)]
+
                     def with_icon():
-                        return [w for w in xc.tree(xc.root, 3)
-                                if xc.has_prop(w, "_GTK_APPLICATION_ID") and xc.has_prop(w, "_NET_WM_ICON")]
+                        return [w for w in ours() if xc.has_prop(w, "_NET_WM_ICON")]
                     got = wait_for(with_icon, 20, 0.5)
                     check(bool(got), "window: its X window carries the icon (_NET_WM_ICON)",
-                          [w for w in xc.tree(xc.root, 3) if xc.has_prop(w, "_GTK_APPLICATION_ID")])
+                          [(w, xc.wm_class(w)) for w in ours()])
                 finally:
                     xc.close()
         finally:
@@ -2482,6 +2491,23 @@ class XClient:
                                            self.c.c_int]
         self.prop(self.wmwin, "_NET_SUPPORTING_WM_CHECK", self.XA_WINDOW, [self.wmwin])
         self.prop(self.root, "_NET_SUPPORTING_WM_CHECK", self.XA_WINDOW, [self.wmwin])
+
+    def wm_class(self, win):
+        """the window's WM_CLASS: its instance and class name, () when it has none"""
+        c = self.c
+        kind, fmt, n, left = c.c_ulong(), c.c_int(), c.c_ulong(), c.c_ulong()
+        data = c.c_void_p()
+        self.x.XGetWindowProperty.argtypes = [c.c_void_p, c.c_ulong, c.c_ulong, c.c_long, c.c_long, c.c_int,
+                                              c.c_ulong, c.POINTER(c.c_ulong), c.POINTER(c.c_int),
+                                              c.POINTER(c.c_ulong), c.POINTER(c.c_ulong),
+                                              c.POINTER(c.c_void_p)]
+        if self.x.XGetWindowProperty(self.d, win, self.atom("WM_CLASS"), 0, 64, 0, 0, c.byref(kind), c.byref(fmt),
+                                     c.byref(n), c.byref(left), c.byref(data)) != 0:
+            return ()
+        raw = c.string_at(data, n.value) if data and fmt.value == 8 else b""
+        if data:
+            self.x.XFree(data)
+        return tuple(t.decode(errors="replace") for t in raw.split(b"\0") if t)
 
     def has_prop(self, win, name):
         """does the window have this property?"""
