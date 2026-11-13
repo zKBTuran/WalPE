@@ -2987,12 +2987,12 @@ WalpeGlTex walpe_gl_tex_from_file (const char *path)
      * before for what it will hand out. A file of those three without a
      * size the reader finds is not handed to a loader either: where the
      * loader decodes through glycin the question alone is a full decode,
-     * at whatever size the data has (an AVIF image sequence, an AVIF
-     * without "ispe": pichead.c). */
+     * at whatever size the data has (an AVIF without "ispe": pichead.c;
+     * an AVIF image sequence has the size it declares, and is handed on). */
     gboolean sized = kind && walpe_pichead_file_size (kind, path, &iw, &ih);
     if (kind && !sized && !walpe_pichead_exact (kind)) {
-        g_warning ("texture %s: not loaded, its %s header does not say how large the picture is%s",
-                   walpe_log_str (path), kind, !strcmp (kind, "avif") ? " (or it is an image sequence)" : "");
+        g_warning ("texture %s: not loaded, its %s header does not say how large the picture is",
+                   walpe_log_str (path), kind);
         return out;
     }
     if (sized && !walpe_pichead_exact (kind)) {

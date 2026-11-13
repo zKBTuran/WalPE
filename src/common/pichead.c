@@ -456,44 +456,18 @@ static gboolean box_find (Src *s, guint64 from, guint64 to, const char *want, gu
 
 /* AVIF: the largest "ispe" (image spatial extents) among the item
  * properties: meta > iprp > ipco. A grid's canvas has one of its own.
- *
- * That bounds what libheif decodes for a picture kept as an item: it holds
- * an item's coded size to its "ispe" and a grid to its tiles before
- * anything is decoded (run with libheif 1.23: a 9000 x 9000 item under an
- * "ispe" of 64 x 64, a grid of 2 x 2 tiles that says 9000 x 9000 - both
- * refused at 17 to 22 MiB). It does not bound an image sequence: a file
- * with a "moov" box is played from its track, whose pictures are as large
- * as the AV1 data says - with every size the file declares (ispe, tkhd,
- * the sample entry) at 64 x 64, frames of 5000 x 5000 were decoded, and a
- * picture of 64 x 64 handed back. So a file with a "moov" box has no size
- * here, nor one without "ispe" (libheif decodes that one as well: seen),
- * nor one this walk does not see whole - more than 4096 boxes on a level,
- * or eight bytes and more at the end that are no box. */
-static gboolean avif_size (Src *s, guint64 size, int *w, int *h)
+ * FALSE: none, or a level of boxes this walk does not see whole. */
+static gboolean avif_ispe_size (Src *s, guint64 mbody, guint64 mend, int *w, int *h)
 {
-    guint64 body, end, lim, from = 0, mbody = 0, mend = 0;
+    guint64 body, end, lim = mend, from, mw = 0, mh = 0;
     char type[4];
-    gboolean meta = FALSE;
     int n;
-    for (n = 0; n < 4096 && box_at (s, from, size, type, &body, &end); n++, from = end) {
-        if (!memcmp (type, "moov", 4))
-            return FALSE;
-        if (!meta && !memcmp (type, "meta", 4)) {
-            meta = TRUE;
-            mbody = body;
-            mend = end;
-        }
-    }
-    if (!meta || mend - mbody < 4 || size - from >= 8)
-        return FALSE;
-    lim = mend;
-    if (!box_find (s, mbody + 4, lim, "iprp", &body, &end))
+    if (mend - mbody < 4 || !box_find (s, mbody + 4, lim, "iprp", &body, &end))
         return FALSE;
     lim = end;
     if (!box_find (s, body, lim, "ipco", &body, &end))
         return FALSE;
     lim = end;
-    guint64 mw = 0, mh = 0;
     from = body;
     for (n = 0; n < 4096 && box_at (s, from, lim, type, &body, &end); n++, from = end) {
         guint8 b[12];
@@ -507,6 +481,85 @@ static gboolean avif_size (Src *s, guint64 size, int *w, int *h)
     if (lim - from >= 8)
         return FALSE;
     return dims_set (mw, mh, w, h);
+}
+
+/* An image sequence without "ispe": the largest width and height among its
+ * track headers (moov > trak > tkhd; 16.16 fixed point, a fraction counts
+ * as the next whole pixel). FALSE: no track with a size (a sound track has
+ * 0 x 0), or a level this walk does not see whole. */
+static gboolean avif_track_size (Src *s, guint64 vbody, guint64 vend, int *w, int *h)
+{
+    guint64 body, end, tbody, tend, from = vbody, mw = 0, mh = 0;
+    char type[4];
+    int n;
+    for (n = 0; n < 4096 && box_at (s, from, vend, type, &body, &end); n++, from = end) {
+        guint8 b[8], ver;
+        if (memcmp (type, "trak", 4) || !box_find (s, body, end, "tkhd", &tbody, &tend))
+            continue;
+        if (tend - tbody < 1 || !src_read (s, tbody, &ver, 1))
+            return FALSE;
+        /* version and flags, the times, id and duration (32 bits each, or
+         * 64 for the times and the duration in version 1), 52 bytes of
+         * layer, volume and matrix - then width and height */
+        const guint64 at = tbody + (ver == 1 ? 88 : 76);
+        if (ver > 1 || tend - tbody < (at - tbody) + 8 || !src_read (s, at, b, 8))
+            return FALSE;
+        mw = MAX (mw, ((guint64) be32 (b) + 0xffff) >> 16);
+        mh = MAX (mh, ((guint64) be32 (b + 4) + 0xffff) >> 16);
+    }
+    if (vend - from >= 8)
+        return FALSE;
+    return dims_set (mw, mh, w, h);
+}
+
+/* AVIF: the size of the picture kept as an item ("ispe" above), or, for an
+ * image sequence without one, of its track.
+ *
+ * "ispe" bounds what libheif decodes for a picture kept as an item: it
+ * holds an item's coded size to its "ispe" and a grid to its tiles before
+ * anything is decoded (run with libheif 1.23: a 9000 x 9000 item under an
+ * "ispe" of 64 x 64, a grid of 2 x 2 tiles that says 9000 x 9000 - both
+ * refused at 17 to 22 MiB).
+ *
+ * NOTHING BOUNDS AN IMAGE SEQUENCE (an animated AVIF: a file with a "moov"
+ * box). It is played from its track, whose pictures are as large as the
+ * AV1 data says - with every size the file declares (ispe, tkhd, the
+ * sample entry) at 64 x 64, frames of 5000 x 5000 were decoded by glycin's
+ * libheif loader, and a picture of 64 x 64 handed back; 3.7 KB with two
+ * frames of 9000 x 9000 cost 1441 MiB in the decoder process. Such a file
+ * has a size here all the same - what it declares: "ispe" as for a still
+ * picture, else its track header - and so goes to the loader, which shows
+ * its first frame: the owner's decision, an animated AVIF is a picture a
+ * wallpaper can have. For such a file TRUE is therefore no bound on what
+ * its decoder allocates.
+ *
+ * No size: a file without "ispe" that is no sequence (libheif decodes that
+ * one as well: seen), a sequence without "ispe" whose tracks have no size
+ * either, and a file this walk does not see whole - more than 4096 boxes
+ * on a level, or eight bytes and more at the end that are no box. */
+static gboolean avif_size (Src *s, guint64 size, int *w, int *h)
+{
+    guint64 body, end, from = 0, mbody = 0, mend = 0, vbody = 0, vend = 0;
+    char type[4];
+    gboolean meta = FALSE, moov = FALSE;
+    int n;
+    for (n = 0; n < 4096 && box_at (s, from, size, type, &body, &end); n++, from = end) {
+        if (!moov && !memcmp (type, "moov", 4)) {
+            moov = TRUE;
+            vbody = body;
+            vend = end;
+        }
+        if (!meta && !memcmp (type, "meta", 4)) {
+            meta = TRUE;
+            mbody = body;
+            mend = end;
+        }
+    }
+    if (size - from >= 8)
+        return FALSE;
+    if (meta && avif_ispe_size (s, mbody, mend, w, h))
+        return TRUE;
+    return moov && avif_track_size (s, vbody, vend, w, h);
 }
 
 /* JPEG XL: the size header at the start of the codestream (bits from the

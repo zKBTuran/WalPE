@@ -99,15 +99,21 @@ So WalPE does not leave either to gdk-pixbuf any more (`src/common/pichead.c`):
   gathered across the parts of a container) what WalPE reads is an upper bound that
   refuses a picture beyond the limits; the size the picture is laid out by is still the
   loader's. A file of these three without a size WalPE finds is not handed on either.
-- **An AVIF image sequence is not decoded at all.** A file with a `moov` box is played
-  by glycin's libheif loader from its track, and the frames are as large as the AV1 data
-  says whatever the file declares: with `ispe`, the track header and the sample entry at
-  64 x 64, frames of 5000 x 5000 were decoded (470 MiB), and an animated AVIF of 3.7 KB
-  with two frames of 9000 x 9000 cost 1441 MiB and 15 seconds for a picture handed back
-  at 64 x 64. No header field bounds it, so the reader gives such a file no size. (A
-  still AVIF is bounded: libheif 1.23 holds an item's coded size to its `ispe` and a
-  grid to its tiles before it decodes - run, refused at 17 to 22 MiB.) The first frame
-  of an animated AVIF used to be shown where gdk-pixbuf has an AVIF loader.
+- **An AVIF image sequence (an animated AVIF) is decoded, and nothing bounds what that
+  costs.** A file with a `moov` box is played by glycin's libheif loader from its track,
+  and the frames are as large as the AV1 data says whatever the file declares: with
+  `ispe`, the track header and the sample entry at 64 x 64, frames of 5000 x 5000 were
+  decoded (470 MiB), and an animated AVIF of 3.7 KB with two frames of 9000 x 9000 cost
+  1441 MiB and 15 seconds in the decoder process for a picture handed back at 64 x 64
+  (Arch, glycin 2.2.6, libheif 1.23.7). No header field bounds it. Such a file is handed
+  to the loader all the same, for its first frame, where gdk-pixbuf has an AVIF loader:
+  an animated AVIF is a picture a wallpaper can have, by the owner's decision. The size
+  WalPE holds to its limits is the one the file declares (`ispe`; without one the size
+  in its track header, `tkhd`), which says nothing about the frames; a sequence that
+  declares no size at all is not handed on, like any file without one. For a while
+  these files were not decoded at all; that bound is given up again. (A still AVIF is
+  bounded: libheif 1.23 holds an item's coded size to its `ispe` and a grid to its tiles
+  before it decodes - run, refused at 17 to 22 MiB.)
 - The loader's own report of the size is still held to the limit behind that, and for
   previews and cover art to the header as well: a size that differs from the header's
   refuses the picture.

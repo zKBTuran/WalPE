@@ -641,9 +641,10 @@ static gboolean picture_accept (const guint8 *head, gsize n, guint64 size, const
  * caller before anything else happens to the file. FALSE with err set: the
  * caller refused it, or the file has no size the readers find - of a
  * format whose header is in one fixed place no decoder shows such a file;
- * an AVIF without one (no "ispe", an image sequence) is decoded at
- * whatever size its data has by a decoder that reports afterwards
- * (pichead.c, avif_size). No decoder is started for either. */
+ * an AVIF without one (no "ispe", and no image sequence with a track's
+ * size instead) is decoded at whatever size its data has by a decoder
+ * that reports afterwards (pichead.c, avif_size). No decoder is started
+ * for either. */
 static gboolean picture_size_gate (PictureLoad *pl, gboolean known, int w, int h, GError **err)
 {
     if (!known) {

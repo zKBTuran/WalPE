@@ -682,12 +682,13 @@ microphone.
   decoders behind glycin, and four ways to tell WalPE one size and the decoder another
   were closed (a JPEG with a restart marker or a second frame header in front of its
   scan, a TIFF with its size in another number type, a JPEG XL container cut behind its
-  first two bytes, an "AVIF" whose box length is a TGA header to glycin). An AVIF image
-  sequence (an animated AVIF) is not decoded any more, on any system: its frames are as
-  large as its AV1 data says whatever the file declares (3.7 KB cost 1.4 GiB in the
-  decoder process on Arch); its first frame used to be shown where gdk-pixbuf has an AVIF
-  loader (Ubuntu 24.04 has none by default). On Ubuntu 24.04 the same checks run and
-  change nothing else that was shown: 193 pictures of every format, header version and
+  first two bytes, an "AVIF" whose box length is a TGA header to glycin). One way stays
+  open, by decision: an AVIF image sequence (an animated AVIF) is still handed to the
+  decoder, for its first frame, where gdk-pixbuf has an AVIF loader (Ubuntu 24.04 has
+  none by default), and its frames are as large as its AV1 data says whatever the file
+  declares (3.7 KB cost 1.4 GiB in the decoder process on Arch; under "Known limitations"
+  below). On Ubuntu 24.04 the same checks run and
+  change nothing that was shown: 193 pictures of every format, header version and
   name gave the same pixels through previews, `.tex`, layer pictures and as the
   wallpaper before and after. A picture or GIF wallpaper is no longer opened three times to learn
   its format and size (on Arch that was three full decodes before the picture was
@@ -932,9 +933,12 @@ microphone.
   in the three cases that were watched; what puts it back in step was not measured. By
   its review the sound also begins at full level there, without the short fade-in. Not
   repaired.
-- An animated AVIF (an AVIF image sequence) is not shown, as a wallpaper, a layer
-  picture or a preview: its frames are as large as its AV1 data says whatever the file
-  declares (under Security above). A still AVIF is shown as before.
+- An animated AVIF (an AVIF image sequence) is shown by its first frame, as a wallpaper,
+  a layer picture or a preview, where gdk-pixbuf has an AVIF loader - and nothing in such
+  a file bounds what the decoder takes for it: its frames are as large as its AV1 data
+  says whatever the file declares, and 3.7 KB cost 1.4 GiB and 15 seconds in the decoder
+  process on Arch ([SECURITY.md](docs/SECURITY.md#which-decoder-a-picture-reaches-and-when-its-size-is-known)).
+  A still AVIF is held to the size it declares.
 - Video sound: videos imported with 0.14.0 or earlier have no sound track - the import
   dropped it - and have to be imported again from the original file. A video layer
   inside a scene is silent. A video's track is kept as a FLAC file in

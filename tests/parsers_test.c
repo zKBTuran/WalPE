@@ -3319,6 +3319,20 @@ static void ph_bits (GByteArray *a, guint *pos, guint64 v, guint n)
     }
 }
 
+/* a WalpePictureSizeFunc that notes what it is asked (user: int[3] = times,
+ * w, h) and refuses the picture, so that no loader is made */
+static gboolean ph_size_asked (const char *kind, int w, int h, int *sw, int *sh, gpointer user)
+{
+    int *asked = user;
+    (void) kind;
+    (void) sw;
+    (void) sh;
+    asked[0]++;
+    asked[1] = w;
+    asked[2] = h;
+    return FALSE;
+}
+
 static gboolean ph_size (const char *kind, const guint8 *d, gsize n, int ew, int eh)
 {
     int w = -1, h = -1, fw = -1, fh = -1;
@@ -3541,9 +3555,11 @@ static void test_pichead (void)
             CHECK (walpe_picture_decode (a->data, a->len, avif_only, NULL, NULL, &e) == NULL);
             CHECK (g_error_matches (e, G_IO_ERROR, G_IO_ERROR_INVALID_DATA));
             g_clear_error (&e);
-            /* An image sequence - a "moov" box, in front of the "meta" box or behind it -
-             * has no size: it is played from its track, at the size of its AV1 data, whatever
-             * "ispe" says (64 x 64 here stood for frames of 9000 x 9000 on Arch) */
+            /* An image sequence (an animated AVIF) - a "moov" box, in front of the "meta"
+             * box or behind it - has the size it declares and is handed to the decoder with
+             * it, for its first frame. That size bounds nothing: the file is played from its
+             * track, at the size of its AV1 data (64 x 64 here stood for frames of
+             * 9000 x 9000 on Arch) */
             static const guint8 seq[12] = { 0, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0, 64 };
             GByteArray *co = g_byte_array_new (), *rp = g_byte_array_new (), *me = g_byte_array_new ();
             ph_box (co, "ispe", seq, 12);
@@ -3557,15 +3573,81 @@ static void test_pichead (void)
             CHECK (ph_size ("avif", a->data, a->len, 64, 64));
             ph_box (a, "moov", (const guint8 *) "\0\0\0\0", 4);
             ph_box (a, "mdat", (const guint8 *) "\0\0\0\0", 4);
-            CHECK (ph_size ("avif", a->data, a->len, 0, 0));
-            CHECK (walpe_picture_decode (a->data, a->len, avif_only, NULL, NULL, &e) == NULL);
-            CHECK (g_error_matches (e, G_IO_ERROR, G_IO_ERROR_INVALID_DATA));
+            CHECK (ph_size ("avif", a->data, a->len, 64, 64));
+            /* ... the caller is asked about that size before a loader exists (it says no
+             * here, so that the check needs no AVIF loader) */
+            int asked[3] = { 0, 0, 0 };
+            CHECK (walpe_picture_decode (a->data, a->len, avif_only, ph_size_asked, asked, &e) == NULL);
+            CHECK (asked[0] == 1 && asked[1] == 64 && asked[2] == 64);
+            CHECK (e && strstr (e->message, "size is not accepted") && !strstr (e->message, "does not say how large"));
             g_clear_error (&e);
             g_byte_array_set_size (a, 0);
             ph_box (a, "ftyp", (const guint8 *) "avis\0\0\0\0avifavis", 16);
             ph_box (a, "moov", (const guint8 *) "\0\0\0\0", 4);
             ph_box (a, "meta", me->data, me->len);
+            CHECK (ph_size ("avif", a->data, a->len, 64, 64));
+            /* A sequence without "ispe": the size of its track (moov > trak > tkhd, 16.16
+             * fixed point; version 0 and 1; the largest of several tracks, a sound track
+             * has none; a fraction is the next whole pixel); "ispe" comes first where the
+             * file has both */
+            guint8 tk0[84] = { 0 }, tk1[96] = { 1 }, snd[84] = { 0 };
+            tk0[77] = 48; tk0[81] = 32;                     /* 48 x 32 */
+            tk1[88] = 1; tk1[89] = 0x2c; tk1[91] = 1;       /* 300 1/65536 x 200 */
+            tk1[93] = 200;
+            GByteArray *tr = g_byte_array_new (), *mv = g_byte_array_new ();
+            ph_box (tr, "tkhd", tk0, sizeof tk0);
+            ph_box (mv, "mvhd", NULL, 0);
+            ph_box (mv, "trak", tr->data, tr->len);
+            g_byte_array_set_size (a, 0);
+            ph_box (a, "ftyp", (const guint8 *) "avis\0\0\0\0avifavis", 16);
+            ph_box (a, "moov", mv->data, mv->len);
+            ph_box (a, "mdat", (const guint8 *) "\0\0\0\0", 4);
+            CHECK (ph_size ("avif", a->data, a->len, 48, 32));
+            asked[0] = 0;
+            CHECK (walpe_picture_decode (a->data, a->len, avif_only, ph_size_asked, asked, &e) == NULL);
+            CHECK (asked[0] == 1 && asked[1] == 48 && asked[2] == 32);
+            g_clear_error (&e);
+            ph_box (a, "meta", me->data, me->len);
+            CHECK (ph_size ("avif", a->data, a->len, 64, 64));
+            g_byte_array_set_size (tr, 0);
+            ph_box (tr, "tkhd", tk1, sizeof tk1);
+            ph_box (mv, "trak", tr->data, tr->len);
+            g_byte_array_set_size (tr, 0);
+            ph_box (tr, "tkhd", snd, sizeof snd);
+            ph_box (mv, "trak", tr->data, tr->len);
+            g_byte_array_set_size (a, 0);
+            ph_box (a, "ftyp", (const guint8 *) "avis\0\0\0\0avifavis", 16);
+            ph_box (a, "moov", mv->data, mv->len);
+            CHECK (ph_size ("avif", a->data, a->len, 301, 200));
+            /* A sequence with no size anywhere stays what a file without a size is: not
+             * handed to a decoder, and the error is the header's. No "ispe" and: no track;
+             * a sound track alone; a track header cut short */
+            g_byte_array_set_size (a, 0);
+            ph_box (a, "ftyp", (const guint8 *) "avis\0\0\0\0avifavis", 16);
+            ph_box (a, "moov", (const guint8 *) "\0\0\0\0", 4);
+            ph_box (a, "mdat", (const guint8 *) "\0\0\0\0", 4);
             CHECK (ph_size ("avif", a->data, a->len, 0, 0));
+            asked[0] = 0;
+            CHECK (walpe_picture_decode (a->data, a->len, avif_only, ph_size_asked, asked, &e) == NULL);
+            CHECK (asked[0] == 0 && g_error_matches (e, G_IO_ERROR, G_IO_ERROR_INVALID_DATA) &&
+                   strstr (e->message, "does not say how large"));
+            g_clear_error (&e);
+            g_byte_array_set_size (mv, 0);
+            ph_box (mv, "trak", tr->data, tr->len);         /* (the sound track) */
+            g_byte_array_set_size (a, 0);
+            ph_box (a, "ftyp", (const guint8 *) "avis\0\0\0\0avifavis", 16);
+            ph_box (a, "moov", mv->data, mv->len);
+            CHECK (ph_size ("avif", a->data, a->len, 0, 0));
+            g_byte_array_set_size (tr, 0);
+            ph_box (tr, "tkhd", tk0, sizeof tk0 - 1);
+            g_byte_array_set_size (mv, 0);
+            ph_box (mv, "trak", tr->data, tr->len);
+            g_byte_array_set_size (a, 0);
+            ph_box (a, "ftyp", (const guint8 *) "avis\0\0\0\0avifavis", 16);
+            ph_box (a, "moov", mv->data, mv->len);
+            CHECK (ph_size ("avif", a->data, a->len, 0, 0));
+            g_byte_array_unref (tr);
+            g_byte_array_unref (mv);
             /* the file is walked to its end: up to seven bytes there are no box to any
              * reader; eight that are none (a length past the end) could hide one */
             g_byte_array_set_size (a, 0);
