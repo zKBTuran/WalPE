@@ -1660,6 +1660,35 @@ static void audit_checks (void)
             g_string_append (s, "void main () {\n\tfloat a = 0.0;\n#ifndef GL_ARB_shading_language_420pack\n\tC(a += 0.000001;)\n"
                                 "#endif\n#if !defined(__VERSION__) || !GL_ES || !defined(GL_ES)\n\tC(a += 0.000001;)\n#endif\n}\n");
             result (fits_with_probe (s->str), "... without the \"#undef\": the driver's word is taken, accepted", NULL);
+            /* "##" copies the text of both tokens into a new one, and a
+             * body of "a ## x ## x ..." copies its growing name at every
+             * "##": the square of their number in bytes, here before any
+             * driver (40000 of them, 200 KB of source: 1 GB in the reader;
+             * 200000: the process ends in g_malloc). The copies are text
+             * like the text written out, and charged. */
+            static const char *const first[] = { "a", "1", "+" };
+            for (guint k = 0; k < G_N_ELEMENTS (first); k++) {
+                g_string_assign (s, "#define P ");
+                g_string_append (s, first[k]);
+                for (int i = 0; i < 40000; i++)
+                    g_string_append (s, " ## x");
+                g_string_append (s, "\nfloat a = P;\n");
+                gint64 t0 = g_get_monotonic_time ();
+                gboolean refused = !fx_expansion_ok (s->str);
+                double took = (g_get_monotonic_time () - t0) / 1e6;
+                char *what = g_strdup_printf ("40000 \"##\" in one body behind \"%s\" (800 MB of copies): refused, in less than 1 s",
+                                              first[k]);
+                d = g_strdup_printf ("%s, %.2f s", refused ? "refused" : "accepted", took);
+                result (refused && took < 1.0, what, d);
+                g_free (d);
+                g_free (what);
+            }
+            fits = fx_expansion_sizes ("#define CAT3(a, b, c) a ## b ## c\n#define NAME(n) CAT3(u_, n, _v)\n"
+                                       "void main () {\n\tfloat NAME(1) = 1.0, NAME() = 2.0, CAT3(,,x) = CAT3(1,.,5);\n}\n", &st);
+            d = g_strdup_printf ("longest statement %" G_GINT64_FORMAT, st);
+            /* float u_1_v = 1.0 , u__v = 2.0 , x = 1.5 */
+            result (fits && st == 12, "names and a number made by \"##\", with empty arguments: accepted, one token each", d);
+            g_free (d);
         }
         g_string_assign (s, "#define SELF SELF + 1\n#define P Q\n#define Q P\nfloat a = SELF + P;\n");
         result (fx_expansion_ok (s->str), "self-referencing macros: accepted (not expanded in themselves)", NULL);

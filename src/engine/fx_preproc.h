@@ -772,6 +772,16 @@ static FxPreTok fxpre_paste (FxPre *pp, const FxPreTok *a, const FxPreTok *b)
         return *b;
     if (b->kind == FXPRE_T_MARK)
         return *a;
+    /* The text of both is copied, and kept to the end. That is text like
+     * the text written out and work like the moving of tokens: a body of
+     * "a ## x ## x ..." copies its growing name anew at every "##" - the
+     * square of their number in bytes (40000 of them, 200 KB of source:
+     * 1 GB here, before any driver). Beyond a bound nothing is pasted. */
+    pp->bytes += (gint64) a->len + b->len + 1;
+    if (pp->bytes > pp->conf.max_bytes && !pp->fail)
+        pp->fail = "too much text after preprocessing (every macro replaced)";
+    if (!fxpre_charge (pp, 1 + ((gint64) a->len + b->len) / 16))
+        return *a;
     char *s = g_malloc (a->len + b->len + 1);
     memcpy (s, a->s, a->len);
     memcpy (s + a->len, b->s, b->len);
@@ -781,7 +791,6 @@ static FxPreTok fxpre_paste (FxPre *pp, const FxPreTok *a, const FxPreTok *b)
     if (fxpre_ident_start (t.s[0])) {
         t.kind = FXPRE_T_IDENT;
         t.sym = fxpre_intern (pp, t.s, t.len);
-        fxpre_charge (pp, t.len / 16);
     }
     else if (g_ascii_isdigit (t.s[0]) || (t.s[0] == '.' && t.len > 1 && g_ascii_isdigit (t.s[1])))
         t.kind = FXPRE_T_NUM;
