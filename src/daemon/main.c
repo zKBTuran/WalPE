@@ -349,6 +349,8 @@ typedef struct Mon {
     gboolean parked;         /* lock: it has no output: its thread holds no wallpaper,
                               * its context is current on nothing, and it waits */
     gboolean park_told;      /* main: ... and has said so (mon_parked_cb) */
+    gboolean gone_said;      /* render thread: it has said that it presents nothing
+                              * any more, the display being gone (mon_swap_failed) */
     guint life;              /* main: the outputs it has had; a load's note carries it,
                               * and one of an earlier output is not acted on */
 #endif
@@ -852,6 +854,9 @@ static void mon_present_apply (Mon *m)
  * operation on the context"), so no glFlush / glFinish goes before it.
  * swap_damage: the damage goes with the swap where the EGL can take it;
  * it is the whole surface, because no content reports less yet. */
+/* (not an EGL error: mon_swap asked nothing of EGL, the display is gone) */
+#define SWAP_ERR_NO_DISPLAY ((EGLint) -1)
+
 static EGLBoolean mon_swap (Mon *m)
 {
     mon_present_apply (m);
@@ -859,6 +864,22 @@ static EGLBoolean mon_swap (Mon *m)
         m->swap_err = D.swap_fail_err;      /* WALPE_SWAP_FAIL (tests): this swap "fails" */
         return EGL_FALSE;
     }
+#ifdef HAVE_WAYLAND
+    /* The compositor is gone and the main thread is on its way to end the
+     * daemon or to restart it; until it has told this thread, the thread
+     * goes on with its frames. A swap on a display that is gone is not for
+     * EGL to sort out: Mesa's software path (26.2, llvmpipe) reads through
+     * a back buffer it could not get any more and the daemon dies of
+     * SIGSEGV in eglSwapBuffers - seen once in some hundred lost
+     * compositors, each time in the frame after the one whose wait for
+     * the compositor had found the connection gone. What is known to be
+     * gone is not swapped on. (What goes in the middle of a swap is still
+     * EGL's.) */
+    if (G_UNLIKELY (walpe_platform_display_gone ())) {
+        m->swap_err = SWAP_ERR_NO_DISPLAY;
+        return EGL_FALSE;
+    }
+#endif
     walpe_surface_pre_swap (m->ps);
     if (P.swap_damage && P.has_damage) {
         EGLint r[4] = { 0, 0, MON_W (m), MON_H (m) };
@@ -914,6 +935,18 @@ static void mon_swap_failed (Mon *m)
 {
     EGLint err = m->swap_err ? m->swap_err : eglGetError ();
     m->swap_err = 0;
+#ifdef HAVE_WAYLAND
+    if (err == SWAP_ERR_NO_DISPLAY) {
+        /* nothing failed and nothing is to be made anew: the main thread
+         * has the lost display in hand (plat_connection_lost) */
+        if (!m->gone_said) {
+            m->gone_said = TRUE;
+            g_message ("monitor %d (%s): the display connection is gone: its frames are not "
+                       "presented any more", m->index, m->name);
+        }
+        return;
+    }
+#endif
     const gboolean gone = err == EGL_CONTEXT_LOST || err == EGL_BAD_SURFACE ||
                           err == EGL_BAD_NATIVE_WINDOW;
     const gint64 now = g_get_monotonic_time ();
@@ -4889,6 +4922,17 @@ static void plat_connection_lost (gpointer user)
     } else {
         g_message ("the display connection is gone: shutting down");
     }
+#ifdef HAVE_WAYLAND
+    {
+        /* WALPE_LOST_LINGER_MS (tests): the main thread stands still that
+         * long before it leaves its loop, so that the render threads come
+         * to their next frames with the display gone - which they do
+         * anyway, for the moment the tear-down takes to reach them */
+        const char *e = g_getenv ("WALPE_LOST_LINGER_MS");
+        if (e && *e)
+            g_usleep ((gulong) CLAMP (g_ascii_strtoll (e, NULL, 10), 0, 10000) * 1000);
+    }
+#endif
     if (D.loop)
         g_main_loop_quit (D.loop);
 }

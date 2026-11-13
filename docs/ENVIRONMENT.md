@@ -279,6 +279,7 @@ Not for daily use: test hooks, measuring aids and names the programs set for the
 | `WALPE_FAKE_VSYNC=1` | daemon | every swap waits for an emulated vertical blank (X servers without vsync, such as Xvfb) |
 | `WALPE_FAKE_DPMS=file` / `WALPE_FAKE_POWER=file` | daemon | the display's power state / the power source is read from a file instead of from X / the kernel |
 | `WALPE_WL_IGNORE=interface[,interface...]` | daemon (Wayland) | behave as if the compositor lacked these protocols (`wp_viewporter`, `zwlr_layer_shell_v1`, ...). `wp_cursor_shape_manager_v1`: the pointer's image over a wallpaper comes from the theme again, as up to 0.14.0 |
+| `WALPE_LOST_LINGER_MS=n` | daemon (Wayland) | the main thread stands still for `n` ms when it has found the compositor gone, before it ends or restarts the daemon: the render threads come to their next frames meanwhile (`waylandcheck.py`, case `lost`) |
 | `WALPE_WL_NO_CONFIGURE=n` | daemon (Wayland) | the first `n` wallpaper surfaces are made in a way the compositor does not answer (a monitor that gets no surface) |
 | `WALPE_SURFACE_RETRY_MS=n` | daemon (Wayland) | the time before the first new try for a monitor that got no surface (default 2000; each further one doubles it) |
 | `WALPE_WL_CLOSE_AFTER_MS=n` | daemon (Wayland) | `n` milliseconds after the start the first wallpaper surface is treated as if the compositor had closed it while its monitor stays |

@@ -176,6 +176,14 @@ renders on a laptop's discrete GPU where there is one (under Graphics cards;
   such a wallpaper (64 instead of 24 pixels in the test). On a compositor without that
   protocol nothing changes. `WALPE_WL_IGNORE=wp_cursor_shape_manager_v1` gives the old
   way; `walpe-ctl status` (`wl_cursor`) says which one is in use.
+- A compositor that goes away could take the daemon with it by a crash (SIGSEGV in
+  `eglSwapBuffers`) instead of the orderly end, or the restart with `wayland_reconnect`:
+  for the moment it takes the main thread to stop them, the render threads went on
+  presenting frames on the connection that was gone, and Mesa's software renderer (26.2,
+  llvmpipe) does not always survive that. Seen twice in some three hundred lost
+  compositors (KWin 6.8.2, headless). A render thread now presents nothing once the
+  connection is known to be gone. Not seen with a GPU driver; the code was the same in
+  0.14.0.
 - `wayland_reconnect`, three faults of a daemon that waits for its compositor. Under
   `kwin_wayland_wrapper` the socket stays while `kwin_wayland` is started again, so the
   daemon was connected at once and gave up when no answer came within 10 seconds, whatever

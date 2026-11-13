@@ -117,7 +117,9 @@ not what the daemon believes it drew. Each case starts its own daemon:
             display went while EGL was being set up), and shows its
             wallpaper when the compositor stays at last.
   lost      the compositor goes away: the daemon ends with status 1 and
-            leaves no socket behind.
+            leaves no socket behind; its render thread, which goes on for a
+            moment (made long here: WALPE_LOST_LINGER_MS), presents nothing
+            on the display that is gone.
   cycles    (only with --only cycles) an output is created and unplugged
             six times: the daemon's open files and threads do not grow from
             the second round to the last.
@@ -1440,19 +1442,31 @@ def case_noshell(env, W):
 
 # --------------------------------------------------------------------- lost
 def case_lost(env, W):
-    """the last case: it ends the compositor"""
-    if not start(env, [("A", 640, 360, 0, 0)], "lost"):
+    """the last case: it ends the compositor. The daemon's main thread is made to stand
+    still for a while when it has found the display gone (WALPE_LOST_LINGER_MS), so that
+    the render thread of an animated wallpaper comes to its next frames meanwhile: it does
+    not present them (a swap on a display that is gone is where Mesa's software path was
+    seen to crash) and says so once."""
+    if not start(env, [("A", 640, 360, 0, 0)], "lost", extra={"WALPE_LOST_LINGER_MS": "700"}):
         return
     env.open(W["red"])
     lc.loaded(env, W["red"])
     name = env.mons[0][0]
     check(shows(env, name, "red") == "red", "lost: the wallpaper is shown")
+    env.open(W["anim"])
+    lc.loaded(env, W["anim"])
+    mark = env.mark()
     env.display.stop()
     try:
         status = env.daemon.wait(timeout=30 * PATIENCE)
     except subprocess.TimeoutExpired:
         status = None
     check(status == 1, "lost: the compositor is gone, the daemon ends with status 1", status)
+    log = env.since(mark)
+    check(log.count("the display connection is gone: its frames are not presented any more") == 1 and
+          "eglSwapBuffers failed" not in log,
+          "lost: until the daemon had stopped its render thread, the thread presented no frame on the display "
+          "that was gone, and said so once", log[-800:])
     if status is not None:
         env.daemon = None
     time.sleep(0.5)

@@ -2264,10 +2264,11 @@ void walpe_wayland_surface_wait (int ms)
     W.first_wait_us = ms > 0 ? (gint64) MIN (ms, 60000) * 1000 : 0;
 }
 
-/* Main thread, also before the event source runs: the connection is of no
- * use any more. Also when somebody else found that out - EGL talks to the
- * compositor on this connection during the daemon's start, and what it
- * meets there the backend hears of only at its own next read. */
+/* Any thread while the backend is open (W.dpy is set before the render
+ * threads start and cleared after they ended), also before the event
+ * source runs: the connection is of no use any more. Also when somebody
+ * else found that out - EGL talks to the compositor on this connection,
+ * and what it meets there the backend hears of only at its own next read. */
 gboolean walpe_wayland_display_gone (void)
 {
     return W.dpy && (wl_is_dead () || wl_display_get_error (W.dpy) != 0);
