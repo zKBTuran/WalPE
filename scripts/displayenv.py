@@ -587,9 +587,9 @@ class SwayDisplay:
             sys.stderr.write("displayenv: %s is too long for the compositor's sockets (%d > 107 bytes): "
                              "use a shorter work directory (--tmp, or TMPDIR)\n" % (self.rt, longest))
             return False
-        os.makedirs(self.rt, mode=0o700)
+        os.makedirs(self.rt, mode=0o700, exist_ok=True)     # (there already after end())
         home = os.path.join(self.tmp, "wl-home")
-        os.makedirs(home, mode=0o700)
+        os.makedirs(home, mode=0o700, exist_ok=True)
         conf = os.path.join(self.tmp, "sway.conf")
         with open(conf, "w") as f:
             f.write(SWAY_CONFIG)
@@ -629,18 +629,34 @@ class SwayDisplay:
         # (the list that ended the wait: a second question could come back empty)
         return self.output(outs[0]["name"], mode=(width, height), pos=(0, 0), scale=1)
 
-    def stop(self):
+    def end(self, hard=False):
+        """the compositor goes away and its runtime directory stays, for a start() in the
+        same place: told to end (it removes its socket), or killed (hard: the files of its
+        Wayland socket stay behind, as after a crash)"""
         if self.ptr:
             self.ptr.close()
             self.ptr = None
         if self.proc:
-            self.proc.terminate()
+            if hard:
+                self.proc.kill()
+            else:
+                self.proc.terminate()
             try:
                 self.proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait()
             self.proc = None
+        # (start() takes the first IPC socket it finds for the compositor's)
+        try:
+            for n in os.listdir(self.rt):
+                if n.startswith("sway-ipc."):
+                    os.unlink(os.path.join(self.rt, n))
+        except OSError:
+            pass
+
+    def stop(self):
+        self.end()
         shutil.rmtree(self.rt, ignore_errors=True)
 
     def log_tail(self, lines=20):
@@ -985,10 +1001,10 @@ class WlrDisplay(SwayDisplay):
 
     def start(self, width, height):
         argv, files, no_root = COMPOSITORS[self.kind]
-        os.makedirs(self.rt, mode=0o700)
+        os.makedirs(self.rt, mode=0o700, exist_ok=True)     # (there already after end())
         home = os.path.join(self.tmp, "wl-home")
         cfg = os.path.join(home, "cfg")
-        os.makedirs(cfg, mode=0o700)
+        os.makedirs(cfg, mode=0o700, exist_ok=True)
         for name, text in files.items():
             os.makedirs(os.path.dirname(os.path.join(cfg, name)), exist_ok=True)
             with open(os.path.join(cfg, name), "w") as f:
@@ -1037,11 +1053,11 @@ class WlrDisplay(SwayDisplay):
             self.output(o["name"], enable=False)
         return self.output(outs[0]["name"], enable=True, mode=(width, height), pos=(0, 0), scale=1)
 
-    def stop(self):
+    def end(self, hard=False):
         if self.desk:
             self.desk.close()
             self.desk = None
-        SwayDisplay.stop(self)
+        SwayDisplay.end(self, hard)
 
     # ------------------------------------------------- outputs: wlr-randr
     def _randr(self, args, timeout=10):

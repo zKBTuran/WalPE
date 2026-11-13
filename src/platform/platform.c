@@ -247,6 +247,11 @@ gboolean walpe_surface_follow_output (WalpeSurface *s, const WalpeOutput *o, int
                                                : FALSE;
 }
 
+gboolean walpe_platform_display_gone (void)
+{
+    return ops == &walpe_wayland_ops && walpe_wayland_display_gone ();
+}
+
 void walpe_platform_surface_wait (int ms)
 {
     if (ops == &walpe_wayland_ops)

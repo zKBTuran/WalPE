@@ -2223,6 +2223,15 @@ void walpe_wayland_surface_wait (int ms)
     W.first_wait_us = ms > 0 ? (gint64) MIN (ms, 60000) * 1000 : 0;
 }
 
+/* Main thread, also before the event source runs: the connection is of no
+ * use any more. Also when somebody else found that out - EGL talks to the
+ * compositor on this connection during the daemon's start, and what it
+ * meets there the backend hears of only at its own next read. */
+gboolean walpe_wayland_display_gone (void)
+{
+    return W.dpy && (wl_is_dead () || wl_display_get_error (W.dpy) != 0);
+}
+
 /* Main thread: the surface's output has this rectangle, scale and refresh
  * rate now (the daemon follows a change of the output in place). What only
  * the main thread reads is taken at once - the rectangle a pointer
@@ -3139,7 +3148,15 @@ static gboolean wl_open_once (const WalpePlatformOpts *opts, char **err, gint64 
      * (outputs, seats, the presentation clock); what objects made in the
      * second say (xdg-output of an output announced before its manager) */
     const char *fail = NULL;
-    gint64 answer_by = g_get_monotonic_time () + (gint64) WL_START_ANSWER_S * G_USEC_PER_SEC;
+    char *fail_text = NULL;
+    /* A daemon that waits for its compositor to come back waits that long
+     * for the answer too: under kwin_wayland_wrapper the socket never goes
+     * away - the wrapper holds it while kwin_wayland is started again - so
+     * the connection is made at once and answered when the new one is up.
+     * (It gave up after WL_START_ANSWER_S whatever wayland_reconnect said:
+     * KWin 6.8 held still for 13 s after a crash, and the daemon was gone.) */
+    const gint64 answer_t0 = g_get_monotonic_time ();
+    gint64 answer_by = MAX (answer_t0 + (gint64) WL_START_ANSWER_S * G_USEC_PER_SEC, deadline);
     for (int i = 0; i < 3 && !fail; i++) {
         int r = wl_sync_until (W.dpy, NULL, answer_by);
         if (r < 0) {
@@ -3148,9 +3165,11 @@ static gboolean wl_open_once (const WalpePlatformOpts *opts, char **err, gint64 
              * tried once, as where it was written) */
             *going_down = !kept && !wl_handed && !g_getenv ("WAYLAND_SOCKET") &&
                           g_get_monotonic_time () < deadline;
-        } else if (r == 0)
-            fail = "the Wayland compositor accepted the connection but did not answer within "
-                   G_STRINGIFY (WL_START_ANSWER_S) " seconds";
+        } else if (r == 0) {
+            fail = fail_text = g_strdup_printf ("the Wayland compositor accepted the connection but "
+                                                "did not answer within %d seconds",
+                                                (int) ((answer_by - answer_t0) / G_USEC_PER_SEC));
+        }
     }
     if (!fail && !W.compositor)
         fail = "the Wayland compositor offers no wl_compositor";
@@ -3188,6 +3207,7 @@ static gboolean wl_open_once (const WalpePlatformOpts *opts, char **err, gint64 
         if (err)
             *err = g_strdup (fail);
         g_free (fail_own);
+        g_free (fail_text);
         wl_close ();
         if (!opts->probe)
             walpe_wl_gnome_release ();

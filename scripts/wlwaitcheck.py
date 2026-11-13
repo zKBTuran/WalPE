@@ -19,6 +19,17 @@ own socket in the same place. Two cases:
             with cosmic-comp 1.11 for a moment after it was told to end).
             The daemon waits on as for a socket that is not there, for
             the whole of wayland_reconnect; it used to end at once
+  silent    the compositor's socket is there and nobody answers on it yet:
+            under kwin_wayland_wrapper the socket never goes away, the
+            wrapper holds it while kwin_wayland is started again, and a
+            connection made meanwhile is answered when the new one is up.
+            The daemon waits for the answer as long as wayland_reconnect
+            says; it used to give up after 10 seconds whatever that said
+  signal    the waiting daemon is told to end (SIGTERM: the session closes,
+            systemctl --user stop). It ends by that signal and the socket
+            file is removed; the file used to stay, with nobody listening
+  signal-replaced   the same after the file was replaced by another daemon:
+            that one's file stays
 
 The restarted image is made by hand: a listening socket at the control
 socket's path, handed over the way a restart in place does it (WALPE_IPC_FD,
@@ -30,6 +41,7 @@ Exit status 0 = passed, 1 = failed, 77 = cannot run here.
 import argparse
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -169,6 +181,127 @@ def run_case(daemon, top, name, replace, absent=False, closing=False):
     return 0
 
 
+def waiting_daemon(daemon, top, name, wait_s, display=None):
+    """a daemon as run_case makes it, waiting -> (process, the old listener, socket path, log
+    file name, the listener of `display` when one was asked for: a Wayland socket in the
+    runtime directory that takes connections into its queue and never answers)"""
+    d = os.path.join(top, name)
+    rt = os.path.join(d, "rt")
+    home = os.path.join(d, "home")
+    os.makedirs(rt, 0o700)
+    os.makedirs(home, 0o700)
+    os.chmod(rt, 0o700)
+    path = os.path.join(rt, "walpe.sock")
+    if len(os.fsencode(path)) > 107:
+        print("wlwaitcheck: the temporary directory's path is too long for a socket")
+        return None
+    old = listener(path)
+    held = listener(os.path.join(rt, display)) if display else None
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("DISPLAY", "WAYLAND_SOCKET", "WALPE_BACKEND")}
+    env.update({
+        "XDG_RUNTIME_DIR": rt,
+        "WAYLAND_DISPLAY": display or "wayland-none",
+        "WALPE_IPC_FD": str(old.fileno()),
+        "WALPE_DISPLAY_LOST": "wayland",
+        "WALPE_WAYLAND_RECONNECT": str(wait_s),
+        "HOME": home,
+        "XDG_CONFIG_HOME": os.path.join(home, "config"),
+        "XDG_CACHE_HOME": os.path.join(home, "cache"),
+        "XDG_DATA_HOME": os.path.join(home, "data"),
+    })
+    logname = os.path.join(d, "log")
+    with open(logname, "wb") as log:
+        p = subprocess.Popen([daemon], env=env, cwd=home, stdin=subprocess.DEVNULL,
+                             stdout=log, stderr=subprocess.STDOUT, pass_fds=(old.fileno(),))
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < LIMIT_S and p.poll() is None:
+        with open(logname, "rb") as f:
+            if b"display backend" in f.read():
+                break
+        time.sleep(0.05)
+    return p, old, path, logname, held
+
+
+def text_of(logname):
+    with open(logname, "rb") as f:
+        return f.read().decode("utf-8", "replace")
+
+
+def end_of(p):
+    if p.poll() is None:
+        p.kill()
+        p.wait()
+
+
+def silent_case(daemon, top):
+    """the socket is there, connections are taken into its queue and nobody answers"""
+    name, wait_s = "silent", 13      # (longer than the 10 s the daemon gave an answer before)
+    t0 = time.monotonic()
+    got = waiting_daemon(daemon, top, name, wait_s, "wayland-held")
+    if got is None:
+        return 77
+    p, old, path, logname, held = got
+    try:
+        rc = p.wait(timeout=LIMIT_S)
+    except subprocess.TimeoutExpired:
+        rc = None
+    waited = time.monotonic() - t0
+    end_of(p)
+    held.close()
+    old.close()
+    text = text_of(logname)
+    if rc != 1 or waited < wait_s - 0.5:
+        print("FAIL %s: the daemon ended with status %s after %.1f s; wanted: status 1 after the whole "
+              "wait of %d s:\n%s" % (name, rc, waited, wait_s, text[-1500:]))
+        return 1
+    if os.path.exists(path):
+        print("FAIL %s: the socket file was left behind" % name)
+        return 1
+    print("ok   %s: the daemon waited the whole %d s for an answer (%.1f s), then ended; the socket file "
+          "is removed" % (name, wait_s, waited))
+    return 0
+
+
+def signal_case(daemon, top, replaced):
+    name = "signal-replaced" if replaced else "signal"
+    got = waiting_daemon(daemon, top, name, 30)
+    if got is None:
+        return 77
+    p, old, path, logname, _ = got
+    new = None
+    try:
+        if p.poll() is not None:
+            print("FAIL %s: the daemon ended before it waited:\n%s" % (name, text_of(logname)[-1500:]))
+            return 1
+        time.sleep(0.5)     # it waits now
+        if replaced:
+            os.unlink(path)
+            new = listener(path)
+        p.send_signal(signal.SIGTERM)
+        try:
+            rc = p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            print("FAIL %s: the daemon is still there 10 s after SIGTERM" % name)
+            return 1
+    finally:
+        end_of(p)
+        old.close()
+    there = os.path.exists(path)
+    if new:
+        new.close()
+    if rc != -signal.SIGTERM:
+        print("FAIL %s: ended with status %d, wanted: by SIGTERM:\n%s" % (name, rc, text_of(logname)[-1500:]))
+        return 1
+    if replaced != there:
+        print("FAIL %s: the socket file %s" % (name, "of the other daemon was removed" if replaced
+                                               else "was left behind"))
+        return 1
+    print("ok   %s: SIGTERM ends the waiting daemon; %s" % (name, "the other daemon's socket is left in place"
+                                                             if replaced else "the socket file is removed"))
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--build", required=True)
@@ -183,6 +316,10 @@ def main():
         for name, replace, absent, closing in (("alone", False, False, False), ("replaced", True, False, False),
                                                ("absent", True, True, False), ("closing", False, False, True)):
             rc = run_case(daemon, top, name, replace, absent, closing)
+            if rc == 77:
+                return 77
+            worst = max(worst, rc)
+        for rc in (signal_case(daemon, top, False), signal_case(daemon, top, True), silent_case(daemon, top)):
             if rc == 77:
                 return 77
             worst = max(worst, rc)

@@ -11005,6 +11005,75 @@ static int start_failed (void)
     return 1;
 }
 
+#ifdef HAVE_WAYLAND
+/* The compositor went away again while the daemon was starting on it: one
+ * that came back and crashed once more, kwin_wayland replaced twice in a
+ * row. A start-up step that needs the display has just failed (EGL could
+ * not be initialised) and the daemon is about to end. Where it is to wait
+ * for its display (wayland_reconnect) it waits again instead, the whole
+ * time anew, as it does when the display goes while it runs
+ * (plat_connection_lost; the main loop that would report that is not
+ * running yet). Returns when this is not the case, when the daemon was
+ * told to stop meanwhile, or when the exec failed: the start then fails
+ * the way it did. */
+static void start_display_gone (gboolean windowed)
+{
+    int wait = windowed ? 0 : reconnect_wait_s ();
+    if (wait <= 0 || !walpe_platform_display_gone ())
+        return;
+    g_message ("the display connection went away during the start: restarting in place, waiting "
+               "up to %d s for it to come back (wayland_reconnect)", wait);
+    D.display_lost = TRUE;
+    if (term_pending ()) {
+        g_message ("signal %d during the start: not restarting", atomic_load (&term_signal));
+        return;
+    }
+    diag_end_line (TRUE);
+    restart_exec (TRUE);
+}
+
+/* An image that waits for its display to come back holds the control
+ * socket of the image before it and has no main loop yet. A signal that
+ * ended it there (the session closes, systemctl --user stop) left the
+ * socket's file behind with nobody listening. Until the daemon's own
+ * handlers are in place (term_signals_init) the three signals remove the
+ * file first - when it is still this daemon's, as in start_failed - and
+ * then end the process the way they would have. stat, unlink, signal and
+ * raise may all be called from a signal handler. */
+static const char *wait_sock_path;
+
+static void wait_term_handler (int sig)
+{
+    int e = errno;
+    struct stat st;
+    if (wait_sock_path && stat (wait_sock_path, &st) == 0 && st.st_dev == Bk.ipc_dev &&
+        st.st_ino == Bk.ipc_ino && st.st_ctim.tv_sec == Bk.ipc_ctim.tv_sec &&
+        st.st_ctim.tv_nsec == Bk.ipc_ctim.tv_nsec)
+        unlink (wait_sock_path);
+    errno = e;
+    signal (sig, SIG_DFL);
+    raise (sig);    /* (delivered when this handler returns) */
+}
+
+static void wait_signals_init (void)
+{
+    static const int sigs[] = { SIGTERM, SIGINT, SIGHUP };
+    if (!Bk.lost || Bk.ipc_fd < 0 || !Bk.ipc_file_known)
+        return;
+    wait_sock_path = walpe_socket_path ();  /* (kept: the handler reads it) */
+    for (guint i = 0; i < G_N_ELEMENTS (sigs); i++) {
+        struct sigaction old, sa;
+        /* (a signal the daemon was started to ignore stays ignored) */
+        if (sigaction (sigs[i], NULL, &old) != 0 || old.sa_handler != SIG_DFL)
+            continue;
+        memset (&sa, 0, sizeof sa);
+        sa.sa_handler = wait_term_handler;
+        sigemptyset (&sa.sa_mask);
+        sigaction (sigs[i], &sa, NULL);
+    }
+}
+#endif
+
 /* For pause-signal providers that know outputs by their connector name
  * (a provider on a connection of its own): the id per-output signals are
  * reported under, 0 = no monitor of this daemon. name = NULL: the provider
@@ -11331,6 +11400,9 @@ int main (int argc, char **argv)
             .events = &plat_events,
         };
         gint64 open_t0 = Bk.lost ? g_get_monotonic_time () : 0;
+#ifdef HAVE_WAYLAND
+        wait_signals_init ();   /* a signal while this image waits for its display */
+#endif
         gboolean opened = walpe_platform_open (D.backend, &po, &perr);
         g_free (xs);
         g_free (xm);
@@ -11389,6 +11461,9 @@ int main (int argc, char **argv)
     g_free (sock);
 
     if (!init_egl ()) {
+#ifdef HAVE_WAYLAND
+        start_display_gone (windowed);  /* (returns when that is not why) */
+#endif
         g_printerr ("EGL init failed; cannot render\n");
         return 1;
     }

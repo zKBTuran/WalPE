@@ -418,6 +418,10 @@ gboolean walpe_platform_follows_outputs (void);
  * closed it, its output is gone, o is another output): nothing was
  * changed, *w and *h are left alone. */
 gboolean walpe_surface_follow_output (WalpeSurface *s, const WalpeOutput *o, int *w, int *h);
+/* Main thread: the connection to the window system is gone (Wayland: the
+ * compositor went away), whoever noticed. For the daemon's start, before
+ * the event source reports connection_lost. */
+gboolean walpe_platform_display_gone (void);
 /* Main thread: how long the WALLPAPER surfaces made from now on wait for
  * the window system's first answer (walpe_surface_new stands still that
  * long at most); 0 = the backend's own time, which is the one of the

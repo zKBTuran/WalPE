@@ -184,8 +184,18 @@ try. With `wayland_follow = off` there still is none.)
 When the compositor goes away the daemon shuts down in order and exits with status 1, as it
 does when an X server goes away. `wayland_reconnect = <seconds>` in `gpu.conf`
 ([GPU-PRESENT.md](GPU-PRESENT.md)) makes it restart in place instead and wait that long for
-the compositor's socket to come back. While it waits, `walpe-ctl` reports that the daemon
-did not answer in time, and what was sent to it meanwhile is not carried out when it is back.
+the compositor to come back: for its socket, and for its answer on a socket that is there
+already (under `kwin_wayland_wrapper`, as a Plasma session runs KWin, the socket never goes
+away: the wrapper holds it while `kwin_wayland` is started again). A compositor that comes
+back and goes again while the daemon starts on it is waited for again, the whole time anew.
+The wallpapers begin anew then: the daemon is the same process, but nothing of what it
+showed is kept. While it waits, `walpe-ctl` reports that the daemon
+did not answer in time, and what was sent to it meanwhile is not carried out when it is back;
+a signal that ends it (the session closes, `systemctl --user stop`) ends it at once.
+The wait is for a compositor that is started again in the same session. At a logout the
+daemon would wait as well, and can still be there, with the old session's environment, when
+the next login starts its own: one of the two then ends ("another walpe-daemon is already
+running") - keep the time short where the setting is used.
 A session started with a one-time socket (`WAYLAND_SOCKET` instead of
 `WAYLAND_DISPLAY`) cannot be reconnected to. Known gap: for the same reason the daemon
 cannot restart itself in place there. Where it has to restart for a monitor (more
@@ -651,6 +661,17 @@ old size for seconds when an output's scale changed (seen on niri, cosmic-comp a
 a daemon waiting with `wayland_reconnect` gave up at once when the old compositor took
 one more connection on its way out (cosmic-comp); and the library window said another
 application id than its dialogs in a session without a D-Bus session bus.
+
+What a compositor that is started again does to the daemon, measured on KWin 6.8.2 under
+`kwin_wayland_wrapper` (two virtual outputs) and on sway 1.9 and 1.12:
+
+| what happened | `wayland_reconnect = 0` (default) | `wayland_reconnect = 60` |
+|---|---|---|
+| `kwin_wayland --replace` | the daemon ends 0.7 s later with status 1; KWin is back, the wallpaper is not, until something starts the daemon again (`walpe.service` does after 3 s) | the wallpaper is back half a second after the new KWin is up, from its beginning; same process id |
+| `kwin_wayland` crashes (SIGSEGV), the wrapper starts it again | the same, 0.5 s | the same |
+| the new `kwin_wayland` needs 13 s before it answers | the same | the wallpaper is back when it answers (the daemon used to give up after 10 s) |
+| sway is told to end, or killed, and started again 2 s later | ends with status 1 | back with its wallpaper as soon as sway is up |
+| the compositor comes back and is killed again within a second, ten times | - | the daemon waits each time (it used to end when that caught it setting up EGL) |
 
 ## Notes per compositor
 

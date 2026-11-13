@@ -97,6 +97,15 @@ not what the daemon believes it drew. Each case starts its own daemon:
             the same way also with an X server there (in a session that
             is Xwayland, where the wallpaper would lie above every
             window) and says so; `--backend x11` takes X11 there.
+  reconnect the compositor ends and is started again in the same place under
+            a daemon with wayland_reconnect: told to end, then killed (its
+            socket's file stays behind). The daemon waits, the same process
+            is there again with its wallpaper shown. Then the compositor is
+            started and killed ten times, between 0 and 0.9 seconds after
+            its socket takes connections: at whatever moment of its own
+            start that catches the daemon, it waits on (it ended when the
+            display went while EGL was being set up), and shows its
+            wallpaper when the compositor stays at last.
   lost      the compositor goes away: the daemon ends with status 1 and
             leaves no socket behind.
   cycles    (only with --only cycles) an output is created and unplugged
@@ -113,6 +122,7 @@ not installed, or the build has no Wayland backend). WAYLANDCHECK_PATIENCE=N
 multiplies every wait (a software renderer on a busy machine: 3 or more).
 --tmp DIR: work in DIR (must not exist; removed afterwards); sockets live
 below it and a socket path is limited to 107 bytes."""
+import threading
 import os, re, shutil, socket, subprocess, sys, time
 
 sys.dont_write_bytecode = True   # no __pycache__ next to the scripts
@@ -1297,6 +1307,89 @@ def case_lost(env, W):
     check(not os.path.exists(env.sock + ".loading"), "lost: nor the marker of a start that did not finish")
 
 
+# ---------------------------------------------------------------- reconnect
+def case_reconnect(env, W):
+    """The compositor goes away and comes back in the same place, under a daemon that is
+    to wait for it (wayland_reconnect). It runs before `lost`, which ends the compositor
+    for good."""
+    wait_s = 40
+    extra = {"WALPE_WAYLAND_RECONNECT": str(wait_s)}
+    if not start(env, [("A", 640, 360, 0, 0)], "reconnect", extra=extra):
+        return
+    env.open(W["quad"])
+    lc.loaded(env, W["quad"])
+    name = env.mons[0][0]
+    ok, lk = shows_quad(env, name)
+    check(ok, "reconnect: the wallpaper is shown", lk)
+    pid = env.daemon.pid
+
+    def away(what, hard):
+        mark = env.mark()
+        env.display.end(hard=hard)
+        said = wait_for(lambda: "waiting up to %d s" % wait_s in env.since(mark), 15 * PATIENCE)
+        check(bool(said) and env.daemon.poll() is None, f"reconnect: the compositor is {what}: the daemon "
+              "restarts in place and waits for it", env.since(mark)[-600:])
+        return mark
+
+    def back(what, mark):
+        answered = wait_for(lambda: bool(env.state().get("monitors")), 40 * PATIENCE)
+        check(bool(answered) and env.daemon.poll() is None and env.daemon.pid == pid,
+              f"reconnect: {what}: the daemon is there again, the same process", env.since(mark)[-800:])
+        check(lc.loaded(env, W["quad"]), f"reconnect: {what}: its wallpaper is loaded", rc.brief(env.monitors()))
+        # (a compositor that starts anew numbers its outputs anew: after the cases before
+        # this one the output need not have had the first name)
+        now = [m.get("name") for m in env.state().get("monitors") or []]
+        ok, lk = shows_quad(env, now[0] if now else name)
+        check(ok, f"reconnect: {what}: the wallpaper is shown again", lk)
+        healthy(env, mark, f"reconnect: {what}")
+
+    for what, hard in (("told to end", False), ("killed", True)):
+        mark = away(what, hard)
+        time.sleep(2.0)
+        check(env.daemon.poll() is None, f"reconnect: {what}: two seconds later it still waits")
+        check(env.display.start(640, 360), f"reconnect: {what}: the compositor is started again",
+              env.display.log_tail())
+        back(what, mark)
+
+    # The compositor that came back goes away again while the daemon starts on it: at
+    # whatever moment of that start, the daemon waits again instead of ending.
+    path = env.display.display
+
+    def cut_after(delay):
+        t0 = time.time()
+        while time.time() - t0 < 20 * PATIENCE:
+            try:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.connect(path)
+                s.close()
+                break
+            except OSError:
+                time.sleep(0.005)
+        time.sleep(delay)
+        p = env.display.proc
+        if p is not None:
+            p.kill()
+
+    mark = away("killed", True)
+    for delay in (0.0, 0.03, 0.06, 0.09, 0.12, 0.15, 0.2, 0.3, 0.5, 0.9):
+        t = threading.Thread(target=cut_after, args=(delay,))
+        t.start()
+        env.display.start(640, 360)
+        t.join()
+        env.display.end(hard=True)
+        time.sleep(1.0)
+        alive = env.daemon.poll() is None
+        check(alive, "reconnect: the compositor is killed again %.2f s after its socket was there: "
+              "the daemon waits on" % delay, env.since(mark)[-1200:])
+        if not alive:
+            env.daemon = None
+            return
+        mark = env.mark()
+    check(env.display.start(640, 360), "reconnect: after that the compositor is started and stays",
+          env.display.log_tail())
+    back("after ten short visits of the compositor", mark)
+
+
 # ------------------------------------------------------------------- cycles
 def case_cycles(env, W, rounds=6):
     """not in the default run (it was two restarts in place a round, ten seconds apart at least)"""
@@ -1547,7 +1640,8 @@ CASES = [("start", case_start), ("layer", case_layer), ("two", case_two), ("mode
          ("follow", case_follow), ("closed", case_closed), ("nosurface", case_nosurface),
          ("pointer", case_pointer), ("covered", case_covered), ("fullscreen", case_fullscreen),
          ("backend", case_backend),
-         ("noshell", case_noshell), ("cycles", case_cycles), ("lost", case_lost)]
+         ("noshell", case_noshell), ("cycles", case_cycles), ("reconnect", case_reconnect),
+         ("lost", case_lost)]
 
 
 def main():

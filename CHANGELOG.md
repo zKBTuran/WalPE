@@ -161,6 +161,17 @@ renders on a laptop's discrete GPU where there is one (under Graphics cards;
   close it ("the Wayland compositor closed the connection during start-up"; COSMIC's
   compositor does that for a moment after it is told to end). It waits on now, for the
   time that was set, as it does for a socket that is not there yet.
+- `wayland_reconnect`, three faults of a daemon that waits for its compositor. Under
+  `kwin_wayland_wrapper` the socket stays while `kwin_wayland` is started again, so the
+  daemon was connected at once and gave up when no answer came within 10 seconds, whatever
+  the setting said (KWin 6.8 held still for 13 seconds after a crash: the daemon was
+  gone); it waits for the answer as long as for the socket now. A compositor that came
+  back and went again while the daemon was setting up EGL ended the daemon ("EGL init
+  failed; cannot render"); it waits again. A signal that ended the waiting daemon left its
+  control socket's file behind; the file goes with it now. The default is unchanged (0:
+  the daemon ends when the compositor goes); [docs/WAYLAND.md](docs/WAYLAND.md) has what
+  was measured with KWin 6.8 (`kwin_wayland --replace`, a crash) and sway, with and
+  without the setting.
 - More compositors than sway and KWin have been run now, all headless on the software
   renderer: sway 1.12, labwc 0.20.2, Wayfire 0.11.0, river 0.3.17 and 0.5.0, niri 26.04
   and COSMIC's compositor 1.11.0. [WAYLAND.md](docs/WAYLAND.md#compositors-that-were-run)
