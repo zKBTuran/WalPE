@@ -81,10 +81,19 @@ static int is_marker (int fd)
         return real pass;                                               \
     }
 
+/* open64, openat64 and fstat64 are functions of their own in glibc, which a
+ * program built with 64-bit file offsets calls by these names. musl has
+ * one of each: off_t is 64 bits wide there, the *64 names are not
+ * declared (1.2.4 and newer: no struct stat64 either) and nothing built
+ * for musl calls them. */
 OPEN_LIKE (open, (const char *path, int flags, ...), (path, flags, mode))
+#ifdef __GLIBC__
 OPEN_LIKE (open64, (const char *path, int flags, ...), (path, flags, mode))
+#endif
 OPEN_LIKE (openat, (int dfd, const char *path, int flags, ...), (dfd, path, flags, mode))
+#ifdef __GLIBC__
 OPEN_LIKE (openat64, (int dfd, const char *path, int flags, ...), (dfd, path, flags, mode))
+#endif
 
 EXPORT int fstat (int fd, struct stat *st)
 {
@@ -99,6 +108,7 @@ EXPORT int fstat (int fd, struct stat *st)
     return r;
 }
 
+#ifdef __GLIBC__
 EXPORT int fstat64 (int fd, struct stat64 *st)
 {
     static int (*real) (int, struct stat64 *);
@@ -111,6 +121,7 @@ EXPORT int fstat64 (int fd, struct stat64 *st)
     }
     return r;
 }
+#endif
 
 EXPORT int ioctl (int fd, unsigned long req, ...)
 {
