@@ -896,6 +896,21 @@ class Subscriber:
                 return out
             out.append(ln)
 
+    def until(self, said, quiet=1.0, limit=10.0):
+        """the lines up to the one of which said() is true, and what follows it until
+        nothing came for `quiet` seconds. The engine sends its line 60 ms after the
+        request that changed something - when its main thread gets to it: that line is
+        waited for (for `limit` seconds after the line before it), not looked for in a
+        fixed time after the request."""
+        out = []
+        while True:
+            ln = self.line(limit * PATIENCE)
+            if ln is None:
+                return out
+            out.append(ln)
+            if said(ln):
+                return out + self.lines(quiet)
+
     def close(self):
         self.s.close()
 
@@ -933,16 +948,16 @@ def case_push(env, W):
           f"{len(got)} lines, {sum(len(json.dumps(g)) for g in got)} bytes")
     # what does change the state is still told
     env.ipc({"cmd": "pause"})
-    got = sub.lines(1.5)
+    got = sub.until(lambda g: (g.get("state") or {}).get("paused") is True, 1.5)
     check(any((g.get("state") or {}).get("paused") is True for g in got),
           "push: a pause is told to the subscriber", f"{len(got)} lines")
     env.ipc({"cmd": "resume"})
-    got = sub.lines(1.5)
+    got = sub.until(lambda g: (g.get("state") or {}).get("paused") is False, 1.5)
     check(any((g.get("state") or {}).get("paused") is False for g in got),
           "push: a resume is told to the subscriber", f"{len(got)} lines")
     # a resolution request that changes something is one
     env.ipc({"cmd": "resolution", "prompt": False})
-    got = sub.lines(1.5)
+    got = sub.until(lambda g: (g.get("state") or {}).get("resolution_prompt") is False, 1.5)
     check(any((g.get("state") or {}).get("resolution_prompt") is False for g in got),
           "push: a resolution request that changes a setting is told", f"{len(got)} lines")
     # An engine that leaves because it was asked to says so, as its last line:
@@ -950,7 +965,7 @@ def case_push(env, W):
     # window that had not started this engine started a new one after
     # `walpe-ctl quit`. An engine that is killed says nothing.
     env.ipc({"cmd": "quit"})
-    got = sub.lines(2.0)
+    got = sub.until(lambda g: g.get("event") == "quit", 2.0)
     check(bool(got) and got[-1].get("event") == "quit" and "state" not in got[-1],
           "push: an engine told to quit says so to its subscribers, last of all",
           [g.get("event") for g in got])
@@ -1019,9 +1034,9 @@ def case_tray(env, W):
         told = 0
         for _ in range(4):
             env.ipc({"cmd": "pause"})
-            told += len(sub.lines(0.6))
+            told += len(sub.until(lambda g: (g.get("state") or {}).get("paused") is True, 0.6))
             env.ipc({"cmd": "resume"})
-            told += len(sub.lines(0.6))
+            told += len(sub.until(lambda g: (g.get("state") or {}).get("paused") is False, 0.6))
         sub.close()
         time.sleep(1.0)
         check(told >= 8, "tray: the engine sent a status line for every pause and resume", told)
@@ -1459,14 +1474,19 @@ def case_window(env, W):
             # engine tells its subscribers, and the line says what the last did
             for _ in range(5):
                 env.ipc({"cmd": "import_cancel"})
-                told[0] += len(sub.lines(0.5))
+                told[0] += len(sub.until(lambda g: True, 0.5))
         n = frames(1.5, poke)
-        sub.close()
         check(told[0] >= 5, "window: the engine sent a status line per request", told[0])
         check(n is not None and n <= 1, "window: status lines that change nothing draw no frame",
               f"{n} frames for {told[0]} lines")
-        # a line that does change something is shown
-        n = frames(1.5, lambda: env.ipc({"cmd": "pause"}))
+
+        # a line that does change something is shown (the time for the frame runs from
+        # the line, which the subscriber of this check is sent as well)
+        def pause():
+            env.ipc({"cmd": "pause"})
+            sub.until(lambda g: (g.get("state") or {}).get("paused") is True, 0)
+        n = frames(1.5, pause)
+        sub.close()
         check(n is not None and n >= 1, "window: a pause is drawn", n)
         env.ipc({"cmd": "resume"})
     finally:
