@@ -1307,15 +1307,41 @@ def built_hosts(build):
             if any(t[:2] == ["#define", name] and t[2:3] != ["0"] for t in lines)}
 
 
+def tcp_answers(port):
+    """does something on this machine take a TCP connection to this port (or keep one waiting)?"""
+    import socket
+    for family, host in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+        try:
+            s = socket.socket(family, socket.SOCK_STREAM)
+        except OSError:
+            continue
+        s.settimeout(1.0)
+        try:
+            s.connect((host, port))
+            return True
+        except socket.timeout:
+            return True
+        except OSError:
+            pass
+        finally:
+            s.close()
+    return False
+
+
 def free_x_display():
-    """an X display number nobody listens on (neither the socket file nor the abstract name)"""
+    """an X display number nobody listens on: neither the socket file nor the abstract name,
+    nor TCP port 6000 + n of this machine - where both sockets are missing, Xlib tries that
+    port, and a program that listens there without being an X server keeps the client
+    waiting for ever (the page host's start-up test, and dbus-launch, which GLib runs for a
+    daemon that has DISPLAY and no session bus)"""
     try:
         with open("/proc/net/unix") as f:
             used = f.read()
     except OSError:
         used = ""
     for n in range(4200 + os.getpid() % 500, 4200 + os.getpid() % 500 + 200):
-        if not os.path.exists("/tmp/.X11-unix/X%d" % n) and ("/tmp/.X11-unix/X%d\n" % n) not in used:
+        if (not os.path.exists("/tmp/.X11-unix/X%d" % n) and ("/tmp/.X11-unix/X%d\n" % n) not in used and
+                not tcp_answers(6000 + n)):
             return ":%d" % n
     return ":4199"
 
