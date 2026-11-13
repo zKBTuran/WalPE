@@ -40,8 +40,13 @@
 #      <iframe>'s prototypes, WebAudio): silent while muted and while off
 #   7  WebAudio alone: mute, unmute
 # and after each: the page's stream in the server was never muted and never
-# away from 100 %, and (WirePlumber) nothing stored for an output stream is
-# muted or below 1.
+# away from 100 %, and (WirePlumber 0.4 and 0.5) nothing stored for an output
+# stream is muted or below 1.
+#
+# Run so far: PipeWire 1.0.5 with WirePlumber 0.4.17, PulseAudio 16.1, and
+# PipeWire 1.6.11 with WirePlumber 0.5.19 (WebKitGTK 2.54.2, GStreamer
+# 1.28.9). In a chroot WebKit's sandbox needs "/" to be a mount point
+# (bwrap: "Failed to make / slave"), or no page comes up.
 B=$(cd "${1:?usage: websound_rig.sh BUILDDIR [pipewire|pulse] [TMPDIR]}" && pwd) || exit 1
 KIND=${2:-pipewire}
 BASE=${3:-/tmp}
@@ -210,8 +215,10 @@ streams () {
 stored () {
     sleep 1.5
     if [ "$KIND" = pipewire ]; then
-        f=$XDG_STATE_HOME/wireplumber/restore-stream
-        bad=$(grep -E '^Output/' "$f" 2> /dev/null | grep -E ':mute=true|:volume=0\.|:channelVolumes=0\.' | tr '\n' ' ')
+        # (WirePlumber 0.4: restore-stream, "key:mute=true"; 0.5: stream-properties, "key={... "mute":true ...}")
+        bad=$(cat "$XDG_STATE_HOME"/wireplumber/restore-stream "$XDG_STATE_HOME"/wireplumber/stream-properties 2> /dev/null |
+              grep -E '^Output/' |
+              grep -E ':mute=true|:volume=0\.|:channelVolumes=0\.|"mute": *true|"volume": *0\.|"channelVolumes": *\[ *0\.' | tr '\n' ' ')
         check "$([ -z "$bad" ] && echo 1 || echo 0)" "$1: WirePlumber has stored no muted or lowered output stream ($bad)"
     fi
     paplay --property=media.role=music "$T/w/other.wav" &
