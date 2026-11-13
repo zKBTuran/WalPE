@@ -674,8 +674,8 @@ wallpaper type from `/usr/share` was chosen and KWin kept Plasma's desktop over 
 daemon's surface. Not tried: CachyOS itself, a graphics card (the software renderer drew),
 a real login with its autostart, the systemd unit under a running user manager, and the
 AUR's `quickjs` (the build used QuickJS 2026-06-04 as its own Makefile installs it). With
-GTK 4.24, gdk-pixbuf 2.44 and GLib 2.90 the compiler warns about functions those releases
-have deprecated (31 lines); the build has no other warning.
+GTK 4.24, gdk-pixbuf 2.44 and GLib 2.90 the build has no warning (before the changes for
+these releases the compiler printed 31 lines about functions they have deprecated).
 
 ## Licence
 
