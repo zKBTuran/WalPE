@@ -119,7 +119,8 @@ not what the daemon believes it drew. Each case starts its own daemon:
   lost      the compositor goes away: the daemon ends with status 1 and
             leaves no socket behind; its render thread, which goes on for a
             moment (made long here: WALPE_LOST_LINGER_MS), presents nothing
-            on the display that is gone.
+            on the display that is gone - neither the frames of a wallpaper
+            nor the black frame of one whose load fails in that moment.
   cycles    (only with --only cycles) an output is created and unplugged
             six times: the daemon's open files and threads do not grow from
             the second round to the last.
@@ -1446,7 +1447,40 @@ def case_lost(env, W):
     still for a while when it has found the display gone (WALPE_LOST_LINGER_MS), so that
     the render thread of an animated wallpaper comes to its next frames meanwhile: it does
     not present them (a swap on a display that is gone is where Mesa's software path was
-    seen to crash) and says so once."""
+    seen to crash) and says so once. Before that the same for the one frame that is not a
+    wallpaper's: the black one after a load that failed."""
+    # A load that fails after the display went: its black frame is a frame like the
+    # others. (The load is made to take a second, the compositor is killed inside it.)
+    bad = os.path.join(env.tmp, "wallpapers", "broken")
+    os.makedirs(bad, exist_ok=True)
+    rc.jdump(bad + "/project.json", {"file": "scene.json", "title": "broken", "type": "scene"})
+    with open(bad + "/scene.json", "w") as f:
+        f.write("{ this is no scene")
+    if not start(env, [("A", 640, 360, 0, 0)], "lost, a load that fails",
+                 extra={"WALPE_LOST_LINGER_MS": "2500", "WALPE_LOAD_DELAY_MS": "1000"}):
+        return
+    time.sleep(1.0)
+    mark = env.mark()
+    check(bool((env.ipc({"cmd": "open", "path": bad}) or {}).get("ok")), "lost: a wallpaper that cannot be "
+          "loaded is opened")
+    time.sleep(0.25)
+    env.display.end(hard=True)
+    try:
+        status = env.daemon.wait(timeout=30 * PATIENCE)
+    except subprocess.TimeoutExpired:
+        status = None
+    log = env.since(mark)
+    gone, failed = log.find("the display connection is gone: shutting down"), log.find("wallpaper load failed")
+    if status is not None:
+        env.daemon = None
+    if check(status == 1 and 0 <= gone < failed, "lost: the compositor is killed, the load fails after that, the "
+             "daemon ends with status 1", (status, log[-800:])):
+        check(log.count("the display connection is gone: its frames are not presented any more") == 1,
+              "lost: the black frame of the wallpaper that could not be loaded is not presented on the "
+              "display that is gone", log[-800:])
+    if not check(env.display.start(640, 360), "lost: the compositor is started again", env.display.log_tail()):
+        return
+
     if not start(env, [("A", 640, 360, 0, 0)], "lost", extra={"WALPE_LOST_LINGER_MS": "700"}):
         return
     env.open(W["red"])

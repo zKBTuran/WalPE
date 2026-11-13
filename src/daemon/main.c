@@ -984,6 +984,27 @@ static void mon_swap_failed (Mon *m)
     }
 }
 
+/* render thread: present a frame that is no content's - the black one of
+ * a monitor whose wallpaper is gone or could not be loaded. Through the
+ * platform's hooks like every other frame (a backend that paces itself
+ * keeps its own commits apart from this one), and like every other frame
+ * not on a display that is gone (mon_swap; said once, mon_swap_failed):
+ * a load that fails while the daemon is on its way out came here with
+ * the same swap on a dead connection. */
+static void mon_swap_plain (Mon *m)
+{
+#ifdef HAVE_WAYLAND
+    if (G_UNLIKELY (walpe_platform_display_gone ())) {
+        m->swap_err = SWAP_ERR_NO_DISPLAY;
+        mon_swap_failed (m);
+        return;
+    }
+#endif
+    walpe_surface_pre_swap (m->ps);
+    if (eglSwapBuffers (D.egl_dpy, m->surf))
+        walpe_surface_swapped (m->ps);
+}
+
 /* render thread: a swap went through after one that had not */
 static void mon_swap_recovered (Mon *m)
 {
@@ -1498,11 +1519,7 @@ static void mon_load_failed_frame (Mon *m, gboolean keep)
     glClear (GL_COLOR_BUFFER_BIT);
     if (m->lead_sf)
         (void) sf_publish (m, w, h, G_MAXUINT64);   /* drawn in full: it serves any clip */
-    /* through the platform's hooks like every other frame (a backend
-     * that paces itself keeps its own commits apart from this one) */
-    walpe_surface_pre_swap (m->ps);
-    if (eglSwapBuffers (D.egl_dpy, m->surf))
-        walpe_surface_swapped (m->ps);
+    mon_swap_plain (m);
     /* neither the window nor the followers' slot holds a frame of a
      * content any more (frame skipping) */
     m->win_has_frame = m->sf_has_frame = FALSE;
@@ -1584,9 +1601,7 @@ static void mon_do_load_ex (Mon *m, const char *path, gboolean paused, int fps,
         glViewport (0, 0, MAX (1, MON_W (m)), MAX (1, MON_H (m)));
         glClearColor (0.0f, 0.0f, 0.0f, 1.0f);
         glClear (GL_COLOR_BUFFER_BIT);
-        walpe_surface_pre_swap (m->ps);
-        if (eglSwapBuffers (D.egl_dpy, m->surf))
-            walpe_surface_swapped (m->ps);
+        mon_swap_plain (m);
         malloc_trim (0);
         mon_load_note (m, path, NULL, FALSE, tag);
         return;
