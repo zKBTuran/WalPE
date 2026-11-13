@@ -6,6 +6,12 @@
 #include <gdk/x11/gdkx.h>
 #include <X11/Xlib.h>
 
+/* GTK 4.18 marks GDK's whole X11 interface as deprecated and gives it no
+ * successor (GTK 5 is to have no X11 backend). What a window manager did
+ * to a window can only be asked of the X server, through the surface GDK
+ * keeps for an X window, its atoms and its error traps: the calls stay,
+ * and the compiler's note is switched off around each of them. */
+
 /* three ways to hide a window that GDK does not call "minimised"
  * (the marks of winstate.h) */
 #define WM_UNMAPPED  WALPE_WM_UNMAPPED      /* the window itself is unmapped (bspwm, awesome, xmonad) */
@@ -44,7 +50,9 @@ static gboolean on_xevent (GdkDisplay *d, gpointer xevent, gpointer u)
         /* same layout up to .window; not the copies a parent gets */
         if (e->xmap.event != e->xmap.window)
             break;
+        G_GNUC_BEGIN_IGNORE_DEPRECATIONS    /* GDK's X11 interface: no successor (above) */
         sf = gdk_x11_surface_lookup_for_display (d, e->xmap.window);
+        G_GNUC_END_IGNORE_DEPRECATIONS
         if (!sf || !GDK_IS_TOPLEVEL (sf))
             break;
         if (e->type == UnmapNotify)
@@ -57,7 +65,9 @@ static gboolean on_xevent (GdkDisplay *d, gpointer xevent, gpointer u)
         if (e->xreparent.event != e->xreparent.window ||
             e->xreparent.parent != DefaultRootWindow (e->xreparent.display))
             break;
+        G_GNUC_BEGIN_IGNORE_DEPRECATIONS    /* GDK's X11 interface: no successor (above) */
         sf = gdk_x11_surface_lookup_for_display (d, e->xreparent.window);
+        G_GNUC_END_IGNORE_DEPRECATIONS
         if (sf && GDK_IS_TOPLEVEL (sf))
             wm_hidden_store (sf, wm_hidden_get (sf), walpe_wm_marks_unframed (wm_hidden_get (sf)));
         break;
@@ -65,7 +75,9 @@ static gboolean on_xevent (GdkDisplay *d, gpointer xevent, gpointer u)
         const XConfigureEvent *c = &e->xconfigure;
         if (c->event != c->window)
             break;
+        G_GNUC_BEGIN_IGNORE_DEPRECATIONS    /* GDK's X11 interface: no successor (above) */
         sf = gdk_x11_surface_lookup_for_display (d, c->window);
+        G_GNUC_END_IGNORE_DEPRECATIONS
         if (!sf || !GDK_IS_TOPLEVEL (sf))
             break;
         Screen *s = DefaultScreenOfDisplay (c->display);
@@ -76,10 +88,14 @@ static gboolean on_xevent (GdkDisplay *d, gpointer xevent, gpointer u)
     }
     case PropertyNotify: {
         const XPropertyEvent *pe = &e->xproperty;
+        G_GNUC_BEGIN_IGNORE_DEPRECATIONS    /* GDK's X11 interface: no successor (above) */
         Atom wm_state = gdk_x11_get_xatom_by_name_for_display (d, "WM_STATE");
+        G_GNUC_END_IGNORE_DEPRECATIONS
         if (pe->atom != wm_state)
             break;
+        G_GNUC_BEGIN_IGNORE_DEPRECATIONS    /* GDK's X11 interface: no successor (above) */
         sf = gdk_x11_surface_lookup_for_display (d, pe->window);
+        G_GNUC_END_IGNORE_DEPRECATIONS
         if (!sf || !GDK_IS_TOPLEVEL (sf))
             break;
         /* one round trip per change of the property, none otherwise */
@@ -89,13 +105,17 @@ static gboolean on_xevent (GdkDisplay *d, gpointer xevent, gpointer u)
             int fmt = 0;
             unsigned long n = 0, left = 0;
             unsigned char *data = NULL;
+            G_GNUC_BEGIN_IGNORE_DEPRECATIONS    /* GDK's X11 interface: no successor (above) */
             gdk_x11_display_error_trap_push (d);
+            G_GNUC_END_IGNORE_DEPRECATIONS
             if (XGetWindowProperty (pe->display, pe->window, wm_state, 0, 2, False, wm_state,
                                     &type, &fmt, &n, &left, &data) == Success &&
                 type == wm_state && fmt == 32 && n >= 1 && data) {
                 gone = walpe_wm_state_gone (*(long *) data);
             }
+            G_GNUC_BEGIN_IGNORE_DEPRECATIONS    /* GDK's X11 interface: no successor (above) */
             gdk_x11_display_error_trap_pop_ignored (d);
+            G_GNUC_END_IGNORE_DEPRECATIONS
             if (data)
                 XFree (data);
         }

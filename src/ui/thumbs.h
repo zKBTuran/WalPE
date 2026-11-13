@@ -61,5 +61,9 @@ void thumbs_anim_kick (void);
 /* is a file gdk-pixbuf identifies as this format (gdk_pixbuf_format_get_name)
  * decoded for a thumbnail? */
 gboolean thumbs_format_allowed (const char *gdk_pixbuf_format_name);
+/* a texture of a pixbuf's pixels, as gdk_texture_new_for_pixbuf made it
+ * (deprecated from GTK 4.20 on): it reads the pixbuf's own pixels and keeps
+ * the pixbuf alive */
+GdkTexture *thumbs_texture_for_pixbuf (GdkPixbuf *pb);
 /* diagnostics: animations loaded / playing, bytes of frames held */
 void thumbs_anim_stats (guint *loaded, guint *playing, gsize *bytes);

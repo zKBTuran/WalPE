@@ -120,6 +120,25 @@ gboolean thumbs_format_allowed (const char *gdk_pixbuf_format_name)
     return FALSE;
 }
 
+/* What gdk_texture_new_for_pixbuf does (GTK deprecates it from 4.20 on and
+ * points to another image library), with calls GTK has had since 4.0: a
+ * memory texture over the pixbuf's own pixels, RGB or RGBA with straight
+ * alpha, sRGB. The bytes keep the pixbuf alive for the texture. */
+GdkTexture *thumbs_texture_for_pixbuf (GdkPixbuf *pb)
+{
+    g_return_val_if_fail (GDK_IS_PIXBUF (pb), NULL);
+    int w = gdk_pixbuf_get_width (pb), h = gdk_pixbuf_get_height (pb);
+    gsize stride = (gsize) gdk_pixbuf_get_rowstride (pb);
+    GBytes *px = g_bytes_new_with_free_func (gdk_pixbuf_get_pixels (pb), (gsize) h * stride,
+                                             g_object_unref, g_object_ref (pb));
+    GdkTexture *t = gdk_memory_texture_new (w, h,
+                                            gdk_pixbuf_get_has_alpha (pb) ? GDK_MEMORY_R8G8B8A8
+                                                                         : GDK_MEMORY_R8G8B8,
+                                            px, stride);
+    g_bytes_unref (px);
+    return t;
+}
+
 /* the declared size of a preview, before a pixel of it exists: what is not
  * decoded at all, and the size the rest is decoded to */
 static gboolean thumb_size (const char *kind, int iw, int ih, int *sw, int *sh, gpointer user)

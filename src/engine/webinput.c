@@ -198,8 +198,12 @@ static void inj_put (const Inj *j)
     GdkSurface *surf = gtk_native_get_surface (GTK_NATIVE (wi->win));
     if (!surf || !GDK_IS_X11_SURFACE (surf))
         return;
+    /* GTK 4.18 marks GDK's X11 interface as deprecated without a successor: the
+     * events go into GDK's own X connection, so the two calls stay */
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS
     Display *xd = gdk_x11_display_get_xdisplay (gdk_surface_get_display (surf));
     Window xid = gdk_x11_surface_get_xid (surf);
+    G_GNUC_END_IGNORE_DEPRECATIONS
     /* GDK divides event coordinates by the surface scale (GDK_SCALE) */
     double s = gdk_surface_get_scale_factor (surf);
     unsigned char bmask[4] = { 0 }, vmask[4] = { 0 };
@@ -336,7 +340,9 @@ static gboolean native_setup (WebInput *wi)
         return FALSE;
     if (inj_display == dpy)
         return xi_opcode >= 0 && xi_pointer >= 0;
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS    /* GDK's X11 interface: no successor (inj_put) */
     Display *xd = gdk_x11_display_get_xdisplay (dpy);
+    G_GNUC_END_IGNORE_DEPRECATIONS
     int ev, err;
     GdkSeat *seat = gdk_display_get_default_seat (dpy);
     GdkDevice *ptr = seat ? gdk_seat_get_pointer (seat) : NULL;
@@ -345,7 +351,9 @@ static gboolean native_setup (WebInput *wi)
         xi_opcode = -1;
         return FALSE;
     }
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS    /* GDK's X11 interface: no successor (inj_put) */
     xi_pointer = gdk_x11_device_get_id (ptr);
+    G_GNUC_END_IGNORE_DEPRECATIONS
     inj_display = dpy;
     g_signal_connect (dpy, "xevent", G_CALLBACK (on_gdk_xevent), NULL);
     return TRUE;

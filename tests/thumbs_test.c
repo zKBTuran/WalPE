@@ -473,6 +473,84 @@ int main (void)
         g_object_unref (src);
     }
 
+    /* thumbs_texture_for_pixbuf is gdk_texture_new_for_pixbuf (which GTK
+     * deprecates from 4.20 on): the same size, format and bytes, for RGB
+     * and RGBA pixbufs, widths whose rows end in padding, a pixbuf made
+     * over bytes of its own and one cut out of another (its rows are
+     * longer than its width). The texture keeps the pixbuf alive. */
+    {
+        static const struct { int w, h; gboolean alpha; } shape[] = {
+            { 1, 1, FALSE }, { 1, 1, TRUE }, { 5, 3, FALSE }, { 7, 4, TRUE }, { 64, 36, FALSE },
+            { 33, 17, TRUE }, { 2, 9, FALSE },
+        };
+        for (guint i = 0; i < G_N_ELEMENTS (shape); i++) {
+            int w = shape[i].w, h = shape[i].h;
+            GdkPixbuf *whole = gdk_pixbuf_new (GDK_COLORSPACE_RGB, shape[i].alpha, 8, w + 2, h + 1);
+            guint8 *px = gdk_pixbuf_get_pixels (whole);
+            gsize bytes = (gsize) gdk_pixbuf_get_rowstride (whole) * (h + 1);
+            for (gsize k = 0; k < bytes; k++)
+                px[k] = (guint8) (k * 37 + i * 11 + (k >> 3));
+            /* 0: cut out of the larger one; 1: a copy with pixels of its own */
+            for (int kind = 0; kind < 2; kind++) {
+                GdkPixbuf *part = gdk_pixbuf_new_subpixbuf (whole, 1, 1, w, h);
+                GdkPixbuf *pb = kind ? gdk_pixbuf_copy (part) : g_object_ref (part);
+                g_object_unref (part);
+                GdkTexture *ours = thumbs_texture_for_pixbuf (pb);
+                G_GNUC_BEGIN_IGNORE_DEPRECATIONS    /* the function this is measured against */
+                GdkTexture *gtks = gdk_texture_new_for_pixbuf (pb);
+                G_GNUC_END_IGNORE_DEPRECATIONS
+                CHECK (GDK_IS_TEXTURE (ours) && GDK_IS_TEXTURE (gtks));
+                CHECK (G_OBJECT_TYPE (ours) == G_OBJECT_TYPE (gtks));
+                CHECK (gdk_texture_get_width (ours) == w && gdk_texture_get_height (ours) == h);
+                CHECK (gdk_texture_get_width (gtks) == w && gdk_texture_get_height (gtks) == h);
+#if GTK_CHECK_VERSION (4, 10, 0)
+                CHECK (gdk_texture_get_format (ours) == gdk_texture_get_format (gtks));
+                CHECK (gdk_texture_get_format (ours) ==
+                       (shape[i].alpha ? GDK_MEMORY_R8G8B8A8 : GDK_MEMORY_R8G8B8));
+#endif
+                /* the bytes GTK draws from (Cairo's ARGB32, premultiplied) */
+                gsize stride = (gsize) w * 4;
+                guint8 *a = g_malloc0 (stride * h), *b = g_malloc0 (stride * h);
+                gdk_texture_download (ours, a, stride);
+                gdk_texture_download (gtks, b, stride);
+                CHECK (!memcmp (a, b, stride * h));
+#if GTK_CHECK_VERSION (4, 10, 0)
+                /* and they are the pixbuf's pixels, unchanged (straight alpha) */
+                GdkTextureDownloader *dl = gdk_texture_downloader_new (ours);
+                gdk_texture_downloader_set_format (dl, GDK_MEMORY_R8G8B8A8);
+                gsize got_stride = 0;
+                GBytes *raw = gdk_texture_downloader_download_bytes (dl, &got_stride);
+                const guint8 *rp = g_bytes_get_data (raw, NULL);
+                const guint8 *sp = gdk_pixbuf_read_pixels (pb);
+                int rs = gdk_pixbuf_get_rowstride (pb), nc = gdk_pixbuf_get_n_channels (pb);
+                gboolean same = got_stride >= stride;
+                for (int y = 0; same && y < h; y++) {
+                    for (int x = 0; x < w; x++) {
+                        const guint8 *q = sp + (gsize) y * rs + (gsize) x * nc;
+                        const guint8 *r = rp + (gsize) y * got_stride + (gsize) x * 4;
+                        same = same && r[0] == q[0] && r[1] == q[1] && r[2] == q[2] &&
+                               r[3] == (nc == 4 ? q[3] : 255);
+                    }
+                }
+                CHECK (same);
+                g_bytes_unref (raw);
+                gdk_texture_downloader_free (dl);
+#endif
+                g_free (a);
+                g_free (b);
+                /* the pixbuf lives as long as the texture does */
+                g_object_add_weak_pointer (G_OBJECT (pb), (gpointer *) &pb);
+                g_object_unref (pb);
+                CHECK (pb != NULL);
+                g_object_unref (gtks);
+                CHECK (pb != NULL);
+                g_object_unref (ours);
+                CHECK (pb == NULL);
+            }
+            g_object_unref (whole);
+        }
+    }
+
     /* JPEG is let through at any declared size up to 16384 a side because
      * its decoder scales while it reads - which holds only for a
      * sequential file with one scan. A progressive one, or one with a scan

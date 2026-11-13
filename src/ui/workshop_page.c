@@ -328,7 +328,7 @@ static void thumb_done (GObject *src, GAsyncResult *res, gpointer user)
     GdkPixbuf *pb = walpe_ws_preview_finish (res, NULL);
     e->pending = FALSE;
     if (pb) {
-        GdkTexture *t = gdk_texture_new_for_pixbuf (pb);
+        GdkTexture *t = thumbs_texture_for_pixbuf (pb);
         g_free (e->thumb_file);
         e->thumb_file = file;   /* the cached download: plays when it is an animated GIF */
         file = NULL;
@@ -755,7 +755,7 @@ static void detail_pic_done (GObject *src, GAsyncResult *res, gpointer user)
     g_clear_error (&err);
     Page *p = user;
     if (pb) {
-        GdkTexture *t = gdk_texture_new_for_pixbuf (pb);
+        GdkTexture *t = thumbs_texture_for_pixbuf (pb);
         p->d_full = TRUE;
         thumbs_anim_unwatch (p->d_pic);
         gtk_picture_set_paintable (p->d_pic, GDK_PAINTABLE (t));

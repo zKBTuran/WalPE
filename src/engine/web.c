@@ -3135,8 +3135,12 @@ static gboolean ensure_gtk (void)
          * display that no GDK trap covers - the daemon vanished without a
          * trace. A trap that is never popped covers them all; GDK's own nested
          * traps still get their errors (innermost first). */
-        if (host == WEB_HOST_X11)
+        if (host == WEB_HOST_X11) {
+            /* GTK 4.18 marks GDK's X11 interface as deprecated without a successor */
+            G_GNUC_BEGIN_IGNORE_DEPRECATIONS
             gdk_x11_display_error_trap_push (gdk_display_get_default ());
+            G_GNUC_END_IGNORE_DEPRECATIONS
+        }
 #else
         return FALSE;   /* web_host_pick does not choose a host that is not built */
 #endif
@@ -3205,8 +3209,12 @@ static void hide_window_offscreen (GtkWidget *win, int w, int h)
     GdkSurface *surf = gtk_native_get_surface (GTK_NATIVE (win));
     if (!surf || !GDK_IS_X11_SURFACE (surf))
         return;     /* the private page host: its display shows nothing anyway */
+    /* GTK 4.18 marks GDK's X11 interface as deprecated without a successor: the
+     * page's window is put off screen through X itself, so the two calls stay */
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS
     Display *xd = gdk_x11_display_get_xdisplay (gdk_surface_get_display (surf));
     Window xid = gdk_x11_surface_get_xid (surf);
+    G_GNUC_END_IGNORE_DEPRECATIONS
     XSetWindowAttributes a = { .override_redirect = True };
     XChangeWindowAttributes (xd, xid, CWOverrideRedirect, &a);
     XMoveWindow (xd, xid, -w - 64, -h - 64);
