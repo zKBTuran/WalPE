@@ -3960,7 +3960,13 @@ static void sys_draw (DrawCtx *d, WeSys *s)
         int *idx = (int *) (tmp + (gsize) n * 8 * sizeof (float));
         for (int i = 0; i < n; i++)
             idx[i] = i;
+        /* a stable sort in both spellings (GLib's merge sort): g_sort_array is
+         * the name from GLib 2.82 on, which marks the older one as deprecated */
+#if GLIB_CHECK_VERSION (2, 82, 0)
+        g_sort_array (idx, (size_t) n, sizeof (int), seq_cmp, s->pts);
+#else
         g_qsort_with_data (idx, n, sizeof (int), seq_cmp, s->pts);
+#endif
         float (*pt)[2] = (float (*)[2]) buf;
         float (*rgba)[4] = (float (*)[4]) (buf + (gsize) n * 2);
         float *hw = buf + (gsize) n * 6, *vc = buf + (gsize) n * 7;
