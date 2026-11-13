@@ -1,5 +1,6 @@
 #include "tex.h"
 #include "gifcheck.h"
+#include "pichead.h"
 #include "util.h"
 #include <lz4.h>
 #include <string.h>
@@ -88,6 +89,26 @@ static void tex_size_prepared (GdkPixbufLoader *ld, int w, int h, gpointer user)
     }
 }
 
+/* The same before a loader is made, on the size WalPE reads from the
+ * picture's header itself (pichead.h): where gdk-pixbuf decodes through
+ * glycin the answer above comes when the picture has been decoded - 829 MiB
+ * and seconds in the loader process for 12000 x 12000 pixels that were then
+ * dropped. type: "png", "jpeg", "webp", "gif", "bmp" (their header is in
+ * one fixed place: a file without it there is one no decoder shows) or
+ * "tiff" (a size this reader does not find is left to the answer above).
+ * FALSE: not to be handed to a loader. */
+static gboolean tex_header_size_ok (const guint8 *d, gsize len, const char *type)
+{
+    int w = 0, h = 0;
+    if (!walpe_pichead_size (type, d, len, &w, &h))
+        return !walpe_pichead_exact (type);
+    if (tex_size_ok (w, h))
+        return TRUE;
+    g_warning ("texture: a picture of %d x %d pixels is not loaded (the limit is %d per "
+               "side and 8192 x 8192 pixels in all)", w, h, TEX_MAX_DIM);
+    return FALSE;
+}
+
 /* a JPEG goes to its decoder only when it is not arithmetic-coded (util.h) */
 static gboolean tex_jpeg_ok (const guint8 *d, gsize len)
 {
@@ -110,6 +131,8 @@ static GdkPixbuf *tex_pixbuf_from_data (const guint8 *d, gsize len, const char *
 {
     gboolean too_big = FALSE, ok = TRUE;
     if (!tex_jpeg_ok (d, len))      /* (util.h: a JPEG whose decoder would not come back) */
+        return NULL;
+    if (!tex_header_size_ok (d, len, type))
         return NULL;
     GdkPixbufLoader *ld = gdk_pixbuf_loader_new_with_type (type, NULL);
     if (!ld) {
@@ -136,12 +159,11 @@ static GdkPixbuf *tex_pixbuf_from_data (const guint8 *d, gsize len, const char *
  * name, or NULL */
 static const char *tex_embedded_kind (const guint8 *d, gsize left)
 {
-    if (left >= 8 && memcmp (d, "\x89PNG\r\n\x1a\n", 8) == 0)
-        return "png";
-    if (left >= 3 && memcmp (d, "\xff\xd8\xff", 3) == 0)
-        return "jpeg";
-    if (left >= 12 && memcmp (d, "RIFF", 4) == 0 && memcmp (d + 8, "WEBP", 4) == 0)
-        return "webp";
+    /* (pichead.c's signatures: a JPEG start with "ftyp" behind it is an ISO
+     * media file to glycin, and no JPEG here) */
+    const char *kind = walpe_pichead_kind (d, left);
+    if (kind && (!strcmp (kind, "png") || !strcmp (kind, "jpeg") || !strcmp (kind, "webp")))
+        return kind;
     return NULL;
 }
 
@@ -176,6 +198,13 @@ static gboolean tex_picture_size_from_data (const guint8 *d, gsize len, const ch
     gboolean ok = TRUE;
     if (!tex_jpeg_ok (d, len))
         return FALSE;
+    {
+        /* (too large by the header WalPE reads itself, or without one: no
+         * loader is asked - tex_header_size_ok, without its log line) */
+        int hw = 0, hh = 0;
+        if (walpe_pichead_size (type, d, len, &hw, &hh) ? !tex_size_ok (hw, hh) : walpe_pichead_exact (type))
+            return FALSE;
+    }
     GdkPixbufLoader *ld = gdk_pixbuf_loader_new_with_type (type, NULL);
     if (!ld)
         return FALSE;
@@ -660,8 +689,9 @@ static WalpeTex *tex_load_mem (const guint8 *d, gsize len, const char *path, gui
         /* any other picture gdk-pixbuf reads (GIF = first frame, BMP, ...):
          * a file the user picked for a "scenetexture" option */
         WalpeTex *t = NULL;
-        const char *kind = !memcmp (d, "GIF8", 4) ? "gif" : !memcmp (d, "BM", 2) ? "bmp"
-                         : !memcmp (d, "II*\0", 4) || !memcmp (d, "MM\0*", 4) ? "tiff" : NULL;
+        const char *kind = walpe_pichead_kind (d, len);
+        if (kind && strcmp (kind, "gif") && strcmp (kind, "bmp") && strcmp (kind, "tiff"))
+            kind = NULL;
         /* a GIF: only with every frame inside the picture its header
          * declares (gifcheck.h) - the size check of the loader below is on
          * that picture alone */

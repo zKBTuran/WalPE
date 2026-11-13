@@ -5,6 +5,7 @@
 #include "gpuprof.h"   /* GPUPROF hooks: WALPE_PROF_QUAD in the quad draws */
 #include "yuvconv.h"
 #include "common/gifcheck.h"
+#include "common/pichead.h"
 #include "common/premult.h"
 #include "common/util.h"
 #include "common/lazy.h"
@@ -2746,66 +2747,18 @@ static gboolean tex_scope_over (int w, int h, int bpp)
 }
 
 /* The picture formats a wallpaper's layers and sprites are made of, and the
- * one gdk-pixbuf loader each is read by, from the file's first bytes (from
- * its name when they say nothing): "png", "jpeg", "bmp", "gif", "tiff",
- * "webp", "avif", "jxl", "tga". NULL: none of them.
+ * one gdk-pixbuf loader each is read by: "png", "jpeg", "bmp", "gif", "tiff",
+ * "webp", "avif", "jxl", "tga", settled by walpe_pichead_file_kind () from
+ * the file's first bytes (pichead.h) before gdk-pixbuf is asked anything.
  * gdk-pixbuf left to choose (gdk_pixbuf_get_file_info, gdk_pixbuf_new_from_
  * file) picks a loader by the bytes itself, whatever the name, and the name
  * of the format can be asked only after that loader has read the file's
  * header - for some the whole file: a layer "image" that is an SVG document,
  * a Windows cursor or icon, an XPM or a PNM went to those decoders before
- * it was refused. Now the format is settled first, and the size query and
- * the decode below open the loader of that one name. */
-static const char *tex_file_kind (const char *path)
-{
-    guint8 h[16] = { 0 };
-    GStatBuf st;
-    FILE *f = g_stat (path, &st) == 0 && S_ISREG (st.st_mode) ? fopen (path, "rb") : NULL;
-    if (!f)
-        return NULL;
-    gsize n = fread (h, 1, sizeof h, f);
-    fclose (f);
-    if (n >= 8 && !memcmp (h, "\x89PNG\r\n\x1a\n", 8))
-        return "png";
-    if (n >= 3 && !memcmp (h, "\xff\xd8\xff", 3))
-        return "jpeg";
-    if (n >= 4 && !memcmp (h, "GIF8", 4))
-        return "gif";
-    if (n >= 12 && !memcmp (h, "RIFF", 4) && !memcmp (h + 8, "WEBP", 4))
-        return "webp";
-    if (n >= 4 && (!memcmp (h, "II*\0", 4) || !memcmp (h, "MM\0*", 4)))
-        return "tiff";
-    if (n >= 12 && !memcmp (h + 4, "ftyp", 4) && (!memcmp (h + 8, "avif", 4) || !memcmp (h + 8, "avis", 4)))
-        return "avif";
-    if ((n >= 2 && h[0] == 0xff && h[1] == 0x0a) ||
-        (n >= 12 && !memcmp (h, "\0\0\0\x0cJXL \r\n\x87\n", 12)))
-        return "jxl";
-    if (n >= 2 && h[0] == 'B' && h[1] == 'M')
-        return "bmp";
-    /* TGA has no signature: the bytes gdk-pixbuf takes one by (no colour
-     * map and picture type 2, 3, 10 or 11, or a colour map and type 1 or
-     * 9), less what it takes for a Windows cursor (00 00 02 00, a count,
-     * 00), which it preferred */
-    if (n >= 6 && ((h[1] == 1 && (h[2] == 1 || h[2] == 9)) ||
-                   (h[1] == 0 && (h[2] == 2 || h[2] == 3 || h[2] == 10 || h[2] == 11))) &&
-        !(h[0] == 0 && h[1] == 0 && h[2] == 2 && h[3] == 0 && h[4] != 0 && h[5] == 0))
-        return "tga";
-    /* bytes that say nothing: the name decides, as it did when gdk-pixbuf
-     * chose (a picture whose first bytes are damaged is still its
-     * format's decoder's to refuse or to show) - among these formats only */
-    static const struct { const char *ext, *kind; } by_name[] = {
-        { ".png", "png" }, { ".jpg", "jpeg" }, { ".jpeg", "jpeg" }, { ".gif", "gif" }, { ".bmp", "bmp" },
-        { ".tif", "tiff" }, { ".tiff", "tiff" }, { ".webp", "webp" }, { ".avif", "avif" },
-        { ".jxl", "jxl" }, { ".tga", "tga" },
-    };
-    const gsize l = strlen (path);
-    for (guint i = 0; i < G_N_ELEMENTS (by_name); i++) {
-        const gsize el = strlen (by_name[i].ext);
-        if (l > el && !g_ascii_strcasecmp (path + l - el, by_name[i].ext))
-            return by_name[i].kind;
-    }
-    return NULL;
-}
+ * it was refused. And a loader asked for by name is that format's decoder
+ * only where gdk-pixbuf has decoders of its own: through glycin it decodes
+ * whatever the bytes are. So the bytes have to be the format's here, and
+ * the name of a file settles nothing but which TGA header is a TGA's. */
 
 typedef struct { int w, h; gboolean seen; } TexFileSize;
 
@@ -2963,7 +2916,7 @@ WalpeGlTex walpe_gl_tex_from_file (const char *path)
     int iw = 0, ih = 0;
     /* (a "BM" file without the header sizes of a BMP file: refused by the
      * loader above for what its decoder would reserve, not read here either) */
-    const char *kind = walpe_bmp_file_header_ok (path) ? tex_file_kind (path) : NULL;
+    const char *kind = walpe_bmp_file_header_ok (path) ? walpe_pichead_file_kind (path, NULL) : NULL;
     const gint64 max_side = 16384, max_px = (gint64) 8192 * 8192;
     /* (and a JPEG, under whatever name, that is arithmetic-coded: its decoder
      * may never come back - util.h) */
@@ -2973,7 +2926,23 @@ WalpeGlTex walpe_gl_tex_from_file (const char *path)
     }
     if (kind && !strcmp (kind, "png") && !tex_file_png_whole (path))
         kind = NULL;
-    if (!kind || !tex_file_size (path, kind, &iw, &ih) || iw <= 0 || ih <= 0) {
+    /* The size, from the header as WalPE reads it (pichead.h), before a
+     * loader exists: asked for the size alone, a loader that decodes
+     * through glycin decodes the whole picture first, whatever it is told.
+     * For the formats whose header is in one fixed place that is the size,
+     * and a file without it is no picture of that format. For TIFF, AVIF
+     * and JPEG XL it is an upper bound - past the largest size any path
+     * below decodes, the file is refused here - and the loader is asked as
+     * before for what it will hand out. */
+    gboolean sized = kind && walpe_pichead_file_size (kind, path, &iw, &ih);
+    if (kind && !walpe_pichead_exact (kind)) {
+        if (sized && (gint64) iw * ih > max_side * max_side) {
+            g_warning ("texture %s: %d x %d pixels is too large to load", walpe_log_str (path), iw, ih);
+            return out;
+        }
+        sized = tex_file_size (path, kind, &iw, &ih);
+    }
+    if (!kind || !sized || iw <= 0 || ih <= 0) {
         g_debug ("texture %s: not a picture format a wallpaper texture can have", walpe_log_str (path));
         return out;
     }

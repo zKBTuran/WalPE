@@ -58,6 +58,7 @@
 #include "engine/puppet.h"
 #include "engine/scenetext.h"
 #include "common/gifcheck.h"
+#include "common/pichead.h"
 #include "common/tex.h"
 #include "common/util.h"
 #include <epoxy/gl.h>
@@ -2456,6 +2457,88 @@ static gboolean loader_mapped (const char *name)
     return in;
 }
 
+/* The decoder processes of this process: where gdk-pixbuf decodes through
+ * glycin (2.44) a decoder is a child process ("glycin-svg", "glycin-heif",
+ * "glycin-image-rs" ...; inside a sandbox its grandchild), kept for half a
+ * minute after its last picture. The number of them whose name starts with
+ * `name`, and through *peak_kb (may be NULL) the largest resident memory
+ * any of them has had. 0 where gdk-pixbuf decodes in this process. */
+static int decoder_children (const char *name, gint64 *peak_kb)
+{
+    GDir *proc = g_dir_open ("/proc", 0, NULL);
+    const char *e;
+    int n = 0;
+    if (peak_kb)
+        *peak_kb = 0;
+    while (proc && (e = g_dir_read_name (proc))) {
+        const int pid = atoi (e);
+        if (pid <= 1 || pid == getpid ())
+            continue;
+        int up = pid, hops = 0;
+        char *st = NULL, comm[64] = "";
+        gint64 hwm = 0;
+        while (up > 1 && up != getpid () && hops++ < 4) {
+            char *f = g_strdup_printf ("/proc/%d/status", up), *t = NULL;
+            int next = 0;
+            if (g_file_get_contents (f, &t, NULL, NULL)) {
+                const char *q = strstr (t, "\nPPid:");
+                next = q ? atoi (q + 6) : 0;
+                if (up == pid)
+                    st = g_steal_pointer (&t);
+            }
+            g_free (t);
+            g_free (f);
+            up = next;
+        }
+        if (up == getpid () && st) {
+            const char *q = strstr (st, "\nVmHWM:");
+            if (q)
+                hwm = g_ascii_strtoll (q + 7, NULL, 10);
+            sscanf (st, "Name:\t%63s", comm);
+            if (g_str_has_prefix (comm, name)) {
+                n++;
+                if (peak_kb)
+                    *peak_kb = MAX (*peak_kb, hwm);
+            }
+        }
+        g_free (st);
+    }
+    if (proc)
+        g_dir_close (proc);
+    return n;
+}
+
+/* a HEIC picture of 64 x 48 pixels (523 bytes, as heif-enc 1.23 writes it) */
+static const guint8 heic_64x48[] = {
+            0x00,0x00,0x00,0x1c,0x66,0x74,0x79,0x70,0x68,0x65,0x69,0x63,0x00,0x00,0x00,0x00,0x6d,0x69,0x66,0x31,
+            0x68,0x65,0x69,0x63,0x6d,0x69,0x61,0x66,0x00,0x00,0x01,0x7d,0x6d,0x65,0x74,0x61,0x00,0x00,0x00,0x00,
+            0x00,0x00,0x00,0x21,0x68,0x64,0x6c,0x72,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x70,0x69,0x63,0x74,
+            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x22,0x69,0x6c,0x6f,
+            0x63,0x00,0x00,0x00,0x00,0x44,0x40,0x00,0x01,0x00,0x01,0x00,0x00,0x00,0x00,0x01,0xa1,0x00,0x01,0x00,
+            0x00,0x00,0x00,0x00,0x00,0x00,0x6a,0x00,0x00,0x00,0x23,0x69,0x69,0x6e,0x66,0x00,0x00,0x00,0x00,0x00,
+            0x01,0x00,0x00,0x00,0x15,0x69,0x6e,0x66,0x65,0x02,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x68,0x76,0x63,
+            0x31,0x00,0x00,0x00,0x00,0x0e,0x70,0x69,0x74,0x6d,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0xfd,
+            0x69,0x70,0x72,0x70,0x00,0x00,0x00,0xdd,0x69,0x70,0x63,0x6f,0x00,0x00,0x00,0x76,0x68,0x76,0x63,0x43,
+            0x01,0x03,0x70,0x00,0x00,0x00,0x90,0x00,0x00,0x00,0x00,0x00,0x1e,0xf0,0x00,0xfc,0xfd,0xf8,0xf8,0x00,
+            0x00,0x0f,0x03,0x60,0x00,0x01,0x00,0x18,0x40,0x01,0x0c,0x01,0xff,0xff,0x03,0x70,0x00,0x00,0x03,0x00,
+            0x90,0x00,0x00,0x03,0x00,0x00,0x03,0x00,0x1e,0xba,0x02,0x40,0x61,0x00,0x01,0x00,0x2a,0x42,0x01,0x01,
+            0x03,0x70,0x00,0x00,0x03,0x00,0x90,0x00,0x00,0x03,0x00,0x00,0x03,0x00,0x1e,0xa0,0x20,0x81,0x05,0x96,
+            0xea,0xe4,0xa6,0xb9,0xb8,0x08,0x68,0x30,0x20,0x00,0x00,0x03,0x03,0x20,0x00,0x00,0x03,0x00,0x21,0x62,
+            0x00,0x01,0x00,0x06,0x44,0x01,0xc1,0x73,0xc0,0x89,0x00,0x00,0x00,0x13,0x63,0x6f,0x6c,0x72,0x6e,0x63,
+            0x6c,0x78,0x00,0x01,0x00,0x0d,0x00,0x06,0x80,0x00,0x00,0x00,0x14,0x69,0x73,0x70,0x65,0x00,0x00,0x00,
+            0x00,0x00,0x00,0x00,0x40,0x00,0x00,0x00,0x40,0x00,0x00,0x00,0x28,0x63,0x6c,0x61,0x70,0x00,0x00,0x00,
+            0x40,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x30,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+            0x02,0xff,0xff,0xff,0xf0,0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x10,0x70,0x69,0x78,0x69,0x00,0x00,0x00,
+            0x00,0x03,0x08,0x08,0x08,0x00,0x00,0x00,0x18,0x69,0x70,0x6d,0x61,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+            0x01,0x00,0x01,0x05,0x81,0x02,0x03,0x05,0x84,0x00,0x00,0x00,0x72,0x6d,0x64,0x61,0x74,0x00,0x00,0x00,
+            0x66,0x28,0x01,0xaf,0x13,0x80,0xf5,0x45,0x3e,0x14,0x9d,0x9b,0x8e,0xc9,0xf6,0x37,0x34,0x56,0x84,0xec,
+            0x52,0xae,0x90,0x1a,0xe4,0x3b,0x51,0xaa,0x1d,0x9b,0x7b,0xf2,0xfc,0xf0,0xea,0x10,0x65,0x1a,0xa2,0xbf,
+            0xc9,0x3a,0xec,0x7d,0x6b,0xc8,0xdf,0x92,0xda,0x97,0x1e,0xc4,0xa9,0x9c,0xa2,0xbd,0xc7,0x1f,0x2b,0x7b,
+            0xd3,0xda,0x04,0x39,0xf0,0x67,0x61,0x17,0x42,0x45,0xa1,0x8a,0xca,0xa5,0x8d,0x71,0xa5,0xd8,0x60,0x21,
+            0xff,0xa7,0x55,0xb2,0x11,0xb2,0x7a,0xbe,0x42,0xef,0x75,0x9f,0xf0,0x6f,0xc7,0x94,0x56,0x38,0x4c,0xca,
+            0xd7,0xce,0xee,
+};
+
 /* a 4 x 4 TGA picture: colour map type cmap (1: with a colour map of two
  * entries, used or not), picture type 1 / 2 / 3 / 9 / 10 / 11, the colour
  * map's first index `first` */
@@ -2542,6 +2625,21 @@ static void gl_part (void)
             { "gl/other/ico.png", "ico", ico, sizeof ico },
             { "gl/other/pnm.tga", "pnm", "P6\n4 4\n255\n" "000000000000000000000000000000000000000000000000", -1 },
             { "gl/other/cur.tga", "ico", cur, sizeof cur },
+            /* ... and where gdk-pixbuf decodes through glycin, which goes by
+             * the bytes whatever loader it was asked through: an SVG
+             * document, a HEIC picture, a QOI picture or a PNM under names
+             * whose loaders took them there (every name but ".png", which
+             * was held to a PNG's chunks) */
+            { "gl/other/svg.jpg", "svg", "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\">"
+                                         "<rect width=\"8\" height=\"8\" fill=\"red\"/></svg>", -1 },
+            { "gl/other/svg.tga", "svg", "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\">"
+                                         "<rect width=\"8\" height=\"8\" fill=\"red\"/></svg>", -1 },
+            { "gl/other/svg-large.gif", "svg", "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16000\" "
+                                               "height=\"16000\"><rect width=\"8\" height=\"8\" fill=\"red\"/></svg>", -1 },
+            { "gl/other/heic.jpg", "heif", heic_64x48, sizeof heic_64x48 },
+            { "gl/other/heic.avif", "heif", heic_64x48, sizeof heic_64x48 },
+            { "gl/other/qoi.bmp", "qoi", "qoif\0\0\0\4\0\0\0\4\3\0\xfe\x10\x20\x30\xfd\xcd\0\0\0\0\0\0\0\1", 28 },
+            { "gl/other/pnm.jxl", "pnm", "P6\n4 4\n255\n" "000000000000000000000000000000000000000000000000", -1 },
         };
         for (guint i = 0; i < G_N_ELEMENTS (other); i++) {
             mkfile (other[i].file, other[i].data, other[i].len);
@@ -2559,6 +2657,11 @@ static void gl_part (void)
             }
             g_free (of);
         }
+        /* no decoder process was started for an SVG document or a HEIC
+         * picture (glycin's; there are none where gdk-pixbuf decodes in
+         * this process) */
+        CHECK (decoder_children ("glycin-svg", NULL) == 0);
+        CHECK (decoder_children ("glycin-heif", NULL) == 0);
         /* The bytes decide, and the name where they say nothing: a TGA
          * picture (2 x 2, 32 bits) under a PNG's name is a TGA picture;
          * one whose second byte is damaged is still handed to the TGA
@@ -3100,6 +3203,331 @@ static void test_gl (void)
         g_printerr ("parsers-test: no surfaceless / device GL 3.3 context, gl part skipped\n");
 }
 
+/* ---- common/pichead.c: a picture's format and size from its own header,
+ * read before gdk-pixbuf is asked anything */
+static void ph_be32 (GByteArray *a, guint32 v)
+{
+    guint8 b[4] = { (guint8) (v >> 24), (guint8) (v >> 16), (guint8) (v >> 8), (guint8) v };
+    g_byte_array_append (a, b, 4);
+}
+
+static void ph_box (GByteArray *a, const char *type, const guint8 *body, gsize n)
+{
+    ph_be32 (a, (guint32) (n + 8));
+    g_byte_array_append (a, (const guint8 *) type, 4);
+    if (n)
+        g_byte_array_append (a, body, (guint) n);
+}
+
+/* bits from the lowest of each byte on, as a JPEG XL codestream has them */
+static void ph_bits (GByteArray *a, guint *pos, guint64 v, guint n)
+{
+    for (guint i = 0; i < n; i++, (*pos)++) {
+        if (*pos / 8 >= a->len) {
+            guint8 z = 0;
+            g_byte_array_append (a, &z, 1);
+        }
+        a->data[*pos / 8] |= (guint8) (((v >> i) & 1) << (*pos % 8));
+    }
+}
+
+static gboolean ph_size (const char *kind, const guint8 *d, gsize n, int ew, int eh)
+{
+    int w = -1, h = -1, fw = -1, fh = -1;
+    const gboolean ok = walpe_pichead_size (kind, d, n, &w, &h);
+    /* the reader of a file says the same as the reader of a buffer */
+    mkfile ("pichead/probe.bin", d, (gssize) n);
+    char *f = P ("pichead/probe.bin");
+    const gboolean fok = walpe_pichead_file_size (kind, f, &fw, &fh);
+    g_free (f);
+    if (ok != fok || (ok && (w != fw || h != fh))) {
+        g_printerr ("parsers-test: %s header: buffer %d (%d x %d), file %d (%d x %d)\n", kind, ok, w, h, fok, fw, fh);
+        return FALSE;
+    }
+    if (ew == 0)
+        return !ok;
+    if (!ok || w != ew || h != eh)
+        g_printerr ("parsers-test: %s header: %d, %d x %d, expected %d x %d\n", kind, ok, w, h, ew, eh);
+    return ok && w == ew && h == eh;
+}
+
+static void test_pichead (void)
+{
+    /* 1. signatures. A file with "ftyp" at offset 4 is an ISO media file
+     * whatever its first four bytes are: glycin goes by that box before it
+     * looks for a JPEG's, a BMP's or a TIFF's start, and decodes with
+     * libheif */
+    static const struct { const char *bytes; gsize n; const char *kind; } sig[] = {
+        { "\x89PNG\r\n\x1a\n", 8, "png" }, { "\xff\xd8\xff\xe0", 4, "jpeg" }, { "GIF89a", 6, "gif" },
+        { "GIF87a", 6, "gif" }, { "GIF8xa", 6, NULL }, { "RIFF\0\0\0\0WEBP", 12, "webp" },
+        { "II*\0", 4, "tiff" }, { "MM\0*", 4, "tiff" }, { "II+\0", 4, NULL }, { "\xff\x0a", 2, "jxl" },
+        { "\0\0\0\x0cJXL \r\n\x87\n", 12, "jxl" }, { "BM", 2, "bmp" },
+        { "\0\0\0\x1c" "ftypavif\0\0\0\0", 16, "avif" },
+        { "\0\0\0\x1c" "ftypmif1\0\0\0\0miafavif", 24, "avif" },
+        { "\0\0\0\x18" "ftypheic\0\0\0\0mif1heic", 24, NULL },
+        { "BM\0\0ftypheic\0\0\0\0", 16, NULL }, { "\xff\xd8\xff\xe0" "ftypheic\0\0\0\0", 16, NULL },
+        { "II*\0ftypheic\0\0\0\0", 16, NULL }, { "\0\0\2\0ftypheic\0\0\0\0", 16, NULL },
+        { "<svg xmlns", 10, NULL }, { "P6\n4 4\n", 7, NULL }, { "qoif", 4, NULL }, { "DDS ", 4, NULL },
+        { "\0\0\1\0", 4, NULL }, { "/* XPM */", 9, NULL }, { "", 0, NULL },
+    };
+    for (guint i = 0; i < G_N_ELEMENTS (sig); i++) {
+        guint8 *b = g_memdup2 (sig[i].n ? sig[i].bytes : "x", sig[i].n ? sig[i].n : 1);
+        if (g_strcmp0 (walpe_pichead_kind (b, sig[i].n), sig[i].kind))
+            g_printerr ("parsers-test: signature %u is %s\n", i, walpe_pichead_kind (b, sig[i].n));
+        CHECK (!g_strcmp0 (walpe_pichead_kind (b, sig[i].n), sig[i].kind));
+        g_free (b);
+    }
+    CHECK (walpe_pichead_kind (NULL, 0) == NULL);
+    CHECK (walpe_pichead_is_bigtiff ((const guint8 *) "MM\0+", 4) && !walpe_pichead_is_bigtiff ((const guint8 *) "II*\0", 4));
+    CHECK (walpe_pichead_exact ("png") && walpe_pichead_exact ("tga") && !walpe_pichead_exact ("tiff") &&
+           !walpe_pichead_exact ("avif") && !walpe_pichead_exact (NULL));
+
+    /* 2. sizes, each format's header written by hand */
+    GByteArray *a = g_byte_array_new ();
+    {   /* PNG: the header chunk first; not when another chunk is, not cut short */
+        g_byte_array_append (a, (const guint8 *) "\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR", 16);
+        ph_be32 (a, 30000);
+        ph_be32 (a, 20000);
+        g_byte_array_append (a, (const guint8 *) "\x08\x06\0\0\0", 5);
+        CHECK (ph_size ("png", a->data, a->len, 30000, 20000));
+        CHECK (ph_size ("png", a->data, 23, 0, 0));
+        a->data[12] = 'i';
+        CHECK (ph_size ("png", a->data, a->len, 0, 0));
+        a->data[12] = 'I';
+        memset (a->data + 16, 0, 4);
+        CHECK (ph_size ("png", a->data, a->len, 0, 0));        /* no pixels wide */
+    }
+    {
+        static const guint8 gif[] = { 'G', 'I', 'F', '8', '9', 'a', 0x40, 0x1f, 0x70, 0x17, 0, 0, 0 };
+        CHECK (ph_size ("gif", gif, sizeof gif, 8000, 6000));
+        CHECK (ph_size ("gif", gif, 9, 0, 0));
+    }
+    {   /* BMP: signed 32-bit fields (rows from the top: a negative height), 16-bit ones in the oldest header */
+        guint8 bmp[54] = { 'B', 'M', 0, 0, 0, 0, 0, 0, 0, 0, 54, 0, 0, 0, 40, 0, 0, 0,
+                           0x2c, 1, 0, 0, 0x38, 0xff, 0xff, 0xff, 1, 0, 24, 0 };
+        CHECK (ph_size ("bmp", bmp, sizeof bmp, 300, 200));
+        bmp[21] = 0x80;     /* a width below zero */
+        CHECK (ph_size ("bmp", bmp, sizeof bmp, 0, 0));
+        static const guint8 old[26] = { 'B', 'M', 0, 0, 0, 0, 0, 0, 0, 0, 26, 0, 0, 0, 12, 0, 0, 0,
+                                        0x10, 0x27, 0x20, 0x4e, 1, 0, 24, 0 };
+        CHECK (ph_size ("bmp", old, sizeof old, 10000, 20000));
+    }
+    {   /* WebP: the three first chunks */
+        static const guint8 x[] = { 'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'E', 'B', 'P', 'V', 'P', '8', 'X', 10, 0, 0, 0,
+                                    0, 0, 0, 0, 0xe7, 0x03, 0, 0xcf, 0x07, 0 };
+        CHECK (ph_size ("webp", x, sizeof x, 1000, 2000));
+        static const guint8 l[] = { 'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'E', 'B', 'P', 'V', 'P', '8', 'L', 10, 0, 0, 0,
+                                    0x2f, 0x3f, 0xc0, 0x2f, 0x00 };     /* 64 x 192 */
+        CHECK (ph_size ("webp", l, sizeof l, 64, 192));
+        guint8 v[] = { 'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'E', 'B', 'P', 'V', 'P', '8', ' ', 10, 0, 0, 0,
+                       0x10, 0, 0, 0x9d, 0x01, 0x2a, 0x80, 0x02, 0xe0, 0x01 };
+        CHECK (ph_size ("webp", v, sizeof v, 640, 480));
+        v[23] = 0;          /* not a key frame's start code */
+        CHECK (ph_size ("webp", v, sizeof v, 0, 0));
+        static const guint8 other[] = { 'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'E', 'B', 'P', 'A', 'L', 'P', 'H', 0, 0, 0, 0,
+                                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        CHECK (ph_size ("webp", other, sizeof other, 0, 0));
+    }
+    {   /* JPEG: the first frame header on libjpeg's walk - not one inside a comment */
+        static const guint8 jpg[] = { 0xff, 0xd8, 0xff, 0xfe, 0, 11, 0xff, 0xc0, 0, 11, 8, 0, 1, 0, 1,
+                                      0xff, 0xe0, 0, 4, 'J', 'F',
+                                      0xff, 0xc2, 0, 11, 8, 0x04, 0xd2, 0x10, 0xe1, 1, 1, 0x11, 0,
+                                      0xff, 0xda, 0, 8, 1, 1, 0, 0, 63, 0 };
+        CHECK (ph_size ("jpeg", jpg, sizeof jpg, 4321, 1234));
+        CHECK (ph_size ("jpeg", jpg, 26, 0, 0));        /* ends inside the frame header */
+        static const guint8 noframe[] = { 0xff, 0xd8, 0xff, 0xda, 0, 8, 1, 1, 0, 0, 63, 0, 0xff, 0xd9 };
+        CHECK (ph_size ("jpeg", noframe, sizeof noframe, 0, 0));
+    }
+    {   /* TIFF: both byte orders; of a tag that is there twice the larger value; not the 64-bit kind */
+        static const guint8 le[] = { 'I', 'I', 42, 0, 8, 0, 0, 0, 3, 0,
+                                     0, 1, 3, 0, 1, 0, 0, 0, 0x20, 0x03, 0, 0,
+                                     1, 1, 4, 0, 1, 0, 0, 0, 0x58, 0x02, 0, 0,
+                                     0, 1, 4, 0, 1, 0, 0, 0, 0x40, 0x9c, 0, 0,
+                                     0, 0, 0, 0 };
+        CHECK (ph_size ("tiff", le, sizeof le, 40000, 600));
+        static const guint8 be[] = { 'M', 'M', 0, 42, 0, 0, 0, 8, 0, 2,
+                                     1, 0, 0, 3, 0, 0, 0, 1, 0x03, 0x20, 0, 0,
+                                     1, 1, 0, 4, 0, 0, 0, 1, 0, 0, 0x02, 0x58,
+                                     0, 0, 0, 0 };
+        CHECK (ph_size ("tiff", be, sizeof be, 800, 600));
+        CHECK (ph_size ("tiff", be, 30, 0, 0));
+        static const guint8 big[] = { 'I', 'I', 43, 0, 8, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        CHECK (ph_size ("tiff", big, sizeof big, 0, 0));
+    }
+    {   /* AVIF: the largest of the "ispe" properties (meta > iprp > ipco) */
+        GByteArray *ipco = g_byte_array_new (), *iprp = g_byte_array_new (), *meta = g_byte_array_new ();
+        static const guint8 ispe1[12] = { 0, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0, 48 },
+                            ispe2[12] = { 0, 0, 0, 0, 0, 0, 0x0f, 0xa0, 0, 0, 0x0b, 0xb8 },
+                            pixi[5] = { 0, 0, 0, 0, 3 };
+        ph_box (ipco, "ispe", ispe1, 12);
+        ph_box (ipco, "pixi", pixi, 5);
+        ph_box (ipco, "ispe", ispe2, 12);
+        ph_box (iprp, "ipco", ipco->data, ipco->len);
+        g_byte_array_append (meta, (const guint8 *) "\0\0\0\0", 4);
+        ph_box (meta, "hdlr", (const guint8 *) "\0\0\0\0\0\0\0\0pict", 12);
+        ph_box (meta, "iprp", iprp->data, iprp->len);
+        g_byte_array_set_size (a, 0);
+        ph_box (a, "ftyp", (const guint8 *) "avif\0\0\0\0avifmif1", 16);
+        ph_box (a, "free", NULL, 0);
+        ph_box (a, "meta", meta->data, meta->len);
+        CHECK (ph_size ("avif", a->data, a->len, 4000, 3000));
+        CHECK (ph_size ("avif", a->data, a->len - 14, 0, 0));       /* the box says more than the file has */
+        g_byte_array_set_size (a, 0);
+        ph_box (a, "ftyp", (const guint8 *) "avif\0\0\0\0avifmif1", 16);
+        ph_box (a, "mdat", (const guint8 *) "\0\0\0\0", 4);
+        CHECK (ph_size ("avif", a->data, a->len, 0, 0));
+        g_byte_array_unref (ipco);
+        g_byte_array_unref (iprp);
+        g_byte_array_unref (meta);
+    }
+    {   /* JPEG XL: the size header, short form, long form and by a ratio; in a container's first part */
+        static const guint8 small[] = { 0xff, 0x0a, 0x0b, 0x0e };
+        CHECK (ph_size ("jxl", small, sizeof small, 64, 48));
+        static const guint8 ratio[] = { 0xff, 0x0a, 0xcb, 0x06 };         /* what cjxl writes for 64 x 48: 4:3 */
+        CHECK (ph_size ("jxl", ratio, sizeof ratio, 64, 48));
+        guint pos = 16;
+        g_byte_array_set_size (a, 0);
+        g_byte_array_append (a, (const guint8 *) "\xff\x0a", 2);
+        ph_bits (a, &pos, 0, 1);
+        ph_bits (a, &pos, 1, 2);
+        ph_bits (a, &pos, 2999, 13);
+        ph_bits (a, &pos, 0, 3);
+        ph_bits (a, &pos, 3, 2);
+        ph_bits (a, &pos, 99999, 30);
+        CHECK (ph_size ("jxl", a->data, a->len, 100000, 3000));
+        CHECK (ph_size ("jxl", a->data, 5, 0, 0));
+        GByteArray *part = g_byte_array_new ();
+        g_byte_array_append (part, (const guint8 *) "\0\0\0\0", 4);
+        g_byte_array_append (part, a->data, a->len);
+        g_byte_array_set_size (a, 0);
+        g_byte_array_append (a, (const guint8 *) "\0\0\0\x0cJXL \r\n\x87\n", 12);
+        ph_box (a, "ftyp", (const guint8 *) "jxl \0\0\0\0jxl ", 12);
+        ph_box (a, "jxlp", part->data, part->len);
+        CHECK (ph_size ("jxl", a->data, a->len, 100000, 3000));
+        g_byte_array_unref (part);
+    }
+    CHECK (!walpe_pichead_size ("svg", (const guint8 *) "<svg", 4, &(int) { 0 }, &(int) { 0 }));
+    CHECK (!walpe_pichead_size (NULL, (const guint8 *) "<svg", 4, &(int) { 0 }, &(int) { 0 }));
+    CHECK (!walpe_pichead_file_size ("png", "/nonexistent/x.png", &(int) { 0 }, &(int) { 0 }));
+
+    /* 3. against this gdk-pixbuf: the size of what it writes */
+    {
+        static const char *const kinds[] = { "png", "jpeg", "bmp", "tiff" };
+        GRand *r = g_rand_new_with_seed (7);
+        for (guint i = 0; i < 24; i++) {
+            const char *kind = kinds[i % G_N_ELEMENTS (kinds)];
+            const int pw = g_rand_int_range (r, 1, 700), ph = g_rand_int_range (r, 1, 700);
+            GdkPixbuf *pb = gdk_pixbuf_new (GDK_COLORSPACE_RGB, FALSE, 8, pw, ph);
+            char *buf = NULL;
+            gsize n = 0;
+            gdk_pixbuf_fill (pb, 0x406080ff);
+            if (gdk_pixbuf_save_to_buffer (pb, &buf, &n, kind, NULL, NULL)) {
+                CHECK (!g_strcmp0 (walpe_pichead_kind ((const guint8 *) buf, n), kind));
+                CHECK (ph_size (kind, (const guint8 *) buf, n, pw, ph));
+            }
+            g_free (buf);
+            g_object_unref (pb);
+        }
+        g_rand_free (r);
+    }
+
+    /* 4. damaged headers: the two readers agree, and nothing is read past the bytes given */
+    {
+        static const char *const kinds[] = { "png", "jpeg", "gif", "bmp", "webp", "tga", "tiff", "avif", "jxl" };
+        GRand *r = g_rand_new_with_seed (11);
+        for (guint i = 0; i < 4000; i++) {
+            const gsize n = (gsize) g_rand_int_range (r, 0, 96);
+            guint8 *b = g_malloc (n + 1);
+            for (gsize k = 0; k < n; k++)
+                b[k] = (guint8) (g_rand_int_range (r, 0, 4) ? a->data[k % a->len] : g_rand_int_range (r, 0, 256));
+            if (n >= 12 && (i & 1))
+                memcpy (b + 4, i & 2 ? "ftyp" : "meta", 4);
+            int w = 0, h = 0;
+            for (guint k = 0; k < G_N_ELEMENTS (kinds); k++)
+                if (walpe_pichead_size (kinds[k], b, n, &w, &h))
+                    CHECK (w >= 1 && h >= 1);
+            walpe_pichead_kind (b, n);
+            walpe_tga_head (b, n, NULL);
+            g_free (b);
+        }
+        g_rand_free (r);
+    }
+    g_byte_array_unref (a);
+
+    /* 5. TGA headers: what gdk-pixbuf's decoder takes, and the header a decoder is given */
+    {
+        guint8 t[18] = { 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 3, 0, 24, 0x20 };
+        WalpeTga tga;
+        CHECK (walpe_tga_head (t, 18, &tga) && tga.w == 4 && tga.h == 3 && !tga.changed && tga.skip_len == 0);
+        CHECK (!walpe_tga_head (t, 17, &tga));
+        /* true colour with a colour map of two 24-bit entries behind an id of 5 bytes */
+        t[0] = 5; t[1] = 1; t[3] = 1; t[5] = 2; t[7] = 24;
+        CHECK (walpe_tga_head (t, 18, &tga) && tga.changed && tga.skip_off == 23 && tga.skip_len == 6);
+        CHECK (tga.head[0] == 5 && tga.head[1] == 0 && tga.head[2] == 2 && !tga.head[3] && !tga.head[5] &&
+               !tga.head[7] && tga.head[12] == 4 && tga.head[16] == 24);
+        t[7] = 8;       /* entries of 8 bits: no colour map gdk-pixbuf reads */
+        CHECK (!walpe_tga_head (t, 18, &tga));
+        t[5] = 0;       /* ... but no entries of them */
+        CHECK (walpe_tga_head (t, 18, &tga) && tga.skip_len == 0 && tga.changed);
+        /* the map flag is a flag: 0xff with a colour-mapped picture is 1 for the decoder */
+        guint8 m[18] = { 0, 0xff, 1, 0, 0, 2, 0, 24, 0, 0, 0, 0, 4, 0, 3, 0, 8, 0 };
+        CHECK (walpe_tga_head (m, 18, &tga) && tga.changed && tga.head[1] == 1 && tga.head[5] == 2 && tga.skip_len == 0);
+        m[1] = 0;       /* colour-mapped without a map */
+        CHECK (!walpe_tga_head (m, 18, &tga));
+        static const guint8 bad[][18] = {
+            { 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 3, 0, 0, 0 },        /* no bits a pixel (a cursor's header) */
+            { 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 3, 0, 15, 0 },
+            { 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 3, 0, 24, 0 },       /* no picture type */
+            { 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 24, 0 },       /* no width */
+            { 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 3, 0, 24, 0x40 },    /* interleaved */
+            { 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 3, 0, 24, 0 },       /* grey of 24 bits */
+        };
+        for (guint i = 0; i < G_N_ELEMENTS (bad); i++)
+            CHECK (!walpe_tga_head (bad[i], 18, NULL));
+    }
+
+    /* 6. a file's format: the bytes; the name only for which TGA header is one, and for a 64-bit TIFF */
+    {
+        static const guint8 tga[34] = { 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 2, 0, 32, 0x28 };
+        static const guint8 tga_map[18 + 6 + 12] = { 0, 1, 2, 0, 0, 2, 0, 24, 0, 0, 0, 0, 2, 0, 2, 0, 24, 0x20 };
+        static const guint8 tga_iso[34] = { 0, 0, 2, 0, 'f', 't', 'y', 'p', 'h', 'e', 'i', 'c', 2, 0, 2, 0, 32, 0x28 };
+        static const guint8 big[24] = { 'I', 'I', 43, 0, 8, 0, 0, 0, 16 };
+        static const char svg[] = "<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"/>";
+        static const struct { const char *file; const void *d; gssize n; const char *kind, *other; } f[] = {
+            { "pichead/a.png", tga, sizeof tga, "tga", NULL },
+            { "pichead/map.tga", tga_map, sizeof tga_map, "tga", NULL },
+            { "pichead/map.TGA", tga_map, sizeof tga_map, "tga", NULL },
+            { "pichead/map.png", tga_map, sizeof tga_map, NULL, NULL },
+            { "pichead/iso.tga", tga_iso, sizeof tga_iso, NULL, "heif" },
+            { "pichead/big.tif", big, sizeof big, "tiff", NULL },
+            { "pichead/big.tiff", big, sizeof big, "tiff", NULL },
+            { "pichead/big.png", big, sizeof big, NULL, NULL },
+            { "pichead/doc.png", svg, -1, NULL, "svg" },
+            { "pichead/doc.jpg", svg, -1, NULL, "svg" },
+            { "pichead/doc.tga", svg, -1, NULL, "svg" },
+            { "pichead/p.tga", "P6\n4 4\n255\n000000000000000000000000000000000000000000000000", -1, NULL, "pnm" },
+            { "pichead/q.bmp", "qoif\0\0\0\4\0\0\0\4\3\0", 14, NULL, "qoi" },
+            { "pichead/i.png", "\0\0\1\0\1\0\20\20\0\0\1\0\40\0", 14, NULL, "ico" },
+            { "pichead/x.gif", "/* XPM */\nstatic char *a[] = {", -1, NULL, "xpm" },
+            { "pichead/empty.png", "", 0, NULL, NULL },
+        };
+        for (guint i = 0; i < G_N_ELEMENTS (f); i++) {
+            WalpeTga t;
+            mkfile (f[i].file, f[i].d, f[i].n);
+            char *p = P (f[i].file);
+            const char *kind = walpe_pichead_file_kind (p, &t);
+            if (g_strcmp0 (kind, f[i].kind) || (!kind && g_strcmp0 (walpe_pichead_file_other (p), f[i].other)))
+                g_printerr ("parsers-test: %s is %s / %s\n", f[i].file, kind, walpe_pichead_file_other (p));
+            CHECK (!g_strcmp0 (kind, f[i].kind));
+            CHECK (kind || !g_strcmp0 (walpe_pichead_file_other (p), f[i].other));
+            g_free (p);
+        }
+        char *dir = P ("pichead");
+        CHECK (walpe_pichead_file_kind (dir, NULL) == NULL && walpe_pichead_file_other (dir) == NULL);
+        g_free (dir);
+    }
+}
+
 int main (int argc, char **argv)
 {
     char *tmp = g_dir_make_tmp ("walpe-parsers-test-XXXXXX", NULL);
@@ -3138,6 +3566,8 @@ int main (int argc, char **argv)
         test_font ();
     if (!only || !strcmp (only, "gif"))
         test_gif ();
+    if (!only || !strcmp (only, "pichead"))
+        test_pichead ();
     if (!only || !strcmp (only, "gl"))
         test_gl ();
 

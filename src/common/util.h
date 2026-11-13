@@ -114,15 +114,22 @@ gboolean walpe_jpeg_file_coding_ok (const char *path);
  * gdk_pixbuf_get_file_info) hands the bytes to whichever of its loaders
  * matches them - SVG (librsvg), XPM, PNM, TGA, ICO, ANI, TIFF, whatever the
  * system has - and that loader has parsed them by the time its name can be
- * asked for. Here the format is read from the signature and the bytes go to
- * the loader of that one name, and only when the caller accepts it.
+ * asked for. Here the format is read from the signature (pichead.h) and
+ * the bytes go to the loader of that one name, and only when the caller
+ * accepts it.
  *
  * walpe_picture_kind: "jpeg", "png", "gif", "webp", "bmp", "avif" or NULL.
  * walpe_picture_decode / _file: the picture (first frame), or NULL + err
  * (G_IO_ERROR_NOT_SUPPORTED: not one of `kinds`, a NULL-terminated list of
  * the names above, or no loader of that name here). `size` (may be NULL)
- * is called once with the declared size before any pixel exists: FALSE
- * refuses the picture, *sw x *sh (when set) is the size it is decoded to.
+ * is called once with the declared size before any pixel exists - the size
+ * WalPE reads from the header itself (pichead.h), before a loader of
+ * gdk-pixbuf is made: where gdk-pixbuf decodes through glycin a loader
+ * reports the size when the picture has been decoded. FALSE refuses the
+ * picture, *sw x *sh (when set) is the size it is decoded to. (An AVIF
+ * whose decoder reports another size than its header's largest picture is
+ * asked about a second time, with that size.) A PNG, JPEG, GIF, BMP or
+ * WebP without a size in its header is not handed to a decoder.
  * A JPEG that its decoder would hold whole beyond WALPE_JPEG_STORE_MAX is
  * refused as well. */
 typedef struct _GdkPixbuf GdkPixbuf;

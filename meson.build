@@ -591,6 +591,7 @@ core_srcs = files(
   'src/common/ipcsub.c',
   'src/common/tex.c',
   'src/common/gifcheck.c',
+  'src/common/pichead.c',
   'src/common/region.c',
   'src/common/premult.c',
   'src/common/import.c',

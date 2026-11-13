@@ -459,8 +459,11 @@ static void work (gpointer data, gpointer user)
         goto out;
     char *dp = disk_path (j, &st);
     GdkPixbuf *pb = NULL;
-    if (g_file_test (dp, G_FILE_TEST_IS_REGULAR))
-        pb = gdk_pixbuf_new_from_file (dp, NULL);
+    if (g_file_test (dp, G_FILE_TEST_IS_REGULAR)) {
+        /* (what this wrote: a PNG, and read as nothing else) */
+        static const char *const png_only[] = { "png", NULL };
+        pb = walpe_picture_decode_file (dp, png_only, NULL, NULL, NULL);
+    }
     if (!pb) {
         pb = decode (j);
         if (pb) {

@@ -1,5 +1,6 @@
 #include "util.h"
 #include "gifcheck.h"
+#include "pichead.h"
 #include <glib/gstdio.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <errno.h>
@@ -522,28 +523,10 @@ guint64 walpe_jpeg_store_bytes_file (const char *path)
 
 const char *walpe_picture_kind (const guint8 *d, gsize len)
 {
-    if (!d)
-        return NULL;
-    if (len >= 3 && !memcmp (d, "\xff\xd8\xff", 3))
-        return "jpeg";
-    if (len >= 8 && !memcmp (d, "\x89PNG\r\n\x1a\n", 8))
-        return "png";
-    if (len >= 6 && (!memcmp (d, "GIF87a", 6) || !memcmp (d, "GIF89a", 6)))
-        return "gif";
-    if (len >= 12 && !memcmp (d, "RIFF", 4) && !memcmp (d + 8, "WEBP", 4))
-        return "webp";
-    if (len >= 16 && !memcmp (d + 4, "ftyp", 4)) {
-        /* the major brand, or one of the compatible brands after it */
-        gsize box = ((gsize) d[0] << 24) | ((gsize) d[1] << 16) | ((gsize) d[2] << 8) | d[3];
-        box = MIN (MIN (box, len), 128);
-        for (gsize o = 8; o + 4 <= box; o += o == 8 ? 8 : 4)
-            if (!memcmp (d + o, "avif", 4) || !memcmp (d + o, "avis", 4))
-                return "avif";
-        return NULL;
-    }
-    if (len >= 2 && d[0] == 'B' && d[1] == 'M')
-        return "bmp";
-    return NULL;
+    /* the signatures are pichead.c's; of its formats a preview has these */
+    static const char *const mine[] = { "jpeg", "png", "gif", "webp", "avif", "bmp", NULL };
+    const char *kind = walpe_pichead_kind (d, len);
+    return kind && g_strv_contains (mine, kind) ? kind : NULL;
 }
 
 static guint32 bmp_le32 (const guint8 *p)
@@ -588,13 +571,25 @@ typedef struct {
     WalpePictureSizeFunc size;
     gpointer user;
     gboolean refused;
+    /* the size WalPE read from the header itself (pichead.h), and what the
+     * caller said to it, before a loader existed */
+    gboolean asked;
+    int w, h, sw, sh;
 } PictureLoad;
 
 static void picture_size_prepared (GdkPixbufLoader *ld, int w, int h, gpointer user)
 {
     PictureLoad *pl = user;
     int sw = 0, sh = 0;
-    if (pl->size && !pl->size (pl->kind, w, h, &sw, &sh, pl->user)) {
+    if (pl->asked && w == pl->w && h == pl->h) {
+        /* the decoder's header is the one that was read: the caller's answer stands */
+        sw = pl->sw;
+        sh = pl->sh;
+    } else if ((pl->asked && walpe_pichead_exact (pl->kind)) ||
+               (pl->size && !pl->size (pl->kind, w, h, &sw, &sh, pl->user))) {
+        /* another size than the header's, where the header is the decoder's
+         * own (a file changed underneath, or read differently: not shown),
+         * or a size the caller refuses */
         pl->refused = TRUE;
         gdk_pixbuf_loader_set_size (ld, 0, 0);     /* the loaders stop before a pixel exists */
         return;
@@ -603,9 +598,13 @@ static void picture_size_prepared (GdkPixbufLoader *ld, int w, int h, gpointer u
         gdk_pixbuf_loader_set_size (ld, sw, sh);
 }
 
-/* the loader for the format the first bytes name, when it is one of kinds */
-static GdkPixbufLoader *picture_loader (const guint8 *head, gsize n, guint64 size,
-                                        const char *const *kinds, PictureLoad *pl, GError **err)
+/* The format the first bytes name, when it is one of kinds, and the checks
+ * that are on the bytes alone. head = the file's first bytes, size = its
+ * whole length. No gdk-pixbuf call: on a system whose gdk-pixbuf decodes
+ * through glycin a loader of one name decodes whatever the bytes are, and
+ * decodes it whole before WalPE hears its size (pichead.h). */
+static gboolean picture_accept (const guint8 *head, gsize n, guint64 size, const char *const *kinds,
+                                PictureLoad *pl, GError **err)
 {
     const char *kind = walpe_picture_kind (head, n);
     gboolean accepted = FALSE;
@@ -614,14 +613,46 @@ static GdkPixbufLoader *picture_loader (const guint8 *head, gsize n, guint64 siz
     if (!accepted) {
         g_set_error_literal (err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
                              "not a picture of an accepted format");
-        return NULL;
+        return FALSE;
     }
-    /* head = the file's first bytes, size = its whole length */
     if (!strcmp (kind, "bmp") && !walpe_bmp_header_ok (head, n, size)) {
         g_set_error_literal (err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
                              "a BMP whose header sizes are not those of a BMP file");
-        return NULL;
+        return FALSE;
     }
+    pl->kind = kind;
+    return TRUE;
+}
+
+/* The declared size, read here (known: pichead.c found it), goes to the
+ * caller before anything else happens to the file. FALSE with err set: the
+ * caller refused it, or a format whose header is in one fixed place has
+ * none there - no decoder shows such a file, and none is started for it. */
+static gboolean picture_size_gate (PictureLoad *pl, gboolean known, int w, int h, GError **err)
+{
+    if (!known && walpe_pichead_exact (pl->kind)) {
+        g_set_error_literal (err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                             "the picture cannot be decoded (its header does not say how large it is)");
+        return FALSE;
+    }
+    if (!known || !pl->size)
+        return TRUE;
+    pl->w = w;
+    pl->h = h;
+    pl->sw = pl->sh = 0;
+    if (!pl->size (pl->kind, w, h, &pl->sw, &pl->sh, pl->user)) {
+        g_set_error_literal (err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                             "the picture's size is not accepted");
+        return FALSE;
+    }
+    pl->asked = TRUE;
+    return TRUE;
+}
+
+/* the loader of that one name, after everything above */
+static GdkPixbufLoader *picture_loader (PictureLoad *pl, GError **err)
+{
+    const char *kind = pl->kind;
     GdkPixbufLoader *ld = gdk_pixbuf_loader_new_with_type (kind, NULL);
     if (!ld && !strcmp (kind, "avif"))
         ld = gdk_pixbuf_loader_new_with_type ("heif/avif", NULL);   /* libheif's name for it */
@@ -630,7 +661,6 @@ static GdkPixbufLoader *picture_loader (const guint8 *head, gsize n, guint64 siz
                      "this gdk-pixbuf has no loader for %s pictures", kind);
         return NULL;
     }
-    pl->kind = kind;
     g_signal_connect (ld, "size-prepared", G_CALLBACK (picture_size_prepared), pl);
     return ld;
 }
@@ -672,23 +702,23 @@ static gboolean picture_jpeg_ok (const PictureLoad *pl, gboolean coding_ok, guin
 GdkPixbuf *walpe_picture_decode (const guint8 *d, gsize len, const char *const *kinds,
                                  WalpePictureSizeFunc size, gpointer user, GError **err)
 {
-    PictureLoad pl = { NULL, size, user, FALSE };
-    GdkPixbufLoader *ld = picture_loader (d, len, len, kinds, &pl, err);
-    if (!ld)
+    PictureLoad pl = { .size = size, .user = user };
+    int w = 0, h = 0;
+    if (!picture_accept (d, len, len, kinds, &pl, err))
         return NULL;
     if (!picture_jpeg_ok (&pl, walpe_jpeg_coding_ok (d, len),
-                          !strcmp (pl.kind, "jpeg") ? walpe_jpeg_store_bytes (d, len) : 0, err)) {
-        gdk_pixbuf_loader_close (ld, NULL);
-        g_object_unref (ld);
+                          !strcmp (pl.kind, "jpeg") ? walpe_jpeg_store_bytes (d, len) : 0, err))
         return NULL;
-    }
     /* a GIF whose frames are not all inside its picture, or have no pixels,
      * is not given to the decoder (gifcheck.h) */
-    if (!strcmp (pl.kind, "gif") && !walpe_gif_layout_ok (d, len, err)) {
-        gdk_pixbuf_loader_close (ld, NULL);
-        g_object_unref (ld);
+    if (!strcmp (pl.kind, "gif") && !walpe_gif_layout_ok (d, len, err))
         return NULL;
-    }
+    const gboolean known = walpe_pichead_size (pl.kind, d, len, &w, &h);
+    if (!picture_size_gate (&pl, known, w, h, err))
+        return NULL;
+    GdkPixbufLoader *ld = picture_loader (&pl, err);
+    if (!ld)
+        return NULL;
     gboolean ok = TRUE;
     GError *lerr = NULL;
     for (gsize off = 0; ok && !pl.refused && off < len; off += 65536)
@@ -710,16 +740,16 @@ GdkPixbuf *walpe_picture_decode_file (const char *path, const char *const *kinds
     }
     guint8 *buf = g_malloc (65536);
     gsize n = fread (buf, 1, 65536, f);
-    PictureLoad pl = { NULL, size, user, FALSE };
-    GdkPixbufLoader *ld = picture_loader (buf, n, (guint64) st.st_size, kinds, &pl, err);
-    if (ld && !picture_jpeg_ok (&pl, walpe_jpeg_file_coding_ok (path),
-                                !strcmp (pl.kind, "jpeg") ? walpe_jpeg_store_bytes_file (path) : 0, err)) {
-        gdk_pixbuf_loader_close (ld, NULL);
-        g_clear_object (&ld);
-    }
-    if (ld && !strcmp (pl.kind, "gif") && !walpe_gif_file_layout_ok (path, err)) {   /* as above */
-        gdk_pixbuf_loader_close (ld, NULL);
-        g_clear_object (&ld);
+    PictureLoad pl = { .size = size, .user = user };
+    int w = 0, h = 0;
+    GdkPixbufLoader *ld = NULL;
+    if (picture_accept (buf, n, (guint64) st.st_size, kinds, &pl, err) &&
+        picture_jpeg_ok (&pl, walpe_jpeg_file_coding_ok (path),
+                         !strcmp (pl.kind, "jpeg") ? walpe_jpeg_store_bytes_file (path) : 0, err) &&
+        (strcmp (pl.kind, "gif") || walpe_gif_file_layout_ok (path, err))) {    /* as above */
+        const gboolean known = walpe_pichead_file_size (pl.kind, path, &w, &h);
+        if (picture_size_gate (&pl, known, w, h, err))
+            ld = picture_loader (&pl, err);
     }
     GdkPixbuf *pb = NULL;
     if (ld) {

@@ -47,6 +47,8 @@
 #endif
 
 #include "common/media.h"
+#include "common/tex.h"
+#include "common/util.h"
 #include "engine/content.h"
 #include "engine/gif.h"
 #include "engine/glutil.h"
@@ -382,6 +384,144 @@ static void test_other_kinds (void)
     }
     g_byte_array_unref (ani);
     g_free (good);
+}
+
+/* ------- 2c. a picture that is refused by its size is decoded nowhere */
+
+/* A real PNG of w x h pixels, one bit each, all of them white: complete
+ * and valid, a thousandth of its rows in the file. (png_header's files end
+ * where their pixels would begin: a decoder gives those up at once.) */
+static char *png_real (const char *name, guint32 w, guint32 h)
+{
+    static const guint8 sig[8] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n' };
+    guint8 hd[13] = { 0 };
+    guint32 be[2] = { GUINT32_TO_BE (w), GUINT32_TO_BE (h) };
+    memcpy (hd, be, 8);
+    hd[8] = 1;      /* bit depth; colour type 0: grey */
+    GZlibCompressor *z = g_zlib_compressor_new (G_ZLIB_COMPRESSOR_FORMAT_ZLIB, 1);
+    GOutputStream *mem = g_memory_output_stream_new_resizable ();
+    GOutputStream *out = g_converter_output_stream_new (mem, G_CONVERTER (z));
+    const gsize rowlen = 1 + (w + 7) / 8;
+    guint8 *row = g_malloc (rowlen);
+    memset (row, 0xff, rowlen);
+    row[0] = 0;     /* filter: none */
+    for (guint32 y = 0; y < h; y++)
+        g_output_stream_write_all (out, row, rowlen, NULL, NULL, NULL);
+    g_output_stream_close (out, NULL, NULL);
+    GByteArray *a = g_byte_array_new ();
+    g_byte_array_append (a, sig, sizeof sig);
+    png_chunk (a, "IHDR", hd, sizeof hd);
+    png_chunk (a, "IDAT", g_memory_output_stream_get_data (G_MEMORY_OUTPUT_STREAM (mem)),
+               (guint32) g_memory_output_stream_get_data_size (G_MEMORY_OUTPUT_STREAM (mem)));
+    png_chunk (a, "IEND", NULL, 0);
+    char *p = P (name);
+    g_file_set_contents (p, (const char *) a->data, (gssize) a->len, NULL);
+    g_byte_array_unref (a);
+    g_free (row);
+    g_object_unref (out);
+    g_object_unref (mem);
+    g_object_unref (z);
+    return p;
+}
+
+/* The most resident memory (KiB) a decoder process of this process has
+ * had: where gdk-pixbuf decodes through glycin (2.44) the decoder is a
+ * child process ("glycin-image-rs" ...; inside a sandbox its grandchild),
+ * kept for half a minute after its last picture. 0 where gdk-pixbuf
+ * decodes in this process. */
+static gint64 decoder_peak_kb (void)
+{
+    GDir *proc = g_dir_open ("/proc", 0, NULL);
+    const char *e;
+    gint64 peak = 0;
+    while (proc && (e = g_dir_read_name (proc))) {
+        const int pid = atoi (e);
+        if (pid <= 1 || pid == getpid ())
+            continue;
+        int up = pid, hops = 0;
+        char *st = NULL;
+        while (up > 1 && up != getpid () && hops++ < 4) {
+            char *f = g_strdup_printf ("/proc/%d/status", up), *t = NULL;
+            int next = 0;
+            if (g_file_get_contents (f, &t, NULL, NULL)) {
+                const char *q = strstr (t, "\nPPid:");
+                next = q ? atoi (q + 6) : 0;
+                if (up == pid)
+                    st = g_steal_pointer (&t);
+            }
+            g_free (t);
+            g_free (f);
+            up = next;
+        }
+        const char *q = up == getpid () && st ? strstr (st, "\nVmHWM:") : NULL;
+        if (q)
+            peak = MAX (peak, g_ascii_strtoll (q + 7, NULL, 10));
+        g_free (st);
+    }
+    if (proc)
+        g_dir_close (proc);
+    return peak;
+}
+
+static gint64 own_peak_kb (void)
+{
+    struct rusage ru;
+    return getrusage (RUSAGE_SELF, &ru) == 0 ? ru.ru_maxrss : 0;
+}
+
+static gboolean preview_8192 (const char *kind, int w, int h, int *sw, int *sh, gpointer user)
+{
+    (void) kind; (void) sw; (void) sh;
+    *(int *) user += 1;
+    return w <= 8192 && h <= 8192;
+}
+
+/* 12000 x 12000 pixels are more than a texture, a preview, a cover or a
+ * picture wallpaper may have, and each of those paths says so from the
+ * file's header. The picture is then decoded nowhere: gdk-pixbuf 2.44
+ * (through glycin) reports a picture's size when its loader is closed and
+ * decodes it whatever it is answered - 830 MiB and 4 s in the decoder
+ * process for each of these refusals, where 2.42 stopped at the header. */
+static void test_before_decode (void)
+{
+    static const char *const png_only[] = { "png", NULL };
+    char *real = png_real ("real-12000.png", 12000, 12000), *raw = NULL;
+    gsize raw_len = 0;
+    int w = 0, h = 0, asked = 0;
+    guint n = 0;
+    gsize bytes = 0;
+    GError *err = NULL;
+    CHECK (g_file_get_contents (real, &raw, &raw_len, NULL) && raw_len < 200 * 1024);
+    const gint64 dec0 = decoder_peak_kb (), own0 = own_peak_kb ();
+    const gint64 t0 = g_get_monotonic_time ();
+
+    /* a wallpaper's texture (a plain picture file in place of a .tex) */
+    CHECK (walpe_tex_load (real) == NULL);
+    /* a preview: the reader of a file and the reader of a buffer */
+    CHECK (walpe_picture_decode_file (real, png_only, preview_8192, &asked, &err) == NULL);
+    CHECK (asked == 1 && err && strstr (err->message, "size is not accepted"));
+    g_clear_error (&err);
+    CHECK (walpe_picture_decode ((const guint8 *) raw, raw_len, png_only, preview_8192, &asked, &err) == NULL);
+    CHECK (asked == 2 && err && strstr (err->message, "size is not accepted"));
+    g_clear_error (&err);
+    /* cover art */
+    char *b64 = g_base64_encode ((const guchar *) raw, raw_len);
+    char *du = g_strconcat ("data:image/png;base64,", b64, NULL);
+    CHECK (!walpe_media_art_probe (du, &w, &h, &n, &bytes));
+    g_free (du);
+    g_free (b64);
+
+    const gint64 dec1 = decoder_peak_kb (), own1 = own_peak_kb ();
+    const double secs = (double) (g_get_monotonic_time () - t0) / 1e6;
+    if (dec1 > dec0 || own1 > own0 + 64 * 1024)
+        g_print ("limits-test: four refusals of a 12000 x 12000 PNG: %.1f s, a decoder process at %.0f MiB "
+                 "(before: %.0f), this process %+.0f MiB\n", secs, (double) dec1 / 1024.0, (double) dec0 / 1024.0,
+                 (double) (own1 - own0) / 1024.0);
+    /* (144 megapixels are 137 MiB at one bit, 412 at three bytes) */
+    CHECK (dec1 < dec0 + 100 * 1024);
+    CHECK (own1 < own0 + 100 * 1024);
+    g_free (raw);
+    g_free (real);
 }
 
 /* with a GL context: the good paths, and the refusal of a later decode */
@@ -955,6 +1095,10 @@ int main (int argc, char **args)
     g_setenv ("GSETTINGS_BACKEND", "memory", TRUE);
     test_art_http ();
 #endif
+    /* (before the tests below: on a system where a refused picture is
+     * decoded all the same, theirs have raised the decoder process's peak
+     * past anything this one could add) */
+    test_before_decode ();
     test_gif ();
     test_image ();
     test_other_kinds ();
