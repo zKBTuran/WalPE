@@ -1524,6 +1524,24 @@ static void audit_checks (void)
             /* float a = PAIR ( 1.0 + 1.0 + 1.0 ) */
             result (fits && st == 11, "a call with too few arguments: accepted, its arguments counted as the text they are", d);
             g_free (d);
+            /* "#else" or "#elif" behind a group's "#else": an error too, and
+             * Mesa's preprocessor leaves the group as it was - lines that
+             * were compiled before the directive are compiled behind it */
+            static const char *const again[] = { "#else", "#elif 0", "#elif 1" };
+            for (guint k = 0; k < G_N_ELEMENTS (again); k++) {
+                g_string_assign (s, bomb);
+                g_string_append_printf (s, "void main () {\n\tfloat a = 0.0;\n#if 0\n#else\n\ta += 1.0;\n%s\n"
+                                        "\tC(a += 0.000001;)\n#endif\n}\n", again[k]);
+                char *what = g_strdup_printf ("the macros behind \"%s\" in an \"#else\" branch that is compiled: refused", again[k]);
+                result (!fx_expansion_ok (s->str), what, NULL);
+                g_free (what);
+                g_string_assign (s, bomb);
+                g_string_append_printf (s, "void main () {\n\tfloat a = 0.0;\n#if 1\n\ta += 1.0;\n#else\n%s\n"
+                                        "\tC(a += 0.000001;)\n#endif\n}\n", again[k]);
+                what = g_strdup_printf ("... behind \"%s\" in an \"#else\" branch that is not: accepted, not counted", again[k]);
+                result (fx_expansion_ok (s->str), what, NULL);
+                g_free (what);
+            }
         }
         g_string_assign (s, "#define SELF SELF + 1\n#define P Q\n#define Q P\nfloat a = SELF + P;\n");
         result (fx_expansion_ok (s->str), "self-referencing macros: accepted (not expanded in themselves)", NULL);

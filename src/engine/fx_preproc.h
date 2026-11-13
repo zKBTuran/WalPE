@@ -1040,7 +1040,12 @@ static void fxpre_directive (FxPre *pp, const FxPreTok *toks, guint n)
         if (!pp->ifs->len)
             return;
         FxPreIf *f = &g_array_index (pp->ifs, FxPreIf, pp->ifs->len - 1);
-        if (!f->parent || f->taken || f->seen_else) {
+        if (f->seen_else) {
+            /* behind the group's "#else": the compile ends, the
+             * preprocessing does not, and Mesa's leaves the group as it
+             * was - an "#else" branch that is compiled stays compiled
+             * behind a second "#else" or an "#elif", to the "#endif" */
+        } else if (!f->parent || f->taken) {
             f->active = 0;
         } else {
             f->active = f->taken = (guint8) (fxpre_is (w, "else") || fxpre_condition (pp, rest, nr));
