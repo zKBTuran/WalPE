@@ -26,8 +26,8 @@ What to include:
 | File | Limit |
 |---|---|
 | texture / picture | 16384 px per side and 8192 x 8192 px; all textures of a scene 1024 MiB (`WALPE_TEX_BUDGET_MB=<MiB>`, 0 = none), the largest are stored smaller beyond that |
-| picture inside a `.tex`, layer picture of the old scene format | PNG, JPEG, WebP (plain picture files also GIF, BMP, TIFF; old-format layers also TGA, AVIF, JXL), each read by its own decoder only, also when only its size is asked for; a JPEG above the texture size is decoded smaller, and one that its decoder has to hold whole (progressive) is not decoded beyond 256 MiB of that store; an arithmetic-coded JPEG is not decoded at all, under whatever name (a short one could keep the JPEG library decoding for ever), nor is one whose frame header is not within the file's first 32 MiB |
-| picture or GIF wallpaper (a picture file chosen as the wallpaper) | shown only when gdk-pixbuf takes the file for a PNG, JPEG, GIF, BMP, TIFF, WebP, TGA, AVIF or JPEG XL picture, whatever its name says: a file it takes for anything else (an SVG document, XPM text, a Windows icon ...) is refused and not decoded as a picture; that loader has read the file's header by then, which is how the format is found out; a file that starts as a JPEG and is arithmetic-coded is refused before that |
+| picture inside a `.tex`, layer picture of the old scene format | PNG, JPEG, WebP (plain picture files also GIF, BMP, TIFF; old-format layers also TGA, AVIF, JXL). Which of them a file is, and how many pixels it declares, WalPE reads from the file's own first bytes before gdk-pixbuf is asked anything ([below](#which-decoder-a-picture-reaches-and-when-its-size-is-known)): bytes that are not the signature of one of these formats go to no decoder, whatever the file is called, and a picture beyond the size limit is refused before a decoder is started; a JPEG above the texture size is decoded smaller, and one that its decoder has to hold whole (progressive) is not decoded beyond 256 MiB of that store; an arithmetic-coded JPEG is not decoded at all, under whatever name (a short one could keep the JPEG library decoding for ever), nor is one whose frame header is not within the file's first 32 MiB |
+| picture or GIF wallpaper (a picture file chosen as the wallpaper) | shown only when its first bytes are those of a PNG, JPEG, GIF, BMP, TIFF, WebP, AVIF or JPEG XL file, or its header a TGA picture's, whatever its name says: a file that is anything else (an SVG document, XPM text, a Windows icon, a HEIC picture ...) is refused by those bytes and handed to no decoder; so is one that declares more than 16384 pixels a side or 64 megapixels; a file that starts as a JPEG and is arithmetic-coded is refused as well |
 | GIF (wallpaper, preview, cover art) | checked before any of it is decoded: the picture and every frame at least 1 x 1 pixel, every frame inside the picture; a GIF that fails is refused like a damaged picture |
 | `.json` | 32 MiB, 512 levels of nesting |
 | `scene.pkg` | a regular file inside the wallpaper's folder (no pipe, no link that leads out); entries stay inside the cache copy, at most 32 path components, 32768 files + directories, 4 x the package's size + 16 MiB written; the cache holds 1 GiB (`WALPE_PKG_CACHE_MB`) |
@@ -39,6 +39,77 @@ What to include:
 | names of files a wallpaper refers to | below the wallpaper's own folder (or the Wallpaper Engine `assets/`): no absolute path, no `..`, no symbolic link that leads out, regular files only; the preview picture the library window shows for a wallpaper is one of these |
 
 A file beyond a limit is not loaded (the log says which); the rest of the wallpaper is.
+
+### Which decoder a picture reaches, and when its size is known
+
+Pictures are decoded by gdk-pixbuf, and what "the PNG decoder and no other" and "refused
+before a pixel exists" mean there depends on the gdk-pixbuf underneath:
+
+- **gdk-pixbuf with decoders of its own** (2.42; Ubuntu 24.04): a loader asked
+  for by name is that format's decoder, and it reports a picture's size from the header
+  and stops when the size is refused.
+- **gdk-pixbuf that decodes through glycin** (2.44; Arch, CachyOS): every
+  loader name is the same module. It writes the bytes into a temporary file, and when
+  the loader is closed glycin picks a decoder *from the bytes* - an SVG document handed
+  to the "png" loader is drawn by librsvg, a HEIC picture handed to the "jpeg" loader is
+  decoded by libheif - and runs it in a process of its own (`glycin-image-rs`,
+  `glycin-svg`, `glycin-heif`, `glycin-jxl`; by glycin's source inside a bubblewrap
+  sandbox where the system allows one, limited to 80 % of the memory and swap that are
+  free). The size is
+  reported then, and the answer "do not decode" is not acted on: the picture is decoded
+  at full size in that process and dropped afterwards. Measured on Arch (gdk-pixbuf
+  2.44.8, glycin 2.2.6, without the sandbox): 12000 x 12000 pixels that WalPE refused
+  cost 830 MiB and 4 to 11 seconds in the decoder process as a PNG, JPEG, BMP, TGA or
+  TIFF and 1650 MiB and 18 seconds as a GIF; a GIF of 43 bytes that declares
+  20617 x 18254 cost 4.3 GiB and 17 seconds; an SVG document of 114 bytes that declares
+  16000 x 16000 cost two gigabytes there, two in the calling process and 45 to 60
+  seconds. With 0.14.0 both happened (measured with that release): a layer picture of
+  the old scene format whose name ends in `.jpg`, `.gif`, `.bmp`, `.tga` ... went to
+  whatever decoder its bytes asked for, and every picture path decoded what it then
+  refused.
+
+So WalPE does not leave either to gdk-pixbuf any more (`src/common/pichead.c`):
+
+- **The format** is the signature in the file's first bytes, read by WalPE: PNG, JPEG,
+  GIF87a / GIF89a, RIFF-WEBP, "BM", TIFF, the `ftyp` box of an AVIF file, JPEG XL. A file
+  with `ftyp` at offset 4 is an ISO media file and nothing else - glycin goes by that box
+  before it looks for a JPEG's or a BMP's first bytes. TGA has no signature: its 18-byte
+  header has to be one gdk-pixbuf's TGA decoder takes (picture type, bits per pixel,
+  colour map), and a header of the less common kind (a colour map nobody uses, a map
+  origin) counts only under a name that ends in `.tga`; the decoder is then given the
+  header without the unused map, which is a TGA file to every reader. The name of a file
+  decides nothing else: where the first bytes say nothing, the file is not a picture.
+- **The size** is read from the header by WalPE as well, and the limit is applied to it
+  before a loader exists. For PNG, JPEG, GIF, BMP, WebP and TGA the header is in one
+  fixed place and those are the decoder's numbers; a file without it is not handed on.
+  For TIFF (first directory), AVIF (the largest `ispe` property) and JPEG XL (the
+  codestream's size header) what WalPE reads is an upper bound that refuses a picture
+  beyond the limits; the size the picture is laid out by is still the loader's.
+- The loader's own report of the size is still held to the limit behind that, and for
+  previews and cover art to the header as well: a size that differs from the header's
+  refuses the picture.
+
+What this does not cover, where gdk-pixbuf decodes through glycin:
+
+- Which decoder glycin runs for bytes that carry an accepted signature is glycin's
+  decision. With the decoders of glycin 2.2.6 it is that format's; a decoder added to
+  the system with a signature of its own that fits inside such a file would get it.
+- A TIFF, AVIF or JPEG XL file whose size WalPE's reader does not find (a 64-bit TIFF,
+  an AVIF without `ispe`) is decoded by the loader process before WalPE hears its size
+  and refuses it; that process is glycin's to limit. The same holds for the size
+  question alone on those three formats: it decodes the picture.
+- Every picture is a temporary file (`gdk-pixbuf-glycin-tmp.*` in `$TMPDIR`, removed
+  when the loader is closed) and a round trip to a decoder process; glycin keeps such a
+  process for 30 seconds after its last picture and gives one operation 60 seconds. A
+  decoder process that is killed or hangs fails the one picture (seen: "i/o error" at
+  once, "did not complete in supplied limit of 60s"); so does a system without glycin's
+  loaders.
+- None of this was run inside glycin's sandbox: the container the tests run in has no
+  user namespaces, and glycin says "running without sandbox" there.
+
+Tests: `meson test -C build parsers limits thumbs wsnet` (`parsers-test pichead` for the
+header readers alone; `limits` looks at the decoder processes after six refusals of a
+real 12000 x 12000 PNG).
 
 Names and texts of a wallpaper that the engine prints in its log lines, and what a scene
 script logs or throws, are printed with their control characters and bytes that are not
@@ -274,7 +345,8 @@ pixel exists, a JPEG that its decoder has to hold whole is not decoded beyond 25
 that store, an arithmetic-coded JPEG is not decoded, and a GIF is checked as in the table above. The cover goes to a decoder only
 when its first bytes are those of a JPEG, PNG, GIF, WebP or BMP file, and then to the
 decoder of that one format: gdk-pixbuf is not left to pick one of its other loaders (SVG,
-XPM, PNM, TGA, ICO, TIFF ...) for bytes a music player or a server chose. A cover in any
+XPM, PNM, TGA, ICO, TIFF ...) for bytes a music player or a server chose
+([what that rests on](#which-decoder-a-picture-reaches-and-when-its-size-is-known)). A cover in any
 other format is not decoded, and the wallpaper is shown none (the log says "album art not
 decodable"). Nothing of a cover is written to disk: two reduced copies (640 pixels at most)
 are kept in memory. The texts a player sends (title, artist, album, genres) are kept up to
@@ -340,7 +412,8 @@ to a size limit and at most 120 s, redirects are followed only to Steam's https 
 for calls that carry the Web API key), preview pictures go to a decoder only when their first
 bytes are those of a JPEG, PNG, GIF or WebP file (library previews also BMP and AVIF) and then
 to the decoder of that one format (gdk-pixbuf is never left to pick one of its other loaders -
-SVG, XPM, PNM, TGA, ICO ... - for them), a JPEG that its decoder has to hold whole (progressive,
+SVG, XPM, PNM, TGA, ICO ... - for them; the size a preview declares is read from its header
+before that, [as for every picture](#which-decoder-a-picture-reaches-and-when-its-size-is-known)), a JPEG that its decoder has to hold whole (progressive,
 or a scan per component) is not decoded beyond 256 MiB of that store, an arithmetic-coded JPEG
 is not decoded at all, and titles, tags, names
 and descriptions are cut to sane lengths and cleaned of control and text-direction characters

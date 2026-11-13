@@ -620,12 +620,53 @@ comes from and what it costs).
   to draw on, a compositor without the layer shell - was in its log and nowhere in the
   window.
 
+### Arch Linux and CachyOS (gdk-pixbuf 2.44, json-glib 1.10)
+
+Found by building and running the tests on current Arch, whose gdk-pixbuf decodes
+pictures through glycin (decoder processes of its own) and whose json-glib reads a text
+with two values differently. The first entry under Security below belongs here too.
+
+- TGA pictures as layer pictures of the old scene format, as particle sprites and as
+  picture wallpapers: a true-colour or grey TGA that carries a colour map it does not
+  use, and one whose colour-map flag is not 0 or 1, were not loaded there (glycin does
+  not take such a header for a TGA file). WalPE now reads the TGA header itself and
+  hands the decoder the same picture without the unused map; on Ubuntu 24.04 these files
+  loaded before and load the same now.
+- A `project.json` or `scene.json` with a second value behind its first one (two objects
+  in one file) was refused there as "no object" - the wallpaper did not load and was
+  missing from the library - where json-glib 1.8 gave the first value. It is the first
+  value on both now. A text with anything else behind its first value is refused on
+  both, as before.
+
 ### Security
 
 What another program of the session or a wallpaper's files could do, found by a review of
 the changes above and of what they touch. None of these was seen being used. One more
 is under "Audio-reactive wallpapers" above: the capture that could end up on a
 microphone.
+
+- Pictures, on systems whose gdk-pixbuf decodes through glycin (gdk-pixbuf 2.44: Arch,
+  CachyOS; not Ubuntu 24.04): the two things WalPE asked of gdk-pixbuf for a wallpaper's
+  pictures - "this file to the PNG decoder and no other", "tell me the size and stop if
+  I refuse it" - are not what happens there. glycin picks the decoder from the file's
+  bytes whatever loader it was asked through, and decodes the picture in full before the
+  size is reported. So a layer picture of the old scene format named `.jpg`, `.gif`,
+  `.bmp`, `.tga` ... that was an SVG document, a HEIC picture or one of a dozen other
+  formats was decoded by that format's decoder (librsvg, libheif ...), and a picture
+  WalPE refuses for its size - in a `.tex`, as a layer picture, as a preview in the
+  library or the Workshop page, as cover art - was decoded anyway, in glycin's decoder
+  process, and then dropped: 830 MiB and 4 to 11 seconds for 12000 x 12000 pixels, 4.3
+  GiB and 17 seconds for a GIF of 43 bytes that declares 20617 x 18254, two gigabytes
+  there and two in the daemon for an SVG document of 114 bytes. This is so in 0.14.0
+  (measured there) and was not seen in use. WalPE now
+  reads the format and the declared size from the file's own first bytes and hands a
+  file to gdk-pixbuf only as one of the formats a wallpaper can have and within the size
+  limit ([SECURITY.md](docs/SECURITY.md#which-decoder-a-picture-reaches-and-when-its-size-is-known),
+  with what is still glycin's to decide). On Ubuntu 24.04 the same checks run and change
+  nothing that was shown: 37 pictures of every format and name gave the same frame
+  before and after. A picture or GIF wallpaper is no longer opened three times to learn
+  its format and size (on Arch that was three full decodes before the picture was
+  shown).
 
 - Configuration: one request on the control socket with half of a surrogate pair in a
   string (`"a\ud800b"`, which is valid JSON) put bytes that are no UTF-8 into
@@ -801,6 +842,15 @@ microphone.
 
 ### Known limitations
 
+- Arch, CachyOS (gdk-pixbuf 2.44 with glycin): pictures are decoded by glycin's decoders
+  there, not by the ones Ubuntu's gdk-pixbuf has. PNG, GIF, BMP, TIFF and TGA pictures
+  of 8, 24 and 32 bits gave the same pixels on both; a JPEG differs by up to 3 steps of
+  255 in a third of its values (another JPEG decoder) and a 16-bit true-colour TGA by
+  one step; a grey TGA with an alpha channel (16 bits) is not decoded at all, and a
+  64-bit TIFF is not recognised. Every picture costs a temporary file and a round trip
+  to a decoder process (one process for all pictures of a kind, kept for 30 seconds),
+  and asking a picture for its size alone is a full decode there: a picture inside a
+  `.tex` that is asked for its size and then loaded is decoded twice.
 - KDE Plasma: without the add-on (`contrib/plasma`, under Wayland above) the desktop
   icons and widgets cannot be seen while WalPE shows a wallpaper; they are part of the
   window of Plasma's shell that the wallpaper lies on. With the add-on they are shown
