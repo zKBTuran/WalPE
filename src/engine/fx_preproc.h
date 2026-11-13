@@ -128,6 +128,7 @@ typedef struct FxPre_ {
     gboolean es;
     GHashTable *names;      /* FxPreName -> the name's number */
     GHashTable *macros;     /* a name's number -> FxPreMacro */
+    GHashTable *undefd;     /* the numbers of the driver's names the text has an "#undef" for (NULL: none) */
     GPtrArray *all;         /* every FxPreMacro made, also the redefined and undefined
                              * ones: a call may be reading its arguments while a
                              * line between them undefines the macro */
@@ -392,12 +393,17 @@ static gboolean fxpre_defined (FxPre *pp, const FxPreTok *name, gint64 *value)
      * holds for them is the driver's: yes in C, no in Mesa's preprocessor) */
     if (m && m->special != 1 && m->special != 2)
         return TRUE;
-    if (!fxpre_driver_name (name) || fxpre_is (name, "GL_ES"))
+    /* (a name of the driver's that the text has taken away with "#undef":
+     * the driver, asked in a source of its own, still has it. Mesa removes
+     * the macro - with a warning for __VERSION__, with an error for a GL_
+     * name - and another driver may refuse to: not known, both ways) */
+    const gboolean gone = pp->undefd && g_hash_table_contains (pp->undefd, GUINT_TO_POINTER ((guint) name->sym));
+    if (!fxpre_driver_name (name) || (fxpre_is (name, "GL_ES") && !gone))
         return m != NULL;   /* (GL_ES: a macro of the table after "#version ... es", else not defined) */
-    if (m && pp->conf.trust_line)
+    if ((m || gone) && pp->conf.trust_line)
         return FALSE;
     int r = -1;
-    if (pp->conf.probe && name->len < 128) {
+    if (pp->conf.probe && name->len < 128 && !gone) {
         char nm[128];
         memcpy (nm, name->s, name->len);
         nm[name->len] = 0;
@@ -1126,8 +1132,14 @@ static void fxpre_directive (FxPre *pp, const FxPreTok *toks, guint n)
     } else if (fxpre_is (w, "define")) {
         fxpre_define (pp, rest, nr);
     } else if (fxpre_is (w, "undef")) {
-        if (nr > 0 && rest[0].kind == FXPRE_T_IDENT)
+        if (nr > 0 && rest[0].kind == FXPRE_T_IDENT) {
             g_hash_table_remove (pp->macros, GUINT_TO_POINTER ((guint) rest[0].sym));
+            if (fxpre_driver_name (&rest[0]) && rest[0].sym) {
+                if (!pp->undefd)
+                    pp->undefd = g_hash_table_new (NULL, NULL);
+                g_hash_table_add (pp->undefd, GUINT_TO_POINTER ((guint) rest[0].sym));
+            }
+        }
     } else if (fxpre_is (w, "line")) {
         /* "#line N" / "#line N F" (macros expanded): the next line is N */
         GArray *e = g_array_new (FALSE, FALSE, sizeof (FxPreTok));
@@ -1223,6 +1235,8 @@ static void fx_pre_clear (FxPre *pp)
         g_hash_table_unref (pp->macros);
     if (pp->names)
         g_hash_table_unref (pp->names);
+    if (pp->undefd)
+        g_hash_table_unref (pp->undefd);
     if (pp->all)
         g_ptr_array_free (pp->all, TRUE);
     if (pp->ifs)

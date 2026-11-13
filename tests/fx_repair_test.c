@@ -1283,6 +1283,34 @@ static void anno (const char *what, const char *body, const char *uname, const c
     g_free (got);
 }
 
+/* a driver that defines every name it is asked about, as 1 (FxPreProbe) */
+static int probe_defines_all (const char *name, gint64 *value, gpointer user)
+{
+    (void) name;
+    (void) user;
+    *value = 1;
+    return 1;
+}
+
+/* fx_preproc.h over src with that driver, every way the source can be read: does it fit */
+static gboolean fits_with_probe (const char *src)
+{
+    FxPreConf conf = { 0 };
+    conf.max_out = FX_MAX_EXPANSION + 1;
+    conf.max_work = 12 * (gint64) FX_MAX_EXPANSION;
+    conf.max_bytes = 24 * 1024 * 1024;
+    conf.probe = probe_defines_all;
+    gboolean ok = TRUE;
+    for (;;) {
+        FxPre pp;
+        ok = fx_pre_run (&pp, src, &conf) && ok;
+        const int used = pp.unknown;
+        fx_pre_clear (&pp);
+        if (!ok || !fx_pre_next (&conf.forced, used))
+            return ok;
+    }
+}
+
 static void audit_checks (void)
 {
     /* #if arithmetic: INT64_MIN / -1 and % -1 trap on x86 */
@@ -1611,6 +1639,27 @@ static void audit_checks (void)
                 result (fits && st == 2044, "eight calls in each other of a macro that uses its parameter twice: accepted", d);
                 g_free (d);
             }
+            /* A name of the driver's that the text itself takes away: the
+             * driver asked about it (in a source of its own) still says
+             * "defined". Mesa removes the macro at the "#undef" - with a
+             * warning for __VERSION__, with an error and all the same for
+             * a GL_ name - and compiles the "#ifndef" branch behind it. */
+            static const char *const gone[] = { "__VERSION__", "GL_ARB_shading_language_420pack", "GL_ES" };
+            for (guint k = 0; k < G_N_ELEMENTS (gone); k++) {
+                g_string_assign (s, "#version 300 es\n");
+                g_string_append (s, bomb);
+                g_string_append_printf (s, "void main () {\n\tfloat a = 0.0;\n#undef %s\n#ifndef %s\n\tC(a += 0.000001;)\n#endif\n}\n",
+                                        gone[k], gone[k]);
+                char *what = g_strdup_printf ("the macros behind \"#undef %s\" and \"#ifndef\", the driver saying it is defined: "
+                                              "refused", gone[k]);
+                result (!fits_with_probe (s->str), what, NULL);
+                g_free (what);
+            }
+            g_string_assign (s, "#version 300 es\n");
+            g_string_append (s, bomb);
+            g_string_append (s, "void main () {\n\tfloat a = 0.0;\n#ifndef GL_ARB_shading_language_420pack\n\tC(a += 0.000001;)\n"
+                                "#endif\n#if !defined(__VERSION__) || !GL_ES || !defined(GL_ES)\n\tC(a += 0.000001;)\n#endif\n}\n");
+            result (fits_with_probe (s->str), "... without the \"#undef\": the driver's word is taken, accepted", NULL);
         }
         g_string_assign (s, "#define SELF SELF + 1\n#define P Q\n#define Q P\nfloat a = SELF + P;\n");
         result (fx_expansion_ok (s->str), "self-referencing macros: accepted (not expanded in themselves)", NULL);
