@@ -81,6 +81,7 @@ Shell, and at most eight such connections exist at a time (a daemon needs one).
 |---|---|
 | extension on, daemon started | the wallpaper, below windows and desktop icons |
 | daemon quits or is killed | GNOME's own background again |
+| GNOME Shell 46 to 48: the second process is killed while the daemon runs | nothing changes: the daemon and the wallpaper stay; the next start or restart of the daemon gets a new one |
 | daemon started without the extension (off, not installed, not loaded yet) | no wallpaper; the daemon ends with a sentence that names the extension and the command that installs or enables it |
 | extension switched off while the daemon runs | the wallpaper stays where it is, a desktop window as before; the overview shows GNOME's own background; the pause rules for windows have no source (`walpe-ctl status` says so). The next start of the daemon ends with the sentence |
 | extension switched on again while that daemon still runs | as before: overview and pause rules are back |
@@ -114,6 +115,10 @@ on 47 to 50 the extension is expected to work (it uses the 46 way up to 48 and t
 from 49 on, and both were run) but was not, so they are not listed. To try it there:
 add the version to `shell-version` in the installed `metadata.json`, or switch GNOME's
 check off (`gsettings set org.gnome.shell disable-extension-version-validation true`).
+Whether it works on the GNOME Shell of a machine, whatever its version, is checked by
+`python3 -I scripts/gnomecheck.py --build <build directory>` in WalPE's source tree: it
+starts a GNOME Shell of its own without a screen, with a private home directory, and
+touches nothing of the session it is run from (test `gnome-shell` of `meson test`).
 
 What it uses of GNOME Shell and Mutter, for whoever has to adapt it to a new release:
 `Meta.Window.set_type` (49+) or `Meta.WaylandClient.new`, `spawnv`, `owns_window`,
@@ -131,4 +136,7 @@ Written for WalPE, under WalPE's licence ([LICENSE](../../LICENSE), BSD-3-Clause
 of another extension is in it. Run on a headless GNOME Shell 46.0 (Mutter 46.2, Ubuntu
 24.04, with and without Ubuntu's "Desktop Icons NG" 47.0.9, one and two monitors) and
 51.1 (Mutter 51.1, Arch Linux, one monitor), with Mesa's software renderer only: no real
-session, no GPU, no NVIDIA driver, no fractional scaling, no HDR.
+session, no GPU, no NVIDIA driver, no HDR. On 46.0 also: two monitors that change places
+and a monitor whose scale changes to 2 and to 1.5 while the daemon runs (it restarts in
+place and its windows are on the right monitors at the right size); the lock screen.
+Not run on 51.1: the lock screen, more than one monitor, a scale other than 1.

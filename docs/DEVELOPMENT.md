@@ -38,7 +38,8 @@ walpe-tray (src/tray/)       tray icon (XEmbed + StatusNotifierItem), own proces
 scripts/                     walpe-gpu-report.sh, walpe-collect.sh (installed); the end-to-end tests' harness:
                              displayenv.py, checkenv.py, lifecheck.py, waylandcheck.py, rescheck.py,
                              scenevideocheck.py, webcheck.py, wlsilentcheck.py, wlwaitcheck.py,
-                             kwincheck.py
+                             kwincheck.py, gnomecheck.py (GNOME Shell)
+contrib/gnome/               the extension for GNOME Shell (JavaScript; no build installs it)
 protocols/                   Wayland protocol descriptions (third-party, see Licence)
 cross/                       meson cross files for aarch64
 data/                        systemd user unit, autostart and desktop entries, style.css, icon
@@ -91,6 +92,7 @@ directory; nothing of your session is read, written or disturbed:
 | `daemon-wayland-wait-socket` | none | a daemon restarted in place that waits for its compositor and gives up: which control socket file it removes, and what its log says (`scripts/wlwaitcheck.py`) |
 | `daemon-wayland` | headless sway | what only outputs can do (`scripts/waylandcheck.py`): two outputs, a mode / scale / transform that changes under the running daemon, outputs that appear and go, a pointer device, the choice between the two backends |
 | `daemon-kwin` | a private KDE Plasma session: KWin on two virtual outputs, Plasma's shell | what only KWin and Plasma can show (`scripts/kwincheck.py`): where the wallpaper is among Plasma's windows before and after a click on the desktop, the layer and what status says about it, the pause rules through the script in KWin, the add-on of `contrib/plasma` installed, selected and taken away, the tray's menu at Plasma's own StatusNotifierWatcher |
+| `gnome-shell` | headless `gnome-shell` (also `gdbus`, `dbus-daemon`; `gjs` for two cases) | the daemon and the extension of `contrib/gnome` on a private GNOME Shell with the software renderer (`scripts/gnomecheck.py`): the wallpaper's window becomes a desktop window on its monitor; nothing of it stays in the shell when the daemon is quit, killed, or ends after the process GNOME Shell 46 to 48 starts for its connection; another program with the wallpaper's application id and title keeps an ordinary window; what the extension reports about covering and focused windows; the bounds on what it takes from the session bus. `WALPE_CHECK_GNOME_SHELL` runs the shell of another root (a chroot with another GNOME version) |
 | `web-wayland` | headless sway without Xwayland, no `DISPLAY` | the same pages on the private page host (`scripts/webcheck.py`), and what only a Wayland session has: two outputs, outputs that come, change and go, `DISPLAY` left over without an X server, what the page's sandbox sees of the session, the session's clipboard (needs `wl-copy` / `wl-paste`) |
 
 The X ones need `Xvfb` (and use `xdotool`, `xrandr` when present), the Wayland ones `sway`
