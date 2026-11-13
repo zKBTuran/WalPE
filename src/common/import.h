@@ -154,6 +154,12 @@ char        *walpe_video_sound_file (const char *src);
  * there; 0 = the video has no sound track (dst is the empty file that says
  * so); -1 = failed, *err (g_free) says why and nothing is left behind. */
 int          walpe_video_sound_extract (const char *src, const char *dst, char **err);
+/* The same for a caller that may lose interest: stop (user) is asked ten or
+ * twenty times a second while the call waits - for its turn (one track is
+ * taken out at a time) and for ffmpeg. Once it says TRUE the call ends: ffmpeg
+ * is killed, nothing is left behind, -2 is returned (*err stays NULL). */
+int          walpe_video_sound_extract_stoppable (const char *src, const char *dst,
+                                                  gboolean (*stop) (gpointer user), gpointer user, char **err);
 /* argv of that run (tests; NULL-terminated, g_strfreev) */
 char       **walpe_video_sound_argv (const char *src, const char *dst_part);
 int          walpe_import_percent (WalpeImport *imp); /* -1 = unknown */

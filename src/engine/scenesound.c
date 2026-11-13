@@ -974,6 +974,20 @@ static gint64 flac_frames (const char *path)
     return n;
 }
 
+/* the player whose prepare function the thread is in (walpe_sound_prepare_stop) */
+static GPrivate preparing;
+
+gboolean walpe_sound_prepare_stop (void)
+{
+    WalpeSound *s = g_private_get (&preparing);
+    if (!s)
+        return FALSE;
+    g_mutex_lock (&s->lock);
+    const gboolean quit = s->quit;
+    g_mutex_unlock (&s->lock);
+    return quit;
+}
+
 static gpointer sound_thread (gpointer data)
 {
     WalpeSound *s = data;
@@ -1100,9 +1114,20 @@ static gpointer sound_thread (gpointer data)
                 void (*prepare) (const char *) = s->prepare;
                 char *arg = prepare ? g_strdup (s->prepare_arg) : NULL;
                 g_mutex_unlock (&s->lock);
-                if (prepare)
+                if (prepare) {
+                    g_private_set (&preparing, s);
                     prepare (arg);
+                    g_private_set (&preparing, NULL);
+                }
                 g_free (arg);
+                /* told to end while that ran (walpe_sound_prepare_stop): no
+                 * file is looked for, and none is said to be missing, for
+                 * a wallpaper that is gone */
+                g_mutex_lock (&s->lock);
+                const gboolean gone = s->quit;
+                g_mutex_unlock (&s->lock);
+                if (gone)
+                    continue;
             }
             char *err = NULL;
             if (!src_open (&src, s->files[idx], &err)) {

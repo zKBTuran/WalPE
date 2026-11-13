@@ -23,7 +23,9 @@
  *     is shorter than its header says, a directory, a FIFO, a file that
  *     never ends (a decoder of the test's own).
  *  7. Freeing a group while its players run returns at once; the threads
- *     end by themselves.
+ *     end by themselves. A player that is still inside its prepare
+ *     function then (a video's sound track being taken out) is told so
+ *     there, and opens nothing afterwards.
  *  8. The process's streams: of more players than WALPE_SOUND_MAX_STREAMS,
  *     over two wallpapers, that many sound and the others wait; a waiting
  *     one gets its output when another falls silent.
@@ -810,6 +812,63 @@ static void test_limits (const char *dir, const char *sine)
 }
 
 /* ---- 7 ---- */
+
+/* a decoder of the test's own (parts 7 and 9): 125 s at 8000 Hz, which
+ * counts how often it is opened, what it is made to decode and what it is
+ * asked to pass over */
+enum { SEEK_FRAMES = 125 * 8000 };
+static gint seek_opens, seek_decoded, seek_skips, seek_skipped;
+static gpointer seek_open (const char *path, int *rate, int *channels, char **err)
+{
+    (void) path;
+    (void) err;
+    *rate = 8000;
+    *channels = 1;
+    g_atomic_int_inc (&seek_opens);
+    return g_new0 (gint64, 1);
+}
+static int seek_read (gpointer dec, gint16 *out, int max_frames)
+{
+    gint64 *at = dec;
+    const int n = (int) MIN ((gint64) max_frames, SEEK_FRAMES - *at);
+    for (int i = 0; i < n; i++)
+        out[i] = (gint16) ((*at + i) % 1000);
+    *at += n;
+    g_atomic_int_add (&seek_decoded, n);
+    return n;
+}
+static gint64 seek_skip (gpointer dec, gint64 frames)
+{
+    gint64 *at = dec;
+    const gint64 n = MIN (frames, SEEK_FRAMES - *at);
+    *at += n;
+    g_atomic_int_inc (&seek_skips);
+    g_atomic_int_add (&seek_skipped, (gint) n);
+    return n;
+}
+static void seek_close (gpointer dec) { g_free (dec); }
+static const WalpeSoundDecoder seek_dec = { seek_open, seek_read, seek_close, seek_skip };
+static const WalpeSoundDecoder seek_dec_plain = { seek_open, seek_read, seek_close, NULL };
+
+/* a prepare function that takes ten seconds unless it is told to stop:
+ * prep_state 1 = inside, 2 = left because it was told, 3 = sat it out */
+static gint prep_state, said_missing;
+static void slow_prepare (const char *arg)
+{
+    (void) arg;
+    g_atomic_int_set (&prep_state, 1);
+    for (int i = 0; i < 10000 && !walpe_sound_prepare_stop (); i++)
+        g_usleep (1000);
+    g_atomic_int_set (&prep_state, walpe_sound_prepare_stop () ? 2 : 3);
+}
+
+static void log_missing (const gchar *domain, GLogLevelFlags level, const gchar *msg, gpointer user)
+{
+    (void) domain; (void) level; (void) user;
+    if (msg && strstr (msg, "is not played"))
+        g_atomic_int_inc (&said_missing);
+}
+
 static void test_free_running (const char *dir)
 {
     walpe_sound_use_null (FALSE);   /* at the pace of real output: the threads sleep in their writes */
@@ -828,6 +887,60 @@ static void test_free_running (const char *dir)
            ms, left);
     CHECK (threads_gone (), "the threads end by themselves: %d left", walpe_sound_threads ());
     walpe_sound_use_null (TRUE);
+    /* a prepare function that would take ten seconds: it hears that its
+     * player is to end, and the thread is gone at once - without a word
+     * about the file the function did not make */
+    {
+        char *later = g_build_filename (dir, "made-by-prepare.wav", NULL);
+        char *there = g_build_filename (dir, "there.bin", NULL);
+        g_file_set_contents (there, "not RIFF: the decoder of the test", -1, NULL);
+        g_atomic_int_set (&said_missing, 0);
+        guint h = g_log_set_handler (NULL, G_LOG_LEVEL_MESSAGE, log_missing, NULL);
+        g = group_on ("/w/prepare");
+        WalpeSound *s = snd_new (g, later, NULL, WALPE_SOUND_LOOP, 1.0f);
+        walpe_sound_set_prepare (s, slow_prepare, "x");
+        walpe_sound_play (s);
+        WAIT (g_atomic_int_get (&prep_state) == 1, 5000);
+        CHECK (g_atomic_int_get (&prep_state) == 1 && !walpe_sound_prepare_stop (),
+               "the prepare function runs (%d), and no other thread is told to stop",
+               g_atomic_int_get (&prep_state));
+        g_usleep (50000);
+        CHECK (g_atomic_int_get (&prep_state) == 1, "a player that is not to end is not stopped in it");
+        t0 = g_get_monotonic_time ();
+        walpe_sound_group_free (g);
+        WAIT (walpe_sound_threads () == 0, 3000);
+        ms = (g_get_monotonic_time () - t0) / 1e3;
+        CHECK (walpe_sound_threads () == 0 && g_atomic_int_get (&prep_state) == 2 && ms < 2000.0 &&
+               !g_atomic_int_get (&said_missing),
+               "freed inside its prepare function: %d thread(s) left after %.0f ms, the function %s, %d line(s) "
+               "about a missing file", walpe_sound_threads (), ms,
+               g_atomic_int_get (&prep_state) == 2 ? "was told" : "was not told", g_atomic_int_get (&said_missing));
+        /* ... and with the file there (what the function was to make came
+         * in while it ran): it is not opened, so not one block of a
+         * wallpaper that is gone reaches an output. (It was: 70 ms of a
+         * replaced video's sound were heard when its ffmpeg was done.) */
+        walpe_sound_set_decoder (&seek_dec);
+        g_atomic_int_set (&seek_opens, 0);
+        g_atomic_int_set (&seek_decoded, 0);
+        g_atomic_int_set (&prep_state, 0);
+        g = group_on ("/w/prepare2");
+        s = snd_new (g, there, NULL, WALPE_SOUND_LOOP, 1.0f);
+        walpe_sound_set_prepare (s, slow_prepare, "x");
+        walpe_sound_play (s);
+        WAIT (g_atomic_int_get (&prep_state) == 1, 5000);
+        walpe_sound_group_free (g);
+        WAIT (walpe_sound_threads () == 0, 3000);
+        g_usleep (20000);
+        CHECK (walpe_sound_threads () == 0 && g_atomic_int_get (&prep_state) == 2 &&
+               !g_atomic_int_get (&seek_opens) && !g_atomic_int_get (&seek_decoded),
+               "freed inside its prepare function, the file there: opened %d time(s), %d frames decoded (wanted: "
+               "0, 0)", g_atomic_int_get (&seek_opens), g_atomic_int_get (&seek_decoded));
+        walpe_sound_set_decoder (NULL);
+        g_log_remove_handler (NULL, h);
+        g_remove (there);
+        g_free (there);
+        g_free (later);
+    }
     g_remove (lng);
     g_free (lng);
 }
@@ -897,41 +1010,6 @@ static void test_stream_cap (const char *dir)
 }
 
 /* ---- 9 ---- */
-
-/* a decoder of the test's own: 125 s at 8000 Hz, which counts what it is
- * made to decode and what it is asked to pass over */
-enum { SEEK_FRAMES = 125 * 8000 };
-static gint seek_decoded, seek_skips, seek_skipped;
-static gpointer seek_open (const char *path, int *rate, int *channels, char **err)
-{
-    (void) path;
-    (void) err;
-    *rate = 8000;
-    *channels = 1;
-    return g_new0 (gint64, 1);
-}
-static int seek_read (gpointer dec, gint16 *out, int max_frames)
-{
-    gint64 *at = dec;
-    const int n = (int) MIN ((gint64) max_frames, SEEK_FRAMES - *at);
-    for (int i = 0; i < n; i++)
-        out[i] = (gint16) ((*at + i) % 1000);
-    *at += n;
-    g_atomic_int_add (&seek_decoded, n);
-    return n;
-}
-static gint64 seek_skip (gpointer dec, gint64 frames)
-{
-    gint64 *at = dec;
-    const gint64 n = MIN (frames, SEEK_FRAMES - *at);
-    *at += n;
-    g_atomic_int_inc (&seek_skips);
-    g_atomic_int_add (&seek_skipped, (gint) n);
-    return n;
-}
-static void seek_close (gpointer dec) { g_free (dec); }
-static const WalpeSoundDecoder seek_dec = { seek_open, seek_read, seek_close, seek_skip };
-static const WalpeSoundDecoder seek_dec_plain = { seek_open, seek_read, seek_close, NULL };
 
 static void test_restart (const char *dir)
 {

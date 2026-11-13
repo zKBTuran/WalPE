@@ -12,6 +12,10 @@
  *    "ffmpeg" put in front of the real one refuses every stream copy);
  *  - a run that is cancelled leaves no output and no ".part" file, and its
  *    callback is not called;
+ *  - a sound track being taken out (walpe_video_sound_extract_stoppable) is
+ *    given up when its caller says so: ffmpeg is gone, nothing is left, and
+ *    a second caller does not wait for its turn longer than it wants to
+ *    (a stand-in "ffmpeg" that never ends; runs without the real one);
  *  - the unfinished outputs of a killed daemon are removed
  *    (walpe_import_tidy_parts), and only those;
  *  - the ffmpeg of a conversion does not outlive the process that started
@@ -46,6 +50,77 @@ static GMainLoop *loop;
 static char *P (const char *rel)
 {
     return g_build_filename (tmp, rel, NULL);
+}
+
+/* ---- a sound track given up (walpe_video_sound_extract_stoppable) ---- */
+static gint stop_a, stop_b;     /* what the two callers' stop functions say */
+static gint asked_b;            /* how often the second one was asked */
+static gboolean stop_a_cb (gpointer user) { (void) user; return g_atomic_int_get (&stop_a) != 0; }
+static gboolean stop_b_cb (gpointer user)
+{
+    (void) user;
+    g_atomic_int_inc (&asked_b);
+    return g_atomic_int_get (&stop_b) != 0;
+}
+
+typedef struct { const char *src, *dst; int res; char *err; } Extract;
+static gpointer extract_thread (gpointer data)
+{
+    Extract *x = data;
+    x->res = walpe_video_sound_extract_stoppable (x->src, x->dst, stop_a_cb, NULL, &x->err);
+    return NULL;
+}
+
+/* any file as the "video": the stand-in ffmpeg writes its process id and
+ * sleeps for a minute */
+static void test_sound_stop (const char *any_file)
+{
+    char *dir = P ("slow"), *fake = P ("slow/ffmpeg"), *pidf = P ("slow/pid"), *dst_a = P ("slow/a-sound.flac"),
+         *dst_b = P ("slow/b-sound.flac"), *part_a = P ("slow/a-sound.flac.part"), *text = NULL;
+    char *q_pid = g_shell_quote (pidf);
+    char *sh = g_strdup_printf ("#!/bin/sh\necho $$ > %s\nexec sleep 60\n", q_pid);
+    char *old_path = g_strdup (g_getenv ("PATH")), *path = g_strconcat (dir, ":", old_path, NULL);
+    g_mkdir_with_parents (dir, 0700);
+    if (!g_file_set_contents (fake, sh, -1, NULL) || g_chmod (fake, 0700)) {
+        CHECK (!"the stand-in ffmpeg could not be written");
+    } else {
+        g_setenv ("PATH", path, TRUE);
+        Extract a = { any_file, dst_a, 99, NULL };
+        GThread *t = g_thread_new ("extract", extract_thread, &a);
+        for (int i = 0; i < 5000 && !g_file_get_contents (pidf, &text, NULL, NULL); i++)
+            g_usleep (1000);
+        const pid_t child = text ? (pid_t) atoi (text) : 0;
+        CHECK (child > 1 && kill (child, 0) == 0);          /* the first caller's ffmpeg runs */
+        /* a second caller, for another video: it waits for its turn, and
+         * no longer than until it is told to stop */
+        gint64 t0 = g_get_monotonic_time ();
+        g_atomic_int_set (&stop_b, 0);
+        char *err = NULL;
+        g_atomic_int_set (&asked_b, 0);
+        g_atomic_int_set (&stop_b, 1);
+        int rb = walpe_video_sound_extract_stoppable (any_file, dst_b, stop_b_cb, NULL, &err);
+        double el = (g_get_monotonic_time () - t0) / 1e6;
+        CHECK (rb == -2 && !err && el < 3.0 && g_atomic_int_get (&asked_b) >= 1);
+        CHECK (child > 1 && kill (child, 0) == 0 && a.res == 99);   /* the first one is not touched by that */
+        g_free (err);
+        /* the first caller is told: back within the second, ffmpeg gone
+         * (and collected), neither the file nor its ".part" */
+        t0 = g_get_monotonic_time ();
+        g_atomic_int_set (&stop_a, 1);
+        g_thread_join (t);
+        el = (g_get_monotonic_time () - t0) / 1e6;
+        CHECK (a.res == -2 && !a.err && el < 3.0);
+        CHECK (child > 1 && kill (child, 0) != 0);
+        CHECK (!g_file_test (dst_a, G_FILE_TEST_EXISTS) && !g_file_test (part_a, G_FILE_TEST_EXISTS) &&
+               !g_file_test (dst_b, G_FILE_TEST_EXISTS));
+        g_free (a.err);
+        g_setenv ("PATH", old_path, TRUE);
+    }
+    g_remove (fake);
+    g_remove (pidf);
+    g_rmdir (dir);
+    g_free (dir); g_free (fake); g_free (pidf); g_free (dst_a); g_free (dst_b); g_free (part_a); g_free (text);
+    g_free (q_pid); g_free (sh); g_free (old_path); g_free (path);
 }
 
 static gboolean have_arg (char **argv, const char *a, const char *next)
@@ -777,6 +852,13 @@ int main (int argc, char **argv)
     test_boxes ();
     test_tidy ();
     test_child_of ();
+    {
+        char *any = P ("any.mp4");
+        g_file_set_contents (any, "stands for a video\n", -1, NULL);
+        test_sound_stop (any);
+        g_remove (any);
+        g_free (any);
+    }
     test_runs ();
     g_rmdir (tmp);
     if (fails)

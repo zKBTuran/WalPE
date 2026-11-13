@@ -179,6 +179,12 @@ WalpeSound *walpe_sound_new (WalpeSoundGroup *g, const WalpeSoundSpec *spec);
  * the layer is really about to be heard. To be set before the first play;
  * arg is copied. */
 void walpe_sound_set_prepare (WalpeSound *s, void (*prepare) (const char *arg), const char *arg);
+/* For a prepare function that takes long (a video's sound track is taken
+ * out of the video: seconds, with a long one minutes): TRUE once the player
+ * it is called for has been told to end - its wallpaper was replaced or
+ * closed. The function then gives up and returns; nothing is opened after
+ * it. FALSE on every thread that is not inside a prepare function. */
+gboolean walpe_sound_prepare_stop (void);
 void walpe_sound_play (WalpeSound *s);    /* start, or go on after pause */
 void walpe_sound_pause (WalpeSound *s);
 void walpe_sound_stop (WalpeSound *s);    /* stop; the next play starts the file again */

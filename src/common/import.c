@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/wait.h>
 #include <math.h>
 #include <sched.h>
@@ -1135,11 +1136,23 @@ char **walpe_video_sound_argv (const char *src, const char *dst_part)
 
 int walpe_video_sound_extract (const char *src, const char *dst, char **err)
 {
+    return walpe_video_sound_extract_stoppable (src, dst, NULL, NULL, err);
+}
+
+int walpe_video_sound_extract_stoppable (const char *src, const char *dst, gboolean (*stop) (gpointer user),
+                                         gpointer user, char **err)
+{
     static GMutex one;      /* one at a time in this process: they share the ".part" of a video */
     int res = -1;
     if (err)
         *err = NULL;
-    g_mutex_lock (&one);
+    /* (a caller that can be stopped does not wait behind another video's
+     * track for longer than it wants to) */
+    while (!g_mutex_trylock (&one)) {
+        if (stop && stop (user))
+            return -2;
+        g_usleep (50000);
+    }
     if (g_file_test (dst, G_FILE_TEST_EXISTS)) {    /* made while this call waited */
         GStatBuf st;
         res = g_stat (dst, &st) == 0 && st.st_size > 0 ? 1 : 0;
@@ -1154,7 +1167,7 @@ int walpe_video_sound_extract (const char *src, const char *dst, char **err)
     int efd = -1;
     GError *e = NULL;
     GString *said = g_string_new (NULL);
-    gboolean timed_out = FALSE, low_disk = FALSE;
+    gboolean timed_out = FALSE, low_disk = FALSE, stopped = FALSE;
     int status = -1;
     /* the floor every conversion has (import_watch): six hours of sound
      * are up to 2 GB of FLAC, from a video file that may be a hundredth of
@@ -1179,13 +1192,15 @@ int walpe_video_sound_extract (const char *src, const char *dst, char **err)
         const gint64 t0 = g_get_monotonic_time ();
         /* (what ffmpeg says is read while it runs: a full pipe would stop it) */
         fcntl (efd, F_SETFL, fcntl (efd, F_GETFL) | O_NONBLOCK);
-        guint rounds = 0;
+        gint64 disk_at = t0;    /* when the free disk was looked at last */
+        gboolean eof = FALSE;   /* ffmpeg has closed its end: it is about to be gone */
         for (;;) {
             char buf[512];
             ssize_t n;
             while ((n = read (efd, buf, sizeof buf)) > 0)
                 if (said->len < 2000)
                     g_string_append_len (said, buf, n);
+            eof |= n == 0;
             pid_t r = waitpid (pid, &status, WNOHANG);
             if (r == pid)
                 break;
@@ -1193,17 +1208,32 @@ int walpe_video_sound_extract (const char *src, const char *dst, char **err)
                 status = -1;
                 break;
             }
-            if (max_us > 0 && g_get_monotonic_time () - t0 > max_us)
-                timed_out = TRUE;
-            else if (floor_mb > 0 && ++rounds % 50 == 0 && disk_free_mb (dir) < floor_mb)
-                low_disk = TRUE;    /* (looked at once a second) */
-            if (timed_out || low_disk) {
+            const gint64 now = g_get_monotonic_time ();
+            timed_out = max_us > 0 && now - t0 > max_us;
+            if (!timed_out && floor_mb > 0 && now - disk_at >= G_USEC_PER_SEC) {
+                /* (looked at once a second, however often this loop wakes) */
+                disk_at = now;
+                low_disk = disk_free_mb (dir) < floor_mb;
+            }
+            stopped = !timed_out && !low_disk && stop && stop (user);
+            if (timed_out || low_disk || stopped) {
                 kill (pid, SIGKILL);
                 while (waitpid (pid, &status, 0) < 0 && errno == EINTR)
                     ;
                 break;
             }
-            g_usleep (20000);
+            /* Until ffmpeg says something or ends (both wake the pipe), and
+             * no longer than the caller is to be kept from being stopped.
+             * (This was a look every 20 ms for as long as ffmpeg ran: 50
+             * wake-ups a second of the waiting thread, for minutes with a
+             * long video.) */
+            if (eof) {
+                g_usleep (20000);
+            } else {
+                struct pollfd pf = { efd, POLLIN, 0 };
+                if (poll (&pf, 1, stop ? 100 : 1000) < 0 && errno != EINTR)
+                    g_usleep (20000);
+            }
         }
         {
             char buf[512];
@@ -1215,8 +1245,10 @@ int walpe_video_sound_extract (const char *src, const char *dst, char **err)
         close (efd);
         g_spawn_close_pid (pid);
         GStatBuf st;
-        if (!timed_out && !low_disk && WIFEXITED (status) && WEXITSTATUS (status) == 0 &&
-            g_stat (part, &st) == 0 && st.st_size > 0 && g_rename (part, dst) == 0) {
+        if (stopped) {
+            /* (the caller's doing: neither a track nor "no track" was found out) */
+        } else if (!timed_out && !low_disk && WIFEXITED (status) && WEXITSTATUS (status) == 0 &&
+                   g_stat (part, &st) == 0 && st.st_size > 0 && g_rename (part, dst) == 0) {
             res = 1;
         } else if (!timed_out && !low_disk && strstr (said->str, "matches no streams")) {
             /* the video has no sound track: an empty file says so from now
@@ -1231,7 +1263,10 @@ int walpe_video_sound_extract (const char *src, const char *dst, char **err)
                              (int) floor_mb);
         }
     }
-    if (res < 0) {
+    if (stopped) {
+        g_remove (part);
+        res = -2;
+    } else if (res < 0) {
         g_remove (part);
         g_strchomp (said->str);
         if (err)

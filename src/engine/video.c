@@ -235,7 +235,8 @@ typedef struct {
  * what a silent scene layer costs while it is not heard: no thread, no
  * stream, no file opened, ffmpeg never started. The track is taken out by
  * the player's own thread when it is about to be heard for the first time
- * (walpe_sound_set_prepare); the picture never waits for it.
+ * (walpe_sound_set_prepare); the picture never waits for it, and a wallpaper
+ * that is replaced before ffmpeg is done takes its ffmpeg with it.
  *
  * One pass of the track is one pass of the clip, to the sample. The track
  * loops by itself (walpe_sound_set_period: the clip's own length, which
@@ -262,6 +263,12 @@ typedef struct {
  * fifth of a second: on average it is this far ahead of what is heard */
 #define VC_SOUND_AHEAD_S 0.10
 
+static gboolean vc_sound_prepare_stop (gpointer unused)
+{
+    (void) unused;
+    return walpe_sound_prepare_stop ();
+}
+
 /* the sound player's thread, once, before it opens the track's file */
 static void vc_sound_prepare (const char *media)
 {
@@ -274,8 +281,14 @@ static void vc_sound_prepare (const char *media)
     }
     char *err = NULL;
     const gint64 t0 = g_get_monotonic_time ();
-    int r = walpe_video_sound_extract (media, file, &err);
-    if (r > 0)
+    /* (given up when the wallpaper is replaced meanwhile: ffmpeg ran on to
+     * the end of the track of a video nobody looked at any more, minutes
+     * for a long one, and the next video's track waited for its turn) */
+    int r = walpe_video_sound_extract_stoppable (media, file, vc_sound_prepare_stop, NULL, &err);
+    if (r == -2)
+        g_message ("video: taking the sound track out of %s was given up: the wallpaper is not shown any more",
+                   walpe_log_str (media));
+    else if (r > 0)
         g_message ("video: sound track of %s taken out into %s (%.1f s)", walpe_log_str (media),
                    walpe_log_str (file), (g_get_monotonic_time () - t0) / 1e6);
     else if (r == 0)
