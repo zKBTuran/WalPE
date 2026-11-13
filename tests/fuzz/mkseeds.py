@@ -123,6 +123,40 @@ for name, data in pictures:
     if name.endswith(".jpg"):
         put("jpegstore", name, data)
 
+# a picture's header as WalPE reads it before any decoder (fuzz_pichead: the input is the file)
+def be32(*v):
+    return b"".join(struct.pack(">I", x) for x in v)
+
+
+def box(kind, body=b""):
+    return be32(len(body) + 8) + kind + body
+
+
+tga_plain = bytes([0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 2, 0, 24, 0x20]) + bytes(12)
+tga_map = bytes([3, 1, 2, 0, 0, 2, 0, 24, 0, 0, 0, 0, 2, 0, 2, 0, 24, 0x20]) + b"id." + bytes(6) + bytes(12)
+tga_mapped = bytes([0, 1, 1, 0, 0, 2, 0, 24, 0, 0, 0, 0, 2, 0, 2, 0, 8, 0]) + bytes(6) + bytes(4)
+tiff_le = (b"II*\0" + u32(8) + struct.pack("<H", 2) + struct.pack("<HHIHH", 256, 3, 1, 800, 0) +
+           struct.pack("<HHII", 257, 4, 1, 600) + u32(0))
+tiff_be = (b"MM\0*" + be32(8) + struct.pack(">H", 2) + struct.pack(">HHIHH", 256, 3, 1, 800, 0) +
+           struct.pack(">HHII", 257, 4, 1, 600) + be32(0))
+avif = (box(b"ftyp", b"avif" + bytes(4) + b"avifmif1") +
+        box(b"meta", bytes(4) + box(b"hdlr", bytes(8) + b"pict") +
+            box(b"iprp", box(b"ipco", box(b"ispe", bytes(4) + be32(64, 48)) + box(b"pixi", bytes(5))))))
+jxl_code = b"\xff\x0a\xcb\x06"
+for name, data in pictures + [("plain.tga", tga_plain), ("unused-map.tga", tga_map), ("mapped.tga", tga_mapped),
+                              ("le.tif", tiff_le), ("be.tif", tiff_be), ("64bit.tif", b"II+\0" + bytes(20)),
+                              ("boxes.avif", avif), ("heic-brand", box(b"ftyp", b"heic" + bytes(4) + b"mif1heic")),
+                              ("bmp-ftyp", b"BM\0\0ftypheic" + bytes(42)),
+                              ("codestream.jxl", jxl_code + bytes(4)),
+                              ("container.jxl", b"\0\0\0\x0cJXL \r\n\x87\n" + box(b"ftyp", b"jxl " + bytes(4) + b"jxl ") +
+                               box(b"jxlp", bytes(4) + jxl_code)),
+                              ("vp8x.webp", b"RIFF" + u32(22) + b"WEBPVP8X" + u32(10) + bytes(4) + bytes([0xe7, 3, 0, 0xcf, 7, 0])),
+                              ("vp8l.webp", b"RIFF" + u32(17) + b"WEBPVP8L" + u32(5) + bytes([0x2f, 0x3f, 0xc0, 0x2f, 0])),
+                              ("vp8.webp", b"RIFF" + u32(22) + b"WEBPVP8 " + u32(10) +
+                               bytes([0x10, 0, 0, 0x9d, 1, 0x2a, 0x80, 2, 0xe0, 1])),
+                              ("document.svg", b'<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"/>')]:
+    put("pichead", name, data)
+
 # the library's previews as its workers decode them (fuzz_thumbs: the first byte is the tile)
 for name, data in pictures:
     if name.endswith(".gif") or name in ("small.png", "wide.png", "baseline.jpg", "palette.bmp", "lossy.webp"):

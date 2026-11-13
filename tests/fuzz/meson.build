@@ -53,6 +53,8 @@ fakegl = static_library('walpe-fuzz-fakegl', 'fakegl.c',
 fuzz_targets += ['layerpic']
 # a package's copy without its sound files, and the walk that completes it (src/engine/pkg.c)
 fuzz_targets += ['pkgsound']
+# a picture's format and size read from its own header, before any decoder (src/common/pichead.c)
+fuzz_targets += ['pichead']
 
 foreach t : fuzz_targets
   x = fuzz_extra.get(t, {'src': [], 'args': [], 'deps': []})
