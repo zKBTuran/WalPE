@@ -63,8 +63,11 @@ mkdir -p "$R" || { echo "walpe-collect: cannot create $R" >&2; exit 1; }
 : > "$R/.walpe-collect"
 LOG=$R/report.txt
 
-note () { echo "$*" >> "$LOG"; }
-say () { echo "$*"; note "# $*"; }
+# (printf, not echo: what is said can hold words of the engine's reply and of the tester's
+# answers, and the echo of some shells acts on a backslash in them - "\0033" would be an
+# escape character on the terminal, "\n" a line of its own in report.txt, "\c" the end)
+note () { printf '%s\n' "$*" >> "$LOG"; }
+say () { printf '%s\n' "$*"; note "# $*"; }
 # both clocks: the engine's own lines carry local time, the lines of WAYLAND_DEBUG
 # ("[hh:mm:ss.micro]", or milliseconds on older libwayland) carry UTC
 stamp () { echo "UTC $(LC_ALL=C date -u +%H:%M:%S), local $(LC_ALL=C date +%H:%M:%S)"; }
@@ -98,7 +101,7 @@ run () {
 CUR=
 mark () {
     _t="=== walpe-collect: $* ($(stamp)) ==="
-    [ -z "$CUR" ] || echo "$_t" >> "$R/$CUR"
+    [ -z "$CUR" ] || printf '%s\n' "$_t" >> "$R/$CUR"
     note "$_t"
 }
 
@@ -250,7 +253,9 @@ status_value () {       # FILE KEY: the value of a number / true / false member
 # FILE KEY: the first string member of that name (the reply's own, not a monitor's), as the
 # text it stands for: the string ends at its closing quotation mark, not at one inside it
 # (\" - the sentence about a web wallpaper's sound has some), and JSON's escapes are undone
-# (\" \\ \/; a line break or tab becomes a space; \uXXXX stays as it is written)
+# (\" \\ \/; a line break or tab becomes a space; \uXXXX stays as it is written). A
+# control character itself - a reply that is not JSON's - becomes "?": the text is shown
+# on the tester's terminal.
 status_first () {
     awk -v k="\"$2\"[ \t]*:[ \t]*\"" '{
         if (!match($0, k)) next
@@ -265,7 +270,9 @@ status_first () {
             else if (e == "u") out = out "\\u"
             else if (e != "b" && e != "f") out = out e
         }
-        print out s
+        out = out s
+        gsub(/[\001-\037\177]/, "?", out)
+        print out
         exit
     }' "$1" 2> /dev/null
 }
@@ -666,7 +673,7 @@ if [ "$DO_SOUND" = 1 ]; then
                     echo "The wallpaper shown is a VIDEO; this test is about SCENE wallpapers with sound."
                 fi
             else
-                echo "No scene or web wallpaper is shown (the engine says: type ${WTYPE:-unknown})."
+                printf '%s\n' "No scene or web wallpaper is shown (the engine says: type ${WTYPE:-unknown})."
             fi
             [ "$_try" -lt 3 ] || { note "sound test: still no scene / web wallpaper after $_try tries: going on with type ${WTYPE:-?}"; INSIST=1; break; }
             mark "ASKING THE USER NOW: put a scene wallpaper with sound on"
@@ -686,7 +693,7 @@ if [ "$DO_SOUND" = 1 ]; then
         OLD_MUTE=$(onoff "$(status_value "$R/status-sound.json" mute)")
         _snd=$(status_first "$R/status-sound.json" sound)
         echo
-        echo "The engine says about sound: ${_snd:-?}"
+        printf '%s\n' "The engine says about sound: ${_snd:-?}"
         echo "Your sound settings now: scene_sound=$OLD_SS volume=${_vol:-${OLD_VOL:-?}} mute=$OLD_MUTE"
         if [ -z "$OLD_VOL" ]; then
             note "the sound settings could not be read from the status: the test with sound switched on is skipped"

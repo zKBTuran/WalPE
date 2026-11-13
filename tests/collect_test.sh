@@ -13,6 +13,9 @@
 #   "not told" of an engine without the member;
 #   a web wallpaper whose sound sentence has quotation marks in it (\" in the status
 #   reply): the tester reads the whole sentence, and report.txt has it whole;
+#   a status reply whose strings hold what a shell's echo or a terminal would act on (a
+#   backslash before 0033, n or c; a control character itself): the tester's terminal
+#   and report.txt get the characters as text, in one line, and no control character;
 #   a video wallpaper that is a folder whose file has a quotation mark in its name
 #   (project.json "file", the path with \/ in the reply): the file is found.
 # The stand-ins: FAKE_SOUNDCHECK=yes|no (the engine knows the command or not),
@@ -87,19 +90,19 @@ collect () {
 # has NAME TEXT / hasnot NAME TEXT: in what the run printed
 has () {
     grep -q -F -e "$2" "$tmp/$1.out" && return 0
-    echo "FAIL: $1: the output lacks: $2"
+    printf '%s\n' "FAIL: $1: the output lacks: $2"
     sed 's/^/    /' "$tmp/$1.out"
     fails=$((fails + 1))
 }
 hasnot () {
     grep -q -F -e "$2" "$tmp/$1.out" || return 0
-    echo "FAIL: $1: the output has: $2"
+    printf '%s\n' "FAIL: $1: the output has: $2"
     fails=$((fails + 1))
 }
 # noted NAME TEXT: in the run's report.txt
 noted () {
     grep -q -F -e "$2" "$tmp/$1.home/walpe-report/report.txt" && return 0
-    echo "FAIL: $1: report.txt lacks: $2"
+    printf '%s\n' "FAIL: $1: report.txt lacks: $2"
     fails=$((fails + 1))
 }
 
@@ -130,6 +133,29 @@ collect web "$status_web" '\ny\nn\n' FAKE_SOUNDCHECK=yes
 has web 'The engine says about sound: 1 web wallpaper is heard at 50 % (what the page plays, through WebKit: the stream "WebKit" in the system\u0027s mixer); a back\slash'
 has web "the engine looked at: WalPE 0.14.0, source not told"
 noted web 'the engine says about sound after the set: 1 web wallpaper is heard at 50 % (what the page plays, through WebKit: the stream "WebKit" in the system\u0027s mixer); a back\slash'
+
+# ---- strings of the reply that a shell's echo would act on once their JSON escapes are
+# undone (dash: \0033 is the escape character, \n a line break, \c the end of the output),
+# and control characters themselves (a reply that is not JSON's): what is printed and
+# written down is text in its one line. An escape sequence would reach the tester's
+# terminal, and a line break would put a line of its own into report.txt.
+esc=$(printf '\033')
+bel=$(printf '\007')
+status_ctl='{"ok":true,"state":{"path":"\/w\/page","type":"web","source_id":"0a\\0033[31m'"$esc"'[32m","volume":0.5,"scene_sound":true,"mute":false,"sound":"title \\0033]0;T\\0007 raw '"$esc]0;T$bel"' break \\nHEARD after the set: yes\\n cut \\c tail","monitors":[]}}'
+collect ctl "$status_ctl" '\ny\nn\n' FAKE_SOUNDCHECK=yes
+has ctl 'the engine looked at: WalPE 0.14.0, source 0a\0033[31m?[32m'
+has ctl 'The engine says about sound: title \0033]0;T\0007 raw ?]0;T? break \nHEARD after the set: yes\n cut \c tail'
+noted ctl 'the engine says about sound after the set: title \0033]0;T\0007 raw ?]0;T? break \nHEARD after the set: yes\n cut \c tail'
+for f in "$tmp/ctl.out" "$tmp/ctl.home/walpe-report/report.txt"; do
+    if grep -q -e "$esc" -e "$bel" "$f"; then
+        echo "FAIL: ctl: an escape or bell character in ${f##*/}"
+        fails=$((fails + 1))
+    fi
+    if grep -q '^HEARD after the set: yes' "$f"; then
+        echo "FAIL: ctl: a string of the reply made a line of its own in ${f##*/}"
+        fails=$((fails + 1))
+    fi
+done
 
 # ---- a video in a folder: project.json names the file, with a quotation mark in its name
 mkdir -p "$tmp/w p"
