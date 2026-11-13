@@ -24,9 +24,11 @@ change.
 > river 0.3.17 and 0.5.0, niri 26.04 and COSMIC's compositor 1.11.0. What was run on
 > each, and what could not be, is in [Compositors that were run](#compositors-that-were-run).
 > Hyprland did not start without a graphics device and stays "expected".
+> GNOME was run as well, headless again: GNOME Shell 46.0 and 51.1 with the WalPE
+> extension for GNOME Shell, without which there is no wallpaper there ([GNOME](#gnome)).
 > Nothing on this page has been
 > run on a real Wayland desktop, on a real output or on a GPU.
-> What is said below about Hyprland and GNOME follows from the protocols they are
+> What is said below about Hyprland follows from the protocols it is
 > documented to offer; it is marked "expected". Reports are welcome.
 
 ## What it needs

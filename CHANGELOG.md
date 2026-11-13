@@ -84,10 +84,34 @@ renders on a laptop's discrete GPU where there is one (under Graphics cards;
   longer goes on to X11 by itself when `DISPLAY` is set. That X11 is Xwayland, where the
   wallpaper window lies above every other window, the library window included, and clicks
   pass through it to windows nobody can see. The daemon now ends with status 1 and a
-  sentence that names the layer shell and the X11 session. X11 asked for by name
-  (`--backend x11`, `WALPE_BACKEND`, `walpe-ctl backend x11`) is still taken, and the log
-  says what that means there. Unchanged: an X11 session, a compositor that has the layer
-  shell, `--windowed`.
+  sentence that names the layer shell and the X11 session, and on GNOME the extension of
+  the next entry, with which the daemon stays and takes Wayland there. X11 asked for by
+  name (`--backend x11`, `WALPE_BACKEND`, `walpe-ctl backend x11`) is still taken, and the
+  log says what that means there. Unchanged: an X11 session, a compositor that has the
+  layer shell, `--windowed`.
+- GNOME on Wayland: an optional extension for GNOME Shell shows the wallpaper there.
+  GNOME's compositor has no layer shell and nothing in its place; what it has is a window
+  type, the desktop's, that only GNOME Shell itself can give a window.
+  [contrib/gnome](contrib/gnome/README.md) holds an extension that gives it to the
+  daemon's wallpaper windows. It is not part of the build and `meson install` does not
+  install it; a GNOME user installs it for himself (`contrib/gnome/install.sh install`,
+  then log out and in). With it `backend=auto` takes Wayland on GNOME and the wallpaper
+  is below every window and below the icons of "Desktop Icons NG", on all workspaces and
+  behind the workspaces in the overview; "Pause for fullscreen apps", "Pause when
+  covered" and the focus rule work per monitor from what the extension reports (the
+  source `gnome` in `pause_rules`; `walpe-ctl status`: `wl_gnome_extension`,
+  `wl_gnome_connection`, `pause_gnome_extension`). On GNOME Shell 46 to 48 the shell
+  starts a second, small process of the daemon for the connection (`walpe-daemon
+  --wayland-socket-to 4`). On every other desktop the daemon does not ask for the
+  extension, and `WALPE_GNOME_EXT=0` keeps it from asking on GNOME. Known: the lock
+  screen keeps GNOME's own picture; in the overview the wallpaper has square corners
+  (and stands still on GNOME Shell 46); with "Desktop Icons NG" the pointer does not
+  reach the wallpaper; a daemon started at login waits up to three seconds for the
+  extension. **State of testing: a headless GNOME Shell 46.0 and 51.1 on the software
+  renderer, no real session and no graphics card. The extension lists the versions 46
+  and 51, and GNOME Shell loads it on those only**; for another version,
+  `python3 -I scripts/gnomecheck.py --build <build directory>` (the test `gnome-shell`)
+  says what works there ([WAYLAND.md](docs/WAYLAND.md#gnome)).
 - "Pause when covered" where nothing reports the windows (a compositor without a window
   list; KDE Plasma while the script above cannot report, Plasma 5.27 for one):
   `pause_rules` said that the rule works, and it pauses there only for a locked screen
@@ -100,7 +124,6 @@ renders on a laptop's discrete GPU where there is one (under Graphics cards;
   the desktop, the pause rules, the add-on, the tray's menu. With the daemon of 0.14.0 it
   fails where the reports did; it is skipped where no KWin of Plasma 6 is installed
   ([DEVELOPMENT.md](docs/DEVELOPMENT.md#tests)).
-
 - A still wallpaper (a picture, a scene in which nothing moves, anything paused) on an
   output whose scale or resolution changes: until the daemon had restarted for the new
   layout - two to ten seconds - it was shown at its old size: its top left quarter
@@ -463,6 +486,9 @@ microphone.
 - KDE Plasma: the pause behind a fullscreen or maximized window needs Plasma 6 and the
   session bus. On Plasma 5.27 nothing pauses the wallpaper behind a window, a game
   included; it pauses there for a locked screen and a display that is off.
+- GNOME on Wayland: only with the extension for GNOME Shell (`contrib/gnome`, under
+  Wayland above), which GNOME Shell loads on the two versions it was run on, 46 and 51;
+  on 47 to 50 the version has to be added to its `metadata.json` by hand.
 - Video sound: videos imported with 0.14.0 or earlier have no sound track - the import
   dropped it - and have to be imported again from the original file. A video layer
   inside a scene is silent. A video's track is kept as a FLAC file in
