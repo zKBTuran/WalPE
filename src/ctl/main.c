@@ -68,6 +68,9 @@ static void usage (void)
              "  walpe-ctl setprop walpe_sound=on|off  one wallpaper's own sound switch: wins over\n"
              "                                 scene_sound (resetprops drops it again)\n"
              "  walpe-ctl setprop walpe_volume=X  one wallpaper's own volume, 0..1: times `volume`\n"
+             "  walpe-ctl soundcheck           why nothing is heard: the status line \"sound\", and for a\n"
+             "                                 web wallpaper whether the sound server holds its stream\n"
+             "                                 (\"WebKit\") muted or at 0 %%, with what undoes it\n"
              "  walpe-ctl set fs_all=on|off    a focused fullscreen window pauses every monitor,\n"
              "                                 not only the one it is on (fs=on; off by default)\n"
              "  walpe-ctl set covered=on|off   pause a monitor while windows cover it\n"
@@ -1410,6 +1413,8 @@ static int run (int argc, char **argv)
         req = g_strdup ("{\"cmd\":\"resume\"}");
     } else if (!g_strcmp0 (cmd, "status")) {
         req = g_strdup ("{\"cmd\":\"status\"}");
+    } else if (!g_strcmp0 (cmd, "soundcheck")) {
+        req = g_strdup ("{\"cmd\":\"soundcheck\"}");
     } else if (!g_strcmp0 (cmd, "click") && argc >= 4 && argc <= 6) {
         int x = parse_int ("click: X", argv[2], -100000, 100000);
         int y = parse_int ("click: Y", argv[3], -100000, 100000);

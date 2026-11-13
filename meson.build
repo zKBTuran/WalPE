@@ -578,6 +578,7 @@ core_srcs = files(
   'src/engine/bloom.c',
   'src/engine/camshake.c',
   'src/engine/scenesound.c',
+  'src/engine/soundserver.c',
   'src/engine/video.c',
   'src/engine/modload.c',
 )
@@ -1255,6 +1256,16 @@ test('scenesound', executable('scenesound-test', 'tests/scenesound_test.c',
   include_directories: inc,
   dependencies: [core_dep],
   install: false, build_by_default: false), env: ['WALPE_SOUND_NULL=1'], timeout: 240)
+# what the sound server holds for the pages of web wallpapers
+# (engine/soundserver.c, `walpe-ctl soundcheck`): the sentence made from
+# `pactl -f json list sink-inputs` - lists as PipeWire 1.0 and 1.6 and
+# PulseAudio 16 print them, a page's stream as it is, muted, at 0 %, another
+# program's muted stream, text that is no list. Runs no pactl, needs no
+# server.
+test('soundserver', executable('soundserver-test', 'tests/soundserver_test.c',
+  include_directories: inc,
+  dependencies: [core_dep],
+  install: false, build_by_default: false))
 # a packaged wallpaper's sound files and the package cache (engine/pkg.c,
 # scenenode_sound.h): a copy made with sound off has none of them (files and
 # bytes counted), they are extracted when sound is switched on - by a later

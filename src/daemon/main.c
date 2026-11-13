@@ -5553,6 +5553,7 @@ static gboolean sound_props_apply (const char *wp)
     return n > 0;
 }
 
+#include "engine/soundserver.h"   /* "soundcheck": the page's stream in the sound server */
 #include "layers_ipc.h"   /* "layers" / "layeradj": ipc_layers, ipc_layeradj */
 #include "common/setkeys.h"   /* "set": the members it may carry (walpe_set_check) */
 #include "common/setvalues.h"   /* walpe_set_values_check: the values of a "set" request */
@@ -5721,7 +5722,7 @@ static void status_monitor_output (JsonBuilder *b, Mon *m)
  * "nothing is playing" under a page that was heard. A page is the wallpaper
  * of one or more monitors (shared); it is paused when all of them are. Main
  * thread, only when somebody asks. */
-static char *sound_status_line (void)
+static void sound_pages_count (WalpeSoundPages *out)
 {
     WalpeSoundPages pages = { 0 };
 #ifdef HAVE_WEB
@@ -5753,7 +5754,47 @@ static char *sound_status_line (void)
         g_hash_table_destroy (seen);
     }
 #endif
+    *out = pages;
+}
+
+static char *sound_status_line (void)
+{
+    WalpeSoundPages pages;
+    sound_pages_count (&pages);
     return walpe_sound_status_with (&pages);
+}
+
+/* {"cmd":"soundcheck"} (`walpe-ctl soundcheck`): the status line "sound",
+ * and - only while a web wallpaper is shown at a level above 0, the one
+ * case in which WalPE's settings cannot say why nothing is heard - a look
+ * at the sound server: is the page's stream muted or at 0 % there
+ * (soundserver.h). One child process for this request; nothing is asked
+ * of the server otherwise, by anything. */
+static char *sound_server_line (void)
+{
+    WalpeSoundPages pages;
+    sound_pages_count (&pages);
+    if (pages.heard <= 0)
+        return g_strdup ("not asked: no web wallpaper is shown at a level above 0 (the sound of scenes and "
+                         "videos is WalPE's own stream \"walpe\", which the line above counts)");
+    gboolean asked = FALSE;
+    char *note = walpe_sound_server_note (&asked);
+    if (note)
+        return note;
+    return g_strdup (asked ? "no stream of WebKit is muted or at 0 % in the sound server (a page that is silent "
+                             "now plays nothing, or its stream is not there yet)"
+                           : "could not be asked: `pactl -f json list sink-inputs` did not answer (no pactl, "
+                             "one older than 16, or no sound server)");
+}
+
+static void ipc_soundcheck (JsonBuilder *b)
+{
+    char *snd = sound_status_line (), *srv = sound_server_line ();
+    jb_bool (b, "ok", TRUE);
+    jb_str (b, "sound", snd);
+    jb_str (b, "sound_server", srv);
+    g_free (snd);
+    g_free (srv);
 }
 
 static void ipc_status (JsonBuilder *b)
@@ -8260,6 +8301,8 @@ static char *ipc_handler (const char *req, gpointer user)
         }
     } else if (!g_strcmp0 (cmd, "status")) {
         ipc_status (b);
+    } else if (!g_strcmp0 (cmd, "soundcheck")) {
+        ipc_soundcheck (b);
     } else if (!g_strcmp0 (cmd, "mem")) {
         ipc_mem (b, o);
     } else if (!g_strcmp0 (cmd, "pointer")) {

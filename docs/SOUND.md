@@ -252,6 +252,35 @@ the application name `WebKit` in the desktop's mixer. The same three settings de
   switched off and the other heard). The rows are there for every web wallpaper: whether
   a page makes any sound cannot be known without running it.
 
+### A web wallpaper stays silent although the settings say "on"
+
+`walpe-ctl soundcheck` tells. It prints the status line `sound` and, while a web wallpaper
+is shown at a level above 0, asks the sound server once (`pactl`) whether a stream of
+WebKit is muted or at 0 % there.
+
+The cause: the server keeps a volume and a mute for every stream - yours, set in the
+desktop's mixer - and stores them for later streams. WirePlumber 0.5 files them under the
+program's name, and the page process of *every* program made with WebKitGTK is called
+"WebKit"; WirePlumber 0.4 and PulseAudio file them under the stream's role, "music" for an
+`<audio>`, which music players share. WalPE never changes a stream in the server, in
+either direction. So a stream that was muted or turned down to 0 there once comes back
+that way every time, across restarts: the page plays, `walpe-ctl status` says "on", and
+nothing is heard. It gets there by a mute in the mixer, by another program of the same
+name or role that was muted (measured: a muted `paplay --property=media.role=music` on
+WirePlumber 0.4 silenced the next start of a web wallpaper), or by a WalPE that ran
+*without* `libgstwalpesound.so` while it was muted or at volume 0 (measured on WirePlumber
+0.5.19: one such run, and the build with the plugin was silent for good).
+
+The cure, once, while the page plays: in the desktop's mixer unmute the stream "WebKit"
+and turn it up (Plasma: the volume applet, "Applications"; pavucontrol: "Playback"), or
+`pactl set-sink-input-mute <n> 0; pactl set-sink-input-volume <n> 100%` with the number
+`walpe-ctl soundcheck` prints. The server stores that too, and it stays.
+
+If `soundcheck` finds nothing wrong: the daemon's log says at the first web wallpaper
+whether `libgstwalpesound.so` is used; a page plays only what GStreamer can decode and put
+out, see [BUILDING.md](BUILDING.md#web-wallpaper-sound) for the plugin packages it needs;
+`WALPE_WEB_CONSOLE=1` shows the page's own errors in the log.
+
 State of testing: WebKitGTK 2.52 with GStreamer 1.24 against a PulseAudio null sink (WAV,
 Ogg Vorbis, WebM with VP8 and Vorbis, an oscillator), by recording the sink's monitor.
 The sequences that went wrong in the sound server - mute and unmute, a start while muted,
@@ -260,4 +289,7 @@ fights the level, Web Audio, each followed by a look at the page's stream, at wh
 server stored and at another program's stream of the same role - are
 `tests/websound_rig.sh <build> [pipewire|pulse]`, run by hand against a private PipeWire
 1.0.5 with WirePlumber 0.4.17 and a private PulseAudio 16.1 with module-stream-restore
-(null sinks). WirePlumber 0.5 was not run. Nobody has heard it.
+(null sinks), and against PipeWire 1.6.11 with WirePlumber 0.5.19, WebKitGTK 2.54.2 and
+GStreamer 1.28.9 (Arch Linux, WalPE built there): every check passes with the plugin, and
+without it (`WALPE_WEB_SOUND_SINK=0`) 13 of 45 fail there too - a page that starts muted
+is at 0 % for good. Nobody has heard it.
