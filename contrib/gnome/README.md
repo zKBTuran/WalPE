@@ -40,7 +40,11 @@ One directory, `walpe@walpe.github.io/` (`metadata.json`, `extension.js`), insta
 - looks at every new window. `walpe-daemon` opens one ordinary window per monitor with the
   application id `io.github.walpe.wallpaper` and the title `WalPE wallpaper: <connector>`;
   the extension gives such a window the window type DESKTOP, puts it on that monitor at
-  the monitor's size, and keeps it below other programs' desktop windows. Everything else
+  the monitor's size, and keeps it below other programs' desktop windows. It does that
+  only for a window of a program that has asked the extension on the session bus first,
+  as the daemon does (GNOME Shell 49 and newer; on 46 to 48 only for a client the shell
+  has started for such a program, see below): another program that merely uses the
+  application id and the title keeps an ordinary window. Everything else
   follows from the type inside GNOME Shell itself: below all windows, on all workspaces,
   not in the overview's window list, the window switcher or the dash, behind the windows
   while the workspace is changed;

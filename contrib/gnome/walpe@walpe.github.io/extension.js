@@ -79,6 +79,16 @@ const INTERFACE = `
  * compositor be asked whose a window is. */
 const donors = [];
 
+/* GNOME Shell 49 and newer, where any window can be given a type: the
+ * processes that have asked this extension on the session bus (Hello), by
+ * process id. Only a window of one of them is made a desktop window. The
+ * application id and the title are whatever a client says they are; a
+ * program that merely uses the daemon's - one inside a sandbox, which
+ * reaches the compositor and not this name on the bus - stays an ordinary
+ * window. Kept while the extension is disabled, as the list above is. */
+const callers = new Set();
+const CALLERS_MAX = 64;
+
 function connectorOf(window) {
     if (window.get_client_type() !== Meta.WindowClientType.WAYLAND || window.get_wm_class() !== APP_ID)
         return null;
@@ -97,6 +107,7 @@ export default class WalpeExtension extends Extension {
         this._state = '';
         this._lookId = 0;
         this._adoptIds = new Set();     /* idle sources of _consider */
+        this._refused = new WeakSet();  /* windows that look like wallpapers and are left alone */
         this._lowered = [];
 
         this._object = Gio.DBusExportedObject.wrapJSObject(INTERFACE, this);
@@ -155,6 +166,7 @@ export default class WalpeExtension extends Extension {
         for (const id of this._adoptIds)
             GLib.source_remove(id);
         this._adoptIds = null;
+        this._refused = null;
         this._injections.clear();
         this._injections = null;
         for (const [actor, entry] of this._backgrounds) {
@@ -195,7 +207,8 @@ export default class WalpeExtension extends Extension {
     }
 
     _consider(window) {
-        if (!this._wallpapers || this._wallpapers.has(window) || !connectorOf(window))
+        if (!this._wallpapers || this._wallpapers.has(window) || this._refused.has(window) ||
+            !connectorOf(window))
             return;
         /* The title is told while the window is being made. Its type is
          * changed when the compositor has dealt with the rest of what the
@@ -216,12 +229,18 @@ export default class WalpeExtension extends Extension {
             return;
         if (window.get_window_type() !== Meta.WindowType.DESKTOP) {
             if (this._canSetType) {
+                if (!callers.has(window.get_pid())) {
+                    this._refused.add(window);
+                    console.warn(`walpe: "${window.get_title()}" is a window of process ${window.get_pid()}, which has not asked this extension on the session bus: left alone`);
+                    return;
+                }
                 window.set_type(Meta.WindowType.DESKTOP);
             } else {
                 const donor = donors.find(d => d.running && d.client.owns_window(window));
                 if (!donor) {
                     /* (a walpe-daemon that did not ask for its connection, or
                      * some other program using the name: an ordinary window) */
+                    this._refused.add(window);
                     console.warn(`walpe: "${window.get_title()}" is not a window of a client this shell started: left alone`);
                     return;
                 }
@@ -422,15 +441,38 @@ export default class WalpeExtension extends Extension {
 
     /* ---- io.github.walpe.Gnome */
 
-    Hello() {
-        return {
+    HelloAsync(_params, invocation) {
+        const about = new GLib.Variant('(a{sv})', [{
             protocol: new GLib.Variant('u', PROTOCOL),
             extension: new GLib.Variant('s', this.metadata['version-name'] ?? ''),
             shell: new GLib.Variant('s', Config.PACKAGE_VERSION),
             /* true: only windows of a client this shell started can be
              * desktop windows; the daemon asks for its connection (Socket) */
             socket: new GLib.Variant('b', !this._canSetType),
-        };
+        }]);
+        if (!this._canSetType) {
+            invocation.return_value(about);
+            return;
+        }
+        /* who asks: its windows may become desktop windows (`callers`) */
+        Gio.DBus.session.call('org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus',
+            'GetConnectionUnixProcessID', new GLib.Variant('(s)', [invocation.get_sender()]),
+            new GLib.VariantType('(u)'), Gio.DBusCallFlags.NONE, 1000, null, (bus, result) => {
+                try {
+                    const [pid] = bus.call_finish(result).deepUnpack();
+                    for (const old of callers) {
+                        if (!GLib.file_test(`/proc/${old}`, GLib.FileTest.EXISTS))
+                            callers.delete(old);
+                    }
+                    callers.delete(pid);
+                    callers.add(pid);
+                    while (callers.size > CALLERS_MAX)
+                        callers.delete(callers.values().next().value);
+                } catch (e) {
+                    console.warn(`walpe: the process that asked is not known: ${e.message ?? e}`);
+                }
+                invocation.return_value(about);
+            });
     }
 
     /* see_through: the daemon's "see-through windows" setting, application

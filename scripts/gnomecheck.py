@@ -32,6 +32,9 @@ Cases (--only NAME runs one):
                  (tests/gnome_caller.c) asks for a dozen connections and
                  keeps them: it gets eight, the rest is refused with a
                  sentence, and when it has ended a daemon gets its own
+  stranger       a window of another program (a GTK 4 window made with gjs)
+                 that uses the application id and the title of a wallpaper
+                 window stays an ordinary window; skipped without gjs
   bus-bounds     a "see-through windows" list of 100 000 characters sent to
                  the extension's method Windows: it keeps 64 names at most
                  and answers
@@ -40,13 +43,20 @@ Exit status 0 = passed, 1 = failed, 77 = cannot run here (no gnome-shell,
 gdbus or dbus-daemon, a build without the Wayland backend, or a shell that
 does not come up headless); WALPE_CHECK_STRICT=1 makes that a failure.
 
-    python3 -I scripts/gnomecheck.py --build BUILD_DIR [--only NAME] [--keep]
+    python3 -I scripts/gnomecheck.py --build BUILD_DIR [--only NAME] [--keep] [--tmp DIR]
+
+Another version of GNOME Shell than the installed one, from a chroot or a
+container: WALPE_CHECK_GNOME_SHELL is the command that runs its gnome-shell
+("chroot /srv/arch gnome-shell"), and --tmp a directory that is the same
+path inside and outside (a bind mount); the daemon, the buses and the
+questions stay outside.
 """
 import argparse
 import ast
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -62,6 +72,7 @@ UUID = "walpe@walpe.github.io"
 BUS_NAME = "io.github.walpe.Gnome"
 TITLE = "WalPE wallpaper: "
 SKIP = 1 if os.environ.get("WALPE_CHECK_STRICT", "0") not in ("", "0") else 77
+SHELL = shlex.split(os.environ.get("WALPE_CHECK_GNOME_SHELL", "") or "gnome-shell")
 START_S = 90.0      # for the shell to come up (software renderer, loaded machine)
 WAIT_S = 30.0       # for anything else
 
@@ -131,7 +142,7 @@ class Shell:
             return ""
 
     def start(self):
-        out = subprocess.run(["gnome-shell", "--version"], capture_output=True, text=True).stdout
+        out = subprocess.run(SHELL + ["--version"], capture_output=True, text=True).stdout
         m = re.search(r"GNOME Shell (\d+)", out)
         if not m:
             raise CannotRun("gnome-shell --version gave no version")
@@ -178,7 +189,7 @@ class Shell:
             if time.monotonic() > end:
                 raise CannotRun("dbus-daemon made no socket")
             time.sleep(0.05)
-        shell = self._spawn("shell", ["gnome-shell", "--headless", "--wayland", "--no-x11", "--unsafe-mode",
+        shell = self._spawn("shell", SHELL + ["--headless", "--wayland", "--no-x11", "--unsafe-mode",
                                       "--virtual-monitor", "800x600", "--wayland-display", "walpe-check"], env)
         self.env = dict(env, WAYLAND_DISPLAY="walpe-check")
         end = time.monotonic() + START_S
@@ -449,6 +460,55 @@ def case_socket_bound(shell, build):
         d.stop()
 
 
+STRANGER_JS = """import Gtk from 'gi://Gtk?version=4.0';
+import Gio from 'gi://Gio';
+const app = new Gtk.Application({application_id: 'io.github.walpe.wallpaper', flags: Gio.ApplicationFlags.NON_UNIQUE});
+app.connect('activate', () => {
+    new Gtk.ApplicationWindow({application: app, title: '%sMeta-0', default_width: 300, default_height: 200}).present();
+});
+app.run([]);
+""" % TITLE
+
+
+def case_stranger(shell, build):
+    if not shutil.which("gjs"):
+        return None
+    js = os.path.join(shell.top, "stranger.js")
+    with open(js, "w") as f:
+        f.write(STRANGER_JS)
+    log = open(os.path.join(shell.top, "stranger.log"), "wb")
+    p = subprocess.Popen(["gjs", "-m", js], env=dict(shell.env, GTK_A11Y="none"), stdin=subprocess.DEVNULL,
+                         stdout=log, stderr=subprocess.STDOUT)
+    log.close()
+    try:
+        end = time.monotonic() + WAIT_S
+        seen = None
+        while time.monotonic() < end and p.poll() is None:
+            mine = [x for x in shell.windows()["windows"] if (x["title"] or "").startswith(TITLE)]
+            if mine and seen is None:
+                seen = time.monotonic()
+            if mine and mine[0]["type"] == DESKTOP:
+                return ["a window of another program with the wallpaper's application id and title was "
+                        "made a desktop window: %s" % mine[0]]
+            if seen is not None and time.monotonic() - seen > 3:
+                return []       # (it has been an ordinary window for three seconds)
+            time.sleep(0.25)
+        if seen is None:
+            # (no GTK 4 for gjs, or it cannot reach the compositor: nothing was shown)
+            return None
+        return []
+    finally:
+        p.terminate()
+        try:
+            p.wait(10)
+        except subprocess.TimeoutExpired:
+            p.kill()
+        end = time.monotonic() + WAIT_S
+        while time.monotonic() < end and any((x["title"] or "").startswith(TITLE)
+                                             for x in shell.windows()["windows"]):
+            time.sleep(0.25)
+
+
 def case_bus_bounds(shell, build):
     names = ",".join("name%05d" % i for i in range(10000))        # 100 000 characters
     r = subprocess.run(["gdbus", "call", "--session", "--dest", BUS_NAME, "--object-path",
@@ -467,7 +527,7 @@ def case_bus_bounds(shell, build):
 
 CASES = [("desktop", case_desktop, False), ("helper-killed", case_helper_killed, True),
          ("pkill", case_pkill, True), ("socket-bound", case_socket_bound, True),
-         ("bus-bounds", case_bus_bounds, False)]
+         ("stranger", case_stranger, False), ("bus-bounds", case_bus_bounds, False)]
 
 
 def main():
@@ -475,10 +535,11 @@ def main():
     ap.add_argument("--build", required=True)
     ap.add_argument("--only")
     ap.add_argument("--keep", action="store_true", help="keep the directory with the logs")
+    ap.add_argument("--tmp", default="/tmp", help="where the private directory is made (a short path)")
     a = ap.parse_args()
     build = os.path.abspath(a.build)
     source = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for prog in ("gnome-shell", "gdbus", "dbus-daemon"):
+    for prog in (SHELL[0], "gdbus", "dbus-daemon"):
         if not shutil.which(prog):
             print("gnomecheck: %s is not installed, skipped" % prog)
             return SKIP
@@ -490,7 +551,7 @@ def main():
         if b"--wayland-socket-to" not in f.read():
             print("gnomecheck: this walpe-daemon is built without the Wayland backend, skipped")
             return SKIP
-    top = tempfile.mkdtemp(prefix="walpe-gn.", dir="/tmp")     # (short: socket paths)
+    top = tempfile.mkdtemp(prefix="walpe-gn.", dir=a.tmp)      # (short: socket paths)
     shell = Shell(top, source)
     failed = 0
     try:
@@ -522,6 +583,9 @@ def main():
                 bad = fn(shell, build)
             except (RuntimeError, subprocess.TimeoutExpired) as e:
                 bad = ["%s" % e]
+            if bad is None:
+                print("%-14s skipped (what it needs is not installed)" % name)
+                continue
             for b in bad:
                 print("FAIL: %s: %s" % (name, b))
             print("%-14s %s" % (name, "FAILED" if bad else "ok"))
