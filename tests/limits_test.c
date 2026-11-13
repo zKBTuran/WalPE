@@ -318,10 +318,12 @@ static void test_other_kinds (void)
         int w = 0, h = 0;
         GdkPixbufFormat *fmt = gdk_pixbuf_get_file_info (png, &w, &h);
         char *name = fmt ? gdk_pixbuf_format_get_name (fmt) : NULL;
-        if (g_strcmp0 (name, other[i].kind)) {
-            /* this gdk-pixbuf has no decoder for it: nothing to refuse */
-            g_print ("limits-test: no %s loader, that kind is not tried\n", other[i].kind);
-        } else {
+        /* (the refusal is by the file's own first bytes, read by WalPE:
+         * the same on a system whose gdk-pixbuf has no decoder for the
+         * kind, and on one where it would hand the file to another) */
+        if (g_strcmp0 (name, other[i].kind))
+            g_print ("limits-test: this gdk-pixbuf calls a %s file %s\n", other[i].kind, name ? name : "nothing");
+        {
             GError *err = NULL;
             tried++;
             /* as a picture wallpaper: when it is created */
@@ -510,11 +512,16 @@ static void test_before_decode (void)
     CHECK (!walpe_media_art_probe (du, &w, &h, &n, &bytes));
     g_free (du);
     g_free (b64);
+    /* a picture wallpaper, a GIF wallpaper */
+    CHECK (walpe_image_new (real, &err) == NULL);
+    CHECK (err && strstr (err->message, "12000x12000"));
+    g_clear_error (&err);
+    CHECK (!walpe_picture_size_ok (real, NULL));
 
     const gint64 dec1 = decoder_peak_kb (), own1 = own_peak_kb ();
     const double secs = (double) (g_get_monotonic_time () - t0) / 1e6;
     if (dec1 > dec0 || own1 > own0 + 64 * 1024)
-        g_print ("limits-test: four refusals of a 12000 x 12000 PNG: %.1f s, a decoder process at %.0f MiB "
+        g_print ("limits-test: six refusals of a 12000 x 12000 PNG: %.1f s, a decoder process at %.0f MiB "
                  "(before: %.0f), this process %+.0f MiB\n", secs, (double) dec1 / 1024.0, (double) dec0 / 1024.0,
                  (double) (own1 - own0) / 1024.0);
     /* (144 megapixels are 137 MiB at one bit, 412 at three bytes) */

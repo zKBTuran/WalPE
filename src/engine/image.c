@@ -78,8 +78,6 @@ static GLuint image_upload (GdkPixbuf *pb, gboolean *premult)
     return tex;
 }
 
-static gboolean picture_format_ok (GdkPixbufFormat *fmt, const char *path, GError **err);
-
 /* a picture of w x h pixels (as its file declares) is within the limits
  * of image.h; else FALSE with err set */
 static gboolean picture_dims_ok (int w, int h, GError **err)
@@ -111,20 +109,84 @@ static gboolean picture_bmp_ok (const char *path, GError **err)
     return FALSE;
 }
 
+/* What the file at path is, as WalPE reads it from the file's own first
+ * bytes (common/pichead.h): the format and the declared size. gdk-pixbuf
+ * used to be asked (gdk_pixbuf_get_file_info); it answers after the loader
+ * it picked has read the file, and where it decodes through glycin that
+ * is after the whole picture has been decoded - three times before a
+ * picture wallpaper was on screen - whatever the bytes are.
+ *   1: a picture of one of the formats a wallpaper can be (pf filled);
+ *   0: none of them, or one without a size in its header: the texture
+ *      loader's to take (.tex) or to refuse; pf->kind is set when the
+ *      bytes were a format's all the same;
+ *  -1: refused, err set (a BMP or JPEG of picture_bmp_ok, a file of
+ *      another picture format, a size beyond the limits). */
+typedef struct {
+    const char *kind;
+    WalpeTga tga;
+    int w, h;
+} PictureFile;
+
+static int picture_file (const char *path, PictureFile *pf, GError **err)
+{
+    memset (pf, 0, sizeof *pf);
+    if (!picture_bmp_ok (path, err))
+        return -1;
+    pf->kind = walpe_pichead_file_kind (path, &pf->tga);
+    if (!pf->kind) {
+        const char *other = walpe_pichead_file_other (path);
+        if (!other)
+            return 0;
+        g_set_error (err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                     "%s is a %s file, not a picture format a wallpaper can be", path, other);
+        return -1;
+    }
+    gboolean sized = walpe_pichead_file_size (pf->kind, path, &pf->w, &pf->h);
+    if (!walpe_pichead_exact (pf->kind)) {
+        /* TIFF, AVIF, JPEG XL: the header's size is an upper bound (past the
+         * limits: refused before a decoder runs), the loader's the size */
+        if (sized && !picture_dims_ok (pf->w, pf->h, err))
+            return -1;
+        sized = walpe_gl_picture_file_size (path, pf->kind, &pf->w, &pf->h);
+    }
+    if (!sized || pf->w < 1 || pf->h < 1)
+        return 0;
+    return picture_dims_ok (pf->w, pf->h, err) ? 1 : -1;
+}
+
+/* the size gdk_pixbuf_new_from_file_at_scale (path, side, side, TRUE) asks
+ * its loader for, for a picture of w x h */
+static void picture_at_scale (int w, int h, int side, int *tw, int *th)
+{
+    if ((double) h * (double) side > (double) w * (double) side) {
+        *tw = (int) (0.5 + (double) w * (double) side / (double) h);
+        *th = side;
+    } else {
+        *th = (int) (0.5 + (double) h * (double) side / (double) w);
+        *tw = side;
+    }
+    *tw = MAX (*tw, 1);
+    *th = MAX (*th, 1);
+}
+
 /* decode path so that its longer side is `side` pixels (0 = its own size)
  * and upload it. The longer side, not width x height: a photo turned by
  * its EXIF orientation has them the other way round in the file. */
 static ImageTex *image_tex_load (const char *path, int side, GError **error)
 {
-    int fw = 0, fh = 0;
-    if (!picture_bmp_ok (path, error))
-        return NULL;
-    GdkPixbufFormat *fmt = gdk_pixbuf_get_file_info (path, &fw, &fh);
-    gboolean pixbuf_format = fmt != NULL;
     /* the declared size, not `side`: see the top of the file. Checked
      * here, before each decode - the file may have been replaced since
      * walpe_image_new looked at it. The format likewise. */
-    if (pixbuf_format && (!picture_format_ok (fmt, path, error) || !picture_dims_ok (fw, fh, error)))
+    PictureFile pf;
+    const int is = picture_file (path, &pf, error);
+    if (is < 0)
+        return NULL;
+    const gboolean pixbuf_format = is > 0;
+    const int fw = pf.w, fh = pf.h;
+    /* a GIF (its first frame is the picture): only with every frame inside
+     * the picture its header declares (gifcheck.h); the limit above is on
+     * that picture alone */
+    if (pf.kind && !strcmp (pf.kind, "gif") && !walpe_gif_file_layout_ok (path, error))
         return NULL;
     ImageTex *it = g_new0 (ImageTex, 1);
     if (!pixbuf_format) {
@@ -141,17 +203,23 @@ static ImageTex *image_tex_load (const char *path, int side, GError **error)
         it->tex_h = it->img_h = t.height;
         return it;
     }
-    /* a GIF (its first frame is the picture): only with every frame inside
-     * the picture its header declares (gifcheck.h); the limit above is on
-     * that picture alone */
-    if (!walpe_gif_file_layout_ok (path, error)) {
-        g_free (it);
-        return NULL;
-    }
     GError *err = NULL;
-    GdkPixbuf *pb = side > 0 && side < MAX (fw, fh)
-        ? gdk_pixbuf_new_from_file_at_scale (path, side, side, TRUE, &err)
-        : gdk_pixbuf_new_from_file (path, &err);
+    GdkPixbuf *pb;
+    if (!strcmp (pf.kind, "tga")) {
+        /* by the TGA loader's name and with the header walpe_tga_head made:
+         * gdk-pixbuf left to choose takes some TGA headers for a Windows
+         * cursor's, glycin others for no picture */
+        int tw = 0, th = 0;
+        if (side > 0 && side < MAX (fw, fh))
+            picture_at_scale (fw, fh, side, &tw, &th);
+        pb = walpe_gl_picture_file_decode (path, pf.kind, &pf.tga, tw, th, NULL, &err);
+    } else {
+        /* (the bytes are that format's by its signature: the loader
+         * gdk-pixbuf picks from them is that format's) */
+        pb = side > 0 && side < MAX (fw, fh)
+            ? gdk_pixbuf_new_from_file_at_scale (path, side, side, TRUE, &err)
+            : gdk_pixbuf_new_from_file (path, &err);
+    }
     if (!pb) {
         g_debug ("image %s: %s", path, err ? err->message : "?");
         g_clear_error (&err);
@@ -301,17 +369,16 @@ static gboolean image_load (ImageContent *s, int vw, int vh, GError **err)
 static gboolean image_gl_init (WalpeContent *c, GError **err)
 {
     ImageContent *s = (ImageContent *) c;
-    int fw = 0, fh = 0;
-    if (!picture_bmp_ok (s->base.path, err))
-        return FALSE;
-    GdkPixbufFormat *fmt = gdk_pixbuf_get_file_info (s->base.path, &fw, &fh);
-    s->scalable = fmt != NULL;
     /* too large by its header (or another kind of file now): refused
      * here, before any GL call and before anything is decoded
      * (walpe_image_new checked the file as it was when the wallpaper was
      * chosen) */
-    if (s->scalable && (!picture_format_ok (fmt, s->base.path, err) || !picture_dims_ok (fw, fh, err)))
+    PictureFile pf;
+    const int is = picture_file (s->base.path, &pf, err);
+    if (is < 0)
         return FALSE;
+    s->scalable = is > 0;
+    const int fw = pf.w, fh = pf.h;
     s->img_w = fw;
     s->img_h = fh;
     /* the view is not known before the first frame: the context's
@@ -395,34 +462,42 @@ static void image_free (WalpeContent *c)
     g_free (c);
 }
 
-/* The picture formats a picture or GIF wallpaper is decoded as. gdk-pixbuf
- * picks its decoder from the file's bytes, whatever the name says: a
- * "photo.png" that is an SVG document went to librsvg, a ".gif" that is
- * XPM text to that decoder, and so on for every loader the system has
- * (Windows icons and cursors, PNM, QuickTime pictures ...). */
-static gboolean picture_format_ok (GdkPixbufFormat *fmt, const char *path, GError **err)
-{
-    static const char *const ok[] = { "png", "jpeg", "gif", "bmp", "tiff", "webp", "tga", "avif",
-                                      "heif/avif", "jxl", NULL };
-    char *name = gdk_pixbuf_format_get_name (fmt);
-    gboolean found = name && g_strv_contains (ok, name);
-    if (!found)
-        g_set_error (err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                     "%s is a %s file, not a picture format a wallpaper can be", path,
-                     name ? name : "?");
-    g_free (name);
-    return found;
-}
-
+/* (The picture formats a picture or GIF wallpaper is decoded as are
+ * picture_file's: gdk-pixbuf picks its decoder from the file's bytes,
+ * whatever the name says - a "photo.png" that is an SVG document went to
+ * librsvg, a ".gif" that is XPM text to that decoder, and so on for every
+ * loader the system has (Windows icons and cursors, PNM, QuickTime
+ * pictures ...) - so a file reaches it only as one of those formats.) */
 gboolean walpe_picture_size_ok (const char *path, GError **err)
 {
-    int w = 0, h = 0;
-    if (!picture_bmp_ok (path, err))
-        return FALSE;
-    GdkPixbufFormat *fmt = gdk_pixbuf_get_file_info (path, &w, &h);
-    if (!fmt)
-        return TRUE;    /* not a gdk-pixbuf format: its own loader decides */
-    return picture_format_ok (fmt, path, err) && picture_dims_ok (w, h, err);
+    PictureFile pf;
+    return picture_file (path, &pf, err) >= 0;     /* 0: not a picture format, its own loader decides */
+}
+
+GdkPixbufAnimation *walpe_picture_animation_open (const char *path, GError **err)
+{
+    PictureFile pf;
+    const int is = picture_file (path, &pf, err);
+    if (is < 0)
+        return NULL;
+    if (is == 0) {
+        g_set_error (err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                     "%s is not a picture format a wallpaper can be", path);
+        return NULL;
+    }
+    if (strcmp (pf.kind, "tga")) {
+        /* (gdk-pixbuf 2.44 marks its animation interface as deprecated and
+         * names no successor inside the library; the call stays - gif.c) */
+        G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+        GdkPixbufAnimation *opened = gdk_pixbuf_animation_new_from_file (path, err);
+        G_GNUC_END_IGNORE_DEPRECATIONS
+        return opened;
+    }
+    /* (a TGA: image_tex_load) */
+    GdkPixbufAnimation *anim = NULL;
+    GdkPixbuf *pb = walpe_gl_picture_file_decode (path, pf.kind, &pf.tga, 0, 0, &anim, err);
+    g_clear_object (&pb);
+    return anim;
 }
 
 WalpeContent *walpe_image_new (const char *path, GError **err)

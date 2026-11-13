@@ -90,13 +90,10 @@ static GifSource *gif_source_get (const char *path, GError **err)
      * nothing; a 155-byte one with a 12000 x 12000 canvas took 1.8 GB and
      * seconds per frame. */
     G_STATIC_ASSERT (WALPE_PICTURE_MAX_SIDE <= 16384);
-    if (!walpe_picture_size_ok (path, err)) {
-        g_mutex_unlock (&gif_reg_lock);
-        return NULL;
-    }
-    G_GNUC_BEGIN_IGNORE_DEPRECATIONS    /* gdk-pixbuf's animations: no successor (see the top) */
-    GdkPixbufAnimation *anim = gdk_pixbuf_animation_new_from_file (path, err);
-    G_GNUC_END_IGNORE_DEPRECATIONS
+    /* (walpe_picture_animation_open checks format and size, as
+     * walpe_picture_size_ok does, on the file's own header, before
+     * gdk-pixbuf opens it) */
+    GdkPixbufAnimation *anim = walpe_picture_animation_open (path, err);
     if (!anim) {
         g_mutex_unlock (&gif_reg_lock);
         return NULL;
