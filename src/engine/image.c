@@ -34,6 +34,7 @@ typedef struct {
     int tex_w, tex_h;       /* stored size */
     int img_w, img_h;       /* the picture's own size (placement) */
     gboolean premult;
+    gboolean plain;         /* through the texture loader: at its own size, whatever was asked */
 } ImageTex;
 
 static GMutex it_lock;
@@ -181,7 +182,7 @@ static ImageTex *image_tex_load (const char *path, int side, GError **error)
     const int is = picture_file (path, &pf, error);
     if (is < 0)
         return NULL;
-    const gboolean pixbuf_format = is > 0;
+    gboolean pixbuf_format = is > 0;
     const int fw = pf.w, fh = pf.h;
     /* a GIF (its first frame is the picture): only with every frame inside
      * the picture its header declares (gifcheck.h); the limit above is on
@@ -189,23 +190,11 @@ static ImageTex *image_tex_load (const char *path, int side, GError **error)
     if (pf.kind && !strcmp (pf.kind, "gif") && !walpe_gif_file_layout_ok (path, error))
         return NULL;
     ImageTex *it = g_new0 (ImageTex, 1);
-    if (!pixbuf_format) {
-        /* not a gdk-pixbuf format (.tex ...): its own loader, full size
-         * (with its own limits: walpe_gl_tex_from_file) */
-        WalpeGlTex t = walpe_gl_tex_from_file (path);
-        if (!t.tex) {
-            g_free (it);
-            return NULL;
-        }
-        it->tex = t.tex;
-        it->premult = t.premult;
-        it->tex_w = it->img_w = t.width;
-        it->tex_h = it->img_h = t.height;
-        return it;
-    }
     GError *err = NULL;
-    GdkPixbuf *pb;
-    if (!strcmp (pf.kind, "tga")) {
+    GdkPixbuf *pb = NULL;
+    if (!pixbuf_format) {
+        /* (.tex ...: below) */
+    } else if (!strcmp (pf.kind, "tga")) {
         /* by the TGA loader's name and with the header walpe_tga_head made:
          * gdk-pixbuf left to choose takes some TGA headers for a Windows
          * cursor's, glycin others for no picture */
@@ -219,6 +208,33 @@ static ImageTex *image_tex_load (const char *path, int side, GError **error)
         pb = side > 0 && side < MAX (fw, fh)
             ? gdk_pixbuf_new_from_file_at_scale (path, side, side, TRUE, &err)
             : gdk_pixbuf_new_from_file (path, &err);
+        /* A picture of one of the formats by its signature for which
+         * gdk-pixbuf, left to choose, has no loader: an animated PNG where
+         * the bytes are "image/apng" to the system and no loader is listed
+         * for that (gdk-pixbuf 2.42 with its own PNG decoder), a PNG with
+         * "<svg" in a text chunk near its start. gdk_pixbuf_get_file_info
+         * said "no format" for these and they went to the texture loader,
+         * which decodes them by the loader of the signature's name; they
+         * still do. */
+        if (!pb && g_error_matches (err, GDK_PIXBUF_ERROR, GDK_PIXBUF_ERROR_UNKNOWN_TYPE)) {
+            g_clear_error (&err);
+            pixbuf_format = FALSE;
+        }
+    }
+    if (!pixbuf_format) {
+        /* not a gdk-pixbuf format (.tex ...): its own loader, full size
+         * (with its own limits: walpe_gl_tex_from_file) */
+        WalpeGlTex t = walpe_gl_tex_from_file (path);
+        if (!t.tex) {
+            g_free (it);
+            return NULL;
+        }
+        it->tex = t.tex;
+        it->premult = t.premult;
+        it->tex_w = it->img_w = t.width;
+        it->tex_h = it->img_h = t.height;
+        it->plain = TRUE;
+        return it;
     }
     if (!pb) {
         g_debug ("image %s: %s", path, err ? err->message : "?");
@@ -363,6 +379,8 @@ static gboolean image_load (ImageContent *s, int vw, int vh, GError **err)
     s->it = it;
     s->img_w = it->img_w;
     s->img_h = it->img_h;
+    if (it->plain)
+        s->scalable = FALSE;    /* (the texture loader's: not decoded again at another size) */
     return TRUE;
 }
 
