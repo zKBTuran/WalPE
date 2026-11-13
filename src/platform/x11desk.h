@@ -75,6 +75,24 @@ typedef enum {
     WALPE_X11_WIN_MANAGED,  /* always a managed window of the desktop type */
 } WalpeX11WinMode;
 
+/* A name another client wrote - WM_CLASS of a desktop window, the window
+ * manager's _NET_WM_NAME - as it goes into the log, `walpe-ctl diag` and
+ * status: at most 64 bytes, printable ASCII, anything else a '?'. Any X
+ * client can set both, 30 000 bytes of them with line breaks and terminal
+ * escape sequences if it likes, and diag is read in a terminal. The names
+ * the rules here go by ("Mutter (Muffin)", "GNOME Shell", "KWin") are
+ * shorter and plain. NULL stays NULL (g_free). */
+static inline char *walpe_x11_name_clean (const char *s)
+{
+    if (!s)
+        return NULL;
+    char *out = g_strndup (s, 64);
+    for (guchar *p = (guchar *) out; *p; p++)
+        if (*p < 0x20 || *p > 0x7e)
+            *p = '?';
+    return out;
+}
+
 static inline const char *walpe_x11_win_mode_name (WalpeX11WinMode m)
 {
     return m == WALPE_X11_WIN_OVERRIDE ? "override" : m == WALPE_X11_WIN_MANAGED ? "managed" : "auto";

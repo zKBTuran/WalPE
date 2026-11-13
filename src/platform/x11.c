@@ -659,7 +659,8 @@ static char *window_class_name (Window w)
     XClassHint ch = { NULL, NULL };
     char *name = NULL;
     if (XGetClassHint (X.xd, w, &ch)) {
-        name = g_strdup (ch.res_class && *ch.res_class ? ch.res_class : ch.res_name);
+        /* (another client's words: x11desk.h) */
+        name = walpe_x11_name_clean (ch.res_class && *ch.res_class ? ch.res_class : ch.res_name);
         if (ch.res_name)
             XFree (ch.res_name);
         if (ch.res_class)
@@ -1268,8 +1269,12 @@ static char *wm_name_read (gboolean *present)
     char *name = NULL;
     if (XGetWindowProperty (X.xd, w, XInternAtom (X.xd, "_NET_WM_NAME", False), 0, 64, False,
                             AnyPropertyType, &rt, &fmt, &len, &left, &txt) == Success && txt) {
-        if (fmt == 8 && len > 0)
-            name = g_utf8_make_valid ((const char *) txt, (gssize) len);
+        if (fmt == 8 && len > 0) {
+            /* (another client's words: x11desk.h) */
+            char *raw = g_strndup ((const char *) txt, len);
+            name = walpe_x11_name_clean (raw);
+            g_free (raw);
+        }
         XFree (txt);
     }
     return name;

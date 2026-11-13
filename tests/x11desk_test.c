@@ -222,8 +222,38 @@ static void test_wm_knows_desktop (void)
     CHECK (!walpe_x11_desk_allowed (WALPE_X11_DESK_ROOT, FALSE));
 }
 
+/* names other clients wrote, on their way into the log and diag */
+static void test_name_clean (void)
+{
+    char *c = walpe_x11_name_clean ("Xfdesktop");
+    CHECK (!g_strcmp0 (c, "Xfdesktop"));
+    g_free (c);
+    c = walpe_x11_name_clean ("Mutter (Muffin)");
+    CHECK (!g_strcmp0 (c, "Mutter (Muffin)") && walpe_x11_wm_override_on_top (c));
+    g_free (c);
+    c = walpe_x11_name_clean ("IceWM 3.4.5 (Linux/x86_64)");
+    CHECK (!g_strcmp0 (c, "IceWM 3.4.5 (Linux/x86_64)"));
+    g_free (c);
+    /* a line break, an escape sequence, a byte that is no ASCII */
+    c = walpe_x11_name_clean ("a\nb\033[2Jc\xc3\xa9" "d\177");
+    CHECK (!g_strcmp0 (c, "a?b?[2Jc??d?"));
+    g_free (c);
+    /* 64 bytes of a long one */
+    char big[30001];
+    memset (big, 'J', sizeof big - 1);
+    big[sizeof big - 1] = 0;
+    c = walpe_x11_name_clean (big);
+    CHECK (c && strlen (c) == 64);
+    g_free (c);
+    c = walpe_x11_name_clean ("");
+    CHECK (c && !*c);
+    g_free (c);
+    CHECK (walpe_x11_name_clean (NULL) == NULL);
+}
+
 int main (void)
 {
+    test_name_clean ();
     test_wm_knows_desktop ();
     test_window_kind ();
     test_parse ();
