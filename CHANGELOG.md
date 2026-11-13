@@ -510,7 +510,8 @@ microphone.
   20 seconds after it was asked for is restarted with the daemon, in place (same process,
   the log says which wallpaper held it), and an exit or a restart waits 10 seconds for a
   render thread and then goes on without it. Nothing is done while nobody asks for
-  another wallpaper, and how long a frame may take is not judged. With a graphics card
+  another wallpaper, how long a frame may take is not judged, and a wallpaper that is
+  still loading is left to load (the 20 seconds count from the end of the load). With a graphics card
   such a frame is the driver's and the card's to end; that has not been run
   ([SECURITY.md](docs/SECURITY.md#scripts-and-shaders)). 0.14.0 has this too.
 - A scene with very many particle objects: every object that names a particle file with

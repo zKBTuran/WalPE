@@ -1765,7 +1765,7 @@ def case_held(env, W):
                   is_blue(env.colour(env.mons[0])), 60, 0.5)
     check(bool(ok), "held: it is on screen within a minute (%.0f s)" % (time.time() - t0), env.since(mark)[-600:])
     txt = env.since(mark)
-    check("has not taken the wallpaper it was given" in txt and "load of held for" in txt,
+    check("has not taken the wallpaper it was given" in txt and "frame of held for" in txt,
           "held: the log names the monitor and the wallpaper that held it", txt[-600:])
     check(env.daemon.poll() is None and env.daemon.pid == pid, "held: the same process went on (a restart in place)")
     check(os.path.basename((env.monitors() or [{}])[0].get("current") or "") == "blue", "held: status names the new wallpaper")
@@ -1786,6 +1786,32 @@ def case_held(env, W):
         env.daemon.kill()
         env.daemon.wait()
     env.daemon = None
+    if xc:
+        xc.close()
+
+
+def case_slowload(env, W):
+    """A wallpaper that only takes long to load is not taken for one whose frame does not end."""
+    A = ("A", 640, 360, 0, 0)
+    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False,
+                          "current": W["red"]})
+    # every load takes 24 s: the first one is still running when the 20 s after the
+    # second request are over
+    if not check(env.start_daemon([A], extra={"WALPE_LOAD_DELAY_MS": "24000"}), "slow load: daemon started"):
+        return
+    pid = env.daemon.pid
+    xc = XClient(env.env["DISPLAY"]) if env.display.kind == "xvfb" else None
+    mark = env.mark()
+    t0 = time.time()
+    check(env.open(W["blue"]), "slow load: another wallpaper is asked for while the first one loads")
+    ok = wait_for(lambda: (lambda c: bool(c) and c[2] > 200 and c[0] < 60)(env.colour(env.mons[0])), 90, 0.5)
+    check(bool(ok), "slow load: it is shown when the two loads are over (%.0f s)" % (time.time() - t0),
+          env.since(mark)[-600:])
+    txt = env.since(mark)
+    check("restarting in place" not in txt and "restarts in place" not in txt,
+          "slow load: the daemon was not restarted for it", txt[-600:])
+    check(env.daemon.poll() is None and env.daemon.pid == pid, "slow load: the same daemon runs on")
+    env.stop_daemon()
     if xc:
         xc.close()
 
@@ -3772,7 +3798,7 @@ def case_scan(env, W):
 
 
 CASES = [("logcap", case_logcap), ("settings", case_settings), ("diag", case_diag), ("pointer", case_pointer), ("reload", case_reload), ("restart", case_restart),
-         ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("scan", case_scan), ("tray", case_tray), ("traymenu", case_traymenu), ("trayreg", case_trayreg), ("window", case_window), ("panel", case_panel), ("busy", case_busy), ("held", case_held), ("probe", case_probe),
+         ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("scan", case_scan), ("tray", case_tray), ("traymenu", case_traymenu), ("trayreg", case_trayreg), ("window", case_window), ("panel", case_panel), ("busy", case_busy), ("held", case_held), ("slowload", case_slowload), ("probe", case_probe),
          ("fullscreen", case_fullscreen), ("video", case_video), ("webunload", case_webunload),
          ("winlost", case_winlost), ("desktop", case_desktop), ("convert", case_convert),
          ("swaplost", case_swaplost), ("norestart", case_norestart),

@@ -1853,7 +1853,7 @@ test('diag-paths', executable('diagpath-test', 'tests/diagpath_test.c',
 # a restart in place that cannot be begun (the daemon runs on),
 # an exit asked for while a large scene loads (the load gives up),
 # a wallpaper whose frame does not end (another one is shown all the same,
-# `quit` ends the daemon),
+# `quit` ends the daemon), and one that only loads for long (no restart),
 # a video the decoder refuses (the clip is made with the ffmpeg program:
 # that case is skipped where there is none).
 # Skipped (77) without Xvfb. `meson test -C build daemon-life`

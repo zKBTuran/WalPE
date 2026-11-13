@@ -81,7 +81,9 @@ daemon goes on answering then (its main thread does not draw), and the wallpaper
 left: a monitor that has not taken the wallpaper it was given 20 seconds after it was
 asked for is restarted with the daemon, in place, and the log names the wallpaper that
 held it; `walpe-ctl quit` and every restart in place wait 10 seconds for a render thread
-and go on without it. With a graphics card the frame is the driver's to end (it resets a
+and go on without it. A monitor that is still loading a wallpaper is not restarted for
+that: a load may take as long as it takes (a large scene from a cold disk, the first
+compile of its shaders), and the 20 seconds count from the end of the load. With a graphics card the frame is the driver's to end (it resets a
 context that keeps the card busy for seconds); that has not been run. Test:
 `meson test -C build daemon-life` (case `held`).
 

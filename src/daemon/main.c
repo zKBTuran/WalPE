@@ -247,6 +247,10 @@ typedef struct Mon {
     char *given_path;        /* main: the wallpaper it was handed last (mon_assign) */
     char *busy_path;         /* main: ... and the one before, while its thread has not
                               * taken that one: what the thread is in (mon_thread_in) */
+    gboolean in_load;        /* thread -> main (lock): its thread is still setting up, or is
+                              * inside the load of a wallpaper (mon_do_load): however long
+                              * that takes, it is not a frame that does not end */
+    gint64 load_end_us;      /* thread -> main (lock): when it left that (monotonic) */
     gboolean reload_wanted;  /* main: load its wallpaper again at the next
                               * reload_flush () (scenes_reload_mark) */
     gboolean blank_req;      /* main -> thread (lock): that failure is final: black */
@@ -2330,6 +2334,8 @@ static gpointer mon_thread (gpointer data)
     if (!begun)
         mon_park_wait (m, &begun);
 #endif
+    m->in_load = FALSE;     /* (set when the monitor was made: context, first GL calls) */
+    m->load_end_us = g_get_monotonic_time ();
     while (!m->quitting) {
         char *load = m->load_path;
         m->load_path = NULL;
@@ -2599,7 +2605,15 @@ static gpointer mon_thread (gpointer data)
             load = g_strdup (m->content_path);
         const gboolean did_load = load != NULL;
         if (load) {
+            /* (load_held_check: a load is not a frame that does not end) */
+            g_mutex_lock (&m->lock);
+            m->in_load = TRUE;
+            g_mutex_unlock (&m->lock);
             mon_do_load (m, load, paused, fps, &quality, keep, load_tag);
+            g_mutex_lock (&m->lock);
+            m->in_load = FALSE;
+            m->load_end_us = g_get_monotonic_time ();
+            g_mutex_unlock (&m->lock);
             g_free (m->content_path);
             m->content_path = m->content ? g_strdup (load) : NULL;
             if (m->lead_sf)
@@ -9369,22 +9383,49 @@ static char *mon_thread_in (Mon *m)
 
 static gboolean load_held_retry (gpointer user);
 static gboolean load_held;      /* main: the restart under way is that one */
+static guint load_held_timer;   /* main: the look that was put off (load_held_later) */
 static gboolean term_pending (void);
+
+/* look again in secs seconds; one such look is pending at most */
+static void load_held_later (guint secs)
+{
+    if (!load_held_timer)
+        load_held_timer = g_timeout_add_seconds (secs, load_held_retry, NULL);
+}
+
 static void load_held_check (void)
 {
     if (D.restart || Sw.restart || !D.loop || D.windowed || term_pending ())
         return;
+    const gint64 now = g_get_monotonic_time ();
+    gint64 later_us = 0;    /* a monitor that waits for a load to end: when to look again */
     for (GList *l = D.mons; l; l = l->next) {
         Mon *m = l->data;
         g_mutex_lock (&m->lock);
         const gboolean held = m->load_path != NULL && !g_atomic_int_get (&m->thread_ended);
+        /* A thread that is loading has not taken what it was given either,
+         * and a load may take as long as it takes: a large scene from a
+         * cold disk or a network share, the first compile of its shaders,
+         * a machine that is busy. That is no frame that does not end, and
+         * restarting the daemon for it throws the load away - with
+         * WALPE_LOAD_DELAY_MS=30000 a wallpaper that was opened a second
+         * time 3 s into its load was on screen after 55 s instead of 31,
+         * and every other monitor loaded its wallpaper again. So: only a
+         * thread that has been out of every load for the whole window. */
+        const gint64 quiet_us = m->in_load ? 0 : now - m->load_end_us;
         g_mutex_unlock (&m->lock);
         if (!held)
             continue;
+        if (quiet_us < (gint64) LOADMARK_SECS * G_USEC_PER_SEC) {
+            /* (the first of them that is due: another monitor may be held) */
+            const gint64 due_us = (gint64) LOADMARK_SECS * G_USEC_PER_SEC - quiet_us;
+            later_us = later_us ? MIN (later_us, due_us) : due_us;
+            continue;
+        }
         if (Imp.active || Ws.active) {
             /* (as every restart in place: not under a running import or
              * Workshop download, which it would end) */
-            g_timeout_add_seconds (LOADMARK_SECS, load_held_retry, NULL);
+            load_held_later (LOADMARK_SECS);
             return;
         }
         if (!restart_begin ("a wallpaper that was asked for is not taken by its monitor"))
@@ -9392,7 +9433,7 @@ static void load_held_check (void)
         if (!walpe_config_save (D.cfg))
             return;     /* (the new image would read other wallpapers than were asked for) */
         char *was = mon_thread_in (m);
-        g_warning ("monitor %d (%s): its render thread has been in one frame or load%s%s for more "
+        g_warning ("monitor %d (%s): its render thread has been in one frame%s%s for more "
                    "than %d s and has not taken the wallpaper it was given since: restarting in "
                    "place to show it (a frame of that wallpaper does not end on this renderer)",
                    m->index, m->name ? m->name : "?", was ? " of " : "",
@@ -9403,11 +9444,14 @@ static void load_held_check (void)
         g_main_loop_quit (D.loop);
         return;
     }
+    if (later_us > 0)
+        load_held_later ((guint) (later_us / G_USEC_PER_SEC) + 1);
 }
 
 static gboolean load_held_retry (gpointer user)
 {
     (void) user;
+    load_held_timer = 0;
     load_held_check ();
     return G_SOURCE_REMOVE;
 }
@@ -9661,6 +9705,7 @@ static Mon *make_monitor (const WalpeOutput *out, const WalpeRect *g, int idx, g
     g_cond_init (&m->cond);
     g_cond_init (&m->mem_cond);
     m->clip_n = -1;     /* everything, until "Skip hidden areas" says otherwise */
+    m->in_load = TRUE;  /* until its thread is in its loop (mon_thread) */
     D.mons = g_list_append (D.mons, m);
     return m;
 }
