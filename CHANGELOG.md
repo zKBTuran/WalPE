@@ -293,7 +293,14 @@ it was). A bare window manager on X11 - dwm, i3, openbox - gets the window of 0.
   `volume`, `mute`; silent while paused; the same video on two monitors sounds once. One
   pass of the track is one pass of the clip, to the sample, in one stream: where the clip
   starts again nothing is heard of it. With sound off nothing is started, opened or
-  decoded. [SOUND.md](docs/SOUND.md#video-wallpapers).
+  decoded. A place in the track - after a pause, an unmute, when sound is switched on in
+  the middle - is found without decoding what lies in front of it, so a video of two
+  hours is back as fast as a clip. A wallpaper that is replaced while its track is still
+  being taken out gives that work up (ffmpeg is ended, nothing stays in the cache), and
+  the next video's sound does not wait for it; the track is taken out from the start the
+  next time that video is shown. The first time, a long video's sound comes only when
+  its whole track has been taken out (two hours: about half a minute on an idle
+  machine). [SOUND.md](docs/SOUND.md#video-wallpapers).
 - **An imported video keeps its sound track** (AAC in the MP4 the import writes). Up to
   0.14.0 the import dropped it: videos imported before have no sound and must be imported
   again from the original file. Workshop videos need nothing.
