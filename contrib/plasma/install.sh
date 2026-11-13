@@ -149,6 +149,11 @@ uninstall)
 			"running here to give it another one: without the type's files that desktop would be black." \
 			"Run this in the Plasma session, or choose another wallpaper type there first."
 	fi
+	# (where nothing was installed it said "Removed." all the same)
+	if [ ! -e "$data/plasma/wallpapers/$type_id" ]; then
+		say "The wallpaper type \"WalPE\" is not installed ($data/plasma/wallpapers/$type_id): nothing to remove."
+		exit 0
+	fi
 	if installed && command -v kpackagetool6 >/dev/null 2>&1; then
 		kpackagetool6 --type Plasma/Wallpaper --remove "$type_id" >/dev/null || true
 	fi

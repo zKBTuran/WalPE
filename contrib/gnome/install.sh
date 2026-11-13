@@ -140,6 +140,11 @@ disable)
 	say "again it ends with a sentence about the missing extension (walpe-ctl quit stops it now)."
 	;;
 uninstall)
+	# (where nothing was installed it said "Removed." all the same)
+	if [ ! -e "$dest" ]; then
+		say "The extension \"WalPE\" is not installed ($dest): nothing to remove."
+		exit 0
+	fi
 	if installed; then switch off || true; fi
 	rm -rf "$dest"
 	say "Removed. On GNOME's Wayland session walpe-daemon shows no wallpaper again (walpe-ctl quit"

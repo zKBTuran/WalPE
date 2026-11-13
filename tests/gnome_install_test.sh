@@ -3,8 +3,9 @@
 # `install.sh status` of the extension for GNOME Shell where there is no GNOME: nothing
 # of GNOME in PATH or in the environment, then a stand-in gnome-shell. Every line says
 # something (the session line was "session: ? on ?, GNOME Shell " with nothing after it),
-# and in a GNOME session the line is the one it was. Nothing is installed or switched;
-# the home directory is the test's own.
+# and in a GNOME session the line is the one it was. `uninstall` where nothing is
+# installed says so. The home directory is the test's own; no setting is touched (there
+# is no gsettings in the PATH the installer is given).
 script=$1
 fails=0
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/walpe-git.XXXXXX") || exit 1
@@ -48,6 +49,24 @@ want "session: ubuntu:GNOME on wayland, GNOME Shell 46.0" "GNOME session"
 if grep -q "not a GNOME session" "$tmp/out"; then
     fails=$((fails + 1))
     echo "FAIL: GNOME session: called no GNOME session"
+fi
+
+# uninstall where nothing is installed: said, not "Removed"; where something is: removed
+env -i PATH="$tmp/bare:$(dirname "$(command -v rm)")" HOME="$tmp/home" sh "$script" uninstall > "$tmp/out" 2> "$tmp/err"
+rc=$?
+want "is not installed" "uninstall, nothing installed"
+if [ "$rc" != 0 ] || grep -q "Removed" "$tmp/out"; then
+    fails=$((fails + 1))
+    echo "FAIL: uninstall, nothing installed: exit status $rc, or it says \"Removed\""
+fi
+ext="$tmp/home/.local/share/gnome-shell/extensions/walpe@walpe.github.io"
+mkdir -p "$ext"
+echo '{}' > "$ext/metadata.json"
+env -i PATH="$tmp/bare:$(dirname "$(command -v rm)")" HOME="$tmp/home" sh "$script" uninstall > "$tmp/out" 2> "$tmp/err"
+want "Removed" "uninstall"
+if [ -e "$ext" ]; then
+    fails=$((fails + 1))
+    echo "FAIL: uninstall: the extension is still there"
 fi
 
 if [ $fails != 0 ]; then

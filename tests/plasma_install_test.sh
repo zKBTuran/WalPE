@@ -10,7 +10,8 @@
 #   uninstall takes the type off the desktops first, and removes nothing where that
 #   cannot be done while a desktop still has the type (Plasma's shell not running, or
 #   not answering): a desktop whose wallpaper type has no files is black;
-#   uninstall with no desktop of the type removes the package without the shell.
+#   uninstall with no desktop of the type removes the package without the shell, and
+#   says that nothing is installed where nothing is.
 #   status outside Plasma, without KWin: no "?" and no line that ends in a comma.
 # The stand-ins: FAKE_SHELL=up|down|deaf (org.kde.plasmashell on the bus, not on it, on
 # it and not answering evaluateScript), FAKE_KWIN=<version>; what was sent to Plasma's
@@ -148,6 +149,14 @@ run "install (2)" 0 -- install
 printf '[Containments][1]\nwallpaperplugin=org.kde.image\n' > "$rc_file"
 run "uninstall, shell not running, type not in use" 0 FAKE_SHELL=down -- uninstall
 is "uninstall without the shell: the package is gone" ! -e "$pkg"
+
+# 7b. uninstall once more, with nothing installed: not "Removed"
+run "uninstall, nothing installed" 0 FAKE_SHELL=down -- uninstall
+want "$tmp/out" "is not installed" "uninstall, nothing installed"
+if grep -q "Removed" "$tmp/out"; then
+    fails=$((fails + 1))
+    echo "FAIL: uninstall, nothing installed: it says \"Removed\""
+fi
 
 # 8. status and the usage line change nothing and need nothing
 run "status" 0 FAKE_SHELL=down -- status
