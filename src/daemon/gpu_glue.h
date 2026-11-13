@@ -804,7 +804,8 @@ static gboolean gpu_ipc_set (JsonObject *o, gboolean busy, gboolean *restart, ch
         gboolean need = !Gpu.env_forced && !Sw.active && gpu_effective (v) != running;
         if (need && busy) {
             *err = g_strdup ("gpu: the engine has to restart for this and an import / Workshop "
-                             "download is running; change it when that has finished");
+                             "download is running; change it when that has finished; "
+                             "nothing was changed");
             g_free (v);
             return FALSE;
         }

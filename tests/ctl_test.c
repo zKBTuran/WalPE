@@ -835,6 +835,44 @@ static void scan_daemon (const char *path)
         g_free (body);
     }
 
+    /* ... and gpu_ipc_set () (daemon/gpu_glue.h) keeps that promise for the
+     * keys it takes: each of its refusals - a value that is no GPU setting
+     * (gpu=display is one), a device that is not there, a restart that
+     * cannot be made now - stands in front of its first change and ends
+     * with the same words as the checks' refusals. */
+    {
+        char *dir = g_path_get_dirname (path);
+        char *gp = g_build_filename (dir, "gpu_glue.h", NULL);
+        char *g = NULL;
+        CHECK (g_file_get_contents (gp, &g, NULL, NULL));
+        const char *a = g ? strstr (g, "\nstatic gboolean gpu_ipc_set (JsonObject *o, gboolean busy,") : NULL;
+        const char *z = a ? strstr (a, "\n}\n") : NULL;
+        CHECK (a && z);
+        if (a && z) {
+            char *body = g_strndup (a, (gsize) (z - a));
+            const char *first = strstr (body, "D.cfg->");
+            int refusals = 0;
+            CHECK (first != NULL);
+            for (const char *e = strstr (body, "*err = g_strdup"); e; e = strstr (e + 1, "*err = g_strdup")) {
+                const char *end = strstr (e, ";\n");
+                char *stmt = end ? g_strndup (e, (gsize) (end - e)) : g_strdup ("");
+                refusals++;
+                if (!strstr (stmt, "nothing was changed") || !first || e > first) {
+                    g_printerr ("FAIL: gpu_ipc_set: a refusal that does not say \"nothing was changed\", "
+                                "or stands behind a change: %.60s\n", stmt);
+                    fails++;
+                }
+                g_free (stmt);
+            }
+            CHECK (refusals >= 3);
+            CHECK (strstr (body, "auto, display, integrated, discrete"));
+            g_free (body);
+        }
+        g_free (g);
+        g_free (gp);
+        g_free (dir);
+    }
+
     /* and status shows every setting "set" takes, under the name it is set
      * by: a change could be made and saved that no `walpe-ctl status`
      * showed (pause_covered, parallax, focus_fps ...) */
@@ -1243,6 +1281,27 @@ table:
     TAKEN ("{\"cmd\":\"set\",\"gl_api\":\"gles\"}");
     REFUSED ("{\"cmd\":\"set\",\"fps\":30,\"present\":\"vsync,HDMI-0=fast\"}", "present: \"HDMI-0=fast\" is not understood");
     TAKEN ("{\"cmd\":\"set\",\"present\":\"auto,HDMI-0=limiter\"}");
+    /* The keys of the test builds that followed (wallpaper sound: scene_sound,
+     * mute, volume; gpu=display; the three pause rules a desktop's own
+     * script is told about): a value of theirs that is refused is refused
+     * here, by its type, and such a key in front of a value that is not
+     * allowed is not applied either - `set gpu=display focus=sideways`
+     * left the GPU setting changed and saved. ("gpu" itself is checked by
+     * the daemon against its list of devices: gpu_ipc_set (), which
+     * scan_daemon () finds in front of every change.) */
+    TAKEN ("{\"cmd\":\"set\",\"scene_sound\":false,\"mute\":true,\"volume\":0.25}");
+    TAKEN ("{\"cmd\":\"set\",\"gpu\":\"display\",\"preset_follow_gpu\":false}");
+    REFUSED ("{\"cmd\":\"set\",\"mute\":true,\"scene_sound\":\"off\"}", "scene_sound is a switch: on or off (true / false); nothing was changed");
+    REFUSED ("{\"cmd\":\"set\",\"volume\":0.25,\"mute\":\"yes\"}", "mute is a switch: on or off (true / false); nothing was changed");
+    REFUSED ("{\"cmd\":\"set\",\"scene_sound\":false,\"volume\":\"loud\"}", "volume needs a number; nothing was changed");
+    REFUSED ("{\"cmd\":\"set\",\"scene_sound\":false,\"volume\":\"0.5\"}", "volume needs a number; nothing was changed");
+    REFUSED ("{\"cmd\":\"set\",\"mute\":true,\"volume\":null}", "volume needs a number; nothing was changed");
+    REFUSED ("{\"cmd\":\"set\",\"fps\":30,\"gpu\":true}", "gpu needs a name or text");
+    REFUSED ("{\"cmd\":\"set\",\"fps\":30,\"gpu\":[\"display\"]}", "gpu needs a name or text");
+    REFUSED ("{\"cmd\":\"set\",\"gpu\":\"display\",\"focus_action\":\"sideways\"}", "focus_action: run, limit or pause; nothing was changed");
+    REFUSED ("{\"cmd\":\"set\",\"gpu\":\"display\",\"preset_follow_gpu\":\"no\"}", "preset_follow_gpu is a switch");
+    REFUSED ("{\"cmd\":\"set\",\"scene_sound\":false,\"mute\":true,\"volume\":0.25,\"gl_api\":\"vulkan\"}", "gl_api: auto, gl or gles; nothing was changed");
+    REFUSED ("{\"cmd\":\"set\",\"pause_fullscreen\":false,\"pause_covered\":true,\"focus_action\":\"stop\"}", "focus_action: run, limit or pause; nothing was changed");
     /* every quality key walpe-ctl knows is a member the daemon takes */
     static const char *const qk[] = { "preset", "quality_preset", "fx_rate", "fx_rate_mode", "fx_res",
                                       "fps_idle", "post", "post_processing", "render_scale", "scale",

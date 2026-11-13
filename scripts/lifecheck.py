@@ -2973,8 +2973,9 @@ def case_settings(env, W):
     # applied - not the keys in front of the bad one either (they were, and were saved,
     # and the reply did not say so). Each request names a setting that would change
     # first, then the value that is refused; status and config.json are read around it.
-    watch = ("fps", "volume", "mute", "pause_covered", "focus_action", "particle_density", "quality_preset",
-             "render_scale", "gpu", "we_assets", "scale_filter", "config_serial")
+    watch = ("fps", "volume", "mute", "scene_sound", "pause_covered", "pause_fullscreen", "focus_action",
+             "particle_density", "quality_preset", "render_scale", "gpu", "preset_follow_gpu", "we_assets",
+             "scale_filter", "config_serial")
 
     def view():
         st = env.state()
@@ -3007,6 +3008,22 @@ def case_settings(env, W):
         (("preset=low", "gpu=no-such-device-here"), "gpu"),
         (("fps=42", "we_assets=" + os.path.join(env.tmp, "no-assets-here")), "we_assets"),
         (("fps=43", "coverd=off"), "coverd"),                   # the unknown key, as before
+        # the keys of the later test builds: wallpaper sound (scene_sound, mute, volume),
+        # gpu=display, and the pause rules a desktop's own script is told about. A value
+        # of theirs that is refused, and each of them in front of one that is.
+        # (walpe-ctl refuses text for volume itself and sends nothing: straight to the socket)
+        ({"cmd": "set", "scene_sound": False, "mute": True, "volume": "loud"}, "volume"),
+        (("volume=0.2", "mute=perhaps"), "mute"),
+        (("mute=on", "volume=0.3", "scene_sound=quiet"), "scene_sound"),
+        (("scene_sound=off", "mute=on", "volume=0.1", "focus=sideways"), "focus_action"),
+        ({"cmd": "set", "mute": True, "scene_sound": "off"}, "scene_sound"),
+        ({"cmd": "set", "scene_sound": False, "volume": "0.3"}, "volume"),
+        (("gpu=display", "focus=sideways"), "focus_action"),    # the GPU setting was saved
+        (("gpu=display", "preset_follow_gpu=off", "preview_anim=sometimes"), "preview_anim"),
+        (("fps=45", "gpu=" + "g" * 128), "gpu"),                # no GPU setting is that long
+        (("fps=46", "gpu=two\nlines"), "gpu"),
+        (("fs=off", "covered=on", "focus=stop"), "focus_action"),
+        (("fs=off", "covered=on", "scene_sound=off", "gpu=no-such-device-here"), "gpu"),
     )
     for args, key in refused:
         before = view()
