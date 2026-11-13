@@ -177,8 +177,9 @@ not found, without end. The test no longer writes that file.)
 The tests that need a display were run on Xvfb and on a headless sway (`xvfb`, `sway`,
 `dbus-daemon`, `x11-xserver-utils` for `xrandr`, `xdotool`, `grim`, `procps`): the
 daemon's life on X11 and on Wayland, the window, the tray and web wallpapers on the X11
-page host pass. `parsers` fails in its checks of a text with two JSON values (json-glib
-1.10), and the private page host does not come up (GTK 4.18; see Alpine below).
+page host pass. `parsers` failed in its checks of a text with two JSON values (json-glib
+1.10), and the private page host did not come up (GTK 4.18): both were repaired after
+that run (see Alpine below).
 Debian 13's sway is 1.10.1, and of the 400 checks of `daemon-wayland` 7 fail there, all
 after a fullscreen window was moved to the second output: that sway goes on naming the
 first output to the daemon (no `output_enter` for the new one in
@@ -231,13 +232,16 @@ own (`WEBKIT_DISPLAY_REFRESH_THROTTLE_FPS`), and the frame rate limit of a page'
 
 The tests that need a display were run on Xvfb and on a headless sway (`xvfb`, `sway`,
 `dbus`, `xrandr`, `xdotool`, `grim`, `python3`): the daemon's life on X11 and on Wayland,
-the window, the tray and web wallpapers on the X11 page host pass. What does not pass on
-Alpine 3.24 comes with its library versions and is the same on any system that has them:
-checks of pictures decoded by gdk-pixbuf 2.44 and of a text with two JSON values under
-json-glib 1.10 (`limits`, `parsers`, `thumbs`, `wsnet`), and the private page host for
-web wallpapers on a session without X, which does not come up with GTK 4.18 or newer
-(on Debian 13 as well: `websec-private`). GNOME Shell and KWin were not installed on
-either system.
+the window, the tray and web wallpapers on the X11 page host pass. What did not pass on
+Alpine 3.24 came with its library versions: checks of pictures decoded by gdk-pixbuf 2.44
+and of a text with two JSON values under json-glib 1.10 (`limits`, `parsers`, `thumbs`,
+`wsnet`), and the private page host for web wallpapers on a session without X, which did
+not come up with GTK 4.18 or newer (on Debian 13 as well: `websec-private`). Both were
+repaired after these runs (CHANGELOG.md, "Arch Linux and CachyOS" and, under Wayland,
+"Web wallpapers in a session without an X display"), and the five tests pass on Arch
+Linux of November 2026, which has gdk-pixbuf 2.44, json-glib 1.10 and GTK 4.24; they
+were not run again on Alpine 3.24 or Debian 13. GNOME Shell and KWin were not installed
+on either system.
 
 ## Build options
 
