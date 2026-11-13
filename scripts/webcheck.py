@@ -746,9 +746,13 @@ def case_outputs(env, W):
             if m.get("name") == name:
                 return (name, m["geometry"][2], m["geometry"][3], m["geometry"][0], m["geometry"][1])
         return None
-    # --- a second, larger output appears
+    # --- a second, larger output appears. (Right of where the first one ends at its largest
+    # mode below, 1600 wide: placed at 1024 the two overlapped once the first had grown, and
+    # a compositor that draws its outputs from one scene - sway from 1.10 on - shows both
+    # outputs' wallpapers in the part they share: the first output's picture had the second
+    # one's page over its right third.)
     m1 = env.mark()
-    name = env.display.add_output(mode=(1280, 720), pos=(1024, 0))
+    name = env.display.add_output(mode=(1280, 720), pos=(1600, 0))
     if not check(bool(name), "outputs: a second output was made"):
         return
     b = wait_for(lambda: monitor(name), 60, 0.5)
