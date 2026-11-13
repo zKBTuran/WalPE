@@ -14,7 +14,11 @@ sound could only be switched on with a command, and video and web wallpapers had
 a laptop with two graphics cards the discrete one sat idle; a log sent with a report
 said too little; and, found on the way, the sound server could move the capture of a
 wallpaper that reacts to sound onto a microphone (PulseAudio; under Audio-reactive
-wallpapers). **State of testing: that of 0.14.0 - Mesa's software renderer, Xvfb, a
+wallpapers). And what was looked for on the desktops nobody had reported from yet: on
+X11 desktops whose file manager owns the desktop (XFCE, LXQt, LXDE, MATE) the wallpaper
+ran unseen, under Cinnamon, GNOME and KDE Plasma on X11 it covered every window, and
+GNOME on Wayland had no wallpaper at all (under X11 desktops, and GNOME under Wayland).
+**State of testing: that of 0.14.0 - Mesa's software renderer, Xvfb, a
 headless sway, a PulseAudio null sink - with these additions. The changes for KDE Plasma
 were run on a headless Plasma 6.8.2 (the layer also on a headless Plasma 5.27): KWin on
 one and two virtual outputs, software renderer, a virtual pointer; a real Plasma session,
@@ -24,10 +28,15 @@ sinks (PulseAudio 16.1; PipeWire 1.0.5 with WirePlumber 0.4.17; the sound of web
 wallpapers also PipeWire 1.6.11 with WirePlumber 0.5.19): nobody has heard it, and no
 sound card and no microphone was there. The new
 choice of a laptop's discrete GPU has never run on a machine with two GPUs: what was run
-is the decision, on made-up machines, and the way back when the GPU's test fails.** Two
-defaults change: wallpaper sound is on, at half volume (under Sound), and `gpu=auto`
-renders on a laptop's discrete GPU where there is one (under Graphics cards;
-`walpe-ctl set gpu=display` is what `auto` was).
+is the decision, on made-up machines, and the way back when the GPU's test fails. The
+X11 desktops, GNOME Shell 46 and 51 with the extension, and six more Wayland compositors
+were each run headless on the software renderer, started by hand or by a test; none in
+a real session.** Three things are different without being asked for: wallpaper sound is
+on, at half volume (under Sound); `gpu=auto` renders on a laptop's discrete GPU where
+there is one (under Graphics cards; `walpe-ctl set gpu=display` is what `auto` was); and
+on an X11 desktop whose file manager owns the desktop the wallpaper is now seen, with
+that desktop's own icons behind it (under X11 desktops; `WALPE_X11_DESKTOP=root` is what
+it was). A bare window manager on X11 - dwm, i3, openbox - gets the window of 0.14.0.
 
 ### Wayland
 
