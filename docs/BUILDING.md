@@ -416,11 +416,12 @@ The package is the build of this file with the prefix `/usr`, and differs from
   desktop, "Desktop and Wallpaper", wallpaper type **WalPE**
   ([WAYLAND.md](WAYLAND.md#kde-plasma)). It is always the version of the engine; after an
   update of the package Plasma's shell keeps the version it has loaded until the next
-  login. `contrib/plasma/install.sh` is not needed and does not know this copy (`select`
-  and `status` look into your home directory only). A copy it has put into
+  login. `contrib/plasma/install.sh` of the source tree is not needed; it works with this
+  copy too (`status` names it, `select` and `unselect` use it). A copy it has put into
   `~/.local/share/plasma/wallpapers` earlier is found first by Plasma and stays the old
-  version: remove it with `contrib/plasma/install.sh uninstall`, then choose the type
-  again.
+  version, and `install.sh status` shows both versions: remove yours with
+  `contrib/plasma/install.sh uninstall`. The desktops keep the wallpaper type and show
+  the package's copy from the next login.
 - **The documents are in `/usr/share/doc/walpe`**, the licence texts in
   `/usr/share/licenses/walpe`.
 - **The compiler flags are those of `/etc/makepkg.conf`**, after the project's own: Arch's
