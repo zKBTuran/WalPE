@@ -89,6 +89,22 @@ static gpointer extract_thread (gpointer data)
     return NULL;
 }
 
+/* The process id the stand-in ffmpeg wrote, once the file has all of it
+ * (NULL after 5 s without). The shell makes the file and then writes the
+ * number: a look between the two found the file there and empty, and the
+ * test went on with process 0. */
+static char *wait_pid_file (const char *pidf)
+{
+    for (int i = 0; i < 5000; i++) {
+        char *text = NULL;
+        if (g_file_get_contents (pidf, &text, NULL, NULL) && strchr (text, '\n'))
+            return text;
+        g_free (text);
+        g_usleep (1000);
+    }
+    return NULL;
+}
+
 /* any file as the "video": the stand-in ffmpeg writes its process id and
  * sleeps for a minute */
 static void test_sound_stop (const char *any_file)
@@ -105,8 +121,7 @@ static void test_sound_stop (const char *any_file)
         g_setenv ("PATH", path, TRUE);
         Extract a = { any_file, dst_a, 99, NULL };
         GThread *t = g_thread_new ("extract", extract_thread, &a);
-        for (int i = 0; i < 5000 && !g_file_get_contents (pidf, &text, NULL, NULL); i++)
-            g_usleep (1000);
+        text = wait_pid_file (pidf);
         const pid_t child = text ? (pid_t) atoi (text) : 0;
         CHECK (child > 1 && kill (child, 0) == 0);          /* the first caller's ffmpeg runs */
         /* a second caller, for another video: it waits for its turn, and
@@ -341,8 +356,7 @@ static void test_sound_stop_floor (const char *any_file)
         g_atomic_int_set (&stop_a, 0);
         Extract a = { any_file, dst_a, 99, NULL };
         GThread *t = g_thread_new ("extract", extract_thread, &a);
-        for (int i = 0; i < 5000 && !g_file_get_contents (pidf, &text, NULL, NULL); i++)
-            g_usleep (1000);
+        text = wait_pid_file (pidf);
         const pid_t child = text ? (pid_t) atoi (text) : 0;
         CHECK (child > 1 && kill (child, 0) == 0);
         g_usleep (1500000);     /* (the free disk has been looked at by now) */
