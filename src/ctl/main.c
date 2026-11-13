@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "walpe-build-config.h"   /* WALPE_VERSION, WALPE_CODENAME: --version */
+#include "common/sourceid.h"      /* ... and which tree it was built from */
 #include "common/ipc.h"
 #include "common/config.h"
 #include "common/quality.h"
@@ -51,7 +53,9 @@ static void usage (void)
              "                                 cache, the wallpaper changes when it is ready)\n"
              "  walpe-ctl cancel-import        stop a running import / video conversion\n"
              "  walpe-ctl pause | resume       control playback\n"
-             "  walpe-ctl status               show daemon state (+ import progress)\n"
+             "  walpe-ctl status               show daemon state (+ import progress); \"source_id\" is\n"
+             "                                 the commit of the source the daemon was built from\n"
+             "  walpe-ctl --version            this program's version and that commit of its own\n"
              "  walpe-ctl diag                 the state in a dozen lines, for a bug report: version,\n"
              "                                 session, window system and why, what the compositor\n"
              "                                 offers, GL driver, modules, sound, per monitor what it\n"
@@ -1298,6 +1302,11 @@ static int run (int argc, char **argv)
 
     if (!g_strcmp0 (cmd, "help") || !g_strcmp0 (cmd, "--help") || !g_strcmp0 (cmd, "-h")) {
         usage ();
+        return 0;
+    }
+    if (!g_strcmp0 (cmd, "--version")) {
+        /* this program's own; the daemon that runs says its in status ("source_id") and diag */
+        g_print ("walpe-ctl %s \"%s\" (source %s)\n", WALPE_VERSION, WALPE_CODENAME, walpe_source_id ());
         return 0;
     }
     if (!g_strcmp0 (cmd, "layers"))

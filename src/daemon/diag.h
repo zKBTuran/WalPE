@@ -155,6 +155,15 @@ static char *diag_text (gboolean asked)
                             WALPE_VERSION, WALPE_CODENAME, (int) getpid (), diag_started_by (),
                             (double) (g_get_monotonic_time () - daemon_start_us) / 1e6);
     {
+        /* which tree it was built from (common/sourceid.h): the version is
+         * the same in every test build and in the release they follow */
+        const char *id = walpe_source_id ();
+        g_string_append_printf (s, "source: %s (%s)\n", id,
+                                !strcmp (id, "unknown") ? "built outside git from files that do not name their commit"
+                                : strchr (id, '+') ? "that commit with changed files"
+                                : "the commit this build was made from");
+    }
+    {
         /* the session as the environment names it; of the two display
          * variables only whether they are set */
         const char *st = g_getenv ("XDG_SESSION_TYPE"), *cd = g_getenv ("XDG_CURRENT_DESKTOP");

@@ -55,6 +55,7 @@
 #include "common/ipc.h"
 #include "signals/providers.h"        /* the idle rule: walpe_signal_get, its timeout */
 #include "common/util.h"
+#include "common/sourceid.h"   /* which tree this daemon was built from: status, diag, the log */
 #include "common/import.h"
 #include "common/scenevideo.h" /* converted copies of videos inside scenes */
 #include "common/library.h"   /* walpe_config_forget_path */
@@ -6029,6 +6030,9 @@ static void ipc_status (JsonBuilder *b)
     json_builder_begin_object (b);
     jb_str (b, "path", D.cfg->current);
     jb_str (b, "type", m0 ? walpe_type_name (g_atomic_int_get (&m0->content_type)) : "none");
+    /* the tree this daemon was built from (common/sourceid.h): test builds
+     * and the release they follow answer the same version */
+    jb_str (b, "source_id", walpe_source_id ());
     jb_bool (b, "paused", D.cfg->paused);
     /* the fullscreen rule pauses a monitor (which one: "monitors" below) */
     jb_bool (b, "fullscreen_pause", any_fullscreen_pause ());
@@ -11436,9 +11440,14 @@ int main (int argc, char **argv)
             ; /* read after config load */
         else if (!g_strcmp0 (argv[i], "--backend") && i + 1 < argc)
             cli_backend = argv[++i];
-        else if (!g_strcmp0 (argv[i], "-h") || !g_strcmp0 (argv[i], "--help")) {
+        else if (!g_strcmp0 (argv[i], "--version")) {
+            /* (it was no option: `walpe-daemon --version` started a daemon) */
+            g_print ("walpe-daemon %s \"%s\" (source %s)\n", WALPE_VERSION, WALPE_CODENAME, walpe_source_id ());
+            return 0;
+        } else if (!g_strcmp0 (argv[i], "-h") || !g_strcmp0 (argv[i], "--help")) {
             g_print ("usage: walpe-daemon [--windowed] [--monitor N] [--fps N] "
                      "[--backend auto|x11|wayland]\n"
+                     "  --version: the version, and the commit of the source it was built from\n"
                      "  --backend / WALPE_BACKEND / the saved setting (walpe-ctl set backend=...):\n"
                      "  the window system to draw on; auto = Wayland where the compositor has\n"
                      "  the layer shell, X11 on an X session (never Xwayland by itself)\n"
@@ -11663,8 +11672,8 @@ int main (int argc, char **argv)
     term_signals_init ();
     {
         char *desc = walpe_platform_describe ();
-        g_message ("walpe-daemon %s \"%s\" up (%s, backend=%s)", WALPE_VERSION, WALPE_CODENAME,
-                   desc, WALPE_VIDEO_BACKEND);
+        g_message ("walpe-daemon %s \"%s\" up (%s, backend=%s, source %s)", WALPE_VERSION, WALPE_CODENAME,
+                   desc, WALPE_VIDEO_BACKEND, walpe_source_id ());
         g_free (desc);
     }
 

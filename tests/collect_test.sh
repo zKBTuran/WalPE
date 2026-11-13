@@ -9,6 +9,8 @@
 #   0.14.0, as the builds after 0.14.0 do;
 #   the same wallpaper on an engine that does not know soundcheck (0.14.0): the
 #   sentence is said, and a scene is asked for.
+#   which engine is looked at: the version and the status member "source_id", or
+#   "not told" of an engine without the member;
 #   a web wallpaper whose sound sentence has quotation marks in it (\" in the status
 #   reply): the tester reads the whole sentence, and report.txt has it whole;
 #   a video wallpaper that is a folder whose file has a quotation mark in its name
@@ -55,7 +57,7 @@ for t in pkill systemctl pactl wpctl ffprobe nvidia-smi kscreen-doctor busctl db
 done
 chmod +x "$tmp/build/walpe-daemon" "$tmp/build/walpe-ctl" "$tmp/bin/"*
 
-status_video='{"ok":true,"state":{"path":"\/w\/clip.mp4","type":"video","volume":0.5,"scene_sound":true,"mute":false,"sound":"playing 1 sound","monitors":[{"index":0,"type":"video"}]}}'
+status_video='{"ok":true,"state":{"path":"\/w\/clip.mp4","type":"video","source_id":"077a0dd","volume":0.5,"scene_sound":true,"mute":false,"sound":"playing 1 sound","monitors":[{"index":0,"type":"video"}]}}'
 
 # collect NAME STATUS-JSON INPUT [VAR=value ...]: one run of --sound-only; what it printed
 # is in $tmp/NAME.out, its report in $tmp/NAME.home/walpe-report
@@ -109,6 +111,9 @@ hasnot vsound "Put a SCENE wallpaper with sound on"
 has vsound "The engine says about sound: playing 1 sound"
 noted vsound "the engine plays the sound track of video wallpapers: yes"
 noted vsound "the wallpaper for the sound test is shown (type video)"
+# ... and which engine it is: its version and the commit of its source, as the engine says
+has vsound "the engine looked at: WalPE 0.14.0, source 077a0dd"
+noted vsound "# the engine looked at: WalPE 0.14.0, source 077a0dd"
 [ -f "$tmp/vsound.home/walpe-report/soundcheck.txt" ] || { echo "FAIL: vsound: no soundcheck.txt in the report"; fails=$((fails + 1)); }
 
 # ---- the same video on an engine without (0.14.0): said, and a scene is asked for
@@ -123,6 +128,7 @@ noted novsound "the engine plays the sound track of video wallpapers: no"
 status_web='{"ok":true,"state":{"path":"\/w\/page","type":"web","volume":0.5,"scene_sound":true,"mute":false,"sound":"1 web wallpaper is heard at 50 % (what the page plays, through WebKit: the stream \"WebKit\" in the system\u0027s mixer); a back\\slash","monitors":[{"index":0,"type":"web"}]}}'
 collect web "$status_web" '\ny\nn\n' FAKE_SOUNDCHECK=yes
 has web 'The engine says about sound: 1 web wallpaper is heard at 50 % (what the page plays, through WebKit: the stream "WebKit" in the system\u0027s mixer); a back\slash'
+has web "the engine looked at: WalPE 0.14.0, source not told"
 noted web 'the engine says about sound after the set: 1 web wallpaper is heard at 50 % (what the page plays, through WebKit: the stream "WebKit" in the system\u0027s mixer); a back\slash'
 
 # ---- a video in a folder: project.json names the file, with a quotation mark in its name

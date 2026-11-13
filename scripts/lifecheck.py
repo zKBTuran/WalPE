@@ -184,6 +184,9 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             that lies outside the home directory, also in the reason a
             load failed (a broken scene, a folder with a blank in its
             name); below the home directory it is "~/..." as before.
+            Status ("source_id"), diag ("source:"), the first line in
+            the log and --version name the source the build was made
+            from.
 
 The display is Xvfb, or with --display sway (or WALPE_CHECK_DISPLAY=sway) a
 headless Wayland compositor (scripts/displayenv.py); the cases are the same
@@ -3642,6 +3645,35 @@ def case_diag(env, W):
     out = p.stdout.decode(errors="replace")
     check(p.returncode == 0 and out.startswith("walpe-daemon ") and env.tmp not in out,
           "diag: walpe-ctl diag prints the same text and exits with 0", out[:200])
+    # which source the daemon was built from (common/sourceid.h): the word the build was given
+    # (walpe-source-id.h in the build directory, made by scripts/source-id.sh) is the member
+    # "source_id" of status, the line "source:" of diag and in the daemon's first line in its
+    # log; --version of the daemon and of walpe-ctl print it and start nothing
+    try:
+        m = re.search(r'^#define WALPE_SOURCE_ID "([^"]*)"$', open(os.path.join(env.build, "walpe-source-id.h")).read(), re.M)
+        built = m.group(1) if m else ""
+    except OSError:
+        built = ""
+    check(bool(re.fullmatch(r"[0-9a-f]{4,40}\+?|unknown", built)),
+          "diag: the build has a source id: a commit, a commit with \"+\", or \"unknown\"", built)
+    st = (env.ipc({"cmd": "status"}) or {}).get("state") or {}
+    check(st.get("source_id") == built, "diag: status has \"source_id\", the id the build was given",
+          (st.get("source_id"), built))
+    src = [l for l in text().splitlines() if l.startswith("source: ")]
+    check(len(src) == 1 and src[0].startswith("source: %s (" % built) and text().splitlines()[1] == src[0],
+          "diag: the second line of diag is \"source: <id> (...)\"", (src, built))
+    try:
+        first = [l for l in open(env.log, errors="replace") if " up (" in l and "walpe-daemon " in l]
+    except OSError:
+        first = []
+    check(bool(first) and first[0].rstrip().endswith(", source %s)" % built),
+          "diag: the daemon's first line in the log ends with the source id", first[:1])
+    for prog in ("walpe-daemon", "walpe-ctl"):
+        p = subprocess.run([os.path.join(env.build, prog), "--version"], env=env.env, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60 * PATIENCE)
+        out = p.stdout.decode(errors="replace")
+        check(p.returncode == 0 and bool(re.fullmatch(r'%s [0-9.]+ "[^"]+" \(source %s\)\n' % (prog, re.escape(built)), out)),
+              f"diag: {prog} --version prints the version and the source id, and ends with 0", out[:300])
     # the sound server's line (what `walpe-ctl soundcheck` says of a web wallpaper's stream):
     # in the text that is asked for, whole - the cutting of paths leaves it alone -, and not
     # in the summary the daemon logs by itself (asking the server can cost a child process)

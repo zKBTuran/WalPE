@@ -840,6 +840,22 @@ if have_ffmpeg
     install_dir: moddir)
 endif
 
+# ------------------------------------------------------------- the source's id
+# Which tree a program was built from (src/common/sourceid.h): the commit, found by
+# scripts/source-id.sh - in the file SOURCE-ID where `git archive` made the tree (a
+# release tarball, a test build's zip: .gitattributes export-subst), from git in a
+# checkout, "unknown" otherwise. The step runs with every build (a new commit has to
+# be seen) and rewrites its header only when the id changed; the header is read by
+# sourceid.c alone, which is compiled into the three programs that show the id. So an
+# unchanged tree builds the same bytes again and compiles nothing, and a new commit
+# compiles that one file and links those programs. Nothing of the build - no date, no
+# host - is in the id, and the version stays what meson.build's project() says.
+source_id_h = custom_target('source-id',
+  output: 'walpe-source-id.h',
+  command: [find_program('sh'), files('scripts/source-id.sh'), meson.current_source_dir(), '@OUTPUT@'],
+  build_always_stale: true)
+source_id_src = [files('src/common/sourceid.c'), source_id_h]
+
 # ---------------------------------------------------------------- executables
 dynlist = meson.current_source_dir() / 'src/daemon/modules.dynlist'
 # the platform layer: the interface, the pause-signal registry and one
@@ -867,6 +883,7 @@ elif have_webhost_x11
   daemon_src += files('src/daemon/selguard.c')
   daemon_deps += x11
 endif
+daemon_src += source_id_src
 daemon = executable('walpe-daemon', daemon_src,
   include_directories: inc,
   dependencies: daemon_deps,
@@ -922,7 +939,7 @@ ui = executable('walpe', 'src/ui/main.c', 'src/ui/store.c', 'src/ui/props.c', 's
                 (ui_wl_args.length() > 0 ? [ui_wl_dep] : []),
   install: true)
 
-ctl = executable('walpe-ctl', 'src/ctl/main.c',
+ctl = executable('walpe-ctl', 'src/ctl/main.c', source_id_src,
   include_directories: inc,
   dependencies: [core_dep],
   install: true)
@@ -2091,6 +2108,14 @@ test('gpu-report', find_program('sh'),
   depends: [ctl],
   timeout: 240)
 
+# scripts/source-id.sh (the commit the programs show as their source): trees made by
+# `git archive`, checkouts, changed files, files that do not say, the header that is
+# written only when the id changes - in repositories the test makes; then `git archive
+# HEAD` of this tree where it is a checkout. Skipped (77) without git.
+test('sourceid', find_program('sh'),
+  args: [meson.current_source_dir() / 'tests/sourceid_test.sh', meson.current_source_dir()],
+  timeout: 120)
+
 # scripts/walpe-collect.sh against stand-ins for walpe-daemon and walpe-ctl in a home
 # directory of its own: what it tells the tester about the wallpaper shown for the sound
 # test. Nothing is built for it, no engine that runs is touched.
@@ -2387,7 +2412,7 @@ if have_tray
       tray_deps += xi   # menu grabs through XInput2 (what GDK listens to)
     endif
   endif
-  tray = executable('walpe-tray', tray_srcs,
+  tray = executable('walpe-tray', tray_srcs, source_id_src,
     include_directories: inc,
     c_args: tray_args,
     dependencies: tray_deps,

@@ -381,7 +381,18 @@ hand, and such a copy can be the one that starts:
   and hides the package's unit of the same name: delete it.
 
 `walpe-ctl diag` names in its first line the version of the engine that runs and what
-started it; `readlink /proc/$(pidof walpe-daemon)/exe` names its file.
+started it, in its second the commit of the source it was built from;
+`readlink /proc/$(pidof walpe-daemon)/exe` names its file.
+
+That commit (`walpe-daemon --version`, `walpe-ctl status`: `source_id`) is found at build
+time by `scripts/source-id.sh`: a tree made by `git archive` - a release tarball, the
+forge's download of a tag, a test build's zip - has it in the file `SOURCE-ID`
+(`.gitattributes`: `export-subst`), and git is not asked; a checkout asks git, and marks
+a tree with changed files by a `+`; a copy of the files without `.git` and with the
+placeholder still in `SOURCE-ID` (an archive made by another tool) says `unknown`. The
+step runs with every build and changes its header only when the id changed, so a build
+of an unchanged tree compiles nothing and gives the same bytes; a new commit compiles
+`src/common/sourceid.c` again and links the three programs that show the id.
 
 The package is the build of this file with the prefix `/usr`, and differs from
 `./build.sh` and `meson install` in this:

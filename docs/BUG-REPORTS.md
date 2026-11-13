@@ -13,6 +13,11 @@ it. Wallpapers are named by the last part of their path and the home directory i
 `~`, so it can be pasted as it is. WalPE 0.14.0 does not have it yet; there
 `walpe-ctl status` is what to send: one line of JSON, with the full paths.
 
+Its second line, `source:`, is the commit of the source the daemon was built from - test
+builds answer the version of the release they follow, the commit tells them apart.
+`walpe-ctl status` has it as `source_id`, and `walpe-daemon --version` prints it without
+a daemon running. A build before this line existed has neither.
+
 The collector, from the source directory (the one that holds `build/`), or `walpe-collect`
 where WalPE is installed:
 

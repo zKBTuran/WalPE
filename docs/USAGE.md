@@ -85,8 +85,8 @@ the one before it on screen; `walpe-ctl status` says why (`load_error`, `load_re
 | `add <video>` | import a video into the library ([Video](#video)) |
 | `cancel-import` | stop a running import or conversion |
 | `pause` / `resume` | |
-| `status` | the daemon's state as JSON: monitors, what they show, why one is paused, import progress, renderer, counters |
-| `diag` | the same state in a dozen lines of text, for a bug report: version, session, window system and why it was chosen, what the compositor offers and lacks, GL driver, modules, sound and why it is silent, and per monitor what it shows and which rule pauses it. Wallpapers are named by the last part of their path and the home directory is written `~`. The daemon writes the same lines to its log once, when its first wallpaper is shown |
+| `status` | the daemon's state as JSON: monitors, what they show, why one is paused, import progress, renderer, counters; `source_id` is the commit of the source the daemon was built from (test builds and the release they follow answer the same version) |
+| `diag` | the same state in a dozen lines of text, for a bug report: version, the commit of the source it was built from, session, window system and why it was chosen, what the compositor offers and lacks, GL driver, modules, sound and why it is silent, and per monitor what it shows and which rule pauses it. Wallpapers are named by the last part of their path and the home directory is written `~`. The daemon writes the same lines to its log once, when its first wallpaper is shown |
 | `set key=value ...` | change settings ([SETTINGS.md](SETTINGS.md)); refused as a whole, with nothing changed, when one key is unknown or one value has the wrong kind or is not allowed for its key |
 | `backend [auto\|x11\|wayland]` | show the window system the daemon draws on, how it was chosen, what the build holds and who reports each pause condition; or save the setting for its next start ([WAYLAND.md](WAYLAND.md)) |
 | `gpu [--json]` | the graphics devices of this machine, the one that renders, and what `set gpu=auto\|display\|integrated\|discrete\|<device>` would pick ([GPU.md](GPU.md)) |

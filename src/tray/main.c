@@ -19,6 +19,7 @@
 #include <stdlib.h>
 
 #include "walpe-build-config.h"   /* WALPE_VERSION, WALPE_CODENAME: from meson.build */
+#include "common/sourceid.h"      /* --version: which tree it was built from */
 #include "tray.h"
 #include "trayids.h"
 #include "traysel.h"
@@ -1685,7 +1686,7 @@ int main (int argc, char **argv)
     }
     g_option_context_free (oc);
     if (version) {
-        g_print ("walpe-tray %s \"%s\"\n", WALPE_VERSION, WALPE_CODENAME);
+        g_print ("walpe-tray %s \"%s\" (source %s)\n", WALPE_VERSION, WALPE_CODENAME, walpe_source_id ());
         return 0;
     }
     if (export_icon) {

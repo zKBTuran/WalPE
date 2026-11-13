@@ -268,6 +268,18 @@ status_first () {
 }
 onoff () { if [ "$1" = true ]; then echo on; else echo off; fi; }
 
+# which engine is looked at: its version (its first line in the log) and the commit of the
+# source it was built from (status "source_id") - the test builds after 0.14.0 answer
+# "0.14.0" too. Said once, on the terminal and in report.txt.
+ENGINE_SAID=0
+engine_id () {          # STATUSFILE LOGFILE
+    [ "$ENGINE_SAID" = 0 ] || return 0
+    ENGINE_SAID=1
+    _ev=$(sed -n 's/.*walpe-daemon \([0-9][0-9.]*\) .* up (.*/\1/p' "$R/$2" 2> /dev/null | head -n 1)
+    _es=$(status_first "$R/$1" source_id)
+    say "the engine looked at: WalPE ${_ev:-?}, source ${_es:-not told (a build from before the engine said which source it was built from)}"
+}
+
 # ---- who runs: process ids by name, and the program that started each (its parent)
 procs_named () { LC_ALL=$CL ps -U "$(id -u)" -o pid= -o comm= 2> /dev/null | awk -v n="$1" '$2 == n { print $1 }'; }
 describe_procs () {     # NAME: a line per process "pid P, started by PARENT (pid PP)"
@@ -618,6 +630,7 @@ if [ "$DO_SOUND" = 1 ]; then
     say "== sound"
     if start_debug_daemon daemon-sound.txt; then
         run status-start.json "$CTL" status
+        engine_id status-start.json daemon-sound.txt
         run gpu.json "$CTL" gpu --json
         try_diag diag-sound.txt
         WVER=$(sed -n 's/.*walpe-daemon \([0-9][0-9.]*\) .* up (.*/\1/p' "$R/daemon-sound.txt" | head -n 1)
@@ -722,6 +735,7 @@ if [ "$DO_WL" = 1 ]; then
     if start_debug_daemon daemon-wayland.txt wayland; then
         run backend.txt "$CTL" backend
         run status-wayland-start.json "$CTL" status
+        engine_id status-wayland-start.json daemon-wayland.txt
         [ -f "$R/gpu.json" ] || run gpu.json "$CTL" gpu --json
         try_diag diag-wayland-start.txt
         pause "Put a VIDEO wallpaper on (WalPE window, or: $CTL open <video file>) and wait until it should play"
