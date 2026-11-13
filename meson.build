@@ -844,8 +844,8 @@ test('webhost-select', executable('webhost-select-test', 'tests/webhost_select_t
 
 # the background of a page's view (src/engine/webbg.h): see-through, and
 # opaque black with the WebKitGTK releases that wipe what a page did not
-# repaint from the frame of a see-through view (2.53.1 - 2.54.2);
-# WALPE_WEB_OPAQUE. Pure.
+# repaint from the frame of a see-through view (2.53.1 - 2.54.2), unless
+# frames are WebKit snapshots; WALPE_WEB_OPAQUE. Pure.
 test('webbg', executable('webbg-test', 'tests/webbg_test.c',
   include_directories: inc,
   dependencies: [glib],

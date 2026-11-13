@@ -1,7 +1,8 @@
 /* webbg_test.c - the background of a page's view by WebKitGTK version
  * (src/engine/webbg.h): see-through as ever, opaque black with the
  * releases that wipe what a page did not repaint from the frame of a
- * see-through view (2.53.1 - 2.54.2), and WALPE_WEB_OPAQUE either way.
+ * see-through view (2.53.1 - 2.54.2) - but not where frames are WebKit
+ * snapshots (WALPE_WEB_SNAPSHOT=1) -, and WALPE_WEB_OPAQUE either way.
  * Pure: no display, no GTK, no WebKit. What the picture is with each is
  * scripts/webcheck.py's (`live`, `pausedopen`). */
 #include "engine/webbg.h"
@@ -36,14 +37,28 @@ int main (void)
     };
     for (gsize i = 0; i < G_N_ELEMENTS (v); i++) {
         CHECK (web_bg_wiped_by (v[i].major, v[i].minor, v[i].micro) == v[i].opaque, "%s", v[i].what);
-        CHECK (web_bg_opaque (NULL, v[i].major, v[i].minor, v[i].micro) == v[i].opaque, "no setting: %s", v[i].what);
-        CHECK (web_bg_opaque ("", v[i].major, v[i].minor, v[i].micro) == v[i].opaque, "empty setting: %s", v[i].what);
-        CHECK (web_bg_opaque ("auto", v[i].major, v[i].minor, v[i].micro) == v[i].opaque, "another word: %s",
+        CHECK (web_bg_opaque (NULL, FALSE, v[i].major, v[i].minor, v[i].micro) == v[i].opaque, "no setting: %s",
                v[i].what);
-        CHECK (web_bg_opaque ("1", v[i].major, v[i].minor, v[i].micro), "WALPE_WEB_OPAQUE=1: %s", v[i].what);
-        CHECK (web_bg_opaque ("on", v[i].major, v[i].minor, v[i].micro), "=on: %s", v[i].what);
-        CHECK (!web_bg_opaque ("0", v[i].major, v[i].minor, v[i].micro), "WALPE_WEB_OPAQUE=0: %s", v[i].what);
-        CHECK (!web_bg_opaque ("OFF", v[i].major, v[i].minor, v[i].micro), "=OFF: %s", v[i].what);
+        CHECK (web_bg_opaque ("", FALSE, v[i].major, v[i].minor, v[i].micro) == v[i].opaque, "empty setting: %s",
+               v[i].what);
+        CHECK (web_bg_opaque ("auto", FALSE, v[i].major, v[i].minor, v[i].micro) == v[i].opaque,
+               "another word: %s", v[i].what);
+        /* frames are WebKit snapshots: nothing is wiped from those, and the
+         * opaque view makes them dear - see-through with every version */
+        CHECK (!web_bg_opaque (NULL, TRUE, v[i].major, v[i].minor, v[i].micro), "snapshots, no setting: %s",
+               v[i].what);
+        CHECK (!web_bg_opaque ("auto", TRUE, v[i].major, v[i].minor, v[i].micro), "snapshots, another word: %s",
+               v[i].what);
+        /* the setting wins, however frames are taken */
+        for (int snap = 0; snap < 2; snap++) {
+            CHECK (web_bg_opaque ("1", snap, v[i].major, v[i].minor, v[i].micro), "WALPE_WEB_OPAQUE=1: %s (%d)",
+                   v[i].what, snap);
+            CHECK (web_bg_opaque ("on", snap, v[i].major, v[i].minor, v[i].micro), "=on: %s (%d)", v[i].what, snap);
+            CHECK (!web_bg_opaque ("0", snap, v[i].major, v[i].minor, v[i].micro), "WALPE_WEB_OPAQUE=0: %s (%d)",
+                   v[i].what, snap);
+            CHECK (!web_bg_opaque ("OFF", snap, v[i].major, v[i].minor, v[i].micro), "=OFF: %s (%d)", v[i].what,
+                   snap);
+        }
     }
     if (fails) {
         fprintf (stderr, "webbg: %d check(s) failed\n", fails);

@@ -356,7 +356,10 @@ it was). A bare window manager on X11 - dwm, i3, openbox - gets the window of 0.
   keep the see-through background, nothing changes for them. `WALPE_WEB_OPAQUE=1` or `0`
   in the daemon's environment chooses by hand
   ([ENVIRONMENT.md](docs/ENVIRONMENT.md)); a daemon without this change shows right
-  pictures there with `WALPE_WEB_SNAPSHOT=1`, at the price of processor time. Found in
+  pictures there with `WALPE_WEB_SNAPSHOT=1`, at the price of processor time. With
+  `WALPE_WEB_SNAPSHOT=1` the view stays see-through with these releases too: snapshots
+  never lost anything, and of an opaque view they made a page's `requestAnimationFrame`
+  run 42 to 56 times a second where the limit was 30. Found in
   the checks on Arch with the software renderer; not seen on a desktop.
 
 ### Sound

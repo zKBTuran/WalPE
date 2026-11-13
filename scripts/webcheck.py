@@ -20,6 +20,8 @@ that into the daemon's log). Nothing of the user's is read or written.
   live      requestAnimationFrame runs at about the frame rate limit, the canvas and a
             CSS animation move on the output, and what stands still in the page stays
             in the picture while they do.
+  snapshot  the same with frames taken as WebKit snapshots (WALPE_WEB_SNAPSHOT=1 in the
+            daemon's environment): the same picture, requestAnimationFrame still at the limit.
   props     the Wallpaper Engine listener: applyUserProperties with the option values
             on load, with the changed one after `walpe-ctl setprop` (and the picture
             follows), applyGeneralProperties with the frame rate limit.
@@ -612,24 +614,24 @@ def case_start(env, W):
 
 
 # --------------------------------------------------------------------- live
-def case_live(env, W):
-    if not start(env, [("A", 1280, 720, 0, 0)], "live"):
+def case_live(env, W, what="live", extra=None):
+    if not start(env, [("A", 1280, 720, 0, 0)], what, extra=extra):
         return
     mark = env.mark()
     mon = env.mons[0]
-    if not open_page(env, W["live"], "live", "live"):
+    if not open_page(env, W["live"], "live", what):
         return
     ok, lk = shows_page(env, mon)
-    check(ok, "live: the output shows the page", lk["bad"])
+    check(ok, what + ": the output shows the page", lk["bad"])
     a = state(env, "live", fresh=True)
     time.sleep(3.0)
     b = state(env, "live", fresh=True)
     dt = (b.get("t", 0) - a.get("t", 0)) / 1000.0
     rate = (b.get("raf", 0) - a.get("raf", 0)) / dt if dt > 0 else 0
     # (the limit is 30 a second; a busy machine runs it slower, nothing runs it faster)
-    check(1 <= rate <= 36, "live: requestAnimationFrame runs, and not faster than the frame rate limit (30)",
+    check(1 <= rate <= 36, what + ": requestAnimationFrame runs, and not faster than the frame rate limit (30)",
           "%.1f a second over %.1f s" % (rate, dt))
-    note("live: requestAnimationFrame %.1f times a second (limit 30)" % rate)
+    note(what + ": requestAnimationFrame %.1f times a second (limit 30)" % rate)
     xs, bars = set(), set()
     for _ in range(8):
         f = env.display.frame(mon)
@@ -638,15 +640,28 @@ def case_live(env, W):
         time.sleep(0.25)
     xs.discard(-1)
     bars.discard(-1)
-    check(len(xs) >= 3, "live: the CSS animation moves on the output", sorted(xs))
-    check(len(bars) >= 3, "live: the canvas animation moves on the output", sorted(bars))
+    check(len(xs) >= 3, what + ": the CSS animation moves on the output", sorted(xs))
+    check(len(bars) >= 3, what + ": the canvas animation moves on the output", sorted(bars))
     # a frame of the page is the whole page, not what the page painted anew for it. (With
     # WebKitGTK 2.54 and a see-through view the frames after the third held only what had
     # moved: the quarters were black a tenth of a second after the page came up, behind
     # an animation that ran on - and the look at the page above was over by then.)
     lk = look(env, mon)
-    check(lk["ok"], "live: what stands still in the page is in the picture while the rest moves", lk["bad"])
-    healthy(env, mark, "live")
+    check(lk["ok"], what + ": what stands still in the page is in the picture while the rest moves", lk["bad"])
+    healthy(env, mark, what)
+
+
+def case_snapshot(env, W):
+    """the live page with frames taken as WebKit snapshots (WALPE_WEB_SNAPSHOT=1): the same picture, and
+    the page's requestAnimationFrame still at the frame rate limit. (With WebKitGTK 2.54 and the opaque
+    view that the frame path needs there, snapshots - asked for with a transparent background - ran it 42
+    to 56 times a second where the limit was 30: the view stays see-through with snapshots. A machine
+    that is busy enough runs it below the limit either way, so what the daemon says of the view is looked
+    at as well.)"""
+    mark = env.mark()
+    case_live(env, W, "snapshot", {"WALPE_WEB_SNAPSHOT": "1"})
+    said = [ln for ln in env.since(mark).splitlines() if "view is opaque black" in ln]
+    check(not said, "snapshot: the page's view is see-through, whatever the WebKitGTK version is", said[:2])
 
 
 # -------------------------------------------------------------------- props
@@ -1895,7 +1910,8 @@ def case_sound(env, W):
     healthy(env, mark, "sound")
 
 
-CASES = [("start", case_start), ("live", case_live), ("props", case_props), ("audio", case_audio),
+CASES = [("start", case_start), ("live", case_live), ("snapshot", case_snapshot), ("props", case_props),
+         ("audio", case_audio),
          ("pointer", case_pointer), ("two", case_two), ("outputs", case_outputs), ("pause", case_pause),
          ("pausedopen", case_pausedopen), ("firstsecond", case_firstsecond),
          ("mixedpause", case_mixedpause),

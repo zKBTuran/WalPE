@@ -3896,11 +3896,13 @@ static gboolean sh_create_real (WebShared *sh)
     {   /* see-through where the page paints nothing, unless this WebKit
          * loses the rest of the page with that (webbg.h) */
         static gboolean said;
-        gboolean opaque = web_bg_opaque (g_getenv ("WALPE_WEB_OPAQUE"), webkit_get_major_version (),
-                                         webkit_get_minor_version (), webkit_get_micro_version ());
+        gboolean opaque = web_bg_opaque (g_getenv ("WALPE_WEB_OPAQUE"), use_snapshots (),
+                                         webkit_get_major_version (), webkit_get_minor_version (),
+                                         webkit_get_micro_version ());
         webkit_web_view_set_background_color (sh->view, &(GdkRGBA) { 0, 0, 0, opaque ? 1 : 0 });
-        if (!said && opaque != web_bg_wiped_by (webkit_get_major_version (), webkit_get_minor_version (),
-                                               webkit_get_micro_version ())) {
+        /* (what it is without the setting) */
+        if (!said && opaque != web_bg_opaque (NULL, use_snapshots (), webkit_get_major_version (),
+                                              webkit_get_minor_version (), webkit_get_micro_version ())) {
             g_message ("web: WALPE_WEB_OPAQUE: the background of a page's view is %s",
                        opaque ? "opaque black" : "see-through");
         } else if (!said && opaque) {
