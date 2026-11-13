@@ -128,8 +128,10 @@ gboolean walpe_jpeg_file_coding_ok (const char *path);
  * reports the size when the picture has been decoded. FALSE refuses the
  * picture, *sw x *sh (when set) is the size it is decoded to. (An AVIF
  * whose decoder reports another size than its header's largest picture is
- * asked about a second time, with that size.) A PNG, JPEG, GIF, BMP or
- * WebP without a size in its header is not handed to a decoder.
+ * asked about a second time, with that size.) A picture without a
+ * size in its header - and an AVIF image sequence, whose pictures are as
+ * large as its data says whatever its header declares - is not handed to a
+ * decoder.
  * A JPEG that its decoder would hold whole beyond WALPE_JPEG_STORE_MAX is
  * refused as well. */
 typedef struct _GdkPixbuf GdkPixbuf;

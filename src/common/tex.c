@@ -93,15 +93,14 @@ static void tex_size_prepared (GdkPixbufLoader *ld, int w, int h, gpointer user)
  * picture's header itself (pichead.h): where gdk-pixbuf decodes through
  * glycin the answer above comes when the picture has been decoded - 829 MiB
  * and seconds in the loader process for 12000 x 12000 pixels that were then
- * dropped. type: "png", "jpeg", "webp", "gif", "bmp" (their header is in
- * one fixed place: a file without it there is one no decoder shows) or
- * "tiff" (a size this reader does not find is left to the answer above).
+ * dropped. type: "png", "jpeg", "webp", "gif", "bmp" or "tiff"; a file
+ * without a size the reader finds is one no decoder shows.
  * FALSE: not to be handed to a loader. */
 static gboolean tex_header_size_ok (const guint8 *d, gsize len, const char *type)
 {
     int w = 0, h = 0;
     if (!walpe_pichead_size (type, d, len, &w, &h))
-        return !walpe_pichead_exact (type);
+        return FALSE;
     if (tex_size_ok (w, h))
         return TRUE;
     g_warning ("texture: a picture of %d x %d pixels is not loaded (the limit is %d per "
@@ -202,7 +201,7 @@ static gboolean tex_picture_size_from_data (const guint8 *d, gsize len, const ch
         /* (too large by the header WalPE reads itself, or without one: no
          * loader is asked - tex_header_size_ok, without its log line) */
         int hw = 0, hh = 0;
-        if (walpe_pichead_size (type, d, len, &hw, &hh) ? !tex_size_ok (hw, hh) : walpe_pichead_exact (type))
+        if (!walpe_pichead_size (type, d, len, &hw, &hh) || !tex_size_ok (hw, hh))
             return FALSE;
     }
     GdkPixbufLoader *ld = gdk_pixbuf_loader_new_with_type (type, NULL);

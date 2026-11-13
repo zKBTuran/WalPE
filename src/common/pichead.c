@@ -455,22 +455,47 @@ static gboolean box_find (Src *s, guint64 from, guint64 to, const char *want, gu
 }
 
 /* AVIF: the largest "ispe" (image spatial extents) among the item
- * properties: meta > iprp > ipco. A grid's canvas has one of its own. */
+ * properties: meta > iprp > ipco. A grid's canvas has one of its own.
+ *
+ * That bounds what libheif decodes for a picture kept as an item: it holds
+ * an item's coded size to its "ispe" and a grid to its tiles before
+ * anything is decoded (run with libheif 1.23: a 9000 x 9000 item under an
+ * "ispe" of 64 x 64, a grid of 2 x 2 tiles that says 9000 x 9000 - both
+ * refused at 17 to 22 MiB). It does not bound an image sequence: a file
+ * with a "moov" box is played from its track, whose pictures are as large
+ * as the AV1 data says - with every size the file declares (ispe, tkhd,
+ * the sample entry) at 64 x 64, frames of 5000 x 5000 were decoded, and a
+ * picture of 64 x 64 handed back. So a file with a "moov" box has no size
+ * here, nor one without "ispe" (libheif decodes that one as well: seen),
+ * nor one this walk does not see whole - more than 4096 boxes on a level,
+ * or eight bytes and more at the end that are no box. */
 static gboolean avif_size (Src *s, guint64 size, int *w, int *h)
 {
-    guint64 body, end, lim;
+    guint64 body, end, lim, from = 0, mbody = 0, mend = 0;
     char type[4];
-    if (!box_find (s, 0, size, "meta", &body, &end) || end - body < 4)
+    gboolean meta = FALSE;
+    int n;
+    for (n = 0; n < 4096 && box_at (s, from, size, type, &body, &end); n++, from = end) {
+        if (!memcmp (type, "moov", 4))
+            return FALSE;
+        if (!meta && !memcmp (type, "meta", 4)) {
+            meta = TRUE;
+            mbody = body;
+            mend = end;
+        }
+    }
+    if (!meta || mend - mbody < 4 || size - from >= 8)
         return FALSE;
-    lim = end;
-    if (!box_find (s, body + 4, lim, "iprp", &body, &end))
+    lim = mend;
+    if (!box_find (s, mbody + 4, lim, "iprp", &body, &end))
         return FALSE;
     lim = end;
     if (!box_find (s, body, lim, "ipco", &body, &end))
         return FALSE;
     lim = end;
-    guint64 mw = 0, mh = 0, from = body;
-    for (int n = 0; n < 4096 && box_at (s, from, lim, type, &body, &end); n++, from = end) {
+    guint64 mw = 0, mh = 0;
+    from = body;
+    for (n = 0; n < 4096 && box_at (s, from, lim, type, &body, &end); n++, from = end) {
         guint8 b[12];
         if (memcmp (type, "ispe", 4))
             continue;
@@ -479,6 +504,8 @@ static gboolean avif_size (Src *s, guint64 size, int *w, int *h)
         mw = MAX (mw, be32 (b + 4));
         mh = MAX (mh, be32 (b + 8));
     }
+    if (lim - from >= 8)
+        return FALSE;
     return dims_set (mw, mh, w, h);
 }
 

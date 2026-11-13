@@ -3533,6 +3533,59 @@ static void test_pichead (void)
         ph_box (a, "ftyp", (const guint8 *) "avif\0\0\0\0avifmif1", 16);
         ph_box (a, "mdat", (const guint8 *) "\0\0\0\0", 4);
         CHECK (ph_size ("avif", a->data, a->len, 0, 0));
+        {
+            /* A file without a size is not handed to a decoder: libheif decodes an AVIF
+             * without "ispe" all the same (the error is the header's, not "no loader") */
+            static const char *const avif_only[] = { "avif", NULL };
+            GError *e = NULL;
+            CHECK (walpe_picture_decode (a->data, a->len, avif_only, NULL, NULL, &e) == NULL);
+            CHECK (g_error_matches (e, G_IO_ERROR, G_IO_ERROR_INVALID_DATA));
+            g_clear_error (&e);
+            /* An image sequence - a "moov" box, in front of the "meta" box or behind it -
+             * has no size: it is played from its track, at the size of its AV1 data, whatever
+             * "ispe" says (64 x 64 here stood for frames of 9000 x 9000 on Arch) */
+            static const guint8 seq[12] = { 0, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0, 64 };
+            GByteArray *co = g_byte_array_new (), *rp = g_byte_array_new (), *me = g_byte_array_new ();
+            ph_box (co, "ispe", seq, 12);
+            ph_box (rp, "ipco", co->data, co->len);
+            g_byte_array_append (me, (const guint8 *) "\0\0\0\0", 4);
+            ph_box (me, "iprp", rp->data, rp->len);
+            g_byte_array_set_size (a, 0);
+            ph_box (a, "ftyp", (const guint8 *) "avis\0\0\0\0avifavis", 16);
+            ph_box (a, "meta", me->data, me->len);
+            const guint still = a->len;
+            CHECK (ph_size ("avif", a->data, a->len, 64, 64));
+            ph_box (a, "moov", (const guint8 *) "\0\0\0\0", 4);
+            ph_box (a, "mdat", (const guint8 *) "\0\0\0\0", 4);
+            CHECK (ph_size ("avif", a->data, a->len, 0, 0));
+            CHECK (walpe_picture_decode (a->data, a->len, avif_only, NULL, NULL, &e) == NULL);
+            CHECK (g_error_matches (e, G_IO_ERROR, G_IO_ERROR_INVALID_DATA));
+            g_clear_error (&e);
+            g_byte_array_set_size (a, 0);
+            ph_box (a, "ftyp", (const guint8 *) "avis\0\0\0\0avifavis", 16);
+            ph_box (a, "moov", (const guint8 *) "\0\0\0\0", 4);
+            ph_box (a, "meta", me->data, me->len);
+            CHECK (ph_size ("avif", a->data, a->len, 0, 0));
+            /* the file is walked to its end: up to seven bytes there are no box to any
+             * reader; eight that are none (a length past the end) could hide one */
+            g_byte_array_set_size (a, 0);
+            ph_box (a, "ftyp", (const guint8 *) "avis\0\0\0\0avifavis", 16);
+            ph_box (a, "meta", me->data, me->len);
+            g_byte_array_append (a, (const guint8 *) "\xff\xff\xff\xff\xff\xff\xff", 7);
+            CHECK (a->len == still + 7 && ph_size ("avif", a->data, a->len, 64, 64));
+            g_byte_array_append (a, (const guint8 *) "\xff", 1);
+            CHECK (ph_size ("avif", a->data, a->len, 0, 0));
+            /* and more boxes than are walked: no size */
+            g_byte_array_set_size (a, 0);
+            ph_box (a, "ftyp", (const guint8 *) "avis\0\0\0\0avifavis", 16);
+            ph_box (a, "meta", me->data, me->len);
+            for (guint k = 0; k < 4096; k++)
+                ph_box (a, "free", NULL, 0);
+            CHECK (ph_size ("avif", a->data, a->len, 0, 0));
+            g_byte_array_unref (co);
+            g_byte_array_unref (rp);
+            g_byte_array_unref (me);
+        }
         g_byte_array_unref (ipco);
         g_byte_array_unref (iprp);
         g_byte_array_unref (meta);

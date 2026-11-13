@@ -60,9 +60,14 @@ gboolean walpe_pichead_is_bigtiff (const guint8 *d, gsize len);
  * two frame headers of any kinds, not without a scan (pichead.c).
  * For "tiff" (first directory, of the classic and of the 64-bit file; of a
  * tag that is there twice the larger value; every whole-number type a
- * decoder takes), "avif" (the largest "ispe" property) and "jxl" (the codestream's
- * size header; of a container the codestream gathered from its parts) TRUE is an upper bound good for a limit, and FALSE means
- * only that this reader did not find it.
+ * decoder takes), "avif" (the largest "ispe" property) and "jxl" (the
+ * codestream's size header; of a container the codestream gathered from
+ * its parts) TRUE is an upper bound good for a limit, and the size the
+ * picture is laid out by is the loader's. FALSE: no size a limit can be
+ * held to - the file is not handed to a decoder either. Every file of
+ * these formats that a decoder shows has a size here, but one kind: an AVIF
+ * image sequence (a file with a "moov" box), whose pictures are as large
+ * as its AV1 data says whatever the file declares (pichead.c, avif_size).
  *
  * The file variant reads what it needs from the file (a JPEG's frame
  * header within the first 32 MiB, a TIFF directory wherever it is). */

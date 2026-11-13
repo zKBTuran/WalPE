@@ -2984,10 +2984,19 @@ WalpeGlTex walpe_gl_tex_from_file (const char *path)
      * and a file without it is no picture of that format. For TIFF, AVIF
      * and JPEG XL it is an upper bound - past the largest size any path
      * below decodes, the file is refused here - and the loader is asked as
-     * before for what it will hand out. */
+     * before for what it will hand out. A file of those three without a
+     * size the reader finds is not handed to a loader either: where the
+     * loader decodes through glycin the question alone is a full decode,
+     * at whatever size the data has (an AVIF image sequence, an AVIF
+     * without "ispe": pichead.c). */
     gboolean sized = kind && walpe_pichead_file_size (kind, path, &iw, &ih);
-    if (kind && !walpe_pichead_exact (kind)) {
-        if (sized && (gint64) iw * ih > max_side * max_side) {
+    if (kind && !sized && !walpe_pichead_exact (kind)) {
+        g_warning ("texture %s: not loaded, its %s header does not say how large the picture is%s",
+                   walpe_log_str (path), kind, !strcmp (kind, "avif") ? " (or it is an image sequence)" : "");
+        return out;
+    }
+    if (sized && !walpe_pichead_exact (kind)) {
+        if ((gint64) iw * ih > max_side * max_side) {
             g_warning ("texture %s: %d x %d pixels is too large to load", walpe_log_str (path), iw, ih);
             return out;
         }

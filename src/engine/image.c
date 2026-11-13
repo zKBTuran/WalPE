@@ -143,10 +143,12 @@ static int picture_file (const char *path, PictureFile *pf, GError **err)
         return -1;
     }
     gboolean sized = walpe_pichead_file_size (pf->kind, path, &pf->w, &pf->h);
-    if (!walpe_pichead_exact (pf->kind)) {
+    if (sized && !walpe_pichead_exact (pf->kind)) {
         /* TIFF, AVIF, JPEG XL: the header's size is an upper bound (past the
-         * limits: refused before a decoder runs), the loader's the size */
-        if (sized && !picture_dims_ok (pf->w, pf->h, err))
+         * limits: refused before a decoder runs), the loader's the size.
+         * Without a size in the header the loader is not asked: its answer
+         * may be a full decode (0 below: the texture loader's to refuse) */
+        if (!picture_dims_ok (pf->w, pf->h, err))
             return -1;
         sized = walpe_gl_picture_file_size (path, pf->kind, &pf->w, &pf->h);
     }
