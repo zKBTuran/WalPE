@@ -163,7 +163,11 @@ it was). A bare window manager on X11 - dwm, i3, openbox - gets the window of 0.
   or real monitor: whoever tries it, please say how it went with a monitor switched off
   and on, unplugged, another resolution, scale and rotation
   ([WAYLAND.md](docs/WAYLAND.md)). X11 is unchanged: a build without the Wayland backend
-  has none of this code.
+  has none of this code. (Found in review and repaired before any release: with the
+  setting on, a monitor that went and came back kept the names of its last one or two
+  wallpapers in memory, some tens of bytes each time, and for the first moments on its
+  new output it could have been taken for a monitor whose render thread does not come
+  back from a load, which restarts the daemon.)
 - A monitor that got no wallpaper surface when the daemon started is tried again. A
   compositor that was not ready to show wallpapers yet - river 0.4 and later before its
   window manager is connected, a session still starting - left the daemon running with an
@@ -195,15 +199,19 @@ it was). A bare window manager on X11 - dwm, i3, openbox - gets the window of 0.
   set in its configuration only) the pointer changed its look and size when it came onto
   such a wallpaper (64 instead of 24 pixels in the test). On a compositor without that
   protocol nothing changes. `WALPE_WL_IGNORE=wp_cursor_shape_manager_v1` gives the old
-  way; `walpe-ctl status` (`wl_cursor`) says which one is in use.
+  way; `walpe-ctl status` (`wl_cursor`) says which one is in use. For those who build: the
+  Wayland backend still builds on a system without libwayland-cursor (the library is
+  optional; the first version of this entry did not compile there, found in review).
 - A compositor that goes away could take the daemon with it by a crash (SIGSEGV in
   `eglSwapBuffers`) instead of the orderly end, or the restart with `wayland_reconnect`:
   for the moment it takes the main thread to stop them, the render threads went on
   presenting frames on the connection that was gone, and Mesa's software renderer (26.2,
   llvmpipe) does not always survive that. Seen twice in some three hundred lost
   compositors (KWin 6.8.2, headless). A render thread now presents nothing once the
-  connection is known to be gone. Not seen with a GPU driver; the code was the same in
-  0.14.0.
+  connection is known to be gone - neither a wallpaper's frames nor the two frames that
+  are not a wallpaper's: the black one after a wallpaper that could not be loaded, and
+  the one drawn when a monitor's wallpaper is taken away. Not seen with a GPU driver; the
+  code was the same in 0.14.0.
 - `wayland_reconnect`, three faults of a daemon that waits for its compositor. Under
   `kwin_wayland_wrapper` the socket stays while `kwin_wayland` is started again, so the
   daemon was connected at once and gave up when no answer came within 10 seconds, whatever
