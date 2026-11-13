@@ -37,8 +37,8 @@ walpe-ctl  (src/ctl/)        command line client of the control socket
 walpe-tray (src/tray/)       tray icon (XEmbed + StatusNotifierItem), own process
 scripts/                     walpe-gpu-report.sh, walpe-collect.sh (installed); the end-to-end tests' harness:
                              displayenv.py, checkenv.py, lifecheck.py, waylandcheck.py, rescheck.py,
-                             scenevideocheck.py, webcheck.py, wlsilentcheck.py, wlwaitcheck.py,
-                             kwincheck.py, gnomecheck.py (GNOME Shell)
+                             scenevideocheck.py, lowdiskcheck.py, webcheck.py, wlsilentcheck.py,
+                             wlwaitcheck.py, kwincheck.py, gnomecheck.py (GNOME Shell)
 contrib/gnome/               the extension for GNOME Shell (JavaScript; no build installs it)
 protocols/                   Wayland protocol descriptions (third-party, see Licence)
 cross/                       meson cross files for aarch64 (compiler, sysroot, emulator)
@@ -86,6 +86,7 @@ directory; nothing of your session is read, written or disturbed:
 | Test | Display | Checks |
 |---|---|---|
 | `daemon-life`, `sec-daemon`, `daemon-resolution`, `daemon-scene-video`, `websec`, `websec-private` | `Xvfb` | loads, reloads, the restart in place; what the daemon trusts on the local machine; render resolution; a scene's video played from a converted copy; a hostile web wallpaper, on the X11 page host and on the private one |
+| `daemon-lowdisk` | `Xvfb`, and a tmpfs it mounts | a video's sound track on a disk that runs out of room (`scripts/lowdiskcheck.py`): the floor `WALPE_CONVERT_FREE_MB` crossed while ffmpeg runs, the next start with room, a disk that fills up, less than the floor before anything begins. Mounts a tmpfs of 32 MiB as the private cache's video folder: as root directly, otherwise in a user namespace of its own (`unshare`); skipped with a line that says why where neither is allowed |
 | `web-x11` | `Xvfb` | real pages in WebKitGTK on the X11 page host (`scripts/webcheck.py`): the picture, animation (also with `WALPE_WEB_SNAPSHOT=1`), the Wallpaper Engine listeners, pointer input, pause and resume with the page's CPU time, a page opened while everything is paused, restarts, a page process that dies, popups and choosers, network access off |
 | `daemon-life-wayland`, `sec-daemon-wayland` | headless sway | the same cases on Wayland; the two of `daemon-life` that change the monitor layout are skipped there (the next row does that with real outputs) |
 | `daemon-wayland-silent` | none | a compositor socket that accepts the connection and never answers: the daemon gives up after ten seconds (`scripts/wlsilentcheck.py`) |

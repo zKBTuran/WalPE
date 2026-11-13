@@ -2022,6 +2022,25 @@ if lifecheck_py.found() and have_x11
       depends: [daemon, ctl, video_mod],
       is_parallel: false,
       timeout: 900)
+    # a video's sound track on a disk that runs out of room, through a real
+    # daemon (scripts/lowdiskcheck.py: own Xvfb, private XDG dirs, sound into
+    # the null device): the cache's video folder is a tmpfs of 32 MiB, the
+    # clip ten minutes of noise. The floor of free disk
+    # (WALPE_CONVERT_FREE_MB) is crossed while ffmpeg runs - ffmpeg ends, no
+    # ".part", no track, one line, the daemon and the video stay; the next
+    # start with room takes the track out; a disk that is simply full
+    # (ffmpeg's own error); less than the floor before anything begins.
+    # Needs to mount that tmpfs: done as root, or in a user namespace of the
+    # check's own (unshare). Skipped (77), with a line that says why, where
+    # neither is allowed, and without Xvfb or an ffmpeg program that has
+    # -readrate.
+    test('daemon-lowdisk', lifecheck_py,
+      args: ['-I', meson.current_source_dir() / 'scripts/lowdiskcheck.py',
+             '--build', meson.current_build_dir()],
+      env: ['WALPE_BACKEND=x11'],
+      depends: [daemon, ctl, video_mod],
+      is_parallel: false,
+      timeout: 600)
   endif
 endif
 
