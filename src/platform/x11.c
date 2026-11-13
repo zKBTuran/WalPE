@@ -77,7 +77,7 @@ static struct {
     gpointer user;
     gboolean windowed;       /* --windowed */
     gboolean probe;          /* a test child: one connection, no events */
-    gboolean has_wm;         /* EWMH manager present (checked at startup) */
+    gboolean has_wm;         /* EWMH manager present (at start-up, and when one came or went) */
     GPtrArray *surfs;        /* X11Surface *: the wallpaper windows, in creation order */
     gboolean fs_active;      /* fullscreen window has focus */
     Window fs_win;           /* that window (None while fs_active is off) */
@@ -1228,6 +1228,7 @@ static void wm_look (void)
 {
     gboolean present = FALSE;
     char *name = wm_name_read (&present);
+    X.has_wm = present;     /* ("wm=yes" of walpe-ctl diag) */
     const gboolean managed = walpe_x11_win_managed (X.win_mode, name);
     const gboolean changed = managed != X.managed || g_strcmp0 (name, X.wm_name) != 0;
     g_free (X.wm_name);

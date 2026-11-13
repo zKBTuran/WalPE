@@ -3249,6 +3249,8 @@ def case_desktop(env, W):
         ok = wait_for(lambda: kind()[0] == "override" and flags() == [True, True], 10, 0.1)
         check(bool(ok), "desktop: the window manager gone: the same windows are override-redirect again",
               (kind(), flags()))
+        text = (env.ipc({"cmd": "diag"}) or {}).get("text") or ""
+        check("window system: wm=no" in text, "desktop: ... walpe-ctl diag says wm=no", text[:400])
         check(is_red(colour_is(env, A, is_red)) and is_red(colour_is(env, B, is_red)),
               "desktop: ... and show the scene", (rc.name_of(env.colour(A)), rc.name_of(env.colour(B))))
         check(all(w in ours for w in xc.lowest(2)), "desktop: ... as the lowest windows of the root",
@@ -3258,6 +3260,11 @@ def case_desktop(env, W):
         time.sleep(1.5 * PATIENCE)
         check(kind() == ("override", "dwm") and flags() == [True, True],
               "desktop: a window manager named dwm: override-redirect, as without one", (kind(), flags()))
+        # (a window manager that came after the daemon - walpe-daemon started before dwm in
+        # ~/.xinitrc - was "wm=no" in walpe-ctl diag for as long as the daemon ran)
+        text = (env.ipc({"cmd": "diag"}) or {}).get("text") or ""
+        check("window system: wm=yes" in text, "desktop: ... and walpe-ctl diag says wm=yes of a "
+              "window manager that came while the daemon ran", text[:400])
         # GNOME's
         xc.window_manager("GNOME Shell")
         ok = wait_for(lambda: kind() == ("managed", "GNOME Shell") and flags() == [False, False], 10, 0.1)
