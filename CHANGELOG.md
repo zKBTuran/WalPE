@@ -361,6 +361,22 @@ it was). A bare window manager on X11 - dwm, i3, openbox - gets the window of 0.
   never lost anything, and of an opaque view they made a page's `requestAnimationFrame`
   run 42 to 56 times a second where the limit was 30. Found in
   the checks on Arch with the software renderer; not seen on a desktop.
+- The frame rate limit holds with a WebKitGTK that has no display throttle of its own
+  (2.48.1: Alpine Linux 3.24). For a limit that divides 60 the daemon leaves the rate of
+  a page's `requestAnimationFrame` to WebKit's throttle; that WebKitGTK has none, and the
+  page ran at 60 a second whatever the limit (52.6 a second measured where the limit was
+  30: twice the frames anybody saw). With a WebKitGTK older than 2.52 the limit is now
+  kept by WalPE's script, which has always kept the limits that do not divide 60 (24,
+  25, 40, 50): 29.3 a second after. With 2.52 and newer nothing changes for 30, 20, 15.
+- Under a limit that script keeps, a page's `requestAnimationFrame` callbacks are called
+  by WebKit, each in a frame that is due, and no longer from a loop of the script. A
+  page could tell: `this` in a callback was not the window, an error a callback threw
+  reached `window.onerror` as "Script error." without message, file and line, and
+  `requestAnimationFrame(null)` failed a frame later instead of throwing a TypeError
+  where it is called. And `walpe-ctl set fps=N` while a page runs now reaches the frames
+  inside the page (an `<iframe>` of the page's own origin kept the old limit until the
+  page was loaded again; a frame of another origin has the limit the page was created
+  with, as before).
 
 ### Sound
 
@@ -765,6 +781,15 @@ microphone.
 - `walpe-collect --help` says how the installed command is called (it printed `sh
   walpe-collect.sh`), and the two messages of the video import about a missing ffmpeg or
   H.264 encoder no longer answer with a Gentoo command alone.
+- WalPE builds and runs with musl as the C library (Alpine Linux 3.24, in a chroot). The
+  build stopped at `malloc_trim` and `mallopt`, which are glibc's (`WALPE_MALLOC_MMAP_MB`
+  is not read in a build for another C library), and the programs are linked so that a
+  thread has the 8 MiB of stack it has with glibc: with musl's 128 KiB a wallpaper
+  script that calls itself without end ended the daemon with a segmentation fault where
+  it gets "stack overflow" as an error. Nothing changes in a build for glibc.
+  [BUILDING.md](docs/BUILDING.md) has sections for Debian 13 and for Alpine Linux: the
+  packages, and what was run there - each in a chroot on the software renderer, neither
+  on a machine.
 
 ### Log and bug reports
 
