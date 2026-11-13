@@ -2782,11 +2782,22 @@ static const char *WE_API_JS =
  * limit below that a page drew frames nobody saw. lim = the limit, nat =
  * the rate WebKit itself runs at when the daemon knows it (0 = not known).
  * While lim >= nat the page gets WebKit's own requestAnimationFrame,
- * untouched. Below it callbacks are collected and run from a native frame
- * when a period of 1/lim has passed (periods counted from when a frame
- * was due, so the average rate is the limit): same order, same time
- * stamp argument, cancelAnimationFrame works, a throwing callback does not
- * stop the others. __walpeRaf(n) sets the limit (walpe-ctl set fps=N).
+ * untouched. Below it every callback is handed to WebKit's own
+ * requestAnimationFrame behind a function that calls it in a native frame
+ * at which a period of 1/lim has passed (periods counted from when a frame
+ * was due, so the average rate is the limit) and asks again in every
+ * other: same order, same time stamp argument, cancelAnimationFrame works.
+ * WebKit is what calls the page's function, one native callback each, so
+ * everything else is WebKit's too: "this" is the window (undefined in
+ * strict code), a callback that throws does not stop the others and its
+ * error reaches window.onerror and the console with its message and its
+ * place, something that is not a function is the TypeError of the call.
+ * (Until 0.14 the callbacks of a frame were run from one loop of this
+ * script: "this" was the script's own record of the callback, an error
+ * was caught and thrown again from a timer, which made it a "Script
+ * error." without message, file or line for the page - the script is not
+ * of the page's origin - and null was taken and failed later.)
+ * __walpeRaf(n) sets the limit (walpe-ctl set fps=N).
  *
  * WebKit's own throttle (WEBKIT_DISPLAY_REFRESH_THROTTLE_FPS, which the
  * daemon sets for a limit that divides 60) counts as its rate only in a
@@ -2813,16 +2824,15 @@ static char *raf_limit_js (int lim)
         "(function(){var lim=%d,nat=%d,nr=window.requestAnimationFrame,nc=window.cancelAnimationFrame;"
         "if(!nr||!nc)return;nr=nr.bind(window);nc=nc.bind(window);"
         "try{if(window.top!==window&&window.top.__walpeRaf)lim=window.top.__walpeRaf();}catch(e){}"
-        "var q=[],cur=null,pend=0,due=0,nid=1e9;"
-        "function pump(t){pend=0;var iv=1000/lim;"
-        "if(!(lim>0)||t>=due-1.5){due=(t-due>iv)?t+iv:due+iv;cur=q;q=[];"
-        "for(var i=0;i<cur.length;i++){var c=cur[i];if(!c)continue;cur[i]=null;"
-        "try{c.f(t);}catch(e){(function(x){setTimeout(function(){throw x;},0);})(e);}}cur=null;}"
-        "if(q.length&&!pend)pend=nr(pump);}"
-        "function raf(f){if(!(lim>0)||(nat>0&&lim>=nat))return nr(f);"
-        "var id=++nid;q.push({id:id,f:f});if(!pend)pend=nr(pump);return id;}"
-        "function caf(id){if(id>1e9){var i;for(i=0;i<q.length;i++)if(q[i]&&q[i].id===id)q[i]=null;"
-        "if(cur)for(i=0;i<cur.length;i++)if(cur[i]&&cur[i].id===id)cur[i]=null;return;}return nc(id);}"
+        "var m={},ft=-1,go=false,due=0,nid=1e9;"
+        /* is the native frame with time stamp t one for the page? Decided
+         * once per frame, by the first callback WebKit runs in it */
+        "function hit(t){if(t!==ft){ft=t;var iv=1000/lim;go=!(lim>0)||t>=due-1.5;"
+        "if(go)due=(t-due>iv)?t+iv:due+iv;}return go;}"
+        "function raf(f){if(!(lim>0)||(nat>0&&lim>=nat)||typeof f!=='function')return nr(f);"
+        "var id=++nid;function w(t){if(hit(t)){delete m[id];f(t);}else m[id]=nr(w);}"
+        "m[id]=nr(w);return id;}"
+        "function caf(id){if(id>1e9){if(m[id]){nc(m[id]);delete m[id];}return;}return nc(id);}"
         "window.requestAnimationFrame=raf;window.cancelAnimationFrame=caf;"
         "if(window.webkitRequestAnimationFrame)window.webkitRequestAnimationFrame=raf;"
         "if(window.webkitCancelAnimationFrame)window.webkitCancelAnimationFrame=caf;"

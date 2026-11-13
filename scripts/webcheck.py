@@ -22,6 +22,14 @@ that into the daemon's log). Nothing of the user's is read or written.
             in the picture while they do.
   snapshot  the same with frames taken as WebKit snapshots (WALPE_WEB_SNAPSHOT=1 in the
             daemon's environment): the same picture, requestAnimationFrame still at the limit.
+  raflimit  a frame rate limit that is not WebKit's own rate or a part of it (24 of
+            60): the page's requestAnimationFrame is paced by WalPE's script. It runs at
+            about the limit, and the page's functions are called as WebKit calls them:
+            `this` is the window (undefined in strict code), the callbacks of one frame
+            get the same time stamp in the order they were asked for, a cancelled one
+            is not run, one that throws does not stop the next and its error reaches
+            window.onerror with its message, requestAnimationFrame(null) is a
+            TypeError where it is called.
   props     the Wallpaper Engine listener: applyUserProperties with the option values
             on load, with the changed one after `walpe-ctl setprop` (and the picture
             follows), applyGeneralProperties with the frame rate limit.
@@ -662,6 +670,76 @@ def case_snapshot(env, W):
     case_live(env, W, "snapshot", {"WALPE_WEB_SNAPSHOT": "1"})
     said = [ln for ln in env.since(mark).splitlines() if "view is opaque black" in ln]
     check(not said, "snapshot: the page's view is see-through, whatever the WebKitGTK version is", said[:2])
+
+
+# ----------------------------------------------------------------- raflimit
+RAF_LIMIT = 24      # not 60 and no part of it: no WebKit paces this by itself
+RAFPAGE = """<!doctype html><html><head><meta charset="utf-8"></head><body style="background:#203040">
+<script>
+var S = {raf: 0, errs: [], done: false}, ts = [], c = [0, 0, 0], late;
+window.addEventListener('error', function (e) { S.errs.push(String(e.message)); });
+function loop() { S.raf++; requestAnimationFrame(loop); }
+requestAnimationFrame(loop);
+requestAnimationFrame(function () { S.self = this === window; });
+requestAnimationFrame(function () { 'use strict'; S.strict = this === undefined; });
+[0, 1, 2].forEach(function (i) { requestAnimationFrame(function (t) { ts.push([i, t]); }); });
+var gone = requestAnimationFrame(function () { c[0]++; });
+cancelAnimationFrame(gone);
+requestAnimationFrame(function () { c[1]++; cancelAnimationFrame(late); });
+late = requestAnimationFrame(function () { c[2]++; });
+requestAnimationFrame(function () { throw new Error('wc-throw'); });
+requestAnimationFrame(function () { S.after = true; });
+try { requestAnimationFrame(null); S.nul = 'taken'; } catch (e) { S.nul = e.name; }
+function say() {
+  S.t = Math.round(performance.now()); S.cancel = c; S.order = ts.map(function (x) { return x[0]; }).join('');
+  S.same = ts.length === 3 && typeof ts[0][1] === 'number' && ts[0][1] === ts[1][1] && ts[1][1] === ts[2][1];
+  console.log('WCraf ' + JSON.stringify(S));
+}
+setTimeout(function () { S.done = true; say(); setInterval(say, 500); }, 1000);
+</script></body></html>
+"""
+
+
+def gen_rafpage(out):
+    os.makedirs(out)
+    rc.jdump(os.path.join(out, "project.json"), {"type": "web", "title": "webcheck raf", "file": "index.html"})
+    with open(os.path.join(out, "index.html"), "w") as f:
+        f.write(RAFPAGE)
+
+
+def case_raflimit(env, W):
+    if not start(env, [("A", 1280, 720, 0, 0)], "raflimit", config={"fps": RAF_LIMIT}):
+        return
+    mark = env.mark()
+    env.open(W["raf"])
+    st = wait_state(env, "raf", lambda s: s.get("done"), 90, mark)
+    if not check(bool(st.get("done")), "raflimit: the page loaded and said so", web_status(env)):
+        return
+    a = state(env, "raf", fresh=True)
+    time.sleep(3.0)
+    b = state(env, "raf", fresh=True)
+    dt = (b.get("t", 0) - a.get("t", 0)) / 1000.0
+    rate = (b.get("raf", 0) - a.get("raf", 0)) / dt if dt > 0 else 0
+    # (a busy machine runs it slower, nothing runs it faster; 30 would be WebKit's own step)
+    check(1 <= rate <= RAF_LIMIT * 1.15,
+          "raflimit: requestAnimationFrame runs, and not faster than the frame rate limit (%d)" % RAF_LIMIT,
+          "%.1f a second over %.1f s" % (rate, dt))
+    note("raflimit: requestAnimationFrame %.1f times a second (limit %d)" % (rate, RAF_LIMIT))
+    check(b.get("self") is True and b.get("strict") is True,
+          "raflimit: a callback's `this` is the window, and undefined in strict code",
+          (b.get("self"), b.get("strict")))
+    check(b.get("same") is True and b.get("order") == "012",
+          "raflimit: the callbacks of one frame get one time stamp, in the order they were asked for",
+          (b.get("same"), b.get("order")))
+    check(b.get("cancel") == [0, 1, 0],
+          "raflimit: a cancelled callback is not run (cancelled before the frame, and from a callback before it)",
+          b.get("cancel"))
+    check(b.get("after") is True and any("wc-throw" in e for e in b.get("errs") or []),
+          "raflimit: a callback that throws does not stop the next, and the page gets its error with the message",
+          (b.get("after"), b.get("errs")))
+    check(b.get("nul") == "TypeError", "raflimit: requestAnimationFrame(null) is a TypeError where it is called",
+          b.get("nul"))
+    healthy(env, mark, "raflimit")
 
 
 # -------------------------------------------------------------------- props
@@ -1910,8 +1988,8 @@ def case_sound(env, W):
     healthy(env, mark, "sound")
 
 
-CASES = [("start", case_start), ("live", case_live), ("snapshot", case_snapshot), ("props", case_props),
-         ("audio", case_audio),
+CASES = [("start", case_start), ("live", case_live), ("snapshot", case_snapshot), ("raflimit", case_raflimit),
+         ("props", case_props), ("audio", case_audio),
          ("pointer", case_pointer), ("two", case_two), ("outputs", case_outputs), ("pause", case_pause),
          ("pausedopen", case_pausedopen), ("firstsecond", case_firstsecond),
          ("mixedpause", case_mixedpause),
@@ -1984,7 +2062,7 @@ def main():
             return 2
         wp = os.path.join(env.tmp, "wallpapers")
         W = {k: os.path.join(wp, k) for k in ("still", "live", "other", "widgets", "clip", "offline", "intro",
-                                              "sound")}
+                                              "sound", "raf")}
         gen_page(W["still"], "still", False)
         gen_page(W["live"], "live", True)
         gen_page(W["other"], "other", False)
@@ -1992,6 +2070,7 @@ def main():
         gen_clip(W["clip"])
         gen_intro(W["intro"])
         gen_sound(W["sound"])
+        gen_rafpage(W["raf"])
         if not env.start_x(1280, 720):
             print("webcheck: skipped (the %s display did not start)" % display)
             if display == "sway":
