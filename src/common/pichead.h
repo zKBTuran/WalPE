@@ -73,7 +73,8 @@ gboolean walpe_pichead_exact (const char *kind);
 /* A TGA file by its 18-byte header: one of the picture types and depths
  * gdk-pixbuf's TGA decoder takes (colour-mapped 8 bit, true colour 16 / 24 /
  * 32, grey 8 / 16, plain or run-length coded; not interleaved; a colour map
- * of 15, 16, 24 or 32 bits an entry; a colour-mapped picture has a map).
+ * of 15, 16, 24 or 32 bits an entry; a colour-mapped picture has a map),
+ * and true colour of 15 bits, which the decoder behind glycin takes.
  *
  * head = the header a decoder is given in place of the file's: for a
  * true-colour or grey picture without the colour map (unused there) and

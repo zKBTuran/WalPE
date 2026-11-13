@@ -3653,7 +3653,6 @@ static void test_pichead (void)
         CHECK (!walpe_tga_head (m, 18, &tga));
         static const guint8 bad[][18] = {
             { 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 3, 0, 0, 0 },        /* no bits a pixel (a cursor's header) */
-            { 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 3, 0, 15, 0 },
             { 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 3, 0, 24, 0 },       /* no picture type */
             { 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 24, 0 },       /* no width */
             { 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 3, 0, 24, 0x40 },    /* interleaved */
@@ -3661,6 +3660,15 @@ static void test_pichead (void)
         };
         for (guint i = 0; i < G_N_ELEMENTS (bad); i++)
             CHECK (!walpe_tga_head (bad[i], 18, NULL));
+        /* true colour of 15 bits: a TGA header (the decoder behind glycin shows the
+         * picture, and showed it as a layer before the header was looked at here;
+         * gdk-pixbuf's own decoder refuses it, as it did) */
+        static const guint8 t15[18 + 24] = { 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 3, 0, 15, 0x20 };
+        CHECK (walpe_tga_head (t15, 18, &tga) && tga.w == 4 && tga.h == 3 && !tga.changed);
+        mkfile ("pichead/fifteen.tga", t15, sizeof t15);
+        char *f15 = P ("pichead/fifteen.tga");
+        CHECK (!g_strcmp0 (walpe_pichead_file_kind (f15, NULL), "tga"));
+        g_free (f15);
     }
 
     /* 6. a file's format: the bytes; the name only for which TGA header is one, and for a 64-bit TIFF */

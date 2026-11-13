@@ -73,7 +73,10 @@ gboolean walpe_tga_head (const guint8 *d, gsize len, WalpeTga *t)
     const int w = d[12] | (d[13] << 8), h = d[14] | (d[15] << 8);
     const gboolean mapped = type == 1 || type == 9, colour = type == 2 || type == 10,
                    grey = type == 3 || type == 11;
-    if (!(mapped ? bpp == 8 : colour ? bpp == 16 || bpp == 24 || bpp == 32
+    /* (15 bits: no depth gdk-pixbuf's own TGA decoder takes - it refuses
+     * the file, as it did when the bytes 1 and 2 alone made a file a TGA
+     * here - and one the decoder behind glycin shows) */
+    if (!(mapped ? bpp == 8 : colour ? bpp == 15 || bpp == 16 || bpp == 24 || bpp == 32
                                      : grey && (bpp == 8 || bpp == 16)))
         return FALSE;
     if (w < 1 || h < 1 || (d[17] & 0xc0))
