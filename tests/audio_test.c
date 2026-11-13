@@ -124,12 +124,27 @@ int main (void)
      * one source the user named - never one the server chose that is no
      * monitor (PulseAudio moves a recording stream to the microphone that
      * was just plugged in when the stream sat on the default source) */
-    CHECK (walpe_audio_source_ok (TRUE, NULL));
-    CHECK (walpe_audio_source_ok (TRUE, ""));
-    CHECK (!walpe_audio_source_ok (FALSE, NULL));
-    CHECK (!walpe_audio_source_ok (FALSE, ""));
-    CHECK (walpe_audio_source_ok (FALSE, "alsa_input.usb-headset"));
-    CHECK (walpe_audio_source_ok (TRUE, "some.monitor"));
+    CHECK (walpe_audio_source_ok (TRUE, "out.monitor", NULL));
+    CHECK (walpe_audio_source_ok (TRUE, "out.monitor", ""));
+    CHECK (!walpe_audio_source_ok (FALSE, "alsa_input.usb-headset", NULL));
+    CHECK (!walpe_audio_source_ok (FALSE, "alsa_input.usb-headset", ""));
+    CHECK (walpe_audio_source_ok (FALSE, "alsa_input.usb-headset", "alsa_input.usb-headset"));
+    CHECK (walpe_audio_source_ok (TRUE, "some.monitor", "some.monitor"));
+    /* ... and the source the user named is that one, not what a session
+     * manager took instead: WirePlumber 0.5 links a stream whose target
+     * does not exist to the default source, the microphone */
+    CHECK (!walpe_audio_source_ok (FALSE, "alsa_input.pci-0000_00_1f.3.analog-stereo", "easyeffects_source"));
+    CHECK (!walpe_audio_source_ok (TRUE, "out.monitor", "easyeffects_source"));
+    CHECK (!walpe_audio_source_ok (FALSE, NULL, "easyeffects_source"));
+    CHECK (!walpe_audio_source_ok (FALSE, "some", "some.monitor"));
+    /* (pipewire-pulse: an output's name stands for its monitor) */
+    CHECK (walpe_audio_source_ok (TRUE, "some.monitor", "some"));
+    CHECK (!walpe_audio_source_ok (FALSE, "some.monitor", "some"));
+    CHECK (!walpe_audio_source_ok (TRUE, "some.monitor.monitor", "some"));
+    /* no name to compare: the default source asked for as such, a number */
+    CHECK (walpe_audio_source_ok (FALSE, "mic", "@DEFAULT_SOURCE@"));
+    CHECK (walpe_audio_source_ok (FALSE, "mic", "42"));
+    CHECK (!walpe_audio_source_ok (FALSE, "mic", "42a"));
 
     /* WALPE_NO_AUDIO: a reference starts nothing and status says why
      * (set before the first reference of this process: no sound server

@@ -39,7 +39,10 @@
  *    monitor. PulseAudio left it on the old output's monitor: the bars
  *    stood still after a switch from loudspeakers to headphones.
  * WALPE_AUDIO_SOURCE=<source name> is the user's own choice of a source,
- * a microphone included: taken as it is, never moved, not followed.
+ * a microphone included: taken as it is, never moved, not followed - and
+ * read only when the stream is on the source of that name (PipeWire's
+ * session manager links a stream whose target is missing to the default
+ * source, the microphone). The status says when it is no output's monitor.
  *
  * Analysis (best-effort match of WE's behaviour; WE does not document its
  * normalisation): 44.1 kHz stereo float, one 4096-point Hann-windowed FFT
@@ -264,9 +267,31 @@ float walpe_audio_level (const WalpeAudioSpectrum *s)
     return sum / 16.0f;
 }
 
-gboolean walpe_audio_source_ok (gboolean is_monitor, const char *chosen)
+gboolean walpe_audio_source_ok (gboolean is_monitor, const char *name, const char *chosen)
 {
-    return is_monitor || (chosen && *chosen);
+    if (!chosen || !*chosen)
+        return is_monitor;
+    /* the user's choice: read when it is the source the stream is on.
+     * PulseAudio makes no stream on a name it does not know. PipeWire's
+     * session manager does (WirePlumber 0.5.19: a stream whose target
+     * does not exist is linked to the default source), and the default
+     * source is the microphone: a name with a typing mistake, or the
+     * source of a program that has not started yet, read the room and
+     * the status said "capturing <the microphone> (WALPE_AUDIO_SOURCE)".
+     * "@DEFAULT_SOURCE@" and the like, and a source given by its number,
+     * have no name to compare */
+    gboolean number = TRUE;
+    for (const char *c = chosen; *c && number; c++)
+        number = g_ascii_isdigit (*c);
+    if (*chosen == '@' || number)
+        return TRUE;
+    if (!name)
+        return FALSE;
+    if (!strcmp (name, chosen))
+        return TRUE;
+    /* (pipewire-pulse takes an output's name for its monitor) */
+    gsize n = strlen (chosen);
+    return is_monitor && !strncmp (name, chosen, n) && !strcmp (name + n, ".monitor");
 }
 
 #ifdef HAVE_PULSE
@@ -489,21 +514,28 @@ static void cap_source_info (pa_context *ctx, const pa_source_info *i, int eol, 
     c->source = g_strdup (i->name ? i->name : "?");
     g_free (c->sink);
     c->sink = is_monitor && i->monitor_of_sink_name ? g_strdup (i->monitor_of_sink_name) : NULL;
-    if (!walpe_audio_source_ok (is_monitor, c->chosen)) {
+    if (!walpe_audio_source_ok (is_monitor, i->name, c->chosen)) {
         if (!c->failed) {
             g_free (c->why);
-            c->why = g_strdup_printf ("its source %s is not the monitor of an output (a microphone?): "
-                                      "not read. WALPE_AUDIO_SOURCE=<source> names a source to read", c->source);
+            c->why = c->chosen
+                ? g_strdup_printf ("the server put the stream on %s, which is not the source named in "
+                                   "WALPE_AUDIO_SOURCE (no source of that name?): not read", c->source)
+                : g_strdup_printf ("its source %s is not the monitor of an output (a microphone?): "
+                                   "not read. WALPE_AUDIO_SOURCE=<source> names a source to read", c->source);
         }
         c->failed = TRUE;
         return;
     }
     if (!c->checked) {
+        /* (a source the user named that is no output's monitor: said, so
+         * that a variable left in a start-up file is found again) */
+        const char *how = !c->chosen ? "" : is_monitor ? " (WALPE_AUDIO_SOURCE)"
+                          : " (WALPE_AUDIO_SOURCE; not the monitor of an output: a microphone?)";
         if (c->chosen)
-            g_message ("audio: capturing %s (WALPE_AUDIO_SOURCE)", c->source);
+            g_message ("audio: capturing %s%s", c->source, how);
         else
             g_message ("audio: capturing %s (what the output %s plays)", c->source, c->sink ? c->sink : "?");
-        set_status ("capturing %s%s", c->source, c->chosen ? " (WALPE_AUDIO_SOURCE)" : "");
+        set_status ("capturing %s%s", c->source, how);
     }
     c->checked = TRUE;
     cap_follow (c);

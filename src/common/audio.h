@@ -33,7 +33,8 @@ WALPE_API gboolean walpe_audio_get (WalpeAudioSpectrum *out);
  * started: PipeWire starts it when the output plays) | "capturing <source>"
  * (the source's name as the server gives it:
  * "<output>.monitor"; with " (WALPE_AUDIO_SOURCE)" after it when the user
- * named it) | "error: ..." | "disabled (WALPE_NO_AUDIO)" (the variable is
+ * named it, " (WALPE_AUDIO_SOURCE; not the monitor of an output: a
+ * microphone?)" when that source is no monitor) | "error: ..." | "disabled (WALPE_NO_AUDIO)" (the variable is
  * set: walpe_audio_ref starts nothing, for scenes and web pages alike) |
  * "disabled (built without libpulse)" */
 char *walpe_audio_status (void);
@@ -56,10 +57,13 @@ WALPE_API void walpe_audio_wake_cancel (void (*fn) (gpointer user), gpointer use
 /* What the capture may read (pure; the capture thread asks it for the
  * source its stream is on, and again when the server moves the stream).
  * is_monitor: the source is the monitor of an output - what the computer
- * plays. chosen: the source the user named in WALPE_AUDIO_SOURCE (NULL or
- * "" = none). Anything else - a microphone the server put the stream on -
- * is not read. */
-gboolean walpe_audio_source_ok (gboolean is_monitor, const char *chosen);
+ * plays. name: the source's name as the server gives it. chosen: the
+ * source the user named in WALPE_AUDIO_SOURCE (NULL or "" = none): then
+ * the stream has to be on that very source (its name, or the monitor of
+ * the output of that name; "@...@" and a number are taken on trust).
+ * Anything else - a microphone the server put the stream on - is not
+ * read. */
+gboolean walpe_audio_source_ok (gboolean is_monitor, const char *name, const char *chosen);
 
 /* pure analysis, exposed for tests: the last n samples of each channel
  * (n = FFT size, power of two) -> smoothed bands updated in place */

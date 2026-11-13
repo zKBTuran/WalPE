@@ -24,7 +24,13 @@
  *     default then, without an error.
  *  4b. The output that went away comes back and is the default again (a
  *     headset plugged in a second time): the capture follows once more.
- *  5. WALPE_AUDIO_SOURCE names the microphone: the user's choice is read. */
+ *  5. WALPE_AUDIO_SOURCE names the microphone: the user's choice is read,
+ *     and the status says that it is no output's monitor.
+ *  5b. WALPE_AUDIO_SOURCE names a source that does not exist: an error,
+ *     nothing is read. (What PipeWire's session manager does with such a
+ *     stream - WirePlumber 0.5 links it to the default source, the
+ *     microphone - is not in a PulseAudio server's power to show: the
+ *     rule that refuses it is in the test audio.) */
 #include "common/audio.h"
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -373,12 +379,43 @@ int main (void)
     g_usleep (3600000);
     g_setenv ("WALPE_AUDIO_SOURCE", "mic", TRUE);
     walpe_audio_ref ();
-    CHECK (status_is ("capturing mic (WALPE_AUDIO_SOURCE)", 5000), "WALPE_AUDIO_SOURCE=mic is not what is captured");
+    CHECK (status_is ("capturing mic (WALPE_AUDIO_SOURCE; not the monitor of an output: a microphone?)", 5000),
+           "WALPE_AUDIO_SOURCE=mic is not what is captured");
     speech = tone_start ("room", 5000.0);
     CHECK (hears (52, 5000), "the source named in WALPE_AUDIO_SOURCE is not heard");
     tone_stop (speech);
     walpe_audio_unref ();
     CHECK (status_is ("off", 2000), "status after the last consumer left");
+
+    /* 5b. ... and an output's monitor by name is said without the remark;
+     * a name the server does not know is an error, nothing is read. (The
+     * capture thread has ended each time, as before step 5: a reference
+     * taken at once would find the stream it had) */
+    g_usleep (3600000);
+    g_setenv ("WALPE_AUDIO_SOURCE", "out1.monitor", TRUE);
+    walpe_audio_ref ();
+    CHECK (status_is ("capturing out1.monitor (WALPE_AUDIO_SOURCE)", 5000), "WALPE_AUDIO_SOURCE=out1.monitor");
+    walpe_audio_unref ();
+    CHECK (status_is ("off", 2000), "status after the last consumer left (5b)");
+    g_usleep (3600000);
+    g_setenv ("WALPE_AUDIO_SOURCE", "no-such-source", TRUE);
+    walpe_audio_ref ();
+    {
+        gboolean err = FALSE;
+        for (int w = 0; w < 5000 && !err; w += 20) {
+            st = walpe_audio_status ();
+            err = g_str_has_prefix (st, "error: no-such-source");
+            g_free (st);
+            if (!err)
+                g_usleep (20000);
+        }
+        CHECK (err, "a source that does not exist is no error");
+        speech = tone_start ("room", 5000.0);
+        mic = most_of (52, 1000);
+        CHECK (mic == 0, "WALPE_AUDIO_SOURCE names no source, and something is read: band 52 at %.3f", (double) mic);
+        tone_stop (speech);
+    }
+    walpe_audio_unref ();
 
     cleanup ();
     if (!fails)

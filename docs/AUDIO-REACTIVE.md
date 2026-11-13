@@ -48,7 +48,10 @@ WalPE listens to **what the computer plays**: the monitor of the default output 
   disappears, WalPE makes the stream again on the monitor of the new default output.
 - Only you can point it elsewhere: `WALPE_AUDIO_SOURCE=<source name>` in the daemon's
   environment (`pactl list short sources` lists the names) makes it read that source, a
-  microphone included. Status then says `capturing <name> (WALPE_AUDIO_SOURCE)`.
+  microphone included. Status then says `capturing <name> (WALPE_AUDIO_SOURCE)`, and adds
+  `not the monitor of an output: a microphone?` when that is what was named. A name the
+  sound server does not know is an error and nothing is read (PipeWire would link such a
+  stream to the default source, the microphone: WalPE refuses what it did not ask for).
 - A wallpaper never gets samples. A scene's shaders and scripts and a web page's listener
   get the spectrum described below: 64 numbers per channel, 30 times a second. A web page
   cannot use the microphone through the browser engine either: every permission request
@@ -172,7 +175,7 @@ daemon's environment ([ENVIRONMENT.md](ENVIRONMENT.md)):
 | Variable | Effect |
 |---|---|
 | `WALPE_NO_AUDIO=1` | nothing is captured, for scenes and web pages alike: every spectrum is silence; status says `disabled (WALPE_NO_AUDIO)` |
-| `WALPE_AUDIO_SOURCE=<name>` | capture this source instead of the default output's monitor |
+| `WALPE_AUDIO_SOURCE=<name>` | capture this source instead of the default output's monitor; a name the server does not know is an error, nothing is read |
 | `WALPE_AUDIO_HZ=<10..200>` | spectra per second (30) |
 | `WALPE_AUDIO_REST=0` | audio-only scenes keep their frame clock in silence |
 | `WALPE_WEB_AUDIO_SILENCE=off\|always` | the web listener in silence (above) |
