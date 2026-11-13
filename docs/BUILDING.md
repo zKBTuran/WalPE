@@ -83,10 +83,45 @@ in that directory; `-Dc_args=-I<dir>` when its `quickjs/quickjs.h` is not on the
 compiler's include path). Whether `dev-libs/quickjs-ng`, which the Gentoo tree has today,
 can take its place is not known.
 
-At run time: `ffmpeg` and `ffprobe` for importing and converting videos, GStreamer elements
-for video inside web pages (`media-libs/gst-plugins-good`, `media-plugins/gst-plugins-vpx`
-or `media-plugins/gst-plugins-libav`; missing ones are named in `walpe-ctl status` as
-`web_missing_gst`), `steamcmd` for Workshop downloads.
+At run time: `ffmpeg` and `ffprobe` for importing and converting videos and for the sound
+track of video wallpapers, GStreamer elements for media inside web pages (below),
+`steamcmd` for Workshop downloads.
+
+### Web wallpaper sound
+
+WebKitGTK plays a page's sound and video with GStreamer, and takes the elements from
+GStreamer's plugin packages. Distributions do not all install them with WebKitGTK:
+
+| What a page needs | Element | Gentoo | Arch Linux, CachyOS | Debian, Ubuntu |
+|---|---|---|---|---|
+| a sound output at all | `autoaudiosink` | `media-libs/gst-plugins-good` | `gst-plugins-good` | `gstreamer1.0-plugins-good` |
+| PulseAudio / PipeWire output (what `libgstwalpesound.so` plays through) | `pulsesink` | `media-plugins/gst-plugins-pulse` | `gst-plugins-good` | `gstreamer1.0-plugins-good` (older releases: `gstreamer1.0-pulseaudio`) |
+| WAV, MP4, WebM / Matroska files | `wavparse`, `qtdemux`, `matroskademux` | `media-libs/gst-plugins-good` | `gst-plugins-good` | `gstreamer1.0-plugins-good` |
+| Ogg Vorbis, Opus | `oggdemux`, `vorbisdec`, `opusdec` | `media-libs/gst-plugins-base` (`ogg`, `vorbis`), `media-plugins/gst-plugins-opus` | `gst-plugins-base` | `gstreamer1.0-plugins-base` |
+| MP3 | `mpg123audiodec` or `avdec_mp3` | `media-plugins/gst-plugins-mpg123` | `gst-plugins-good` | `gstreamer1.0-plugins-good` |
+| AAC, H.264 | `avdec_aac`, `avdec_h264` | `media-plugins/gst-plugins-libav` | `gst-libav` | `gstreamer1.0-libav` |
+| VP8, VP9 | `vp8dec`, `vp9dec` (or `avdec_vp8`, `avdec_vp9`) | `media-plugins/gst-plugins-vpx` | `gst-plugins-good` or `gst-libav` | `gstreamer1.0-plugins-good` or `gstreamer1.0-libav` |
+
+Where this comes from: the Arch and Ubuntu 24.04 columns are read from the packages (which
+package owns the plugin file; on Arch `webkitgtk-6.0` lists `gst-plugins-good`,
+`gst-plugins-bad` and `gst-libav` as *optional*, and depends only on `gst-plugins-base-libs`
+and `gst-plugins-bad-libs`, which have neither `autoaudiosink` nor `pulsesink`); the row
+"a sound output at all" and the two after it were run on Arch (WebKitGTK 2.54.2,
+GStreamer 1.28.9); the Gentoo names are the ones this file had and were not checked
+against a Gentoo tree; older Debian releases were not looked at.
+
+**Without `autoaudiosink` a page with sound is not silent, it cannot be shown**: WebKitGTK
+prints "GStreamer element autoaudiosink not found. Please install it" and its page
+process ends as soon as the page loads media; WalPE loads the page again three times and
+then gives up ("web: page process crashed ... 4 times within a minute"). That is WebKitGTK's
+doing and the same in 0.14.0. On Arch Linux and CachyOS: `pacman -S gst-plugins-good
+gst-plugins-base gst-libav`.
+
+When a web wallpaper's folder has media files the daemon asks `gst-inspect-1.0` (if it is
+installed) for the elements those files and their sound need, once, in the background,
+logs each missing one with the package to install, and names them in `walpe-ctl status`
+as `web_missing_gst`. A page that makes its sound without a file in its folder (Web Audio,
+a stream) is not looked at.
 
 ## Build options
 

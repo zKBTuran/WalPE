@@ -944,8 +944,24 @@ static gboolean http_start (void)
  * media files the daemon checks the elements once (gst-inspect-1.0
  * --exists in a worker thread: GStreamer itself is never loaded into the
  * daemon) and logs exactly what is missing and which package has it. */
+#define MEDIA_ANY "any media file"
 typedef struct { const char *ext; const char *alts[3]; const char *what; const char *pkg; } MediaNeed;
 static const MediaNeed media_needs[] = {
+    /* The output WebKit asks GStreamer for when a page makes a media
+     * element or an AudioContext. Without it WebKitGTK does not go silent:
+     * its page process ends ("GStreamer element autoaudiosink not found.
+     * Please install it", then a crash; WebKitGTK 2.54.2, also in WalPE
+     * 0.14.0), the page is loaded again three times and then given up -
+     * the wallpaper cannot be shown. Arch Linux has the element in a
+     * package WebKitGTK only lists as optional. */
+    { MEDIA_ANY, { "autoaudiosink", NULL }, "the sound output WebKit asks for - without it WebKit's page process "
+      "ends when the page loads media, and the wallpaper cannot be shown;",
+      "GStreamer's \"good\" plugins (Gentoo media-libs/gst-plugins-good, Arch gst-plugins-good, Debian / Ubuntu "
+      "gstreamer1.0-plugins-good)" },
+    { MEDIA_ANY, { "pulsesink", NULL }, "the PulseAudio / PipeWire output, which libgstwalpesound.so plays through;",
+      "Gentoo media-plugins/gst-plugins-pulse, Arch gst-plugins-good, Debian / Ubuntu gstreamer1.0-plugins-good "
+      "(older releases: gstreamer1.0-pulseaudio)" },
+    { "wav", { "wavparse", NULL }, "WAV reader", "media-libs/gst-plugins-good" },
     { "webm", { "matroskademux", NULL }, "WebM/Matroska demuxer", "media-libs/gst-plugins-good" },
     { "webm", { "vp8dec", "avdec_vp8", NULL }, "VP8 decoder", "media-plugins/gst-plugins-vpx (or gst-plugins-libav)" },
     { "webm", { "vp9dec", "avdec_vp9", NULL }, "VP9 decoder", "media-plugins/gst-plugins-vpx (or gst-plugins-libav)" },
@@ -969,14 +985,24 @@ static void media_exts_scan (const char *dir, int depth, GHashTable *exts)
         } else {
             const char *dot = strrchr (n, '.');
             char *e = dot ? g_ascii_strdown (dot + 1, -1) : NULL;
+            const char *kind = NULL;
             if (e && (!strcmp (e, "mkv") || !strcmp (e, "webm")))
-                g_hash_table_add (exts, g_strdup ("webm"));
+                kind = "webm";
             else if (e && (!strcmp (e, "mp4") || !strcmp (e, "m4v") || !strcmp (e, "mov")))
-                g_hash_table_add (exts, g_strdup ("mp4"));
+                kind = "mp4";
             else if (e && (!strcmp (e, "ogg") || !strcmp (e, "ogv") || !strcmp (e, "oga")))
-                g_hash_table_add (exts, g_strdup ("ogg"));
+                kind = "ogg";
             else if (e && !strcmp (e, "mp3"))
-                g_hash_table_add (exts, g_strdup ("mp3"));
+                kind = "mp3";
+            else if (e && !strcmp (e, "wav"))
+                kind = "wav";
+            else if (e && (!strcmp (e, "flac") || !strcmp (e, "opus") || !strcmp (e, "m4a") || !strcmp (e, "aac")))
+                kind = MEDIA_ANY;
+            if (kind) {
+                g_hash_table_add (exts, g_strdup (kind));
+                /* (whatever it is: the page will ask for a sound output) */
+                g_hash_table_add (exts, g_strdup (MEDIA_ANY));
+            }
             g_free (e);
         }
         g_free (p);
@@ -1012,8 +1038,12 @@ static void media_check_thread (GTask *t, gpointer src, gpointer data, GCancella
         for (int k = 0; m->alts[k] && !ok; k++)
             ok = gst_has (m->alts[k]);
         if (!ok) {
-            g_warning ("web: GStreamer element %s missing (%s for .%s media in %s): install %s",
-                       m->alts[0], m->what, m->ext, dir, m->pkg);
+            if (!strcmp (m->ext, MEDIA_ANY))
+                g_warning ("web: GStreamer element %s missing (%s %s has media files): install %s",
+                           m->alts[0], m->what, dir, m->pkg);
+            else
+                g_warning ("web: GStreamer element %s missing (%s for .%s media in %s): install %s",
+                           m->alts[0], m->what, m->ext, dir, m->pkg);
             g_string_append_printf (miss, "%s%s", miss->len ? "," : "", m->alts[0]);
         }
     }
