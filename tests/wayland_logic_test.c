@@ -981,6 +981,14 @@ static void test_plasma_addon (void)
     }
     CHECK (strstr (wl_plasma_hint (TRUE, WL_PLASMA_ADDON_NONE), "install.sh install"));
     CHECK (strstr (wl_plasma_hint (TRUE, WL_PLASMA_ADDON_UNSELECTED), "install.sh select"));
+    /* an installed WalPE has no contrib/plasma: both lines name Plasma's own
+     * dialog, which is there on every system, and say where install.sh is;
+     * the one for "not installed" names the package as a source too */
+    CHECK (strstr (wl_plasma_hint (TRUE, WL_PLASMA_ADDON_NONE), "\"Desktop and Wallpaper\""));
+    CHECK (strstr (wl_plasma_hint (TRUE, WL_PLASMA_ADDON_UNSELECTED), "\"Desktop and Wallpaper\""));
+    CHECK (strstr (wl_plasma_hint (TRUE, WL_PLASMA_ADDON_NONE), "source tree") &&
+           strstr (wl_plasma_hint (TRUE, WL_PLASMA_ADDON_NONE), "package"));
+    CHECK (strstr (wl_plasma_hint (TRUE, WL_PLASMA_ADDON_UNSELECTED), "source tree"));
     /* the id is the package's (contrib/plasma/wallpaper/metadata.json) */
     CHECK (!strcmp (WL_PLASMA_TYPE_ID, "io.github.walpe.plasma"));
 }

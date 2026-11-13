@@ -1,13 +1,15 @@
 #!/bin/sh
-# walpe-collect.sh (version 2) - collect the facts for a WalPE bug report (written for 0.14.0).
+# walpe-collect (version 2) - collect the facts for a WalPE bug report (written for 0.14.0).
 #
-#   sh walpe-collect.sh                 everything that fits this session
-#   sh walpe-collect.sh --sound-only    only the sound part (any session)
-#   sh walpe-collect.sh --wayland-only  only the Wayland / KDE part (window, desktop, tray)
+#   walpe-collect                 everything that fits this session
+#   walpe-collect --sound-only    only the sound part (any session)
+#   walpe-collect --wayland-only  only the Wayland / KDE part (window, desktop, tray)
 #   --redact   (with any of them) before packing, replace your home path, user name and host
 #              name by <home>, <user>, <host> in every file of the report
 #
-# Put it into the WalPE folder (where build/ is) or run it from there. No root needed.
+# Where WalPE is installed this is the command `walpe-collect`, and it takes the programs
+# next to it. In the WalPE folder (where build/ is) it is `sh scripts/walpe-collect.sh`, or
+# put the file into that folder and run it there: it takes the programs in build/. No root needed.
 # It stops the running engine and tray, starts the engine with its debug output going to
 # a file, asks you to do the few things only you can do (press Enter after each) and a few
 # y/n questions, and at the end starts the engine and the tray again if they ran before.
@@ -22,7 +24,7 @@ for a in "$@"; do
         --sound-only) [ "$MODE" = all ] || { echo "walpe-collect: --sound-only or --wayland-only, not both" >&2; exit 1; }; MODE=sound ;;
         --wayland-only) [ "$MODE" = all ] || { echo "walpe-collect: --sound-only or --wayland-only, not both" >&2; exit 1; }; MODE=wayland ;;
         --redact) REDACT=1 ;;
-        -h | --help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "walpe-collect: unknown option '$a' (--sound-only, --wayland-only, --redact, --help)" >&2; exit 1 ;;
     esac
 done
@@ -38,8 +40,9 @@ for d in "${WALPE_BUILD:-}" "$here/build" "./build" "$here" "."; do
     fi
 done
 if [ -z "$B" ]; then
-    echo "walpe-collect: build/walpe-daemon and build/walpe-ctl were not found." >&2
-    echo "Run this script from the WalPE folder (the one that holds build/), after ./build.sh." >&2
+    echo "walpe-collect: walpe-daemon and walpe-ctl were not found: not in build/, not next to this script." >&2
+    echo "In the WalPE folder (the one that holds build/) run it after ./build.sh; WALPE_BUILD=<dir>" >&2
+    echo "names another directory that has the two programs." >&2
     exit 1
 fi
 CTL=$B/walpe-ctl

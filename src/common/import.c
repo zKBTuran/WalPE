@@ -816,7 +816,8 @@ static void probe_cb (GObject *o, GAsyncResult *res, gpointer user)
         const char *enc = imp->remux ? "copy" : pick_encoder (imp->encoder);
         if (!enc) {
             finish (imp, FALSE, "this ffmpeg build has no H.264 encoder (libx264, h264_nvenc "
-                                "or libopenh264); Gentoo: enable USE=x264 on media-video/ffmpeg");
+                                "or libopenh264): install an ffmpeg that has one (on Gentoo: "
+                                "USE=x264 on media-video/ffmpeg)");
         } else {
             if (!imp->remux && g_strcmp0 (enc, imp->encoder))
                 g_message ("import: encoder %s unavailable, using %s", imp->encoder, enc);
@@ -1349,8 +1350,8 @@ static WalpeImport *import_start (const char *src, const char *dest_dir, const c
         char *p = g_find_program_in_path (tool);
         if (!p) {
             g_set_error (err, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
-                         "%s not found in PATH: install ffmpeg to import videos "
-                         "(Gentoo: emerge media-video/ffmpeg)", tool);
+                         "%s not found in PATH: install ffmpeg (your distribution's package with "
+                         "the programs ffmpeg and ffprobe) to import videos", tool);
             return NULL;
         }
         g_free (p);

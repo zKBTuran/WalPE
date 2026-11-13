@@ -706,14 +706,15 @@ static inline const char *wl_plasma_hint (gboolean kwin, WlPlasmaAddon a)
         return NULL;
     if (a == WL_PLASMA_ADDON_UNSELECTED)
         return "Plasma's desktop icons and widgets are hidden behind the wallpaper. The WalPE add-on "
-               "for Plasma is installed: choose the wallpaper type \"WalPE\" in Plasma's \"Desktop "
-               "and Wallpaper\" settings, or run `contrib/plasma/install.sh select`, to see them "
-               "over the wallpaper (docs/WAYLAND.md, \"KDE Plasma\")";
+               "for Plasma is installed: to see them over the wallpaper, right-click the desktop "
+               "and choose the wallpaper type \"WalPE\" in Plasma's \"Desktop and Wallpaper\" "
+               "settings (in WalPE's source tree `contrib/plasma/install.sh select` does the same; "
+               "docs/WAYLAND.md, \"KDE Plasma\")";
     return "Plasma's desktop icons and widgets are hidden behind the wallpaper. To see them over "
-           "the wallpaper (Plasma 6.5 or newer), install the WalPE add-on for Plasma from "
-           "WalPE's source tree: `contrib/plasma/install.sh install`, then choose the wallpaper "
-           "type \"WalPE\" in Plasma's \"Desktop and Wallpaper\" settings "
-           "(docs/WAYLAND.md, \"KDE Plasma\")";
+           "the wallpaper (Plasma 6.5 or newer), install the WalPE add-on for Plasma - a package "
+           "of WalPE can bring it; from WalPE's source tree it is `contrib/plasma/install.sh "
+           "install` - then right-click the desktop and choose the wallpaper type \"WalPE\" in "
+           "Plasma's \"Desktop and Wallpaper\" settings (docs/WAYLAND.md, \"KDE Plasma\")";
 }
 
 /* ------------------------------------------------- layer surface life cycle
