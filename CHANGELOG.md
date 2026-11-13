@@ -359,6 +359,35 @@ microphone.
   report from a real Plasma session they were the only thing that changed when Plasma's
   desktop came to lie over the wallpaper. A hint for a report; the daemon does not act
   on it.
+- `walpe-ctl diag` no longer names the folders of a wallpaper that lies outside the home
+  directory. A monitor's line quotes the reason a load failed, and with a library on
+  another disk, or a file opened from `/tmp` or a stick, that sentence held the whole
+  path. It now reads `LOAD ERROR: noscene: scene.json not found in noscene`: the folders
+  the daemon knows are taken out, and any other absolute path is cut down to
+  `.../<last part>`. Below the home directory it is `~/...` as before. `walpe-ctl status`
+  is unchanged.
+
+### Settings and walpe-ctl
+
+- `walpe-ctl set` with a value that is not allowed now changes nothing. `walpe-ctl set
+  fps=31 focus=sideways` was refused (exit status 3) and the frame rate limit was 31 all
+  the same: the pairs in front of the bad one had been applied and saved, and the reply
+  did not say so. The whole request is checked first, as it already was for an unknown
+  key, and every refusal ends with "nothing was changed". A request that is accepted is
+  applied as before.
+- `wallpapers_dir` in `config.json` stays as you wrote it. The first change of any
+  setting after a start had turned `~/.local/share/walpe/workshop` into
+  `/home/<name>/.local/share/walpe/workshop`.
+- `walpe-ctl status`: `backend` is the video backend that plays, `ffmpeg`, also after
+  `walpe-ctl set video_backend=mpv` (that word is still stored for configurations of
+  earlier versions and means the same; the reply now says so). It showed `mpv`.
+- `walpe-ctl pause`, `resume`, `status`, `quit`, `cancel-import` and `steam-libraries`
+  with an argument, and `add` with a second file, end with status 1 and a sentence. The
+  argument was dropped and the command carried out (`walpe-ctl pause 1` paused every
+  monitor).
+- A restart in place no longer waits without limit for a child process that does not end
+  (WebKit's processes): one second after asking, two more after killing it, then the
+  restart goes on and the log names the process.
 
 ### Known limitations
 
