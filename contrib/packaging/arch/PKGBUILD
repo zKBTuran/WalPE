@@ -117,6 +117,15 @@ prepare() {
   # (not all of contrib/: makepkg's own directories lie in it when it is run here)
   mkdir -p "$srcdir/$pkgname/contrib"
   cp -a "$tree/contrib/plasma" "$srcdir/$pkgname/contrib/"
+  # The commit the programs show as their source (`walpe-ctl status`: source_id): the build
+  # finds it in the file SOURCE-ID of a tree made by `git archive`, or asks git in a
+  # checkout - and the copy is neither, it has no .git. The tree is asked here and its
+  # word (with the "+" of a checkout with changed files) is the copy's SOURCE-ID; a tree
+  # that does not say leaves the copy without the file: "unknown"
+  local id
+  id=$(sh "$tree/scripts/source-id.sh" "$tree" 2> /dev/null) || id=
+  rm -f "$srcdir/$pkgname/SOURCE-ID"
+  [[ -z $id || $id == unknown ]] || printf '%s\n' "$id" > "$srcdir/$pkgname/SOURCE-ID"
 }
 
 build() {

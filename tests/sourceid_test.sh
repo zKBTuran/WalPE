@@ -13,6 +13,9 @@
 #   else's repository;
 #   the header is written once: a second run leaves the file alone (nothing is compiled
 #   again), a new commit changes it, and a run that finds no id keeps the one it has.
+#   the Arch recipe (contrib/packaging/arch/PKGBUILD) builds a copy of the tree that has
+#   no .git: its prepare() hands the copy the id of the tree, with the "+" of a changed
+#   checkout (run with bash where there is one);
 # Then the tree under test itself, where it is a git checkout with git at hand: `git
 # archive HEAD` of it - the way a release tarball and a test build's zip are made -
 # names HEAD. Skipped (77) without git.
@@ -111,10 +114,51 @@ git -C "$repo" config --unset core.abbrev
 # what SOURCE-ID may hold: a commit of seven digits or more (an archive made before the
 # file held the whole commit has seven or more of them); anything else does not say
 mkdir "$tmp/words"
-for w in 0123abc:0123abc 0123abcdef01:0123abc 0123ab:unknown 0123abg:unknown '$Format:%H$:unknown' :unknown; do
+for w in 0123abc:0123abc 0123abcdef01:0123abc 0123ab:unknown 0123abg:unknown '$Format:%H$:unknown' :unknown \
+    0123abc+:0123abc+ 0123abcdef01+:0123abc+ 0123abc++:unknown +:unknown; do
     printf '%s\n' "${w%:*}" > "$tmp/words/SOURCE-ID"
     is "SOURCE-ID \"${w%:*}\"" "$(id_of "$tmp/words")" "${w##*:}"
 done
+
+# the Arch recipe: makepkg builds a copy that prepare() makes of the tree's files, without
+# .git. The copy says what the tree says - from a checkout, a changed checkout and a tree
+# made by git archive (the recipe of the tree under test, on trees made here)
+recipe=$src/contrib/packaging/arch/PKGBUILD
+if command -v bash > /dev/null 2>&1 && [ -f "$recipe" ]; then
+    pk=$tmp/pk
+    mkdir -p "$pk/tree/contrib/packaging/arch" "$pk/tree/contrib/plasma" "$pk/tree/scripts"
+    for f in LICENSE README.md CHANGELOG.md meson_options.txt; do echo x > "$pk/tree/$f"; done
+    for d in src gst data protocols licenses docs; do mkdir "$pk/tree/$d"; echo x > "$pk/tree/$d/x"; done
+    printf "project('walpe', 'c',\n  version: '0.0.1')\n" > "$pk/tree/meson.build"
+    echo x > "$pk/tree/contrib/plasma/x"
+    cp "$script" "$pk/tree/scripts/"
+    cp "$src/SOURCE-ID" "$src/.gitattributes" "$pk/tree/"
+    cp "$recipe" "$pk/tree/contrib/packaging/arch/"
+    git -C "$pk/tree" init -q
+    git -C "$pk/tree" add -A
+    git -C "$pk/tree" commit -q -m recipe
+    pc=$(seven "$pk/tree")
+    prepared () {   # TREE NAME: the id of the copy prepare() makes of TREE
+        rm -rf "$pk/$2"
+        mkdir "$pk/$2"
+        if (cd "$1/contrib/packaging/arch" && unset WALPE_SRC && srcdir="$pk/$2" bash -c '. ./PKGBUILD && prepare') > "$pk/$2.out" 2>&1; then
+            id_of "$pk/$2/walpe"
+        else
+            echo "prepare failed: $(tail -n 3 "$pk/$2.out" | tr '\n' ' ')"
+        fi
+    }
+    is "the Arch recipe's copy of a checkout" "$(prepared "$pk/tree" a)" "$pc"
+    echo changed >> "$pk/tree/README.md"
+    is "the Arch recipe's copy of a changed checkout" "$(prepared "$pk/tree" b)" "$pc+"
+    git -C "$pk/tree" checkout -q README.md
+    mkdir "$pk/arch"
+    git -C "$pk/tree" archive --prefix=t/ HEAD | tar -x -C "$pk/arch"
+    is "the Arch recipe's copy of a tree made by git archive" "$(prepared "$pk/arch/t" c)" "$pc"
+    rm -f "$pk/arch/t/SOURCE-ID"
+    is "the Arch recipe's copy of files that do not say" "$(prepared "$pk/arch/t" d)" unknown
+else
+    echo "(no bash, or no contrib/packaging/arch/PKGBUILD: the Arch recipe's copy was not looked at)"
+fi
 
 # the tree under test: an archive of its HEAD names HEAD
 if [ -e "$src/.git" ] && head=$(seven "$src" 2> /dev/null) && [ -n "$head" ]; then
