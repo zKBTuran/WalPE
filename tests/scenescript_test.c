@@ -52,7 +52,7 @@
  * without it (-Dscenescript=disabled, an older libquickjs) has no caller. */
 static gsize heap_in_use (void)
 {
-#if defined (__GLIBC__) && defined (__GLIBC_PREREQ) && __GLIBC_PREREQ (2, 33)
+#if defined (__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33))
     struct mallinfo2 mi = mallinfo2 ();
     return mi.uordblks + mi.hblkhd;
 #else

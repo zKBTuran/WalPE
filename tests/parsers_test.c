@@ -156,7 +156,7 @@ static char *nested (const char *prefix, int depth, gsize *len)
  * AddressSanitizer, whose leak check covers the same ground) */
 static gsize heap_in_use (void)
 {
-#if defined (__GLIBC__) && defined (__GLIBC_PREREQ) && __GLIBC_PREREQ (2, 33)
+#if defined (__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33))
     struct mallinfo2 mi = mallinfo2 ();
     return mi.uordblks + mi.hblkhd;
 #else
