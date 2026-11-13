@@ -1521,6 +1521,15 @@ def case_window(env, W):
     # in XDG_DATA_DIRS) the window carries its pixels (_NET_WM_ICON), which is
     # what a task bar shows that does not look for the window's desktop entry
     # (mate-panel, lxpanel, icewm, tint2 showed their placeholder).
+    # The directory holds the icon and no index.theme: the index of "hicolor"
+    # is the system's or, where there is none, the one GTK has built in, as
+    # for an icon that `meson install` put there. (An index of its own, naming
+    # scalable/apps only, stood in front of both and hid every icon GTK brings
+    # along, "image-missing" among them. On a system without gdk-pixbuf's SVG
+    # loader - Debian 13 without librsvg2-common - GTK cannot draw walpe.svg
+    # and asks for that one instead, and GTK 4.18.5 and 4.18.6 ask again when
+    # it is not there, without end: the window of this check, and of this
+    # check only, ended in a stack overflow inside libgtk-4.)
     icon = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "icons", "walpe.svg")
     share = os.path.join(env.tmp, "icons-share")
     apps = os.path.join(share, "icons", "hicolor", "scalable", "apps")
@@ -1529,9 +1538,6 @@ def case_window(env, W):
     else:
         os.makedirs(apps, exist_ok=True)
         shutil.copy(icon, apps)
-        put(os.path.join(share, "icons", "hicolor", "index.theme"),
-            "[Icon Theme]\nName=Hicolor\nComment=check\nDirectories=scalable/apps\n\n"
-            "[scalable/apps]\nSize=48\nMinSize=8\nMaxSize=512\nType=Scalable\nContext=Applications\n")
         dirs = share + ":" + (env.run_env.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share")
         win, ok = start({"XDG_DATA_DIRS": dirs})
         try:
