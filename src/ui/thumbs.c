@@ -325,10 +325,15 @@ static void decode_anim (Job *j)
      * gif_frame_delays), not whichever loader gdk-pixbuf would choose */
     GdkPixbufLoader *ld = gdk_pixbuf_loader_new_with_type ("gif", NULL);
     GdkPixbufAnimation *an = NULL;
+    /* gdk-pixbuf 2.44 marks its animation interface as deprecated and names
+     * no successor inside the library: the calls stay, here and in the loop
+     * below (engine/gif.c says more) */
     if (ld) {
         gboolean fed = gdk_pixbuf_loader_write (ld, (const guchar *) data, len, NULL);
         fed = gdk_pixbuf_loader_close (ld, NULL) && fed;
+        G_GNUC_BEGIN_IGNORE_DEPRECATIONS    /* gdk-pixbuf's animations: no successor */
         an = fed ? gdk_pixbuf_loader_get_animation (ld) : NULL;
+        G_GNUC_END_IGNORE_DEPRECATIONS
         if (an)
             g_object_ref (an);
         g_object_unref (ld);
@@ -336,9 +341,12 @@ static void decode_anim (Job *j)
     guint8 *buf = NULL;
     int got = 0;
     gboolean transparent = FALSE;
-    if (an && !gdk_pixbuf_animation_is_static_image (an)) {
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS        /* gdk-pixbuf's animations: no successor */
+    gboolean animated = an && !gdk_pixbuf_animation_is_static_image (an);
+    G_GNUC_END_IGNORE_DEPRECATIONS
+    if (animated) {
         buf = g_try_malloc ((gsize) kept * fb);
-        G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+        G_GNUC_BEGIN_IGNORE_DEPRECATIONS    /* the same, and GTimeVal: the clock its iterator takes */
         GTimeVal t = { 1000000, 0 };    /* a clock of our own: frame by frame */
         GdkPixbufAnimationIter *it = buf ? gdk_pixbuf_animation_get_iter (an, &t) : NULL;
         GdkPixbuf *dst = it ? gdk_pixbuf_new (GDK_COLORSPACE_RGB, TRUE, 8, pw, ph) : NULL;

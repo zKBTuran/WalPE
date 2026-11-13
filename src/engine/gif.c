@@ -10,7 +10,14 @@
  * the premultiply pass runs only for frames that really have transparent
  * pixels (into a reused buffer). gdk-pixbuf keeps the frames compressed
  * and composes them on demand, so a long GIF does not sit in memory
- * decoded. Frame timing is the GIF's own (its frame delays). */
+ * decoded. Frame timing is the GIF's own (its frame delays).
+ *
+ * gdk-pixbuf 2.44 marks its whole animation interface (GdkPixbufAnimation,
+ * its iterator) as deprecated and names no successor inside the library:
+ * the advice is another image library. The calls stay as they are - they
+ * decode and compose the frames here, with gdk-pixbuf's rules for delays
+ * and for what a frame leaves behind - and the compiler's note is switched
+ * off around each of them and nowhere else. */
 #include "gif.h"
 #include "fit.h"
 #include "image.h"   /* walpe_picture_size_ok */
@@ -87,14 +94,18 @@ static GifSource *gif_source_get (const char *path, GError **err)
         g_mutex_unlock (&gif_reg_lock);
         return NULL;
     }
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS    /* gdk-pixbuf's animations: no successor (see the top) */
     GdkPixbufAnimation *anim = gdk_pixbuf_animation_new_from_file (path, err);
+    G_GNUC_END_IGNORE_DEPRECATIONS
     if (!anim) {
         g_mutex_unlock (&gif_reg_lock);
         return NULL;
     }
     /* the same limits on what was really opened (the file can be replaced
      * between the look at its header and the decode) */
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS    /* gdk-pixbuf's animations: no successor (see the top) */
     int aw = gdk_pixbuf_animation_get_width (anim), ah = gdk_pixbuf_animation_get_height (anim);
+    G_GNUC_END_IGNORE_DEPRECATIONS
     if (aw > WALPE_PICTURE_MAX_SIDE || ah > WALPE_PICTURE_MAX_SIDE ||
         (gint64) aw * ah > WALPE_PICTURE_MAX_PIXELS) {
         g_set_error (err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
@@ -111,6 +122,7 @@ static GifSource *gif_source_get (const char *path, GError **err)
     g_mutex_init (&src->lock);
     src->anim = anim;
     GdkPixbuf *first = NULL;
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS    /* gdk-pixbuf's animations: no successor (see the top) */
     if (gdk_pixbuf_animation_is_static_image (anim)) {
         /* not actually animated - draw once */
         first = gdk_pixbuf_animation_get_static_image (anim);
@@ -118,6 +130,7 @@ static GifSource *gif_source_get (const char *path, GError **err)
         src->iter = gdk_pixbuf_animation_get_iter (anim, NULL); /* NULL = now */
         first = gdk_pixbuf_animation_iter_get_pixbuf (src->iter);
     }
+    G_GNUC_END_IGNORE_DEPRECATIONS
     if (first) {
         src->frame = g_object_ref (first);
         src->serial = 1;
@@ -155,19 +168,26 @@ static void gif_source_advance (GifSource *src)
         return;
     gint64 now = g_get_monotonic_time ();
     if (src->due_us && now >= src->due_us) {
+        G_GNUC_BEGIN_IGNORE_DEPRECATIONS    /* gdk-pixbuf's animations: no successor (see the top) */
         gboolean moved = gdk_pixbuf_animation_iter_advance (src->iter, NULL);
-        if (gdk_pixbuf_animation_iter_get_delay_time (src->iter) < 0) {
+        gboolean played = gdk_pixbuf_animation_iter_get_delay_time (src->iter) < 0;
+        G_GNUC_END_IGNORE_DEPRECATIONS
+        if (played) {
             /* the GIF has played its loop count (none given = once):
              * gdk-pixbuf then reports delay -1 for good, which the 20 ms
              * floor below turned into 50 uploads a second of the same
              * last frame, for ever. Start over instead - a wallpaper
              * loops, as in Wallpaper Engine. */
             g_object_unref (src->iter);
+            G_GNUC_BEGIN_IGNORE_DEPRECATIONS    /* gdk-pixbuf's animations: no successor (see the top) */
             src->iter = gdk_pixbuf_animation_get_iter (src->anim, NULL);
+            G_GNUC_END_IGNORE_DEPRECATIONS
             moved = TRUE;
         }
         if (moved) {    /* only a frame that changed is uploaded */
+            G_GNUC_BEGIN_IGNORE_DEPRECATIONS    /* gdk-pixbuf's animations: no successor (see the top) */
             GdkPixbuf *pb = gdk_pixbuf_animation_iter_get_pixbuf (src->iter);
+            G_GNUC_END_IGNORE_DEPRECATIONS
             if (pb) {
                 g_object_ref (pb);
                 g_clear_object (&src->frame);
@@ -178,7 +198,9 @@ static void gif_source_advance (GifSource *src)
         src->due_us = 0;
     }
     if (!src->due_us) {
+        G_GNUC_BEGIN_IGNORE_DEPRECATIONS    /* gdk-pixbuf's animations: no successor (see the top) */
         int delay = gdk_pixbuf_animation_iter_get_delay_time (src->iter);
+        G_GNUC_END_IGNORE_DEPRECATIONS
         if (delay < 20)
             delay = 20; /* 0-delay gifs would spin the loop */
         src->due_us = now + (gint64) delay * 1000;

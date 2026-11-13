@@ -2360,10 +2360,15 @@ static void test_gif (void)
             mkfile ("gif/two.gif", a->data, a->len);
             g_byte_array_unref (a);
             char *f = P ("gif/two.gif");
+            /* gdk-pixbuf's animation interface, as engine/gif.c calls it:
+             * deprecated in 2.44 without a successor in the library */
+            G_GNUC_BEGIN_IGNORE_DEPRECATIONS
             GdkPixbufAnimation *an = gdk_pixbuf_animation_new_from_file (f, NULL);
+            gboolean still = an && gdk_pixbuf_animation_is_static_image (an);
+            G_GNUC_END_IGNORE_DEPRECATIONS
             CHECK (an != NULL);
             if (an)
-                CHECK (!gdk_pixbuf_animation_is_static_image (an) == (k == 0));
+                CHECK (!still == (k == 0));
             g_clear_object (&an);
             g_free (f);
         }
