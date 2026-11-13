@@ -28,6 +28,13 @@ Cases (--only NAME runs one):
                  `pkill walpe-daemon` does), the shell collects garbage while
                  the daemon is still shutting down: no picture of the window
                  stays in the shell and the extension keeps no window
+  socket-bound   the same versions: a program that is not walpe-daemon
+                 (tests/gnome_caller.c) asks for a dozen connections and
+                 keeps them: it gets eight, the rest is refused with a
+                 sentence, and when it has ended a daemon gets its own
+  bus-bounds     a "see-through windows" list of 100 000 characters sent to
+                 the extension's method Windows: it keeps 64 names at most
+                 and answers
 
 Exit status 0 = passed, 1 = failed, 77 = cannot run here (no gnome-shell,
 gdbus or dbus-daemon, a build without the Wayland backend, or a shell that
@@ -401,8 +408,66 @@ def case_pkill(shell, build):
         d.stop()
 
 
+def case_socket_bound(shell, build):
+    caller = os.path.join(build, "gnome-caller-test")
+    if not os.access(caller, os.X_OK):
+        return ["%s is not built (ninja gnome-caller-test)" % caller]
+    p = subprocess.Popen([caller, "12"], env=shell.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    lines = []
+    try:
+        for line in p.stdout:
+            lines.append(line.strip())
+            if line.strip() == "done":
+                break
+    finally:
+        p.stdin.close()
+        p.wait(WAIT_S)
+    bad = []
+    handed = lines.count("handed")
+    refused = [x for x in lines if x.startswith("refused")]
+    if handed != 8 or len(refused) != 4:
+        bad.append("a program asked for 12 connections and kept them: %d handed, %d refused (8 and 4 "
+                   "are right): %s" % (handed, len(refused), lines))
+    elif not all("handed out already" in x for x in refused):
+        bad.append("refused without the sentence: %s" % refused)
+    # the eight are let go when their program is gone: a daemon gets its connection
+    d = Daemon(shell, build, "daemon-socket-bound")
+    end = time.monotonic() + WAIT_S
+    try:
+        while True:
+            d.start()
+            w, why = d.wait_window()
+            if w or time.monotonic() > end:
+                break
+            d.stop()        # (the shell had not seen the eight connections close yet)
+            time.sleep(0.5)
+        if not w:
+            bad.append("after the program had ended a daemon got no desktop window: %s" % why)
+        d.stop()
+        return bad + leftovers(shell)
+    finally:
+        d.stop()
+
+
+def case_bus_bounds(shell, build):
+    names = ",".join("name%05d" % i for i in range(10000))        # 100 000 characters
+    r = subprocess.run(["gdbus", "call", "--session", "--dest", BUS_NAME, "--object-path",
+                        "/io/github/walpe/Gnome", "--method", BUS_NAME + ".Windows", names],
+                       env=shell.env, capture_output=True, text=True, timeout=WAIT_S)
+    bad = []
+    if r.returncode != 0 or "monitor-0" not in r.stdout:
+        bad.append("Windows with a long list did not answer with the monitor's line: %s %s"
+                   % (r.stdout.strip(), r.stderr.strip()))
+    kept = shell.eval("Main.extensionManager.lookup('%s').stateObj._seeThrough.length" % UUID)
+    if not isinstance(kept, int) or kept < 1 or kept > 64:
+        bad.append("the extension keeps %s names of a list of 10000 (64 at most)" % kept)
+    shell.eval("Main.extensionManager.lookup('%s').stateObj.Windows(''); 1" % UUID)
+    return bad
+
+
 CASES = [("desktop", case_desktop, False), ("helper-killed", case_helper_killed, True),
-         ("pkill", case_pkill, True)]
+         ("pkill", case_pkill, True), ("socket-bound", case_socket_bound, True),
+         ("bus-bounds", case_bus_bounds, False)]
 
 
 def main():

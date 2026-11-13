@@ -46,6 +46,13 @@ const TITLE_PREFIX = 'WalPE wallpaper: ';
 const GRID = 24;
 const COVER = 0.85;
 const LOOK_DELAY_MS = 40;
+/* What comes in over the session bus is bounded, whoever sends it: the
+ * "see-through windows" list to this many characters and names, and the
+ * connections handed out at one time (GNOME Shell 46 to 48; a daemon needs
+ * one) to this many. */
+const SEE_THROUGH_CHARS = 4096;
+const SEE_THROUGH_NAMES = 64;
+const DONORS_MAX = 8;
 
 const INTERFACE = `
 <node><interface name="io.github.walpe.Gnome">
@@ -89,6 +96,7 @@ export default class WalpeExtension extends Extension {
         this._seeThrough = [];
         this._state = '';
         this._lookId = 0;
+        this._adoptIds = new Set();     /* idle sources of _consider */
         this._lowered = [];
 
         this._object = Gio.DBusExportedObject.wrapJSObject(INTERFACE, this);
@@ -134,10 +142,19 @@ export default class WalpeExtension extends Extension {
         /* The wallpaper windows stay as they are, desktop windows the
          * daemon draws on. What ends: the name on the bus (a daemon that
          * starts now is told that there is no extension), the wallpaper
-         * in the overview, the reports. */
+         * in the overview, the reports.
+         * metadata.json names the session mode "unlock-dialog" so that
+         * this does not run at every lock of the screen, with enable() at
+         * every unlock: the daemon would lose and find the extension each
+         * time. On the lock screen the extension shows nothing (its
+         * backgrounds are left alone) and reports every monitor as
+         * covered. */
         if (this._lookId)
             GLib.source_remove(this._lookId);
         this._lookId = 0;
+        for (const id of this._adoptIds)
+            GLib.source_remove(id);
+        this._adoptIds = null;
         this._injections.clear();
         this._injections = null;
         for (const [actor, entry] of this._backgrounds) {
@@ -183,10 +200,12 @@ export default class WalpeExtension extends Extension {
         /* The title is told while the window is being made. Its type is
          * changed when the compositor has dealt with the rest of what the
          * client sent with it, and long before the window is shown. */
-        GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+        const id = GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+            this._adoptIds.delete(id);
             this._adopt(window);
             return GLib.SOURCE_REMOVE;
         });
+        this._adoptIds.add(id);
     }
 
     _adopt(window) {
@@ -417,7 +436,8 @@ export default class WalpeExtension extends Extension {
     /* see_through: the daemon's "see-through windows" setting, application
      * ids separated by commas */
     Windows(seeThrough) {
-        this._seeThrough = seeThrough.split(',').map(s => s.trim().toLowerCase()).filter(s => s);
+        this._seeThrough = seeThrough.slice(0, SEE_THROUGH_CHARS).split(',')
+            .map(s => s.trim().toLowerCase()).filter(s => s).slice(0, SEE_THROUGH_NAMES);
         this._state = this._look();
         return this._state;
     }
@@ -431,6 +451,10 @@ export default class WalpeExtension extends Extension {
         const fail = text => invocation.return_dbus_error('io.github.walpe.Gnome.Error', text);
         if (this._canSetType) {
             fail('this GNOME Shell makes any window a desktop window: no connection is handed out');
+            return;
+        }
+        if (donors.length >= DONORS_MAX) {
+            fail(`${donors.length} connections are handed out already, and a walpe-daemon needs one`);
             return;
         }
         const fds = invocation.get_message().get_unix_fd_list();
@@ -450,6 +474,8 @@ export default class WalpeExtension extends Extension {
                     const exe = GLib.file_read_link(`/proc/${pid}/exe`);
                     if (!GLib.path_is_absolute(exe) || exe.endsWith(' (deleted)'))
                         throw new Error(`the program of process ${pid} is not a file any more (${exe})`);
+                    if (donors.length >= DONORS_MAX)    /* (calls that came together) */
+                        throw new Error(`${donors.length} connections are handed out already`);
                     const client = Meta.WaylandClient.new(global.context, launcher);
                     const process = client.spawnv(global.display, [exe, '--wayland-socket-to', '4']);
                     const donor = {client, running: true};

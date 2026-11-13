@@ -65,7 +65,8 @@ the daemon's own program a second time as `walpe-daemon --wayland-socket-to 4`, 
 process passes the connection it was started with through the socket pair and then only
 waits (about 2 MB of memory of its own) until the daemon ends. The extension starts the
 file behind `/proc/<pid>/exe` of the caller and nothing a caller could name, so the method
-gives a program on the session bus nothing but a second copy of itself.
+gives a program on the session bus nothing but a second copy of itself, started by GNOME
+Shell, and at most eight such connections exist at a time (a daemon needs one).
 
 `walpe-ctl status` and the start-up log say which way it went ("wl_gnome_connection":
 "handed over by the shell" or "the daemon's own").

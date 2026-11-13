@@ -1968,10 +1968,16 @@ endif
 # gdbus and dbus-daemon, where the shell does not come up headless, and in
 # a build without the Wayland backend.
 if lifecheck_py.found() and have_wayland
+  # (a program that is not walpe-daemon and asks the extension for more
+  # connections than a daemon needs: the check's case "socket-bound")
+  gnome_caller = executable('gnome-caller-test', 'tests/gnome_caller.c',
+    include_directories: inc,
+    dependencies: [glib, gobject, gio, gio_unix],
+    install: false, build_by_default: false)
   test('gnome-shell', lifecheck_py,
     args: ['-I', meson.current_source_dir() / 'scripts/gnomecheck.py',
            '--build', meson.current_build_dir()],
-    depends: [daemon, ctl],
+    depends: [daemon, ctl, gnome_caller],
     is_parallel: false,
     timeout: 600)
 endif
