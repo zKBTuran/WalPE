@@ -35,6 +35,14 @@ Cases (--only NAME runs one):
   stranger       a window of another program (a GTK 4 window made with gjs)
                  that uses the application id and the title of a wallpaper
                  window stays an ordinary window; skipped without gjs
+  covered        what the extension reports about other programs' windows
+                 (method Windows): a small window of an application has the
+                 focus and does not cover the monitor, a maximized one
+                 covers it, and its application id in the "see-through
+                 windows" list takes the covering away; skipped without gjs
+  crash          the daemon is killed (SIGKILL): its window, the process
+                 the shell started for it and what the extension kept of
+                 both are gone
   bus-bounds     a "see-through windows" list of 100 000 characters sent to
                  the extension's method Windows: it keeps 64 names at most
                  and answers
@@ -460,26 +468,117 @@ def case_socket_bound(shell, build):
         d.stop()
 
 
-STRANGER_JS = """import Gtk from 'gi://Gtk?version=4.0';
+WINDOW_JS = """import Gtk from 'gi://Gtk?version=4.0';
 import Gio from 'gi://Gio';
-const app = new Gtk.Application({application_id: 'io.github.walpe.wallpaper', flags: Gio.ApplicationFlags.NON_UNIQUE});
+const app = new Gtk.Application({application_id: '%s', flags: Gio.ApplicationFlags.NON_UNIQUE});
 app.connect('activate', () => {
-    new Gtk.ApplicationWindow({application: app, title: '%sMeta-0', default_width: 300, default_height: 200}).present();
+    const w = new Gtk.ApplicationWindow({application: app, title: '%s', default_width: 300, default_height: 200});
+    if (%s)
+        w.maximize();
+    w.present();
 });
 app.run([]);
-""" % TITLE
+"""
+CHECK_APP = "io.github.walpe.check"
+
+
+def gtk_window(shell, name, app_id, title, maximized=False):
+    """a GTK 4 window of a program of its own (gjs); the process"""
+    js = os.path.join(shell.top, name + ".js")
+    with open(js, "w") as f:
+        f.write(WINDOW_JS % (app_id, title, "true" if maximized else "false"))
+    log = open(os.path.join(shell.top, name + ".log"), "wb")
+    p = subprocess.Popen(["gjs", "-m", js], env=dict(shell.env, GTK_A11Y="none"), stdin=subprocess.DEVNULL,
+                         stdout=log, stderr=subprocess.STDOUT)
+    log.close()
+    return p
+
+
+def end_window(shell, p, title):
+    p.terminate()
+    try:
+        p.wait(10)
+    except subprocess.TimeoutExpired:
+        p.kill()
+    end = time.monotonic() + WAIT_S
+    while time.monotonic() < end and any((x["title"] or "").startswith(title) for x in shell.windows()["windows"]):
+        time.sleep(0.25)
+
+
+def report(shell, see_through=""):
+    """the flags of the one monitor in the answer of Windows, or None"""
+    r = subprocess.run(["gdbus", "call", "--session", "--dest", BUS_NAME, "--object-path",
+                        "/io/github/walpe/Gnome", "--method", BUS_NAME + ".Windows", see_through],
+                       env=shell.env, capture_output=True, text=True, timeout=WAIT_S)
+    m = re.match(r"\('[^'\\]+\\t([caf]*)',\)", r.stdout.strip())
+    return m.group(1) if r.returncode == 0 and m else None
+
+
+def wait_report(shell, want, see_through=""):
+    end = time.monotonic() + WAIT_S
+    while True:
+        got = report(shell, see_through)
+        if got == want or time.monotonic() > end:
+            return got
+        time.sleep(0.25)
+
+
+def case_covered(shell, build):
+    if not shutil.which("gjs"):
+        return None
+    bad = []
+    got = wait_report(shell, "")
+    if got != "":
+        return ["with no window the monitor's flags are %r, not none" % got]
+    p = gtk_window(shell, "small", CHECK_APP, "walpe-check small")
+    try:
+        got = wait_report(shell, "a")
+        if got == "" and p.poll() is not None:
+            return None     # (no GTK 4 for gjs: nothing was shown)
+        if got != "a":
+            bad.append("a small window of an application with the focus: flags %r, not 'a'" % got)
+    finally:
+        end_window(shell, p, "walpe-check")
+    p = gtk_window(shell, "big", CHECK_APP, "walpe-check maximized", maximized=True)
+    try:
+        got = wait_report(shell, "ca")
+        if got != "ca":
+            bad.append("a maximized window of an application with the focus: flags %r, not 'ca'" % got)
+        got = wait_report(shell, "a", " Other.App , %s" % CHECK_APP.upper())
+        if got != "a":
+            bad.append("the same with its application id in the see-through list: flags %r, not 'a'" % got)
+    finally:
+        end_window(shell, p, "walpe-check")
+        report(shell, "")
+    return bad
+
+
+def case_crash(shell, build):
+    d = Daemon(shell, build, "daemon-crash")
+    d.start()
+    try:
+        w, why = d.wait_window()
+        if not w:
+            return [why]
+        helper = d.helper()
+        d.p.kill()
+        d.p.wait()
+        bad = leftovers(shell)
+        end = time.monotonic() + WAIT_S
+        while helper and os.path.exists("/proc/%d" % helper) and time.monotonic() < end:
+            time.sleep(0.1)
+        if helper and os.path.exists("/proc/%d" % helper):
+            bad.append("the process the shell started for the daemon's connection (%d) outlives the daemon" % helper)
+        shell.gc()
+        return bad + leftovers(shell)
+    finally:
+        d.stop()
 
 
 def case_stranger(shell, build):
     if not shutil.which("gjs"):
         return None
-    js = os.path.join(shell.top, "stranger.js")
-    with open(js, "w") as f:
-        f.write(STRANGER_JS)
-    log = open(os.path.join(shell.top, "stranger.log"), "wb")
-    p = subprocess.Popen(["gjs", "-m", js], env=dict(shell.env, GTK_A11Y="none"), stdin=subprocess.DEVNULL,
-                         stdout=log, stderr=subprocess.STDOUT)
-    log.close()
+    p = gtk_window(shell, "stranger", "io.github.walpe.wallpaper", TITLE + "Meta-0")
     try:
         end = time.monotonic() + WAIT_S
         seen = None
@@ -498,15 +597,7 @@ def case_stranger(shell, build):
             return None
         return []
     finally:
-        p.terminate()
-        try:
-            p.wait(10)
-        except subprocess.TimeoutExpired:
-            p.kill()
-        end = time.monotonic() + WAIT_S
-        while time.monotonic() < end and any((x["title"] or "").startswith(TITLE)
-                                             for x in shell.windows()["windows"]):
-            time.sleep(0.25)
+        end_window(shell, p, TITLE)
 
 
 def case_bus_bounds(shell, build):
@@ -527,7 +618,8 @@ def case_bus_bounds(shell, build):
 
 CASES = [("desktop", case_desktop, False), ("helper-killed", case_helper_killed, True),
          ("pkill", case_pkill, True), ("socket-bound", case_socket_bound, True),
-         ("stranger", case_stranger, False), ("bus-bounds", case_bus_bounds, False)]
+         ("stranger", case_stranger, False), ("covered", case_covered, False),
+         ("crash", case_crash, False), ("bus-bounds", case_bus_bounds, False)]
 
 
 def main():

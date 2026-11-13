@@ -143,8 +143,9 @@ status)
 		say "running: yes (it answers on the session bus as $bus_name)"
 	else
 		say "running: no (nothing answers on the session bus as $bus_name)"
-		installed && is_enabled &&
+		if installed && is_enabled; then
 			say "  installed and switched on, not running: log out and in; \`gnome-extensions info $uuid\` shows an error it had"
+		fi
 	fi
 	;;
 *)

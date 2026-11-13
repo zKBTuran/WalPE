@@ -395,7 +395,14 @@ export default class WalpeExtension extends Extension {
         const workspace = global.workspace_manager.get_active_workspace();
         const apps = global.display.list_all_windows().filter(w =>
             this._isApp(w) && w.showing_on_its_workspace() && w.located_on_workspace(workspace));
-        const rects = apps.filter(w => !this._isSeeThrough(w)).map(w => w.get_frame_rect());
+        /* (as plain numbers: a field of the compositor's rectangle is read
+         * through the language bindings, which the grid below would do
+         * twenty thousand times a look - milliseconds of the shell's one
+         * thread at every look while a window is dragged) */
+        const rects = apps.filter(w => !this._isSeeThrough(w)).map(w => {
+            const r = w.get_frame_rect();
+            return [r.x, r.y, r.x + r.width, r.y + r.height];
+        });
         const focus = global.display.focus_window;
         const focused = apps.includes(focus) ? focus : null;
         const names = new Map();
@@ -405,12 +412,18 @@ export default class WalpeExtension extends Extension {
         const lines = [];
         for (let i = 0; i < global.display.get_n_monitors(); i++) {
             const g = global.display.get_monitor_geometry(i);
+            const gx = g.x, gy = g.y, gw = g.width, gh = g.height;
             let marked = 0;
             for (let cy = 0; cy < GRID && rects.length; cy++) {
+                const py = gy + (cy + 0.5) * gh / GRID;
                 for (let cx = 0; cx < GRID; cx++) {
-                    const px = g.x + (cx + 0.5) * g.width / GRID, py = g.y + (cy + 0.5) * g.height / GRID;
-                    if (rects.some(r => px >= r.x && px < r.x + r.width && py >= r.y && py < r.y + r.height))
-                        marked++;
+                    const px = gx + (cx + 0.5) * gw / GRID;
+                    for (const r of rects) {
+                        if (px >= r[0] && px < r[2] && py >= r[1] && py < r[3]) {
+                            marked++;
+                            break;
+                        }
+                    }
                 }
             }
             /* (a locked screen shows no window, the wallpaper's neither) */
