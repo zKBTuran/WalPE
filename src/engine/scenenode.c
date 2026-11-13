@@ -5596,12 +5596,19 @@ static void scene_audio_rest_end (SceneNodeContent *s)
  * WALPE_AUDIO_REST=0: never (the clock runs on, as it did). */
 static gboolean scene_audio_rest (SceneNodeContent *s, WalpeContent *c)
 {
-    static gsize off;
+    static gsize off, deaf;
     if (g_once_init_enter (&off)) {
         const char *e = g_getenv ("WALPE_AUDIO_REST");
         g_once_init_leave (&off, e && !strcmp (e, "0") ? 2 : 1);
     }
-    gboolean quiet = off == 1 && s->audio_ref && c->frame_unchanged && c->request_redraw;
+    /* WALPE_NO_AUDIO: the scene takes no reference (gl_init, set_paused)
+     * and its spectrum is silence for good - the case in which the clock
+     * is least needed, and it ran on at the frame rate because only a
+     * scene that listens was looked at */
+    if (g_once_init_enter (&deaf))
+        g_once_init_leave (&deaf, g_getenv ("WALPE_NO_AUDIO") ? 2 : 1);
+    const gboolean listens = s->audio_ref || (deaf == 2 && s->needs_audio);
+    gboolean quiet = off == 1 && listens && c->frame_unchanged && c->request_redraw;
     for (int b = 0; quiet && b < WALPE_AUDIO_BANDS; b++)
         quiet = s->audio.left[b] == 0 && s->audio.right[b] == 0;
     if (!quiet) {

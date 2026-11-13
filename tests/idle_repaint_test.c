@@ -25,6 +25,13 @@
  * that follows the time must not keep the frames coming, nor keep the still
  * layers around it out of the static bake. Counted: frames drawn, and draw
  * calls per frame.
+ *
+ * And a picture whose only moving part follows the audio spectrum
+ * (silent_checks): while the spectrum is silence it stops its frame clock
+ * after two seconds of frames found unchanged - here with WALPE_NO_AUDIO,
+ * where nothing is captured and no sound server is contacted, which is
+ * the case that went on waking at the frame rate - and the same picture
+ * with a layer that follows the time keeps its clock.
  * Skipped (exit 77) without EGL surfaceless / GL 3.3.
  * `meson test -C build idle-repaint` */
 #include <glib.h>
@@ -487,6 +494,120 @@ static void parked_checks (const char *tmp)
     screen = NULL;
 }
 
+/* an effect that follows the audio spectrum: level bars */
+static void bars_effect (const char *dir)
+{
+    put (dir, "shaders/effects/bars.vert",
+         "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\n"
+         "attribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\n"
+         "void main() {\n    gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
+         "\tv_TexCoord = a_TexCoord;\n}\n");
+    put (dir, "shaders/effects/bars.frag",
+         "varying vec2 v_TexCoord;\nuniform sampler2D g_Texture0;\nuniform float g_AudioSpectrum16Left[16];\n"
+         "void main() {\n\tvec4 c = texSample2D(g_Texture0, v_TexCoord);\n"
+         "\tfloat v = g_AudioSpectrum16Left[int(floor(v_TexCoord.x * 15.99))];\n"
+         "\tgl_FragColor = 1.0 - v_TexCoord.y <= v ? vec4(1.0) : c;\n}\n");
+    put (dir, "materials/effects/bars.json",
+         "{\"passes\":[{\"shader\":\"effects/bars\",\"blending\":\"normal\",\"depthtest\":\"disabled\","
+         "\"depthwrite\":\"disabled\",\"cullmode\":\"nocull\"}]}");
+    put (dir, "effects/bars/effect.json",
+         "{\"name\":\"bars\",\"group\":\"t\",\"passes\":[{\"material\":\"materials/effects/bars.json\"}]}");
+}
+
+/* a background with audio bars; pulse = also a layer that follows the time */
+static char *make_bars_scene (const char *tmp, const char *name, gboolean pulse)
+{
+    char *dir = g_build_filename (tmp, name, NULL);
+    put (dir, "models/solid.json", "{\"solidlayer\":true}");
+    bars_effect (dir);
+    pulse_effect (dir);
+    GString *s = g_string_new (
+        "{\"camera\":{\"center\":\"0 0 -1\",\"eye\":\"0 0 0\",\"up\":\"0 1 0\"},"
+        "\"general\":{\"ambientcolor\":\"0.3 0.3 0.3\",\"bloom\":false,\"cameraparallax\":false,"
+        "\"clearcolor\":\"0.10 0.20 0.30\",\"orthogonalprojection\":{\"height\":180,\"width\":320},"
+        "\"skylightcolor\":\"0.3 0.3 0.3\"},\"objects\":[");
+    g_string_append (s,
+        "{\"id\":1,\"name\":\"bars\",\"image\":\"models/solid.json\",\"origin\":\"160 90 0\","
+        "\"size\":\"320 180\",\"scale\":\"1 1 1\",\"angles\":\"0 0 0\",\"color\":\"0.1 0.1 0.4\",\"alpha\":1.0,"
+        "\"visible\":true,\"effects\":[{\"file\":\"effects/bars/effect.json\",\"id\":101,"
+        "\"name\":\"bars\",\"visible\":true,\"passes\":[{}]}]}");
+    if (pulse)
+        fx_layer (s, 7, "160 90 0", "40 40", "0.8 0.8 0.8");
+    g_string_append (s, "]}");
+    put (dir, "scene.json", s->str);
+    g_string_free (s, TRUE);
+    put (dir, "project.json",
+         "{\"file\":\"scene.json\",\"title\":\"audio bars test\",\"type\":\"scene\","
+         "\"general\":{\"properties\":{}}}");
+    return dir;
+}
+
+/* ticks until the frame clock stops (next_frame_us 0 after a tick), at
+ * most n; -1: it ran on */
+static int ticks_to_rest (int n)
+{
+    for (int i = 1; i <= n; i++) {
+        tick ();
+        if (!C->next_frame_us)
+            return i;
+    }
+    return -1;
+}
+
+static void silent_checks (const char *tmp)
+{
+    screen = g_malloc0 (NPX);
+    guint8 *shown = g_malloc (NPX);
+
+    /* 1. only the bars could move, and there is no sound: the clock runs
+     * for two seconds of frames (60 a second here), then stops */
+    char *dir = make_bars_scene (tmp, "bars", FALSE);
+    if (!load_scene (dir)) {
+        result (FALSE, "the scene with audio bars loads");
+    } else {
+        gboolean drew = tick ();
+        result (drew && C->next_frame_us != 0, "a picture with audio bars draws and has a frame clock");
+        memcpy (shown, screen, NPX);
+        int n = ticks_to_rest (400);
+        char *m = g_strdup_printf ("in silence its frame clock stops after two seconds of unchanged frames "
+                                   "(after %d ticks)", n);
+        result (n >= 100 && n <= 130, m);
+        g_free (m);
+        /* a frame the owner asks for meanwhile (an exposure): nothing to
+         * draw, and no clock again */
+        drew = tick ();
+        result (!drew && !C->next_frame_us, "a frame asked for while it rests draws nothing and starts no clock");
+        /* ... and one that has to be drawn is drawn, the same picture */
+        C->surface_lost = TRUE;
+        glBindFramebuffer (GL_FRAMEBUFFER, 0);
+        glViewport (0, 0, W, H);
+        C->next_frame_us = 0;
+        C->frame_unchanged = FALSE;
+        C->gl_render (C, W, H, 0.0f, 0.0f);
+        glFinish ();
+        glPixelStorei (GL_PACK_ALIGNMENT, 1);
+        glReadPixels (0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, screen);
+        result (!C->frame_unchanged && !memcmp (shown, screen, NPX),
+                "a lost surface is drawn again while it rests, the same picture");
+        unload_scene ();
+    }
+    g_free (dir);
+
+    /* 2. the same with a layer that follows the time: never at rest */
+    dir = make_bars_scene (tmp, "bars-pulse", TRUE);
+    if (!load_scene (dir)) {
+        result (FALSE, "the scene with audio bars and a pulsing layer loads");
+    } else {
+        int n = ticks_to_rest (300);
+        result (n < 0, "a picture that also follows the time keeps its frame clock in silence");
+        unload_scene ();
+    }
+    g_free (dir);
+    g_free (shown);
+    g_free (screen);
+    screen = NULL;
+}
+
 int main (void)
 {
     setvbuf (stdout, NULL, _IONBF, 0);
@@ -537,8 +658,12 @@ int main (void)
     g_unsetenv ("WALPE_FX_QUALITY");
     g_unsetenv ("WALPE_PROP_PROBE");
     g_unsetenv ("WALPE_SKIP_IDS");
+    /* (no capture, no sound server: every spectrum is silence) */
+    g_setenv ("WALPE_NO_AUDIO", "1", TRUE);
+    g_unsetenv ("WALPE_AUDIO_REST");
     idle_checks (tmp);
     parked_checks (tmp);
+    silent_checks (tmp);
     eglMakeCurrent (dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglDestroySurface (dpy, surf);
     eglDestroyContext (dpy, ctx);
