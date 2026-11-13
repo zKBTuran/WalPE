@@ -40,6 +40,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 #include <pulse/simple.h>
 #include <pulse/error.h>
 
@@ -190,6 +193,18 @@ static gboolean status_is (const char *want, int ms)
 
 static GPid server_pid;
 
+/* in the server, before it starts: it ends with the test. (It is started
+ * with --exit-idle-time=-1; a test that was killed - by hand, or by a
+ * runner that ends only the test's own process - left it running for
+ * good) */
+static void with_the_test (gpointer user)
+{
+    (void) user;
+#ifdef __linux__
+    prctl (PR_SET_PDEATHSIG, SIGKILL);
+#endif
+}
+
 static void cleanup (void)
 {
     if (server_pid > 0) {
@@ -242,7 +257,7 @@ int main (void)
                      (char *) "--disable-shm=yes", (char *) "--use-pid-file=no",
                      (char *) "-L", proto, NULL };
     if (!g_spawn_async (NULL, argv, NULL, G_SPAWN_DO_NOT_REAP_CHILD | G_SPAWN_STDOUT_TO_DEV_NULL |
-                        G_SPAWN_STDERR_TO_DEV_NULL, NULL, NULL, &server_pid, NULL)) {
+                        G_SPAWN_STDERR_TO_DEV_NULL, with_the_test, NULL, &server_pid, NULL)) {
         printf ("audio-server: skipped, pulseaudio does not start\n");
         cleanup ();
         return 77;
