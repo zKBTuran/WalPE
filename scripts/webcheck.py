@@ -1705,6 +1705,26 @@ def case_sound(env, W):
           "sound: the volume setting reached the element; the page reads back its own value",
           (vc0, st.get("vc"), st.get("v")))
     note("sound: the AudioContext is %s" % st.get("ctx"))
+    # `walpe-ctl soundcheck` while the page plays: the whole sentence of the status line. It
+    # has quotation marks in it (the stream "WebKit"), written \" in the one line of JSON the
+    # command prints: a grep for "sound":"[^"]*" over `walpe-ctl status` ends at the first of
+    # them, the line of soundcheck is complete and parses to the sentence
+    p = subprocess.run([os.path.join(env.build, "walpe-ctl"), "soundcheck"], env=env.env, stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, timeout=120)
+    raw = p.stdout.decode(errors="replace")
+    try:
+        rep = json.loads(raw)
+    except ValueError:
+        rep = {}
+    said = rep.get("sound", "")
+    check(p.returncode == 0 and raw.count("\n") == 1 and
+          said.startswith("on: 1 web wallpaper(s) at 30 %") and
+          said.endswith("(what the page plays, through WebKit: the stream \"WebKit\" in the system's mixer)") and
+          "the stream \\\"WebKit\\\" in the system's mixer)\"" in raw and said == env.state().get("sound"),
+          "sound: walpe-ctl soundcheck prints the whole sentence about the page that plays, as status has it",
+          (p.returncode, raw[:400]))
+    check(isinstance(rep.get("sound_server"), str) and len(rep.get("sound_server")) > 20,
+          "sound: ... and a second sentence, about the sound server", rep.get("sound_server"))
     # the page process has played a file: GStreamer has written its plugin list where the
     # daemon's GST_REGISTRY says (the variable reached the process WebKit started)
     reg = os.path.join(env.env["XDG_CACHE_HOME"], "walpe", "gstreamer", "registry.bin")
