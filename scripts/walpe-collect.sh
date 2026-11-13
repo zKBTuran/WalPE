@@ -215,6 +215,21 @@ start_debug_daemon () {
 # versions after 0.14.0 have `walpe-ctl diag` (a summary made for reports); 0.14.0 has not
 try_diag () { LC_ALL=$CL "$CTL" diag > "$R/$1" 2> /dev/null || rm -f "$R/$1"; }
 
+# Does this engine play the sound track of a video wallpaper? It is asked, its version is
+# not read: the builds after 0.14.0 that play it still call themselves 0.14.0. They know
+# `walpe-ctl soundcheck` (why nothing is heard; the command came after video sound, so an
+# engine that answers it has video sound); 0.14.0, which plays none, answers "unknown cmd".
+# What the engine answered stays in $R/FILE.
+VSOUND=0
+try_soundcheck () {     # FILE
+    VSOUND=0
+    if LC_ALL=$CL "$CTL" soundcheck > "$R/$1" 2> /dev/null && grep -q '"ok":true' "$R/$1"; then
+        VSOUND=1
+    else
+        rm -f "$R/$1"
+    fi
+}
+
 start_detached () {     # LOGFILE COMMAND...
     _log=$1
     shift
@@ -589,7 +604,14 @@ if [ "$DO_SOUND" = 1 ]; then
         WVER=$(sed -n 's/.*walpe-daemon \([0-9][0-9.]*\) .* up (.*/\1/p' "$R/daemon-sound.txt" | head -n 1)
         note "engine version: ${WVER:-?}"
         pause "Show a wallpaper that should have sound (WalPE window, or: $CTL open <wallpaper>). Keep the desktop visible, no window on top of it. Wait 10 seconds"
-        # a video has no sound in 0.14.0: the test needs a scene (or a web page)
+        # an engine that plays no sound track of a video (0.14.0): the test needs a scene (or
+        # a web page). One that plays it is tested with the video shown.
+        try_soundcheck soundcheck.txt
+        if [ "$VSOUND" = 1 ]; then
+            note "the engine plays the sound track of video wallpapers: yes (it answers soundcheck: soundcheck.txt)"
+        else
+            note "the engine plays the sound track of video wallpapers: no (it does not know soundcheck)"
+        fi
         _try=0
         INSIST=0
         while :; do
@@ -598,7 +620,7 @@ if [ "$DO_SOUND" = 1 ]; then
             WTYPE=$(status_first "$R/status-sound.json" type)
             note "the wallpaper shown for the sound test is of type: ${WTYPE:-?}"
             [ "$_try" -gt 0 ] || video_probe "$R/status-sound.json" "sound test"
-            case "$WTYPE" in scene | web) break ;; esac
+            case "$WTYPE" in scene | web) break ;; video) [ "$VSOUND" = 0 ] || break ;; esac
             _try=$((_try + 1))
             echo
             if [ "$WTYPE" = video ]; then

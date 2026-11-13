@@ -2082,6 +2082,14 @@ test('gpu-report', find_program('sh'),
   depends: [ctl],
   timeout: 240)
 
+# scripts/walpe-collect.sh against stand-ins for walpe-daemon and walpe-ctl in a home
+# directory of its own: what it tells the tester about the wallpaper shown for the sound
+# test. Nothing is built for it, no engine that runs is touched.
+test('collect', find_program('sh'),
+  args: [meson.current_source_dir() / 'tests/collect_test.sh',
+         meson.current_source_dir() / 'scripts/walpe-collect.sh'],
+  timeout: 240)
+
 # The add-on for KDE Plasma (contrib/plasma) is no part of the build; these two only read
 # it. Its installer against stand-ins for kpackagetool6, dbus-send and kwin_wayland in a
 # home directory of its own: where it refuses, install and update, and that uninstall
