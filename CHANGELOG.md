@@ -256,7 +256,13 @@ it was). A bare window manager on X11 - dwm, i3, openbox - gets the window of 0.
   volume 0 is kept, and so is whatever is set from now on: switch it off in Engine
   settings ("Wallpaper sound") or with `walpe-ctl set scene_sound=off`; that is kept. A
   wallpaper without sound costs nothing for it: no stream, no thread, no connection to
-  the sound server.
+  the sound server. A configuration that has no `scene_sound` at all (written before
+  0.14.0, or by a 0.14.0 that never saved a setting) and a volume above 0 has nothing to
+  switch on - sound is on by default, at that volume, from the first start: the daemon's
+  log says that too now ("config: this file of a version up to 0.14.0 has no switch for
+  wallpaper sound: it is on, ..."), at every start until the file is saved by this
+  version, which the first change of a setting or of the wallpaper does. Nothing is
+  changed by it and nothing saved.
 - Engine settings, "Audio": a switch "Wallpaper sound" above the volume, with a line
   under it that says what is heard now and why not (off, muted, the volume is 0, no sound
   server, the wallpaper is paused), and a switch "Mute". Until now the only way to switch

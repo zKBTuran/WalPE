@@ -498,6 +498,13 @@ int walpe_config_migrate_sound (int sound_defaults, gboolean has_switch, gboolea
     return has_switch ? WALPE_SOUND_MIGRATE_ON : WALPE_SOUND_MIGRATE_NONE;
 }
 
+int walpe_config_sound_unswitched (int sound_defaults, gboolean has_switch, gboolean has_volume, double volume)
+{
+    if (sound_defaults >= WALPE_SOUND_DEFAULTS || has_switch || !(volume > 0.0))
+        return WALPE_SOUND_UNSWITCHED_NO;
+    return has_volume ? WALPE_SOUND_UNSWITCHED_VOLUME : WALPE_SOUND_UNSWITCHED_DEFAULT;
+}
+
 int walpe_config_migrate_fps (int version, int fps)
 {
     if (version < 2 && fps == WALPE_FPS_LEGACY_DEFAULT)
@@ -726,6 +733,11 @@ WalpeConfig *walpe_config_load (void)
         c->sound_migrated = walpe_config_migrate_sound ((int) CLAMP (wpj_num (o, "sound_defaults", 1), 1.0, 1000.0),
                                                         json_object_has_member (o, "scene_sound"),
                                                         c->scene_sound, c->volume);
+        /* (the file without the switch and with a volume: on, as it is by
+         * default, and nothing to migrate - only said, config.h) */
+        c->sound_unswitched = walpe_config_sound_unswitched ((int) CLAMP (wpj_num (o, "sound_defaults", 1), 1.0, 1000.0),
+                                                             json_object_has_member (o, "scene_sound"),
+                                                             json_object_has_member (o, "volume"), c->volume);
         if (c->sound_migrated) {
             /* "off" as versions up to 0.14.0 wrote it, where nothing but
              * walpe-ctl could switch it on: this version's default. A

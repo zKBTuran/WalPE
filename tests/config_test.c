@@ -758,6 +758,45 @@ static void test_sound_defaults (void)
     c = walpe_config_load ();
     CHECK (!c->scene_sound && c->volume == 0.0 && !c->sound_migrated);
     walpe_config_free (c);
+    /* the file without the switch and with a volume above 0: nothing is
+     * migrated, sound is on at that volume - and the load says which case
+     * it is, for the daemon's log (config.h walpe_config_sound_unswitched).
+     * Not for a file that has the switch, one of this version, or one whose
+     * volume 0 was migrated. Once the file is saved it is this version's. */
+    {
+        static const struct { const char *json; int unswitched; double vol; const char *what; } u[] = {
+            { "{\"config_version\":3,\"volume\":0.3}", WALPE_SOUND_UNSWITCHED_VOLUME, 0.3, "0.13 with a volume" },
+            { "{\"config_version\":4,\"volume\":1.0,\"mute\":true}", WALPE_SOUND_UNSWITCHED_VOLUME, 1.0,
+              "0.14.0 that never saved the switch, volume 1" },
+            { "{\"config_version\":2}", WALPE_SOUND_UNSWITCHED_DEFAULT, 0.5, "a file from before 0.12: no volume either" },
+            { "{\"config_version\":3,\"volume\":0.0}", WALPE_SOUND_UNSWITCHED_NO, 0.5, "0.13 at volume 0: migrated, said there" },
+            { "{\"config_version\":4,\"volume\":0.3,\"scene_sound\":true}", WALPE_SOUND_UNSWITCHED_NO, 0.3, "0.14.0, switched on" },
+            { "{\"config_version\":4,\"volume\":0.3,\"scene_sound\":false}", WALPE_SOUND_UNSWITCHED_NO, 0.3, "0.14.0, off: migrated" },
+            { "{\"config_version\":4,\"volume\":0.3,\"sound_defaults\":2}", WALPE_SOUND_UNSWITCHED_NO, 0.3, "this version's file" },
+        };
+        for (guint i = 0; i < G_N_ELEMENTS (u); i++) {
+            put_config (u[i].json);
+            WalpeConfig *c2 = walpe_config_load ();
+            if (!(c2->sound_unswitched == u[i].unswitched && c2->scene_sound && c2->volume == u[i].vol &&
+                  (u[i].unswitched == WALPE_SOUND_UNSWITCHED_NO || !c2->sound_migrated))) {
+                printf ("FAIL sound without a switch, %s: unswitched %d scene_sound %d volume %g migrated %d\n", u[i].what,
+                        c2->sound_unswitched, c2->scene_sound, c2->volume, c2->sound_migrated);
+                fails++;
+            }
+            walpe_config_free (c2);
+        }
+        put_config (u[0].json);
+        WalpeConfig *c2 = walpe_config_load ();
+        walpe_config_save (c2);
+        walpe_config_free (c2);
+        c2 = walpe_config_load ();
+        CHECK (c2->scene_sound && c2->volume == 0.3 && !c2->sound_unswitched && !c2->sound_migrated);
+        walpe_config_free (c2);
+        g_remove (cfg_path);
+        c2 = walpe_config_load ();
+        CHECK (c2->scene_sound && !c2->sound_unswitched);    /* no file at all: a new install, nothing to say */
+        walpe_config_free (c2);
+    }
     CHECK (walpe_config_migrate_sound (1, TRUE, FALSE, 0.0) == DEF && walpe_config_migrate_sound (1, FALSE, TRUE, 0.0) == DEF);
     CHECK (walpe_config_migrate_sound (1, TRUE, FALSE, 0.5) == ON && walpe_config_migrate_sound (1, TRUE, FALSE, 1.0) == ON);
     CHECK (!walpe_config_migrate_sound (2, TRUE, FALSE, 0.0) && !walpe_config_migrate_sound (2, TRUE, FALSE, 0.5) &&

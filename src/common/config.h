@@ -61,6 +61,11 @@ typedef struct WalpeConfig_ {
                                * a version up to 0.14.0 (walpe_config_migrate_sound,
                                * WALPE_SOUND_MIGRATE_*; 0 = no); the daemon says so
                                * and saves */
+    int     sound_unswitched; /* this load read a file of a version up to 0.14.0 that
+                               * has no "scene_sound", with a volume above 0: sound is
+                               * on at that volume, by this version's default, and
+                               * nothing was changed (walpe_config_migrate_sound: NONE).
+                               * WALPE_SOUND_UNSWITCHED_*; 0 = no. The daemon says so */
     gboolean mute;            /* wallpaper sound is silent; `volume` keeps its value */
     gboolean paused;
     gboolean pause_fullscreen; /* pause the monitor a focused fullscreen window is on */
@@ -336,6 +341,18 @@ int walpe_config_migrate_fps (int version, int fps);
  * has_switch: the file has "scene_sound". */
 enum { WALPE_SOUND_MIGRATE_NONE = 0, WALPE_SOUND_MIGRATE_DEFAULTS, WALPE_SOUND_MIGRATE_ON };
 int walpe_config_migrate_sound (int sound_defaults, gboolean has_switch, gboolean scene_sound, double volume);
+/* The case of WALPE_SOUND_MIGRATE_NONE in which sound is heard all the same
+ * at the first start of this version, and the file never said so: a file
+ * of sound_defaults < 2 without "scene_sound" (versions before 0.14.0, a
+ * 0.14.0 that never saved a setting, a file written by hand) and with a
+ * volume above 0. Nothing is changed there - the switch has this version's
+ * default, on - so nothing told the user why a wallpaper is heard; the
+ * daemon's log does (WalpeConfig.sound_unswitched):
+ *   WALPE_SOUND_UNSWITCHED_VOLUME   the file has "volume", above 0
+ *   WALPE_SOUND_UNSWITCHED_DEFAULT  it has none: WALPE_VOLUME_DEFAULT
+ * has_volume: the file has "volume". */
+enum { WALPE_SOUND_UNSWITCHED_NO = 0, WALPE_SOUND_UNSWITCHED_VOLUME, WALPE_SOUND_UNSWITCHED_DEFAULT };
+int walpe_config_sound_unswitched (int sound_defaults, gboolean has_switch, gboolean has_volume, double volume);
 
 /* focus_action ("run" / "limit" / "pause" in config.json and IPC) */
 enum { WALPE_FOCUS_RUN, WALPE_FOCUS_LIMIT, WALPE_FOCUS_PAUSE };

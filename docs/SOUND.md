@@ -47,7 +47,12 @@ set the volume to 1. "Off" in such a file is therefore the old default, not a ch
 at the first start it becomes "on" (the log says so, once): at volume 0.5 when the file
 holds volume 0, at the volume the file holds otherwise - **a volume that was turned up in
 0.14.0 without effect is heard now, at that level**. Sound that was switched on there is
-kept as it is, volume 0 included. What is set from now on is kept, "off" included.
+kept as it is, volume 0 included. What is set from now on is kept, "off" included. A file
+that has no `scene_sound` at all (from before 0.14.0, or a 0.14.0 that never saved a
+setting) with a volume above 0 is not changed: sound is on by default and is heard at
+that volume from the first start, and the log says so ("config: this file of a version up
+to 0.14.0 has no switch for wallpaper sound: it is on, ...") at every start until this
+version saves the file.
 
 `walpe-ctl status` has `scene_sound`, `mute`, `volume` and one line `sound`, for example:
 

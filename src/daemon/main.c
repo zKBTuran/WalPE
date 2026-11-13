@@ -11530,6 +11530,21 @@ int main (int argc, char **argv)
                    D.cfg->sound_migrated == WALPE_SOUND_MIGRATE_DEFAULTS ? " at volume 0" : "", vol,
                    D.cfg->sound_migrated == WALPE_SOUND_MIGRATE_ON ? ", the volume that was set" : "");
         walpe_config_save (D.cfg);
+    } else if (D.cfg->sound_unswitched && D.cfg->scene_sound) {
+        /* config.h walpe_config_sound_unswitched: the file of a version up
+         * to 0.14.0 that has no switch at all and a volume above 0. Nothing
+         * is migrated - sound is on by default - and so nothing said why a
+         * wallpaper is heard at the first start of this version. Only said:
+         * nothing is changed and nothing is saved here, so the line is in
+         * the log of every start until the file is saved by this version
+         * (the first change of a setting or of the wallpaper). */
+        char vol[G_ASCII_DTOSTR_BUF_SIZE];
+        g_ascii_formatd (vol, sizeof vol, "%.2f", D.cfg->volume);
+        g_message ("config: this file of a version up to 0.14.0 has no switch for wallpaper sound: it is on, the "
+                   "default of this version, at volume %s%s (the GUI's Engine settings, \"Wallpaper sound\", or "
+                   "walpe-ctl set scene_sound=off, switches it off; that is kept)", vol,
+                   D.cfg->sound_unswitched == WALPE_SOUND_UNSWITCHED_VOLUME ? ", the volume the file has"
+                                                                            : ", this version's default too");
     }
     present_settings_load ();   /* gpu.conf / WALPE_*: before any thread, before EGL */
     D.no_refresh_cap = g_getenv ("WALPE_NO_REFRESH_CAP") != NULL;

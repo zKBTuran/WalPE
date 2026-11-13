@@ -184,6 +184,8 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             that lies outside the home directory, also in the reason a
             load failed (a broken scene, a folder with a blank in its
             name); below the home directory it is "~/..." as before.
+            A config.json without "scene_sound" and with a volume:
+            the log says that sound is on at it.
             Status ("source_id"), diag ("source:"), the first line in
             the log and --version name the source the build was made
             from.
@@ -3603,10 +3605,20 @@ def case_diag(env, W):
     its path, the home directory as "~". The wallpapers of this check lie
     outside its home directory, as a library on another disk does."""
     A = ("A", 320, 180, 0, 0)
-    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False})
+    # (a file as 0.13 wrote it: a volume and no switch for wallpaper sound)
+    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False, "volume": 0.3})
+    started = env.mark()    # (the log has the daemons of the cases before this one)
     if not check(env.start_daemon([A]), "diag: daemon started"):
         return
     home = env.env["HOME"]
+    # ... in which sound is on at that volume from the first start, by this version's default:
+    # nothing is migrated, and the log says why a wallpaper is heard
+    st = (env.ipc({"cmd": "status"}) or {}).get("state") or {}
+    said = [l for l in env.since(started).splitlines() if "has no switch for wallpaper sound" in l]
+    check(st.get("scene_sound") is True and abs(st.get("volume", 0) - 0.3) < 1e-6 and len(said) == 1 and
+          "it is on, the default of this version, at volume 0.30, the volume the file has" in said[0],
+          "diag: a config.json without \"scene_sound\" and with a volume: sound is on at it, and the log says so once",
+          (st.get("scene_sound"), st.get("volume"), said))
     spaced = os.path.join(env.tmp, "my walls", "gone scene")       # no scene.json in it
     rc.jdump(os.path.join(spaced, "project.json"), {"file": "scene.json", "title": "gone", "type": "scene"})
     inhome = os.path.join(home, "walls", "homescene")
