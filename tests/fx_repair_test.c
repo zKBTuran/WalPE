@@ -1486,6 +1486,44 @@ static void audit_checks (void)
             d = g_strdup_printf ("longest statement %" G_GINT64_FORMAT, st);
             result (fits && st == 8, "statements inside a macro's body and inside an argument: each its own", d);
             g_free (d);
+            /* A call no compiler takes - another number of arguments than
+             * the macro has parameters, no ')' - ends the compile, but not
+             * the preprocessing: Mesa's preprocessor says so, leaves the
+             * name and reads on, and the macros in what were the arguments
+             * are expanded (170 bytes that counted as 51 tokens: 3 GiB and
+             * the end of the process after 7 s). */
+            static const struct { const char *what, *use; } bad[] = {
+                { "the arguments of a call with too few of them",
+                  "#define PAIR(p, q) p\nvoid main () {\n\tfloat a = 0.0;\n\tPAIR(C(a += 0.000001;))\n}\n" },
+                { "the arguments of a call with too many of them",
+                  "#define ONE(p) p\nvoid main () {\n\tfloat a = 0.0;\n\tONE(a, C(a += 0.000001;))\n}\n" },
+                { "an argument for a macro that takes none",
+                  "#define NONE() 1.0\nvoid main () {\n\tfloat a = 0.0;\n\tNONE(C(a += 0.000001;))\n}\n" },
+                { "a call without its ')' that a macro begins",
+                  "#define ONE(p) p\n#define OPEN ONE(\nvoid main () {\n\tfloat a = 0.0;\n\tOPEN C(a += 0.000001;)\n}\n" },
+                { "a call without its ')' inside an argument",
+                  "#define ONE(p) p\n#define OPEN ONE(\n#define ID(p) p\nvoid main () {\n\tfloat a = 0.0;\n"
+                  "\tID(OPEN C(a += 0.000001;))\n}\n" },
+                { "a call without its ')' in a macro's body",
+                  "#define ONE(p) p\n#define ALL ONE( C(a += 0.000001;)\nvoid main () {\n\tfloat a = 0.0;\n\tALL\n}\n" },
+                { "a call without its ')' and an #undef behind it",
+                  "#define ONE(p) p\n#define OPEN ONE(\n#define BIG C(a += 0.000001;)\nvoid main () {\n\tfloat a = 0.0;\n"
+                  "\tOPEN BIG\n#undef BIG\n}\n" },
+            };
+            for (guint k = 0; k < G_N_ELEMENTS (bad); k++) {
+                g_string_assign (s, bomb);
+                g_string_append (s, bad[k].use);
+                char *what = g_strdup_printf ("16.7 million copies through %s: expansion size refused", bad[k].what);
+                result (!fx_expansion_ok (s->str), what, NULL);
+                g_free (what);
+            }
+            /* ... and such a call with nothing behind it is the text it is */
+            fits = fx_expansion_sizes ("#define PAIR(p, q) p\n#define TWO(p) p p\nvoid main () {\n\tfloat a = PAIR(TWO(1.0 +) 1.0);\n}\n",
+                                       &st);
+            d = g_strdup_printf ("longest statement %" G_GINT64_FORMAT, st);
+            /* float a = PAIR ( 1.0 + 1.0 + 1.0 ) */
+            result (fits && st == 11, "a call with too few arguments: accepted, its arguments counted as the text they are", d);
+            g_free (d);
         }
         g_string_assign (s, "#define SELF SELF + 1\n#define P Q\n#define Q P\nfloat a = SELF + P;\n");
         result (fx_expansion_ok (s->str), "self-referencing macros: accepted (not expanded in themselves)", NULL);

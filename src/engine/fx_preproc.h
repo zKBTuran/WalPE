@@ -140,6 +140,7 @@ typedef struct FxPre_ {
     gboolean in_cond;       /* an #if / #elif expression is being worked out ... */
     gboolean cond_line;     /* ... and it read __LINE__ or __FILE__ */
     int nest;
+    guint directives;       /* directive lines obeyed so far */
 } FxPre;
 
 /* ---------------------------------------------------------------- text */
@@ -829,6 +830,7 @@ static gboolean fxpre_call (FxPreIn *in, FxPreMacro *m)
          * every other pair of parentheses */
         GArray *args = g_array_new (FALSE, FALSE, sizeof (FxPreTok));
         GArray *ends = g_array_new (FALSE, FALSE, sizeof (guint));
+        const guint directives = pp->directives;
         int depth = 0;
         gboolean closed = FALSE;
         while ((k = fxpre_peek (in)) != NULL && fxpre_charge (pp, 1)) {
@@ -883,10 +885,20 @@ static gboolean fxpre_call (FxPreIn *in, FxPreMacro *m)
             g_array_free (exp, TRUE);
             g_array_free (exp_ends, TRUE);
         } else if (!pp->fail) {
-            /* no call a compiler takes (no ')', another number of
-             * arguments: the compile ends here): the text as it stands */
+            /* No call a compiler takes (no ')', another number of
+             * arguments): the compile ends, but the preprocessing does
+             * not. Mesa's says so, leaves the name as the text it is and
+             * reads on behind it: what was taken for the arguments is
+             * text like any other, and the macros in it are expanded
+             * ("#define PAIR(p, q) p" and "PAIR(BIG)": all of BIG). So the
+             * name stays and the rest is read once more.
+             * Where the search for the ')' went over directive lines they
+             * have been obeyed, and the text before them cannot be read
+             * again as it was (an "#undef" among them): no shader. */
             static const FxPreTok open = { "(", 1, 0, FXPRE_T_PUNCT, 0, 0 }, comma = { ",", 1, 0, FXPRE_T_PUNCT, 0, 0 },
                                close = { ")", 1, 0, FXPRE_T_PUNCT, 0, 0 };
+            if (pp->directives != directives)
+                pp->fail = "a macro call without its ')' or with another number of arguments, over directive lines";
             FxPreTok name = m->name;
             name.noexp = 1;
             g_array_append_val (r, name);
@@ -895,11 +907,7 @@ static gboolean fxpre_call (FxPreIn *in, FxPreMacro *m)
                 const guint b = i ? g_array_index (ends, guint, i - 1) : 0, e = g_array_index (ends, guint, i);
                 if (i)
                     g_array_append_val (r, comma);
-                for (guint q = b; q < e; q++) {
-                    FxPreTok a = g_array_index (args, FxPreTok, q);
-                    a.noexp = 1;
-                    g_array_append_val (r, a);
-                }
+                g_array_append_vals (r, &g_array_index (args, FxPreTok, b), e - b);
             }
             if (closed)
                 g_array_append_val (r, close);
@@ -1114,6 +1122,7 @@ static gboolean fxpre_next_line (FxPre *pp, GArray *toks)
         if (!fxpre_charge (pp, toks->len + 1))
             break;
         if (toks->len && g_array_index (toks, FxPreTok, 0).len == 1 && g_array_index (toks, FxPreTok, 0).s[0] == '#') {
+            pp->directives++;
             fxpre_directive (pp, (const FxPreTok *) toks->data, toks->len);
             continue;
         }
