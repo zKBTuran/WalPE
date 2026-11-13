@@ -125,9 +125,10 @@ and says so. A socket that refuses the connection is handled at once (error, or 
 `wayland_pointer=off` (`walpe-ctl set`) keeps the wallpaper from ever taking pointer input:
 the desktop behaves as without WalPE, and wallpapers do not follow the pointer.
 
-Seen on sway 1.9: a pointer is announced to a surface when it moves onto it, not when the
-surface under a resting pointer begins to take input. A wallpaper that uses the pointer and
-is loaded while the pointer rests on the bare desktop follows it from its first movement on.
+Seen on sway 1.12 (not on sway 1.9, which announces the pointer at once; 1.10 and 1.11 were
+not run): a pointer is announced to a surface when it moves onto it, not when the surface
+appears under a resting pointer. A wallpaper that uses the pointer and is loaded while the
+pointer rests on the bare desktop follows it from its first movement on.
 
 Monitor names are the keys of per-monitor settings. Where X11 and Wayland only spell a
 connector differently (`HDMI-1` / `HDMI-A-1`), status shows a `canon` name that is the same
