@@ -238,9 +238,16 @@ Tests: `meson test -C build websec websec-private web-x11 web-wayland webhost-wl
   conversion nobody asked for in person (a wallpaper is opened, a scene
   has a video) is stopped after 60 minutes, at 8192 MB of output or when
   less than 256 MB are left on the disk (`WALPE_CONVERT_MAX_MIN`,
-  `WALPE_CONVERT_MAX_MB`, 0 = no limit; `walpe-ctl add` has none), and ffmpeg
+  `WALPE_CONVERT_MAX_MB`, `WALPE_CONVERT_FREE_MB`, 0 = no limit; `walpe-ctl add`
+  has none), and ffmpeg
   ends with the daemon, however the daemon ends; what it had written so
-  far is removed at the next start.
+  far is removed at the next start. The sound track of a video wallpaper is
+  taken out the same way (ffmpeg, the same reading limits): at most six
+  hours and 2 GB of it, within the 60 minutes, and not below the 256 MB of
+  free disk. It is not stopped when the wallpaper is left - the file is
+  for the next time - and the cache has no limit on what all its files
+  add up to: a copy or a sound track that nothing played for 90 days is
+  removed when the daemon starts.
 - The environment the daemon is started with is trusted like the daemon
   itself (`LD_*`, `GST_*`, `WEBKIT_*`, `LIBGL_*`, `__EGL_VENDOR_LIBRARY_*`,
   every `WALPE_*` switch): the restarts in place hand the start

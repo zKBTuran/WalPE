@@ -910,17 +910,31 @@ static gint64 limit_env (const char *name, gint64 dflt)
     return MIN (v, 100000000);  /* (the callers multiply: no overflow) */
 }
 
+/* MiB that have to stay free on the file system a conversion or a sound
+ * track is written to (WALPE_CONVERT_FREE_MB, 0 = no floor) */
+static gint64 low_disk_mb (void)
+{
+    return limit_env ("WALPE_CONVERT_FREE_MB", LOW_DISK_MB);
+}
+
+/* MiB free for this user where dir is; G_MAXINT64 when nobody can tell */
+static gint64 disk_free_mb (const char *dir)
+{
+    struct statvfs vfs;
+    return statvfs (dir, &vfs) == 0 ? (gint64) ((guint64) vfs.f_bavail * vfs.f_frsize / (1024 * 1024))
+                                    : G_MAXINT64;
+}
+
 static gboolean import_watch (gpointer user)
 {
     WalpeImport *imp = user;
     char *why = NULL;
     if (!imp->cancelled && imp->stage != ST_DONE && !imp->limit_msg) {
         GStatBuf st;
-        struct statvfs vfs;
         gint64 size = g_stat (imp->dst_part, &st) == 0 ? (gint64) st.st_size : 0;
         char *dir = g_path_get_dirname (imp->dst_part);
-        gint64 free_mb = statvfs (dir, &vfs) == 0
-            ? (gint64) ((guint64) vfs.f_bavail * vfs.f_frsize / (1024 * 1024)) : G_MAXINT64;
+        gint64 free_mb = disk_free_mb (dir);
+        const gint64 floor_mb = low_disk_mb ();
         g_free (dir);
         if (imp->max_us > 0 && g_get_monotonic_time () - imp->start_us > imp->max_us)
             why = g_strdup_printf ("the conversion was stopped: it ran for more than %d minutes "
@@ -930,9 +944,9 @@ static gboolean import_watch (gpointer user)
             why = g_strdup_printf ("the conversion was stopped: its output grew beyond %d MB "
                                    "(WALPE_CONVERT_MAX_MB)",
                                    (int) (imp->max_bytes / (1024 * 1024)));
-        else if (size > 0 && free_mb < LOW_DISK_MB)
+        else if (size > 0 && free_mb < floor_mb)
             why = g_strdup_printf ("the conversion was stopped: less than %d MB are left on "
-                                   "the disk it writes to", LOW_DISK_MB);
+                                   "the disk it writes to", (int) floor_mb);
         /* (between two children there is nothing to stop: look again) */
         if (!why || !imp->proc) {
             g_free (why);
@@ -1072,10 +1086,18 @@ int walpe_video_sound_extract (const char *src, const char *dst, char **err)
     int efd = -1;
     GError *e = NULL;
     GString *said = g_string_new (NULL);
-    gboolean timed_out = FALSE;
+    gboolean timed_out = FALSE, low_disk = FALSE;
     int status = -1;
+    /* the floor every conversion has (import_watch): six hours of sound
+     * are up to 2 GB of FLAC, from a video file that may be a hundredth of
+     * that, and nothing looked at what the disk had left. Not begun below
+     * the floor, stopped when the disk gets there. */
+    const gint64 floor_mb = low_disk_mb ();
     if (g_mkdir_with_parents (dir, 0700) != 0) {
         g_string_printf (said, "%s: %s", dir, g_strerror (errno));
+    } else if (floor_mb > 0 && disk_free_mb (dir) < floor_mb) {
+        g_string_printf (said, "not taken out: less than %d MB are left on the disk of the cache",
+                         (int) floor_mb);
     } else if (!g_spawn_async_with_pipes (NULL, argv, NULL,
                                           G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD |
                                           G_SPAWN_STDOUT_TO_DEV_NULL,
@@ -1089,6 +1111,7 @@ int walpe_video_sound_extract (const char *src, const char *dst, char **err)
         const gint64 t0 = g_get_monotonic_time ();
         /* (what ffmpeg says is read while it runs: a full pipe would stop it) */
         fcntl (efd, F_SETFL, fcntl (efd, F_GETFL) | O_NONBLOCK);
+        guint rounds = 0;
         for (;;) {
             char buf[512];
             ssize_t n;
@@ -1102,11 +1125,14 @@ int walpe_video_sound_extract (const char *src, const char *dst, char **err)
                 status = -1;
                 break;
             }
-            if (max_us > 0 && g_get_monotonic_time () - t0 > max_us) {
+            if (max_us > 0 && g_get_monotonic_time () - t0 > max_us)
+                timed_out = TRUE;
+            else if (floor_mb > 0 && ++rounds % 50 == 0 && disk_free_mb (dir) < floor_mb)
+                low_disk = TRUE;    /* (looked at once a second) */
+            if (timed_out || low_disk) {
                 kill (pid, SIGKILL);
                 while (waitpid (pid, &status, 0) < 0 && errno == EINTR)
                     ;
-                timed_out = TRUE;
                 break;
             }
             g_usleep (20000);
@@ -1121,10 +1147,10 @@ int walpe_video_sound_extract (const char *src, const char *dst, char **err)
         close (efd);
         g_spawn_close_pid (pid);
         GStatBuf st;
-        if (!timed_out && WIFEXITED (status) && WEXITSTATUS (status) == 0 &&
+        if (!timed_out && !low_disk && WIFEXITED (status) && WEXITSTATUS (status) == 0 &&
             g_stat (part, &st) == 0 && st.st_size > 0 && g_rename (part, dst) == 0) {
             res = 1;
-        } else if (!timed_out && strstr (said->str, "matches no streams")) {
+        } else if (!timed_out && !low_disk && strstr (said->str, "matches no streams")) {
             /* the video has no sound track: an empty file says so from now
              * on, and nobody asks ffmpeg again */
             g_remove (part);
@@ -1132,6 +1158,9 @@ int walpe_video_sound_extract (const char *src, const char *dst, char **err)
                 res = 0;
         } else if (timed_out) {
             g_string_assign (said, "stopped: it took longer than WALPE_CONVERT_MAX_MIN minutes");
+        } else if (low_disk) {
+            g_string_printf (said, "stopped: less than %d MB are left on the disk of the cache",
+                             (int) floor_mb);
         }
     }
     if (res < 0) {

@@ -520,6 +520,11 @@ microphone.
   particle objects together now have 4096 systems (the same scene: 6 seconds, 161 MiB);
   an object beyond that gets no further system and the log says so once. 0.14.0 has
   this too.
+- The sound track of a video wallpaper (new with the changes above) was taken out into
+  the cache whatever the disk had left: a video file of 25 MB with an hour of sound
+  becomes 274 MB of FLAC in half a minute, six hours up to 2 GB. It now has the floor
+  every conversion has - not begun, and stopped, when less than 256 MB are free
+  (`WALPE_CONVERT_FREE_MB`, new, for both).
 - New with the changes above, and closed before anybody had them: a web page could undo
   mute and "off" for its own sound (now WebKit's own mute, under Sound), and with the
   Plasma add-on another program of the session could take the pointer's bus name and be

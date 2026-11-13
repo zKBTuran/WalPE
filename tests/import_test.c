@@ -473,6 +473,24 @@ static void test_runs (void)
             CHECK (walpe_video_sound_extract (fine, f2, &err) == 0 && walpe_video_sound_extract (snd, f1, &err) == 1);
             g_free (err);
             err = NULL;
+            /* less free disk than the floor of every conversion (here: a floor
+             * no disk reaches): not begun, the reason said, nothing left
+             * behind; and taken out again once the floor is the usual one */
+            {
+                char *p1 = g_strconcat (f1, ".part", NULL);
+                g_remove (f1);
+                g_setenv ("WALPE_CONVERT_FREE_MB", "100000000", TRUE);
+                CHECK (walpe_video_sound_extract (snd, f1, &err) == -1 && err && strstr (err, "left on the disk") &&
+                       !g_file_test (f1, G_FILE_TEST_EXISTS) && !g_file_test (p1, G_FILE_TEST_EXISTS));
+                g_free (err);
+                err = NULL;
+                g_setenv ("WALPE_CONVERT_FREE_MB", "0", TRUE);
+                CHECK (walpe_video_sound_extract (snd, f1, &err) == 1 && !err);
+                g_unsetenv ("WALPE_CONVERT_FREE_MB");
+                g_remove (f1);
+                CHECK (walpe_video_sound_extract (snd, f1, &err) == 1 && !err);
+                g_free (p1);
+            }
             /* not a video: an error that says what ffmpeg said, nothing left behind */
             char *part = g_strconcat (f3, ".part", NULL);
             CHECK (walpe_video_sound_extract (junk, f3, &err) == -1 && err && *err &&
