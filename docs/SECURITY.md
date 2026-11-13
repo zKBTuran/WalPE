@@ -72,19 +72,42 @@ So WalPE does not leave either to gdk-pixbuf any more (`src/common/pichead.c`):
 
 - **The format** is the signature in the file's first bytes, read by WalPE: PNG, JPEG,
   GIF87a / GIF89a, RIFF-WEBP, "BM", TIFF, the `ftyp` box of an AVIF file, JPEG XL. A file
-  with `ftyp` at offset 4 is an ISO media file and nothing else - glycin goes by that box
-  before it looks for a JPEG's or a BMP's first bytes. TGA has no signature: its 18-byte
-  header has to be one gdk-pixbuf's TGA decoder takes (picture type, bits per pixel,
-  colour map), and a header of the less common kind (a colour map nobody uses, a map
+  with `ftyp` at offset 4 is an ISO media file and nothing else, and an AVIF only when
+  that box is shorter than 256 bytes. glycin 2.2 picks the decoder by its loaders'
+  identifier lists (`/usr/share/glycin-loaders/2+/conf.d`), the one with the most rules
+  and the longest bytes first: `ftypavif` and `ftypheic` at offset 4 come before a
+  JPEG's or a BMP's first bytes - and behind a TGA header, which it knows by bytes 1,
+  2 and 16. The first four bytes of an ISO file are a box length, any number; one of
+  0x0A00 made a file with avif in its brand list a run-length TGA picture to glycin
+  (run: 3 MB, 9000 x 9000 pixels decoded for what WalPE took for an AVIF without a
+  size). With the first three bytes zero no TGA, icon or cursor identifier fits. TGA
+  has no signature: its 18-byte header has to be one gdk-pixbuf's TGA decoder takes
+  (picture type, bits per pixel, colour map; also true colour of 15 bits, which only
+  glycin's decoder shows), and a header of the less common kind (a colour map nobody uses, a map
   origin) counts only under a name that ends in `.tga`; the decoder is then given the
   header without the unused map, which is a TGA file to every reader. The name of a file
   decides nothing else: where the first bytes say nothing, the file is not a picture.
 - **The size** is read from the header by WalPE as well, and the limit is applied to it
   before a loader exists. For PNG, JPEG, GIF, BMP, WebP and TGA the header is in one
   fixed place and those are the decoder's numbers; a file without it is not handed on.
-  For TIFF (first directory), AVIF (the largest `ispe` property) and JPEG XL (the
-  codestream's size header) what WalPE reads is an upper bound that refuses a picture
-  beyond the limits; the size the picture is laid out by is still the loader's.
+  A JPEG's frame header is found by walking its markers, and libjpeg and zune-jpeg (the
+  decoder behind glycin) walk differently where a restart marker stands in front of the
+  first scan or where the file has a second frame header of another kind (run: "16 x 16"
+  read, 9000 x 9000 decoded): such a file has no size and is not handed on.
+  For TIFF (first directory, classic and 64-bit, the size in any number type a decoder
+  takes), AVIF (the largest `ispe` property) and JPEG XL (the codestream's size header,
+  gathered across the parts of a container) what WalPE reads is an upper bound that
+  refuses a picture beyond the limits; the size the picture is laid out by is still the
+  loader's. A file of these three without a size WalPE finds is not handed on either.
+- **An AVIF image sequence is not decoded at all.** A file with a `moov` box is played
+  by glycin's libheif loader from its track, and the frames are as large as the AV1 data
+  says whatever the file declares: with `ispe`, the track header and the sample entry at
+  64 x 64, frames of 5000 x 5000 were decoded (470 MiB), and an animated AVIF of 3.7 KB
+  with two frames of 9000 x 9000 cost 1441 MiB and 15 seconds for a picture handed back
+  at 64 x 64. No header field bounds it, so the reader gives such a file no size. (A
+  still AVIF is bounded: libheif 1.23 holds an item's coded size to its `ispe` and a
+  grid to its tiles before it decodes - run, refused at 17 to 22 MiB.) The first frame
+  of an animated AVIF used to be shown where gdk-pixbuf has an AVIF loader.
 - The loader's own report of the size is still held to the limit behind that, and for
   previews and cover art to the header as well: a size that differs from the header's
   refuses the picture.
@@ -92,12 +115,22 @@ So WalPE does not leave either to gdk-pixbuf any more (`src/common/pichead.c`):
 What this does not cover, where gdk-pixbuf decodes through glycin:
 
 - Which decoder glycin runs for bytes that carry an accepted signature is glycin's
-  decision. With the decoders of glycin 2.2.6 it is that format's; a decoder added to
-  the system with a signature of its own that fits inside such a file would get it.
-- A TIFF, AVIF or JPEG XL file whose size WalPE's reader does not find (a 64-bit TIFF,
-  an AVIF without `ispe`) is decoded by the loader process before WalPE hears its size
-  and refuses it; that process is glycin's to limit. The same holds for the size
-  question alone on those three formats: it decodes the picture.
+  decision. With the identifier lists of glycin 2.2.6 it is that format's (read against
+  every signature above; for an AVIF whose major brand is neither avif nor heic glycin
+  falls back to the system's file type table, which names libheif's loader or none); a
+  decoder added to the system with a signature of its own that fits inside such a file
+  would get it.
+- How a decoder reads a header is the decoder's. WalPE's readers were held against the
+  ones behind glycin 2.2.6 - zune-jpeg 0.5.15 and the tiff crate 0.11.3 by their source;
+  the PNG, WebP and libheif decoders by files (a second IHDR, a VP8X canvas smaller than
+  its picture, an item larger than its `ispe`, a grid larger than its tiles: each
+  refused by the decoder at a few MiB) - and a later version may read differently. Not
+  held against anything: a JPEG XL file's frames and its animation, the frames of an
+  animated WebP.
+- The size question alone on TIFF, AVIF and JPEG XL decodes the picture there (of a
+  size within 16384 x 16384 pixels by its header: 540 to 565 MiB in the decoder process
+  for 9000 x 9000), and a picture above 8192 x 8192 pixels that is loaded scaled down is
+  decoded a second time.
 - Every picture is a temporary file (`gdk-pixbuf-glycin-tmp.*` in `$TMPDIR`, removed
   when the loader is closed) and a round trip to a decoder process; glycin keeps such a
   process for 30 seconds after its last picture and gives one operation 60 seconds. A

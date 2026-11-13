@@ -662,9 +662,18 @@ microphone.
   reads the format and the declared size from the file's own first bytes and hands a
   file to gdk-pixbuf only as one of the formats a wallpaper can have and within the size
   limit ([SECURITY.md](docs/SECURITY.md#which-decoder-a-picture-reaches-and-when-its-size-is-known),
-  with what is still glycin's to decide). On Ubuntu 24.04 the same checks run and change
-  nothing that was shown: 37 pictures of every format and name gave the same frame
-  before and after. A picture or GIF wallpaper is no longer opened three times to learn
+  with what is still glycin's to decide). WalPE's readers were then held against the
+  decoders behind glycin, and four ways to tell WalPE one size and the decoder another
+  were closed (a JPEG with a restart marker or a second frame header in front of its
+  scan, a TIFF with its size in another number type, a JPEG XL container cut behind its
+  first two bytes, an "AVIF" whose box length is a TGA header to glycin). An AVIF image
+  sequence (an animated AVIF) is not decoded any more, on any system: its frames are as
+  large as its AV1 data says whatever the file declares (3.7 KB cost 1.4 GiB in the
+  decoder process on Arch); its first frame used to be shown where gdk-pixbuf has an AVIF
+  loader (Ubuntu 24.04 has none by default). On Ubuntu 24.04 the same checks run and
+  change nothing else that was shown: 193 pictures of every format, header version and
+  name gave the same pixels through previews, `.tex`, layer pictures and as the
+  wallpaper before and after. A picture or GIF wallpaper is no longer opened three times to learn
   its format and size (on Arch that was three full decodes before the picture was
   shown).
 
