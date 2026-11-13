@@ -1360,7 +1360,8 @@ endif
 # scene sound (engine/scenesound.c) on the null device, with WAV files the
 # test writes: players, the switches (the setting, a wallpaper's own, volume,
 # mute, pause), one voice per wallpaper shown twice, the limits and files
-# that are no sound. Never opens a real output; no display.
+# that are no sound; and when the sound track of a video is told its place
+# (engine/video_track.h). Never opens a real output; no display.
 test('scenesound', executable('scenesound-test', 'tests/scenesound_test.c',
   include_directories: inc,
   dependencies: [core_dep],

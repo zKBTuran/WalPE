@@ -37,7 +37,13 @@
  *     go to a place is asked to: what lies in front of it is not decoded.
  * 10. walpe_sound_set_period (the loop of a video's sound track): every
  *     pass is exactly that long - a file that is longer is cut, one that
- *     is shorter is followed by silence - and a place in the silence. */
+ *     is shorter is followed by silence - and a place in the silence.
+ * 11. The track of a video follows its picture (engine/video_track.h, the
+ *     part of video.c that decides it): it plays from the place a frame
+ *     told it and from no other - an instance that gets the word because
+ *     the other monitor was paused, a mute that ends, do nothing until
+ *     their next frame; an instance that resumes with the word goes on
+ *     where it stopped. */
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <math.h>
@@ -46,6 +52,7 @@
 #include <sys/stat.h>
 #include "walpe-build-config.h"   /* HAVE_PULSE: the wording of the status line */
 #include "engine/scenesound.h"
+#include "engine/video_track.h"
 
 static int fails;
 #define CHECK(c, ...) do { if (!(c)) { fails++; printf ("FAIL %s:%d: ", __FILE__, __LINE__); printf (__VA_ARGS__); printf ("\n"); } } while (0)
@@ -1278,6 +1285,128 @@ static void test_period (const char *dir)
     g_free (two);
 }
 
+/* ---- 11 ---- */
+static void track_init (WalpeVideoTrack *t, const char *key, const char *file, double period)
+{
+    /* (what video.c makes for a video with a sound track) */
+    const char *files[1] = { file };
+    const WalpeSoundSpec spec = { files, 1, 1.0f, WALPE_SOUND_LOOP, 0.0f, 0.0f, "track" };
+    memset (t, 0, sizeof *t);
+    t->pos = -1;
+    t->group = walpe_sound_group_new (key, 1);
+    t->snd = walpe_sound_new (t->group, &spec);
+    t->period = period;
+    walpe_sound_set_period (t->snd, period);
+    walpe_sound_group_set_active (t->group, TRUE);
+}
+
+static void test_video_track (const char *dir)
+{
+    WalpeSoundStats sa, sb;
+    char *file = g_build_filename (dir, "track.bin", NULL);
+    g_file_set_contents (file, "not RIFF: the decoder of the test", -1, NULL);
+    walpe_sound_set_decoder (&seek_dec);    /* 8000 Hz, 125 s; counts what is opened and decoded */
+    walpe_sound_use_null (FALSE);           /* at the pace of real output: a place stays a place */
+    g_atomic_int_set (&seek_opens, 0);
+    WalpeVideoTrack A, B;
+    track_init (&A, "/w/video", file, 100.0);
+    track_init (&B, "/w/video", file, 100.0);
+    /* the first pictures of both monitors, 10 s into the clip: one speaks */
+    walpe_video_track_follow (&A, 10.0);
+    walpe_video_track_follow (&B, 10.0);
+    WAIT (stats_of (A.snd).running, 5000);
+    sa = stats_of (A.snd);
+    sb = stats_of (B.snd);
+    CHECK (sa.running && sa.opens == 1 && sa.pos >= 80000 && sa.pos < 88000 && sb.opens == 0 &&
+           walpe_sound_threads () == 1 && g_atomic_int_get (&seek_opens) == 1,
+           "two monitors, first pictures at 10 s: the first plays from frame %" G_GINT64_FORMAT " (wanted: 80000 "
+           "and on), the second opened %d file(s), %d thread(s)", sa.pos, sb.opens, walpe_sound_threads ());
+    /* both monitors are paused, the speaking one first: the other one has
+     * the word until its own pause arrives, and draws no frame in that
+     * time. It starts nothing. */
+    walpe_sound_group_set_active (A.group, FALSE);
+    g_usleep (400000);      /* (a block of this file is a quarter of a second, counted when it is out) */
+    sb = stats_of (B.snd);
+    CHECK (walpe_sound_group_speaking (B.group) && sb.opens == 0 && sb.frames == 0 && !sb.running &&
+           walpe_sound_threads () == 1,
+           "the speaking monitor is paused, the other one not yet: its track opened %d file(s) and put out %"
+           G_GINT64_FORMAT " frames without a frame of its picture, %d thread(s) (wanted: 0, 0, 1)",
+           sb.opens, sb.frames, walpe_sound_threads ());
+    walpe_sound_group_set_active (B.group, FALSE);
+    WAIT (!stats_of (A.snd).running, 5000);
+    /* both resume, the other one first: it has the word, and plays from
+     * the place its first frame says - not before, not from elsewhere */
+    walpe_sound_group_set_active (B.group, TRUE);
+    walpe_sound_group_set_active (A.group, TRUE);
+    g_usleep (60000);
+    sb = stats_of (B.snd);
+    CHECK (walpe_sound_group_speaking (B.group) && sb.opens == 0 && sb.frames == 0,
+           "resumed with the word, no frame yet: %d file(s) opened, %" G_GINT64_FORMAT " frames (wanted: 0, 0)",
+           sb.opens, sb.frames);
+    walpe_video_track_follow (&B, 12.0);
+    walpe_video_track_follow (&A, 12.0);
+    WAIT (stats_of (B.snd).running, 5000);
+    sa = stats_of (A.snd);
+    sb = stats_of (B.snd);
+    const gint64 fa = sa.frames;
+    CHECK (sb.running && sb.opens == 1 && sb.pos >= 96000 && sb.pos < 104000 && !sa.running,
+           "its frame says 12 s: it plays from frame %" G_GINT64_FORMAT " (wanted: 96000 and on), %d open(s); "
+           "the first one %s", sb.pos, sb.opens, sa.running ? "plays too" : "is silent");
+    /* this monitor alone is paused (a window covers it): the first one
+     * takes over - from the place its next frame says, and nothing of
+     * the place it stopped at two seconds of the clip ago is put out */
+    walpe_sound_group_set_active (B.group, FALSE);
+    g_usleep (400000);
+    sa = stats_of (A.snd);
+    CHECK (walpe_sound_group_speaking (A.group) && sa.frames == fa && sa.opens == 1,
+           "took the word over, no frame yet: %" G_GINT64_FORMAT " frames from the old place, %d open(s) (wanted: "
+           "0, 1)", sa.frames - fa, sa.opens);
+    walpe_video_track_follow (&A, 15.0);
+    WAIT (stats_of (A.snd).running && stats_of (A.snd).opens == 2, 5000);
+    sa = stats_of (A.snd);
+    CHECK (sa.running && sa.opens == 2 && sa.pos >= 120000 && sa.pos < 128000,
+           "its frame says 15 s: it plays from frame %" G_GINT64_FORMAT " (wanted: 120000 and on), %d open(s)",
+           sa.pos, sa.opens);
+    /* paused and resumed with the word: it goes on where it stopped,
+     * without a frame and without opening the file again */
+    walpe_sound_group_set_active (A.group, FALSE);
+    WAIT (!stats_of (A.snd).running, 5000);
+    sa = stats_of (A.snd);
+    const gint64 stopped = sa.pos, fa2 = sa.frames;
+    walpe_sound_group_set_active (A.group, TRUE);
+    WAIT (stats_of (A.snd).frames > fa2, 3000);
+    sa = stats_of (A.snd);
+    CHECK (sa.frames > fa2 && sa.opens == 2 && sa.pos >= stopped && sa.pos < stopped + 8000,
+           "paused and resumed with the word: %" G_GINT64_FORMAT " more frames, %d open(s), place %" G_GINT64_FORMAT
+           " after %" G_GINT64_FORMAT " (wanted: it goes on there, 2 opens)", sa.frames - fa2, sa.opens, sa.pos,
+           stopped);
+    /* mute, a frame, the end of the mute: silent until the next frame,
+     * then from its place */
+    walpe_sound_set_muted (TRUE);
+    WAIT (!stats_of (A.snd).running, 5000);
+    walpe_video_track_follow (&A, 20.0);
+    const gint64 fa3 = stats_of (A.snd).frames;
+    walpe_sound_set_muted (FALSE);
+    g_usleep (400000);
+    sa = stats_of (A.snd);
+    CHECK (walpe_sound_group_speaking (A.group) && sa.frames == fa3,
+           "the mute ended, no frame yet: %" G_GINT64_FORMAT " frames from the old place (wanted: 0)",
+           sa.frames - fa3);
+    walpe_video_track_follow (&A, 21.0);
+    WAIT (stats_of (A.snd).running && stats_of (A.snd).opens == 3, 5000);
+    sa = stats_of (A.snd);
+    CHECK (sa.running && sa.opens == 3 && sa.pos >= 168000 && sa.pos < 176000,
+           "its frame says 21 s: it plays from frame %" G_GINT64_FORMAT " (wanted: 168000 and on), %d open(s)",
+           sa.pos, sa.opens);
+    walpe_sound_group_free (A.group);
+    walpe_sound_group_free (B.group);
+    CHECK (threads_gone (), "threads end");
+    walpe_sound_set_decoder (NULL);
+    walpe_sound_use_null (TRUE);
+    g_remove (file);
+    g_free (file);
+}
+
 int main (void)
 {
     test_names ();
@@ -1316,6 +1445,7 @@ int main (void)
     test_stream_cap (dir);
     test_restart (dir);
     test_period (dir);
+    test_video_track (dir);
 
     g_remove (sine);
     g_rmdir (dir);
