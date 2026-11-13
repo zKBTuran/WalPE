@@ -339,6 +339,55 @@ it was). A bare window manager on X11 - dwm, i3, openbox - gets the window of 0.
   started by hand in Xvfb (XFCE 4.18, LXQt 1.4, LXDE, MATE 1.26, Cinnamon 6.0, GNOME
   Shell 46, KDE Plasma 5.27); none in a real session, none with a graphics card.**
 
+### Scenes and wallpaper files
+
+Files a wallpaper names and WalPE did not find, and where a scene of the old format puts
+its layers. **State of testing: run on wallpapers generated for it; no Workshop
+wallpaper and no real Wallpaper Engine install was at hand.**
+
+- File names in another letter case, and with `\`: Wallpaper Engine runs on Windows,
+  where a file is found whatever the case of its name and `\` separates folders like `/`,
+  so a wallpaper can name its own files in another case than they have on disk. Such a
+  name found nothing here. A scene left out the layer, the effect or the particles whose
+  model, material, picture, shader or particle file was named that way (one "... not
+  found" line in the log), and a text whose font was named that way got a system font; a
+  web wallpaper's page that asks for `JS/App.js` next to a folder `js` got a 404 and ran
+  without its script, its style sheet or its pictures; a `project.json` with `"file":
+  "Main.html"` next to `main.html`, or `"Clip.MP4"` next to `clip.mp4`, did not load at
+  all. A name that matches no file as written is now looked up once more with the letter
+  case ignored, and with `\` between folders where that finds nothing either. A file
+  that has the name as written is taken first, as before; what is found the other way is
+  held to the same conditions (inside the wallpaper's folder, a regular file); where a
+  folder has two names that differ in case alone, the one that sorts first is taken. One
+  case is left: a sound file of a packaged scene (`scene.pkg`) that is named in another
+  case plays when sound is on while the wallpaper loads, which is the default, and stays
+  silent when sound is switched on later, until the wallpaper is loaded again.
+- A layer's picture is looked for in Wallpaper Engine's assets too. A picture layer names
+  a model, the model a material, the material a picture; the model and the material were
+  looked for in the wallpaper and then in your Wallpaper Engine install
+  ([USAGE.md](docs/USAGE.md#wallpaper-engine-assets)), the picture in the wallpaper only.
+  A layer whose picture is one of the install's was an empty place. The wallpaper's own
+  picture of that name still comes first, and the log line for a picture that is nowhere
+  names both places. Nothing changes where WalPE knows no install. Run with a made-up
+  install; how many Workshop wallpapers name such a picture is not known.
+- Scenes of the old format (a `scene.json` with `object` / `layers` instead of
+  `objects`): a layer is where its `translation` says. The layer's own placement and
+  the scene's fit to the screen were applied in the wrong order, so every layer lay
+  around the middle of the screen, `translation` and the parallax offset counted in
+  halves of the screen instead of scene pixels, a layer turned about its pivot left the
+  screen, the layers of a group were never seen, and on a screen of another shape than
+  the scene, or with a camera zoom or shift, the picture was black. The same in 0.14.0;
+  only pictures of the scene's own size without a translation, on a screen of the scene's
+  shape, were right. **This changes the picture of every old-format scene that has a
+  layer smaller than the scene, a translation, a rotation, a group or a camera, or is
+  shown on a screen of another shape.** Scenes of the current format do not pass this
+  code. What is implemented is one reading of `translation`: it places the picture's top
+  left corner, in scene pixels from the scene's top left corner, y downwards. That
+  reading was not compared with a file from Wallpaper Engine or a picture of its: none
+  of this format was at hand, and whether Wallpaper Engine ever wrote the format is not
+  known (the files it is known to write have `objects`). If the layer's pivot is meant
+  instead, a layer with a pivot is off by the pivot's distance from that corner.
+
 ### Web wallpapers
 
 - With WebKitGTK 2.54 (Arch, and what follows it; 2.53.1 to 2.54.2) an animated web
