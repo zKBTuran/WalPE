@@ -388,8 +388,91 @@ def open_page(env, path, tag, what, mon=None, timeout=90):
     env.open(path, mon)
     st = wait_state(env, tag, lambda s: s.get("user", 0) >= 1, timeout, mark)
     if not st:
-        check(False, what + ": the page loaded and said so", web_status(env))
+        check(False, what + ": the page loaded and said so",
+              "\n".join(["status: %s" % web_status(env)] + waiting(env)))
     return st
+
+
+def waiting(env):
+    """what the daemon is doing, for a page that never came: is the process there, where
+    its main thread sleeps (the kernel's name for it, where /proc gives one) and on what
+    (the files of a poll), who else holds a pipe it waits for, which threads and child
+    processes it has. Lines of text; says what it could not read."""
+    d = env.daemon
+    if d is None:
+        return ["the daemon: not started"]
+    if d.poll() is not None:
+        return ["the daemon: gone, exit status %s" % d.returncode]
+    pid, out = d.pid, []
+
+    def read(path):
+        try:
+            with open(path, errors="replace") as f:
+                return f.read().strip()
+        except OSError:
+            return ""
+
+    def state(path):
+        txt = read(path + "/stat")
+        return txt[txt.rfind(")") + 2:txt.rfind(")") + 3] if ")" in txt else "?"
+
+    main = "/proc/%d/task/%d" % (pid, pid)
+    where = read(main + "/wchan")
+    out.append("the daemon (pid %d): main thread in state %s, sleeping in %s" %
+               (pid, state(main), where if where not in ("", "0") else "(not told)"))
+    # a poll: its files (the pollfd array is the call's first argument, their number the second)
+    held = []
+    try:
+        sc = read(main + "/syscall").split()
+        if "poll" in where and len(sc) >= 3:
+            n = min(int(sc[2], 16), 16)
+            with open("/proc/%d/mem" % pid, "rb") as f:
+                f.seek(int(sc[1], 16))
+                raw = f.read(8 * n)
+            fds = [int.from_bytes(raw[i:i + 4], sys.byteorder, signed=True) for i in range(0, len(raw), 8)]
+            names = []
+            for fd in fds:
+                try:
+                    names.append("%d = %s" % (fd, os.readlink("/proc/%d/fd/%d" % (pid, fd))))
+                except OSError:
+                    names.append("%d" % fd)
+            out.append("  it polls %d file(s): %s" % (len(fds), ", ".join(names)))
+            held = [nm.split(" = ", 1)[1] for nm in names if " = pipe:" in nm]
+    except (OSError, ValueError, IndexError):
+        out.append("  (its files could not be read)")
+    table = procs()
+    for pipe in held:
+        who = []
+        for q in table:
+            if q == pid:
+                continue
+            try:
+                for fd in os.listdir("/proc/%d/fd" % q):
+                    try:
+                        if os.readlink("/proc/%d/fd/%s" % (q, fd)) == pipe:
+                            who.append("%s (pid %d)" % (table[q][1], q))
+                            break
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+        out.append("  %s is also open in: %s" % (pipe, ", ".join(who) or "no other process"))
+    threads = []
+    try:
+        for t in sorted(os.listdir("/proc/%d/task" % pid), key=int):
+            if int(t) != pid:
+                w = read("/proc/%d/task/%s/wchan" % (pid, t))
+                threads.append("%s %s%s" % (read("/proc/%d/task/%s/comm" % (pid, t)),
+                                            state("/proc/%d/task/%s" % (pid, t)),
+                                            " " + w if w not in ("", "0") else ""))
+    except OSError:
+        pass
+    out.append("  threads: " + "; ".join(threads[:40]))
+    kids = descendants(pid, table)
+    out.append("  child processes: " + (", ".join("%s (pid %d, child of %d, %s)" %
+                                                  (table[k][1], k, table[k][0], state("/proc/%d" % k))
+                                                  for k in sorted(kids)[:30]) or "none"))
+    return out
 
 
 def procs():
