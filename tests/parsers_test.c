@@ -3472,7 +3472,44 @@ static void test_pichead (void)
         CHECK (ph_size ("tiff", be, sizeof be, 800, 600));
         CHECK (ph_size ("tiff", be, 30, 0, 0));
         static const guint8 big[] = { 'I', 'I', 43, 0, 8, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-        CHECK (ph_size ("tiff", big, sizeof big, 0, 0));
+        CHECK (ph_size ("tiff", big, sizeof big, 0, 0));        /* (a directory without the two tags) */
+        /* the number types a decoder takes for the two tags, not only SHORT and LONG: the
+         * tiff crate behind glycin reads a width of type IFD (13) or LONG8 (16, the value
+         * where the entry points), libtiff the signed kinds and BYTE */
+        static const guint8 types[] = { 'I', 'I', 42, 0, 8, 0, 0, 0, 2, 0,
+                                        0, 1, 13, 0, 1, 0, 0, 0, 0x28, 0x23, 0, 0,
+                                        1, 1, 16, 0, 1, 0, 0, 0, 38, 0, 0, 0,
+                                        0, 0, 0, 0,
+                                        0x70, 0x11, 0x01, 0, 0, 0, 0, 0 };
+        CHECK (ph_size ("tiff", types, sizeof types, 9000, 70000));
+        CHECK (ph_size ("tiff", types, sizeof types - 1, 0, 0));       /* the far value is cut short */
+        static const guint8 small[] = { 'M', 'M', 0, 42, 0, 0, 0, 8, 0, 2,
+                                        1, 0, 0, 1, 0, 0, 0, 1, 200, 0, 0, 0,
+                                        1, 1, 0, 9, 0, 0, 0, 1, 0, 0, 0x02, 0x58,
+                                        0, 0, 0, 0 };
+        CHECK (ph_size ("tiff", small, sizeof small, 200, 600));
+        static const guint8 below[] = { 'M', 'M', 0, 42, 0, 0, 0, 8, 0, 2,
+                                        1, 0, 0, 3, 0, 0, 0, 1, 0, 200, 0, 0,
+                                        1, 1, 0, 9, 0, 0, 0, 1, 0xff, 0xff, 0xff, 0xfe,
+                                        0, 0, 0, 0 };
+        CHECK (ph_size ("tiff", below, sizeof below, 0, 0));          /* a height below zero */
+        static const guint8 twice[] = { 'I', 'I', 42, 0, 8, 0, 0, 0, 2, 0,
+                                        0, 1, 4, 0, 2, 0, 0, 0, 0x28, 0x23, 0, 0,
+                                        1, 1, 4, 0, 1, 0, 0, 0, 0x28, 0x23, 0, 0,
+                                        0, 0, 0, 0 };
+        CHECK (ph_size ("tiff", twice, sizeof twice, 0, 0));          /* two values where one is asked for */
+        /* the 64-bit kind: its directory, 20 bytes an entry, the values in the entries */
+        static const guint8 big2[] = { 'M', 'M', 0, 43, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16,
+                                       0, 0, 0, 0, 0, 0, 0, 2,
+                                       1, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0xe2, 0x40,
+                                       1, 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 1, 0, 77, 0, 0, 0, 0, 0, 0,
+                                       0, 0, 0, 0, 0, 0, 0, 0 };
+        CHECK (ph_size ("tiff", big2, sizeof big2, 123456, 77));
+        CHECK (ph_size ("tiff", big2, sizeof big2 - 9, 0, 0));
+        guint8 many[sizeof big2];
+        memcpy (many, big2, sizeof many);
+        many[21] = 0x10;        /* 2^20 + 2 entries: no directory a reader follows */
+        CHECK (ph_size ("tiff", many, sizeof many, 0, 0));
     }
     {   /* AVIF: the largest of the "ispe" properties (meta > iprp > ipco) */
         GByteArray *ipco = g_byte_array_new (), *iprp = g_byte_array_new (), *meta = g_byte_array_new ();

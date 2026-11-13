@@ -58,8 +58,9 @@ gboolean walpe_pichead_is_bigtiff (const guint8 *d, gsize len);
  * libjpeg and to zune-jpeg (the decoder behind glycin) and hold one frame
  * header: not with a restart marker or TEM in front of the scan, not with
  * two frame headers of any kinds, not without a scan (pichead.c).
- * For "tiff" (first directory; of a tag that is there twice the larger
- * value), "avif" (the largest "ispe" property) and "jxl" (the codestream's
+ * For "tiff" (first directory, of the classic and of the 64-bit file; of a
+ * tag that is there twice the larger value; every whole-number type a
+ * decoder takes), "avif" (the largest "ispe" property) and "jxl" (the codestream's
  * size header) TRUE is an upper bound good for a limit, and FALSE means
  * only that this reader did not find it.
  *

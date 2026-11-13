@@ -314,38 +314,95 @@ static gboolean jpeg_size (Src *s, int *w, int *h)
     return r == 0;
 }
 
-/* TIFF (classic): ImageWidth and ImageLength of the first directory. A tag
- * that is there twice counts with its larger value: readers differ in
- * which of the two they keep. */
+/* TIFF, classic and 64-bit: ImageWidth and ImageLength of the first
+ * directory. A tag that is there twice counts with its larger value:
+ * readers differ in which of the two they keep. The value in every whole-
+ * number type one of the decoders takes for these tags - libtiff: BYTE,
+ * SHORT, LONG, LONG8 and their signed kinds; the tiff crate behind glycin:
+ * BYTE, SHORT, LONG, LONG8, IFD, IFD8 (a width written as type IFD was no
+ * size here and 9000 x 9000 pixels there) - with a count of 1, which both
+ * ask for. */
 static gboolean tiff_size (Src *s, int *w, int *h)
 {
-    guint8 b[8];
-    if (!src_read (s, 0, b, 8) || (memcmp (b, "II*\0", 4) && memcmp (b, "MM\0*", 4)))
-        return FALSE;       /* (the 64-bit kind has its directory elsewhere: not followed) */
+    guint8 b[16];
+    if (!src_read (s, 0, b, 8))
+        return FALSE;
     const gboolean le = b[0] == 'I';
     #define T16(p) (le ? (guint) (p)[0] | ((guint) (p)[1] << 8) : ((guint) (p)[0] << 8) | (p)[1])
     #define T32(p) (le ? le32 (p) : be32 (p))
-    const guint64 dir = T32 (b + 4);
-    if (!src_read (s, dir, b, 2))
+    #define T64(p) (le ? ((guint64) le32 ((p) + 4) << 32) | le32 (p) : ((guint64) be32 (p) << 32) | be32 ((p) + 4))
+    gboolean big = FALSE;
+    guint64 dir, n;
+    if (!memcmp (b, "II*\0", 4) || !memcmp (b, "MM\0*", 4)) {
+        dir = T32 (b + 4);
+        if (!src_read (s, dir, b, 2))
+            return FALSE;
+        n = T16 (b);
+        dir += 2;
+    } else if (walpe_pichead_is_bigtiff (b, 8)) {
+        /* 8-byte offsets (the header says so), then the directory's place */
+        if (T16 (b + 4) != 8 || T16 (b + 6) != 0 || !src_read (s, 8, b, 8))
+            return FALSE;
+        dir = T64 (b);
+        if (!src_read (s, dir, b, 8))
+            return FALSE;
+        n = T64 (b);
+        if (dir > G_MAXUINT64 - 8 || n > 4096)     /* (libtiff's own limit on a directory) */
+            return FALSE;
+        dir += 8;
+        big = TRUE;
+    } else {
         return FALSE;
-    const guint n = T16 (b);
-    guint8 *e = g_malloc ((gsize) n * 12 + 1);
+    }
+    const gsize esz = big ? 20 : 12, vo = big ? 12 : 8;
+    guint8 *e = g_malloc ((gsize) n * esz + 1);
     guint64 tw = 0, th = 0;
-    gboolean ok = src_read (s, dir + 2, e, (gsize) n * 12);
+    gboolean ok = src_read (s, dir, e, (gsize) n * esz);
     for (guint i = 0; ok && i < n; i++) {
-        const guint8 *p = e + (gsize) i * 12;
+        const guint8 *p = e + (gsize) i * esz;
         const guint tag = T16 (p), type = T16 (p + 2);
         if (tag != 256 && tag != 257)
             continue;
         guint64 v = 0;
-        if (T32 (p + 4) != 1)
+        guint8 far[8];
+        const guint8 *at = p + vo;
+        if ((big ? T64 (p + 4) : T32 (p + 4)) != 1) {
             ok = FALSE;
-        else if (type == 3)
-            v = T16 (p + 8);
-        else if (type == 4)
-            v = T32 (p + 8);
-        else
+            break;
+        }
+        switch (type) {
+        case 1:                             /* BYTE */
+            v = at[0];
+            break;
+        case 6:                             /* SBYTE */
+            v = at[0];
+            ok = v < 0x80;
+            break;
+        case 3:                             /* SHORT */
+            v = T16 (at);
+            break;
+        case 8:                             /* SSHORT */
+            v = T16 (at);
+            ok = v < 0x8000;
+            break;
+        case 4: case 13:                    /* LONG, IFD */
+            v = T32 (at);
+            break;
+        case 9:                             /* SLONG */
+            v = T32 (at);
+            ok = v < 0x80000000u;
+            break;
+        case 16: case 17: case 18:          /* LONG8, SLONG8, IFD8: in the entry of a 64-bit file, else where it points */
+            if (!big) {
+                ok = src_read (s, T32 (at), far, 8);
+                at = far;
+            }
+            if (ok)
+                v = T64 (at);
+            break;                          /* (a negative SLONG8 is far past every limit) */
+        default:
             ok = FALSE;
+        }
         if (ok && tag == 256)
             tw = MAX (tw, v);
         else if (ok)
@@ -353,6 +410,7 @@ static gboolean tiff_size (Src *s, int *w, int *h)
     }
     #undef T16
     #undef T32
+    #undef T64
     g_free (e);
     return ok && dims_set (tw, th, w, h);
 }
