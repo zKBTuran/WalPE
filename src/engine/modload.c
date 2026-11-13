@@ -161,6 +161,38 @@ static gint web_sound_q16;      /* atomic: walpe_web_sound's master, 0..65536 */
 static gint web_sound_on;       /* atomic: ... and its `enabled` */
 static char *web_sink_note;     /* walpe_web_sound_sink_dir: what it found (said once, at the load) */
 
+/* The directory itself, beyond its one file. GStreamer does not load a file
+ * by name as the module loader does: it loads every plugin it finds in a
+ * directory of its path, and looks into the directories below it. And the
+ * path is a list: a directory with the list's separator in its name would
+ * be read as two entries, the second of them relative to wherever the page
+ * process happens to stand. So: no ':' in the name, and nothing in the
+ * directory that fails the rule of a module (another account's file, one
+ * that everybody can write to). FALSE: *why (g_free) says what. */
+static gboolean sink_dir_trusted (const char *dir, char **why)
+{
+    if (strchr (dir, G_SEARCHPATH_SEPARATOR)) {
+        *why = g_strdup_printf ("%s has a '%c' in its name, which separates the entries of GStreamer's plugin "
+                                "path: not used", dir, G_SEARCHPATH_SEPARATOR);
+        return FALSE;
+    }
+    GDir *d = g_dir_open (dir, 0, NULL);
+    const char *n;
+    gboolean ok = d != NULL;
+    while (ok && (n = g_dir_read_name (d))) {
+        char *p = g_build_filename (dir, n, NULL);
+        g_free (*why);
+        *why = NULL;
+        ok = walpe_module_file_trusted (p, why);
+        g_free (p);
+    }
+    if (d)
+        g_dir_close (d);
+    else
+        *why = g_strdup_printf ("%s cannot be read: not used", dir);
+    return ok;
+}
+
 /* gst/walpesound.c. Called once, by main () before any thread exists. */
 char *walpe_web_sound_sink_dir (void)
 {
@@ -174,7 +206,7 @@ char *walpe_web_sound_sink_dir (void)
         char *untrusted = NULL;
         if (found || !path || (off && !strcmp (off, "0")) || !g_file_test (path, G_FILE_TEST_IS_REGULAR)) {
             /* not here */
-        } else if (!walpe_module_file_trusted (path, &untrusted)) {
+        } else if (!walpe_module_file_trusted (path, &untrusted) || !sink_dir_trusted (dir, &untrusted)) {
             /* (GStreamer loads whatever is in the directory, into the page process) */
             g_string_append_printf (err, "%s%s", err->len ? "; " : "", untrusted);
         } else {

@@ -249,7 +249,10 @@ the application name `WebKit` in the desktop's mixer. The same three settings de
   the case in a build made without GStreamer's headers (`meson setup` warns), with
   `WALPE_WEB_SOUND_SINK=0`, when the file is missing or cannot be trusted
   ([SECURITY.md](SECURITY.md)), and when GStreamer on the machine has no pulsesink or was
-  told to rank another output higher. GStreamer lists the plugin in its registry
+  told to rank another output higher. One case the log cannot know: a plugin that was
+  built with the headers of a newer GStreamer than the one that runs is refused by
+  GStreamer without a word (`gst-inspect-1.0 -b` lists it as blacklisted; tried with a
+  plugin marked 1.99 on GStreamer 1.28) - the daemon's line then still says it is used. GStreamer lists the plugin in its registry
   (`~/.cache/gstreamer-1.0`), which it rewrites when a program with another plugin path
   than the last one starts.
 - A change applies at once, and a daemon that starts shows the page with the saved values.

@@ -793,6 +793,16 @@ test('webhost-select', executable('webhost-select-test', 'tests/webhost_select_t
 # system's plugins); no sound server, no display. Skipped where GStreamer
 # has no pulsesink. The same with WebKit and a real PipeWire or PulseAudio:
 # tests/websound_rig.sh, run by hand.
+# which directory the daemon names to GStreamer for that plugin
+# (engine/modload.c walpe_web_sound_sink_dir): GStreamer loads everything in
+# a directory of its path, so the directory has to pass the rule of a module
+# as a whole. No GStreamer, no display.
+if have_web
+  test('websinkdir', executable('websinkdir-test', 'tests/websinkdir_test.c',
+    include_directories: inc,
+    dependencies: [core_dep],
+    install: false, build_by_default: false))
+endif
 if have_web_sound_sink
   test('websink', executable('websink-test', 'tests/websink_test.c',
     dependencies: [gst_dep],
