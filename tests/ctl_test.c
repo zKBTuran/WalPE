@@ -1091,6 +1091,19 @@ int main (int argc, char **argv)
             CHECK (e && strstr (e, "takes no argument, not '1'") && strstr (e, bare[i]));
             g_free (e);
         }
+        {
+            /* status prints JSON: `status --json` (gpu, resolution, quality,
+             * profile, gpu-stats and mem take --json) is the same request,
+             * not a refused one - here, without a daemon, that is status 2 */
+            char *se = NULL;
+            CHECK (run_ctl (&se, "status", "--json", NULL) == 2);
+            CHECK (!se || !strstr (se, "takes no argument"));
+            g_clear_pointer (&se, g_free);
+            CHECK (run_ctl (&se, "status", "--json", "x", NULL) == 1);
+            g_clear_pointer (&se, g_free);
+            CHECK (run_ctl (&se, "pause", "--json", NULL) == 1);
+            g_free (se);
+        }
         char *e = NULL;
         CHECK (run_ctl (&e, "add", "a.mp4", "b.mp4", NULL) == 1);
         CHECK (e && strstr (e, "add takes one video, not also 'b.mp4'"));

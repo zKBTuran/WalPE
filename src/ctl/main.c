@@ -1316,7 +1316,12 @@ static int run (int argc, char **argv)
          * they did not take already.) */
         static const char *const bare[] = { "pause", "resume", "status", "quit", "cancel-import",
                                             "steam-libraries", "soundcheck", NULL };
-        if (argc > 2 && cmd && g_strv_contains (bare, cmd)) {
+        /* (`status --json` is what status prints anyway, and six other
+         * commands take --json: a script that asks that way is not sent
+         * off with 1 and no output) */
+        const gboolean status_json = argc == 3 && !g_strcmp0 (cmd, "status") &&
+                                     !g_strcmp0 (argv[2], "--json");
+        if (argc > 2 && cmd && g_strv_contains (bare, cmd) && !status_json) {
             g_printerr ("%s takes no argument, not '%s'; nothing was done\n", cmd, argv[2]);
             return 1;
         }
