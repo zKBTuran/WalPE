@@ -9594,9 +9594,14 @@ static WalpeOutputList layout_pending;   /* a different layout, seen once */
  * A new thread would have to make a GL context in the share group while
  * the other threads' contexts are current, which the start-up takes care
  * never to do (ctx_lock), and no driver was at hand to try it on.
- * Likewise --monitor N, swaps that fail for good (swap_lost_cb: the
- * contexts are made anew), and `wayland_follow = off` in gpu.conf
- * (WALPE_WAYLAND_FOLLOW=0), which is the behaviour up to 0.14.0.
+ * Likewise --monitor N and swaps that fail for good (swap_lost_cb: the
+ * contexts are made anew).
+ *
+ * All of this only with `wayland_follow = on` in gpu.conf
+ * (WALPE_WAYLAND_FOLLOW=on). Off is the default and the behaviour up to
+ * 0.14.0: the restart in place for every change. The one thing done in
+ * place either way is the next try for an output that got no surface
+ * (below).
  *
  * A record is never freed while the daemon runs: a shared frame names its
  * followers, queued callbacks name their monitor. Its thread waits on its
@@ -9633,8 +9638,12 @@ static gboolean layout_pending_set;     /* layout_pending holds a layout (one wi
  * later). When the tries are used up the log, `walpe-ctl diag` and status
  * say that it was given up; the next change of an output begins anew. The
  * daemon runs on either way: its window and walpe-ctl go on working.
- * Not without layout_follow (X11 has no such failure; `wayland_follow =
- * off` and --monitor N keep the old way: said once, never tried again). */
+ * Also with `wayland_follow = off`: a try gives a surface to a render
+ * thread that has waited since the start and touches no monitor that
+ * draws; a change of an output is then followed by the restart, which
+ * makes every surface anew and begins the schedule again when one is
+ * still missing. Not on X11 (it has no such failure) and not with
+ * --monitor N (said once, never tried again). */
 #define NOSURF_TRIES 8
 #define NOSURF_WAIT_MS 500
 static GPtrArray *nosurf;       /* char *: names of the outputs without a surface */
@@ -9748,18 +9757,22 @@ static void mon_make_waiting (void)
     mons_parked = g_list_append (mons_parked, m);
 }
 
+/* wayland_follow (gpu.conf, WALPE_WAYLAND_FOLLOW): off unless it says on.
+ * Following in place resizes a surface's buffers under a running render
+ * thread and keeps GL contexts for outputs that are gone; that has run on
+ * the software renderer only, on no GPU driver yet. */
 static gboolean layout_follow_on (void)
 {
     static int on = -1;
     if (on < 0) {
-        gboolean b = TRUE;
+        gboolean b = FALSE;
         const char *v = present_setting ("wayland_follow");
-        on = !(v && walpe_conf_bool (v, &b) && !b);
+        on = v && walpe_conf_bool (v, &b) && b;
         if (v && !walpe_conf_bool (v, &b))
-            g_warning ("wayland_follow = %s is not understood (on, off): on", v);
-        if (!on)
-            g_message ("wayland_follow is off: every change of an output restarts the daemon in "
-                       "place, as up to 0.14.0");
+            g_warning ("wayland_follow = %s is not understood (on, off): off", v);
+        if (on)
+            g_message ("wayland_follow is on: a change of an output is followed in place, without "
+                       "the restart (off, the default: the restart in place for every change)");
     }
     return on;
 }
@@ -9935,14 +9948,31 @@ typedef enum { FOLLOW_NO, FOLLOW_DONE, FOLLOW_WAIT } FollowResult;
  * thread is still letting go of the output it had: look again shortly.
  * NO: nothing was changed (or nothing that a restart does not make anew):
  * the caller restarts in place. */
+/* Can an output that got no surface be tried again here? That needs a
+ * window system whose surfaces are made per output while the daemon runs,
+ * and is not a matter of wayland_follow: such an output was empty for
+ * good, and the try touches no monitor that draws. */
+static gboolean layout_retries (void)
+{
+    return walpe_platform_follows_outputs () && !D.windowed && layout_only < 0;
+}
+
+/* ... and are changes of the outputs followed in place? */
 static gboolean layout_follows (void)
 {
-    return walpe_platform_follows_outputs () && !D.windowed && layout_only < 0 && layout_follow_on ();
+    return layout_retries () && layout_follow_on ();
 }
 
 static FollowResult layout_follow (const WalpeOutputList *l, gboolean changed)
 {
-    if (!layout_follows () || swap_restart)
+    if (!layout_retries () || swap_restart)
+        return FOLLOW_NO;
+    /* wayland_follow off (the default): the one thing done in place is the
+     * next try for an output that got no surface, on the layout the
+     * daemon runs with. A change of an output and a surface that was
+     * taken away are followed by the restart, as before. */
+    const gboolean full = layout_follows ();
+    if (!full && (changed || layout_force || !(nosurf_due || layout_owed) || !nosurf || !nosurf->len))
         return FOLLOW_NO;
     /* outputs that got no surface are tried again when their time has
      * come, and whenever the outputs changed */
@@ -9984,6 +10014,15 @@ static FollowResult layout_follow (const WalpeOutputList *l, gboolean changed)
         dead[i] = !walpe_surface_follow_output (ms[i]->ps, o, &fit_w[i], &fit_h[i]);
         n_dead += dead[i];
     }
+    if (!full && (n_dead || p.gone || p.placed || p.resized)) {
+        /* (more than a try for an output without a surface after all: the
+         * restart; a surface found closed here is one already) */
+        if (n_dead)
+            layout_force = TRUE;
+        g_free (fit_w);
+        g_free (fit_h);
+        goto out;
+    }
     /* is there a render thread for every output that will be without a
      * monitor? (the ones parked here are: each frees one) */
     if (p.added > (int) g_list_length (mons_parked) + p.gone) {
@@ -10004,8 +10043,8 @@ static FollowResult layout_follow (const WalpeOutputList *l, gboolean changed)
     /* 2. the monitors that stay */
     for (i = 0; i < n; i++) {
         Mon *m = ms[i];
-        if (p.running[i] == WALPE_FOLLOW_GONE || dead[i])
-            continue;
+        if (p.running[i] == WALPE_FOLLOW_GONE || dead[i] || !full)
+            continue;       /* (!full: nothing of theirs changed, and nothing is touched) */
         const WalpeOutput *o = &l->o[p.running_to[i]];
         const WalpeOutput *was = &run.o[i];
         const gboolean fit = fit_w[i] != m->geom.width || fit_h[i] != m->geom.height ||
@@ -10078,8 +10117,9 @@ static FollowResult layout_follow (const WalpeOutputList *l, gboolean changed)
     /* 4. the layout the daemon runs with, and what is worked out from it */
     walpe_output_list_free (&layout_now);
     walpe_output_list_copy (&layout_now, l);
-    if (p.placed || p.resized || p.gone || n_dead || attached) {
-        /* (not for a look that only found an output still waiting) */
+    if (full && (p.placed || p.resized || p.gone || n_dead || attached)) {
+        /* (not for a look that only found an output still waiting, and not
+         * for a try that gave an output its surface: that has its own line) */
         GString *d = g_string_new (NULL);
         for (int j = 0; j < l->n; j++)
             g_string_append_printf (d, "%s%s %dx%d+%d+%d", j ? ", " : "", l->o[j].name, l->o[j].width,
@@ -11485,7 +11525,7 @@ int main (int argc, char **argv)
                     D.max_hz = MAX (D.max_hz, o->refresh_hz);
                 } else {
 #ifdef WALPE_FOLLOW
-                    if (layout_follows ()) {
+                    if (layout_retries ()) {
                         /* tried again later: a render thread waits for it */
                         if (!nosurf)
                             nosurf = g_ptr_array_new_with_free_func (g_free);

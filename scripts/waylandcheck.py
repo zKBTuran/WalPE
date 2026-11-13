@@ -27,8 +27,9 @@ not what the daemon believes it drew. Each case starts its own daemon:
   mode      the output's mode changes under the running daemon (640x360 ->
             800x450 -> 1280x720 -> 640x360): status follows, the picture
             fills the new size, the control socket stays connectable and the
-            process id stays. (How the daemon follows - in place - is the
-            case `follow`; these cases look at what is on the output.)
+            process id stays. (How the daemon follows - by a restart in place,
+            or in place with wayland_follow on - is the case `follow`; these
+            cases look at what is on the output.)
   scale     output scale 2 and 1.5: the picture is right and is drawn in the
             output's own pixels (a sharp colour edge), not enlarged from
             the scaled size. Then the scale alone changes, at a moment at
@@ -41,28 +42,31 @@ not what the daemon believes it drew. Each case starts its own daemon:
             the right way up.
   hotplug   an output appears (it gets the wallpaper for all), gets a
             wallpaper of its own, is disabled and enabled again (its own
-            wallpaper is back), is unplugged; then every output is gone (the
-            daemon has no monitor, its render threads wait) and one
-            returns. The daemon lives through all of it.
+            wallpaper is back), is unplugged; then every output is gone and
+            one returns. The daemon lives through all of it: as it is by
+            default, restarting in place for the changes, and once more
+            with wayland_follow on, where nothing restarts and with no
+            output left it has no monitor and its render threads wait.
   follow    two outputs; the second one moves, changes its scale and its
             mode, is switched off and on again: each change is followed
             without a restart in place (the log, the daemon's uptime), the
             first output's animated wallpaper is never loaded again and goes
             on drawing, the pictures are right, the pointer is followed on
-            the output where it lies afterwards. WALPE_WAYLAND_FOLLOW=off:
-            the restart in place for a change, as before.
+            the output where it lies afterwards. This is the daemon with
+            wayland_follow on; without the setting (the default) and with it
+            off: the restart in place for a change, as before.
   closed    the compositor closes a wallpaper surface while its output
             stays (made up with WALPE_WL_CLOSE_AFTER_MS): the surface gets
-            its role back, or with WALPE_WL_RECREATE=0 that output gets a new
-            surface and its wallpaper again; nothing restarts, the other
-            output's wallpaper goes on.
+            its role back, or with WALPE_WL_RECREATE=0 and wayland_follow on
+            that output gets a new surface and its wallpaper again; nothing
+            restarts, the other output's wallpaper goes on.
   nosurface the compositor does not answer the daemon's first wallpaper
             surfaces (made up with WALPE_WL_NO_CONFIGURE): the daemon starts
             without a monitor, says so, tries again on its schedule and
             shows the saved wallpaper once a surface is given; with no
             answer to any try it says that it gives up, runs on with no
             monitor (status, walpe-ctl diag), and tries again when the
-            output changes.
+            output changes (that last part with wayland_follow on).
   pointer   a scene whose colour follows the pointer follows a pointer
             device that moves over the wallpaper, on the output it is on,
             at the right place also on an output with scale 1.5.
@@ -593,82 +597,113 @@ def case_rotate(env, W):
 
 
 # ------------------------------------------------------------------ hotplug
+FOLLOW_ON = {"WALPE_WAYLAND_FOLLOW": "on"}     # (gpu.conf wayland_follow; off is the default)
+
+
 def case_hotplug(env, W):
-    if not start(env, [("A", 640, 360, 0, 0)], "hotplug"):
+    """as the daemon is by default (it restarts in place for a change of the outputs), then
+    with wayland_follow on (it follows in place)"""
+    hotplug_one(env, W, False)
+    hotplug_one(env, W, True)
+
+
+def hotplug_one(env, W, in_place):
+    hp = "hotplug, wayland_follow on" if in_place else "hotplug"
+    if not start(env, [("A", 640, 360, 0, 0)], hp, extra=FOLLOW_ON if in_place else None):
         return
     mark = env.mark()
     a, pid = env.mons[0][0], env.daemon.pid
     env.open(W["red"])
     lc.loaded(env, W["red"])
-    check(shows(env, a, "red") == "red", "hotplug: red on the first output")
+    check(shows(env, a, "red") == "red", hp + ": red on the first output")
 
     b = env.display.add_output(mode=(480, 270), pos=(640, 0))
-    if not check(bool(b), "hotplug: the compositor makes a second output"):
+    if not check(bool(b), hp + ": the compositor makes a second output"):
         env.stop_daemon()
         return
     ok, bad = follow(env, lambda: rects(env) == {a: [0, 0, 640, 360], b: [640, 0, 480, 270]})
-    check(ok, "hotplug: status lists the new output", rects(env))
-    check(bad == 0, "hotplug: the control socket stayed connectable while it appeared", f"{bad} failed connects")
-    check(shows(env, b, "red") == "red", "hotplug: the new output gets the wallpaper for all")
+    check(ok, hp + ": status lists the new output", rects(env))
+    check(bad == 0, hp + ": the control socket stayed connectable while it appeared", f"{bad} failed connects")
+    check(shows(env, b, "red") == "red", hp + ": the new output gets the wallpaper for all")
     bi = index_of(env, b)
     env.open(W["blue"], bi)
     lc.loaded(env, W["blue"], bi)
     got = [shows(env, a, "red"), shows(env, b, "blue")]
-    check(got == ["red", "blue"], "hotplug: the new output takes a wallpaper of its own", got)
+    check(got == ["red", "blue"], hp + ": the new output takes a wallpaper of its own", got)
 
     # disabled and enabled again: the same output (same name) returns to its own wallpaper
-    check(env.display.output(b, enable=False), "hotplug: the compositor disables the second output")
+    check(env.display.output(b, enable=False), hp + ": the compositor disables the second output")
     ok, bad = follow(env, lambda: rects(env) == {a: [0, 0, 640, 360]})
-    check(ok, "hotplug: status drops the disabled output", rects(env))
-    check(shows(env, a, "red") == "red", "hotplug: the first output is not disturbed by it")
-    check(env.display.output(b, enable=True, mode=(480, 270), pos=(640, 0)), "hotplug: ... and enables it again")
+    check(ok, hp + ": status drops the disabled output", rects(env))
+    check(shows(env, a, "red") == "red", hp + ": the first output is not disturbed by it")
+    check(env.display.output(b, enable=True, mode=(480, 270), pos=(640, 0)), hp + ": ... and enables it again")
     ok, bad2 = follow(env, lambda: set(rects(env)) == {a, b})
-    check(ok, "hotplug: status lists it again", rects(env))
+    check(ok, hp + ": status lists it again", rects(env))
     got = [shows(env, a, "red"), shows(env, b, "blue")]
-    check(got == ["red", "blue"], "hotplug: its own wallpaper is back on it", got)
-    check(bad + bad2 == 0, "hotplug: the control socket stayed connectable through both", f"{bad + bad2} failed connects")
+    check(got == ["red", "blue"], hp + ": its own wallpaper is back on it", got)
+    check(bad + bad2 == 0, hp + ": the control socket stayed connectable through both", f"{bad + bad2} failed connects")
 
     # unplugged for good
-    check(env.display.remove_output(b), "hotplug: the compositor unplugs the second output")
+    check(env.display.remove_output(b), hp + ": the compositor unplugs the second output")
     ok, _ = follow(env, lambda: rects(env) == {a: [0, 0, 640, 360]})
-    check(ok and shows(env, a, "red") == "red", "hotplug: one output left, still red", rects(env))
+    check(ok and shows(env, a, "red") == "red", hp + ": one output left, still red", rects(env))
     cur, own = env.saved()
     check(cur == W["red"] and own.get(b) == W["blue"],
-          "hotplug: config.json keeps the unplugged output's own choice for its return", (cur, own))
+          hp + ": config.json keeps the unplugged output's own choice for its return", (cur, own))
 
     # every output gone, then one back
-    # (the daemon has no monitor then: the wallpaper is unloaded, its render thread waits
-    # for an output; a daemon that restarts for every change, wayland_follow = off, keeps
-    # the monitor it was started with until one is back, with a surface that is gone)
-    check(env.display.output(a, enable=False), "hotplug: the compositor disables the last output")
+    check(env.display.output(a, enable=False), hp + ": the compositor disables the last output")
+    if in_place:
+        # (the daemon has no monitor then: the wallpaper is unloaded, its render thread
+        # waits for an output)
+        def none_shown():
+            """the monitors on the outputs of this case, what else the daemon has a monitor
+            on (a compositor may put a stand-in output in the place of the last one:
+            Wayfire's NOOP-1), its surfaces, and whether a render thread waits"""
+            st = env.state()
+            names = [m.get("name") for m in st.get("monitors") or []]
+            return {"monitors": [n for n in names if n in (a, b)], "elsewhere": [n for n in names if n not in (a, b)],
+                    "surfaces": [(sf.get("output"), sf.get("role")) for sf in st.get("wl_surfaces") or []],
+                    "waiting": (st.get("render_threads_waiting") or 0) > 0}
 
-    def none_shown():
-        """the monitors on the outputs of this case, what else the daemon has a monitor on
-        (a compositor may put a stand-in output in the place of the last one: Wayfire's
-        NOOP-1), its surfaces, and whether a render thread waits"""
-        st = env.state()
-        names = [m.get("name") for m in st.get("monitors") or []]
-        return {"monitors": [n for n in names if n in (a, b)], "elsewhere": [n for n in names if n not in (a, b)],
-                "surfaces": [(sf.get("output"), sf.get("role")) for sf in st.get("wl_surfaces") or []],
-                "waiting": (st.get("render_threads_waiting") or 0) > 0}
-
-    def all_gone():
+        def all_gone():
+            ns = none_shown()
+            return (not ns["monitors"] and ns["waiting"] and
+                    sorted(o for o, _ in ns["surfaces"]) == sorted(ns["elsewhere"]))
+        ok, _ = follow(env, all_gone)
         ns = none_shown()
-        return (not ns["monitors"] and ns["waiting"] and
-                sorted(o for o, _ in ns["surfaces"]) == sorted(ns["elsewhere"]))
-    ok, _ = follow(env, all_gone)
-    ns = none_shown()
-    check(ok, "hotplug: the daemon answers with no output left: no monitor and no surface on the outputs that "
-          "went, a render thread waits", ns)
-    if ns["elsewhere"]:
-        note("hotplug: the compositor put another output in their place, which got a monitor: %s" % ns["elsewhere"])
+        check(ok, hp + ": the daemon answers with no output left: no monitor and no surface on the outputs "
+              "that went, a render thread waits", ns)
+        if ns["elsewhere"]:
+            note(hp + ": the compositor put another output in their place, which got a monitor: %s" % ns["elsewhere"])
+    else:
+        # (with no output there is nothing to restart for: the daemon keeps the monitors
+        # it was started with until one is back; their surfaces are gone, nothing is drawn)
+        def none_shown():
+            st = env.state()
+            return {"monitors": [bool(m.get("hidden")) for m in st.get("monitors") or []],
+                    "surfaces": [sf.get("role") for sf in st.get("wl_surfaces") or []]}
+        ok, _ = follow(env, lambda: none_shown() == {"monitors": [True], "surfaces": ["dead"]})
+        check(ok, hp + ": the daemon answers with no output left: its monitor is not shown, the surface is gone",
+              none_shown())
     time.sleep(1.0 * PATIENCE)
-    check(env.daemon.poll() is None, "hotplug: ... and keeps running")
-    check(env.display.output(a, enable=True, mode=(640, 360), pos=(0, 0)), "hotplug: the output returns")
+    check(env.daemon.poll() is None, hp + ": ... and keeps running")
+    check(env.display.output(a, enable=True, mode=(640, 360), pos=(0, 0)), hp + ": the output returns")
     ok, _ = follow(env, lambda: rects(env) == {a: [0, 0, 640, 360]})
-    check(ok and shows(env, a, "red") == "red", "hotplug: the wallpaper is back on the returned output", rects(env))
-    check(env.daemon.poll() is None and env.daemon.pid == pid, "hotplug: same process throughout")
-    healthy(env, mark, "hotplug")
+    check(ok and shows(env, a, "red") == "red", hp + ": the wallpaper is back on the returned output", rects(env))
+    check(env.daemon.poll() is None and env.daemon.pid == pid, hp + ": same process throughout")
+    log = env.since(mark)
+    if in_place:
+        # (one restart: for the second output when it first appeared, which was one more
+        # output than the daemon had had)
+        n = log.count("restarting to follow it")
+        check("followed in place" in log and n <= 1,
+              hp + ": the changes were followed in place: one restart at most, for the output that was new", n)
+    else:
+        check("followed in place" not in log and all(r in log for r in RESTART_LINES),
+              hp + ": the changes were followed by restarts in place, as before; nothing in place",
+              [r for r in RESTART_LINES if r in log])
+    healthy(env, mark, hp)
     env.stop_daemon()
 
 
@@ -689,7 +724,8 @@ def case_follow(env, W):
     """Two outputs. The second one moves, changes its scale and its mode, is switched off
     and on again: the daemon follows each change without restarting, and the first
     output's wallpaper - an animated scene - is never loaded again and goes on drawing."""
-    if not start(env, [("A", 640, 360, 0, 0), ("B", 480, 270, 640, 0)], "follow"):
+    begun = env.mark()
+    if not start(env, [("A", 640, 360, 0, 0), ("B", 480, 270, 640, 0)], "follow", extra=FOLLOW_ON):
         return
     mark = env.mark()
     (a, *_), (b, *_) = env.mons
@@ -794,20 +830,27 @@ def case_follow(env, W):
               "(left edge blue, right edge red)", got)
     healthy(env, mark, "follow")
     env.stop_daemon()
-    # the setting that brings back a restart in place for every change
-    if not start(env, [("A", 640, 360, 0, 0), ("B", 480, 270, 640, 0)], "follow, wayland_follow off",
-                 extra={"WALPE_WAYLAND_FOLLOW": "off"}):
-        return
-    (a, *_), (b, *_) = env.mons
-    m = env.mark()
-    env.display.output(b, pos=(0, 360))
-    env.display.output(a, pos=(0, 0))
-    ok, _ = follow(env, lambda: rects(env) == {a: [0, 0, 640, 360], b: [0, 360, 480, 270]}, 40)
-    said = [r for r in RESTART_LINES if r in env.since(m)]
-    check(ok and len(said) == len(RESTART_LINES) and "wayland_follow is off" in env.since(m),
-          "follow: WALPE_WAYLAND_FOLLOW=off: the daemon restarts in place for the change, as before, and says "
-          "that the setting is off", (rects(env), said))
+    check("wayland_follow is on" in env.since(begun), "follow: the log says that the setting is on")
     env.stop_daemon()
+    # without the setting, which is the default, and with it off: the restart in place for
+    # every change, as before, and nothing of the outputs is followed in place
+    for extra, what in ((None, "the setting is not set"), ({"WALPE_WAYLAND_FOLLOW": "off"}, "WALPE_WAYLAND_FOLLOW=off")):
+        m = env.mark()
+        if not start(env, [("A", 640, 360, 0, 0), ("B", 480, 270, 640, 0)], "follow, " + what, extra=extra):
+            return
+        (a, *_), (b, *_) = env.mons
+        time.sleep(1.5 * PATIENCE)
+        env.display.output(b, pos=(0, 360))
+        env.display.output(a, pos=(0, 0))
+        ok, _ = follow(env, lambda: rects(env) == {a: [0, 0, 640, 360], b: [0, 360, 480, 270]}, 40)
+        log = env.since(m)
+        said = [r for r in RESTART_LINES if r in log]
+        check(ok and len(said) == len(RESTART_LINES) and "followed in place" not in log and
+              "wayland_follow is on" not in log,
+              f"follow: {what}: the daemon restarts in place for the change, as before", (rects(env), said))
+        check(env.state().get("render_threads_waiting") == 0, f"follow: {what}: no render thread waits for an "
+              "output", env.state().get("render_threads_waiting"))
+        env.stop_daemon()
 
 
 # ------------------------------------------------------------------- closed
@@ -815,13 +858,17 @@ def case_closed(env, W):
     """The compositor closes a wallpaper surface while its output stays (the daemon is
     told to act as if: WALPE_WL_CLOSE_AFTER_MS; no compositor here does it on request).
     The surface gets its role back in place; where that is not to be tried
-    (WALPE_WL_RECREATE=0) that output's wallpaper is loaded again on a new surface. In
-    both cases nothing restarts and the other output's wallpaper goes on."""
+    (WALPE_WL_RECREATE=0; with wayland_follow on) that output's wallpaper is loaded again
+    on a new surface. In both cases nothing restarts and the other output's wallpaper
+    goes on."""
     after = int(6000 * PATIENCE)
     for recreate, what in ((None, "closed"), ("0", "closed, WALPE_WL_RECREATE=0")):
         extra = {"WALPE_WL_CLOSE_AFTER_MS": str(after)}
         if recreate is not None:
+            # (a new surface on a monitor that goes on: only where outputs are followed in
+            # place; the daemon's default is the restart for it, as before)
             extra["WALPE_WL_RECREATE"] = recreate
+            extra.update(FOLLOW_ON)
         t0 = time.time()
         if not start(env, [("A", 640, 360, 0, 0), ("B", 480, 270, 640, 0)], what, extra=extra):
             return
@@ -877,8 +924,10 @@ def case_nosurface(env, W):
     WALPE_WL_NO_CONFIGURE=n: no compositor here stays silent on request; river 0.4 and
     later does until its window manager is connected). The daemon starts without a
     monitor and says so, tries again on its schedule and shows the wallpaper once a
-    surface is given; when the tries are used up it says that it gives up, runs on, and
-    tries again when an output changes."""
+    surface is given - with the daemon's default settings: this does not depend on
+    wayland_follow. When the tries are used up it says that it gives up and runs on; with
+    wayland_follow on it tries again when an output changes (without, such a change is a
+    restart in place, which begins with new surfaces anyway)."""
     cfg = dict(CONFIG, current=W["quad"])
 
     def unanswered(mark):
@@ -905,13 +954,15 @@ def case_nosurface(env, W):
           not any(r in env.since(begun) for r in RESTART_LINES) and env.daemon.pid == pid,
           "nosurface: status has no output without a surface any more, nothing restarted",
           {k: st.get(k) for k in ("monitors_without_surface", "render_threads_waiting")})
+    check("wayland_follow is on" not in env.since(begun) and "followed in place" not in env.since(begun),
+          "nosurface: all of that with wayland_follow off, the default")
     healthy(env, begun, "nosurface")
     env.stop_daemon()
 
     # no answer to the start nor to any of the eight tries; the first one after that gets one
     begun = env.mark()
     if not start(env, [("A", 640, 360, 0, 0)], "nosurface, given up", config=cfg,
-                 extra={"WALPE_WL_NO_CONFIGURE": "9", "WALPE_SURFACE_RETRY_MS": "100"}):
+                 extra=dict(FOLLOW_ON, WALPE_WL_NO_CONFIGURE="9", WALPE_SURFACE_RETRY_MS="100")):
         return
     name, pid = env.mons[0][0], env.daemon.pid
     gave = wait_for(lambda: "walpe-daemon gives up on it and runs on" in env.since(begun), 60, 0.3)
@@ -1494,8 +1545,14 @@ def case_reconnect(env, W):
 
 # ------------------------------------------------------------------- cycles
 def case_cycles(env, W, rounds=6):
-    """not in the default run (it was two restarts in place a round, ten seconds apart at least)"""
-    if not start(env, [("A", 640, 360, 0, 0)], "cycles"):
+    """not in the default run (it is two restarts in place a round, ten seconds apart at
+    least); then with wayland_follow on, where a render thread that waits is used again"""
+    cycles_one(env, W, rounds, None)
+    cycles_one(env, W, rounds, FOLLOW_ON)
+
+
+def cycles_one(env, W, rounds, extra):
+    if not start(env, [("A", 640, 360, 0, 0)], "cycles", extra=extra):
         return
     mark = env.mark()
     a, pid = env.mons[0][0], env.daemon.pid

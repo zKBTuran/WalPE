@@ -13,9 +13,9 @@ change.
 > without layer shell that the daemon has to turn down. What ran on sway end to end:
 > pictures, scenes, videos and web wallpapers on one and two outputs (web wallpapers also
 > with no X server anywhere, see [Web wallpapers](#web-wallpapers)); outputs that appear,
-> go and change their mode, scale or transform under the running daemon (followed in
-> place: also on sway 1.12, labwc, Wayfire, river 0.3 and a headless KWin 6.8.2 with two
-> virtual outputs); the restart in
+> go and change their mode, scale or transform under the running daemon (with a restart
+> in place, and with `wayland_follow = on` in place: that also on sway 1.12, labwc,
+> Wayfire, river 0.3 and a headless KWin 6.8.2 with two virtual outputs); the restart in
 > place, and the wait for a compositor that was killed and started again; the pause rules
 > with stand-ins for logind and for the compositor's idle and window-list protocols.
 > One more thing was looked at on one more compositor: where a video wallpaper lies
@@ -141,10 +141,16 @@ name matching is tested with made-up names only: the headless outputs are called
 `HEADLESS-n`.)
 
 A monitor that is removed, comes back, moves in the layout or changes its mode, scale,
-refresh rate or rotation is followed in place, about two seconds after the change has
-settled: nothing restarts, and the wallpapers of the other monitors go on where they
-were (up to 0.14.0, and on X11 still, the daemon restarts itself in place for every such
-change, which begins every wallpaper again):
+refresh rate or rotation makes the daemon restart itself in place, as on X11: two to ten
+seconds, and every wallpaper on every monitor begins again.
+
+**To try: `wayland_follow = on`** in `gpu.conf` ([GPU-PRESENT.md](GPU-PRESENT.md)), or
+`WALPE_WAYLAND_FOLLOW=on` in the daemon's environment. It is off by default because it
+has run on the software renderer only: on no GPU driver and no real monitor yet, and what
+it does - new buffer sizes for a surface that is being drawn on, GL contexts kept for
+monitors that are gone - is where drivers differ. With it the change is followed in
+place, about two seconds after it has settled: nothing restarts, and the wallpapers of
+the other monitors go on where they were:
 
 - another place in the layout, another scale, refresh rate or a half turn: nothing is
   loaded or drawn anew, on any monitor;
@@ -158,14 +164,15 @@ change, which begins every wallpaper again):
   monitor left the daemon runs on with none; `walpe-ctl status` then lists no monitor and
   says how many render threads wait (`render_threads_waiting`).
 
-The daemon still restarts in place when there are more monitors than it has had at one
-time since it started (the first time an external monitor is plugged into a laptop, say):
-a further monitor needs a further render thread with a GL context of its own, and one is
-only made while the daemon starts. From then on that monitor comes and goes in place.
-`wayland_follow = off` in `gpu.conf` ([GPU-PRESENT.md](GPU-PRESENT.md)) or
-`WALPE_WAYLAND_FOLLOW=off` brings back the restart for every change. The log says which
-of the two happened: `monitor layout changed (now: ...): followed in place (...)` or
-`... restarting to follow it`.
+Also with the setting on the daemon restarts in place when there are more monitors than
+it has had at one time since it started (the first time an external monitor is plugged
+into a laptop, say): a further monitor needs a further render thread with a GL context of
+its own, and one is only made while the daemon starts. From then on that monitor comes
+and goes in place. The log says at the start that the setting is on, and for each change
+which of the two happened: `monitor layout changed (now: ...): followed in place (...)`
+or `... restarting to follow it`. What to look at when trying it: a monitor switched off
+and on, unplugged and plugged in, another resolution and scale chosen in the desktop's
+settings, a rotation - each with a video on another monitor, which should play on.
 
 ### An output without a surface
 
@@ -180,7 +187,10 @@ the saved wallpaper. After the eighth (about four minutes) it says that it gives
 that monitor and stays as it is until a monitor changes or it is started again.
 `walpe-ctl status` (`monitors_without_surface`) and `walpe-ctl diag` say at any time
 which monitor has no surface and where the tries stand. (Up to 0.14.0 there was no second
-try. With `wayland_follow = off` there still is none.)
+try.) This does not depend on `wayland_follow`: a try gives a surface to a render thread
+that has waited for it since the start, and touches no monitor that shows something.
+Without `wayland_follow` a monitor that changes meanwhile restarts the daemon, as any
+change does, and the restart asks for every surface anew.
 
 When the compositor goes away the daemon shuts down in order and exits with status 1, as it
 does when an X server goes away. `wayland_reconnect = <seconds>` in `gpu.conf`
@@ -199,8 +209,8 @@ the next login starts its own: one of the two then ends ("another walpe-daemon i
 running") - keep the time short where the setting is used.
 A session started with a one-time socket (`WAYLAND_SOCKET` instead of
 `WAYLAND_DISPLAY`) cannot be reconnected to. Known gap: for the same reason the daemon
-cannot restart itself in place there. Where it has to restart for a monitor (more
-monitors than it has had at one time, see above; `wayland_follow = off`) it ends with
+cannot restart itself in place there. Where it has to restart for a monitor (any change
+of one; with `wayland_follow = on` only more monitors than it has had at one time) it ends with
 status 1 and `no display to draw on` (with `backend=auto` and `DISPLAY` set it comes back
 on X11 instead); start it again from the compositor.
 
@@ -728,23 +738,26 @@ What a compositor that is started again does to the daemon, measured on KWin 6.8
     while the display sleeps", unless the locker tells logind that the session is locked:
     with `pause_covered` off and `pause_dpms` on the wallpaper is drawn on behind such a
     lock screen.
-  - A monitor that comes back gets its wallpaper from its beginning: it was unloaded
-    when the monitor went (a compositor that removes an output while its monitor sleeps
-    does this at every wake-up; the other monitors are not touched).
+  - When the last output is gone, `walpe-ctl status` goes on listing the monitors the
+    daemon had (`hidden: true`); the daemon restarts in place when one is back. With
+    `wayland_follow = on` it has no monitor then, and a monitor that comes back gets its
+    wallpaper from its beginning: it was unloaded when the monitor went (a compositor
+    that removes an output while its monitor sleeps does this at every wake-up; the
+    other monitors are not touched).
   - While the daemon waits for a compositor to come back (`wayland_reconnect`), its
     control socket is there and nobody answers on it: `walpe-ctl` says that the daemon
     did not answer in time, and what was sent in that time is not carried out when it is back.
 - A session started with a one-time socket (`WAYLAND_SOCKET`) cannot be restarted in
-  place: the daemon ends where it would have to restart for a monitor (see "What is
-  different from X11").
+  place: the daemon ends at the first change of a monitor it would follow that way (see
+  "What is different from X11").
 - A frame with translucent pixels: the surface is declared opaque; on a driver without
   `EGL_EXT_present_opaque` and without an alpha-free EGL config such pixels can show the
   compositor's background through them (the log says so at start).
 - If the compositor closes a wallpaper surface while its monitor stays, the daemon gives
-  the surface its role back in place, up to three times in ten seconds; after that (or
-  at once with `WALPE_WL_RECREATE=0`) that monitor's wallpaper is unloaded and loaded
-  again on a new surface, the other monitors go on. This path did not occur in the
-  tests with a real compositor.
+  the surface its role back in place, up to three times in ten seconds, else it restarts in
+  place (`WALPE_WL_RECREATE=0`: always). With `wayland_follow = on` there is no restart
+  for it: that monitor's wallpaper is unloaded and loaded again on a new surface, the
+  other monitors go on. This path did not occur in the tests with a real compositor.
 - `--windowed` (a normal window for trying things out) needs only `xdg-shell` and works
   where wallpapers cannot.
 

@@ -125,26 +125,31 @@ renders on a laptop's discrete GPU where there is one (under Graphics cards;
   the desktop, the pause rules, the add-on, the tray's menu. With the daemon of 0.14.0 it
   fails where the reports did; it is skipped where no KWin of Plasma 6 is installed
   ([DEVELOPMENT.md](docs/DEVELOPMENT.md#tests)).
-- A monitor that changes no longer restarts the daemon. Up to now every change of an
-  output - a monitor unplugged, back from sleep on a compositor that removes sleeping
-  outputs, moved in the layout, another scale or mode chosen in the desktop's settings,
-  a rotation - made the daemon restart itself in place: two to ten seconds, and every
-  wallpaper on every monitor began again. The daemon now follows the change in place:
+- To try, off by default: `wayland_follow = on` in `gpu.conf` (or
+  `WALPE_WAYLAND_FOLLOW=on`), and a monitor that changes no longer restarts the daemon.
+  Every change of an output - a monitor unplugged, back from sleep on a compositor that
+  removes sleeping outputs, moved in the layout, another scale or mode chosen in the
+  desktop's settings, a rotation - makes the daemon restart itself in place: two to ten
+  seconds, and every wallpaper on every monitor begins again. With the setting the
+  daemon follows the change in place:
   position, scale, refresh rate and a half turn change nothing that is shown; another
   size in pixels gives the surface new buffers (a video plays on, a scene on that
   monitor is loaded again); a monitor that goes has its wallpaper unloaded and gets it
   back on a new surface when it returns; the other monitors' wallpapers go on where they
   were throughout. Still a restart in place: more monitors than the daemon has had at
-  one time since its start (once per session, typically). `wayland_follow = off` in
-  `gpu.conf` (or `WALPE_WAYLAND_FOLLOW=off`) is the old behaviour. X11 is unchanged: a
-  build without the Wayland backend has none of this code. Run headless on sway 1.9 and
-  1.12, labwc 0.20.2, Wayfire 0.11.0, river 0.3.17 and KWin 6.8.2, software renderer
-  ([WAYLAND.md](docs/WAYLAND.md)).
+  one time since its start (once per session, typically). Without the setting nothing
+  changes. It is off because it has only run headless on the software renderer (sway 1.9
+  and 1.12, labwc 0.20.2, Wayfire 0.11.0, river 0.3.17, KWin 6.8.2) and on no GPU driver
+  or real monitor: whoever tries it, please say how it went with a monitor switched off
+  and on, unplugged, another resolution, scale and rotation
+  ([WAYLAND.md](docs/WAYLAND.md)). X11 is unchanged: a build without the Wayland backend
+  has none of this code.
 - A monitor that got no wallpaper surface when the daemon started is tried again. A
   compositor that was not ready to show wallpapers yet - river 0.4 and later before its
   window manager is connected, a session still starting - left the daemon running with an
   empty monitor for good: it said so once and never asked again. It now tries again
-  after 2, 4, 8, 16, 32, 60, 60 and 60 seconds and whenever a monitor changes, shows the
+  after 2, 4, 8, 16, 32, 60, 60 and 60 seconds (this one is on, with or without
+  `wayland_follow`), shows the
   saved wallpaper at the first try that is answered, and says in its log,
   `walpe-ctl diag` and `walpe-ctl status` where the tries stand and when it has given up
   (after about four minutes; it runs on then, as before). Run on river 0.5.0 with a

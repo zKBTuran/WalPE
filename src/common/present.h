@@ -180,7 +180,7 @@ static inline const char *const *walpe_gpuconf_keys (void)
         "present", "idle_release", "egl_display", "swap_damage",
         "frame_align",
         "wayland_reconnect",    /* seconds to wait for a Wayland compositor that went away */
-        "wayland_follow",       /* off: restart in place for every change of an output */
+        "wayland_follow",       /* on: a change of an output is followed without a restart */
         "yield", "threaded", "max_frames", "sync_display", "shader_cache", "shader_cache_size",
         NULL
     };
