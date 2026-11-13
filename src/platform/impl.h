@@ -79,7 +79,7 @@ typedef struct {
 
     gboolean (*pointer) (WalpePointer *out);
     gboolean (*on_desktop) (guintptr under);                               /* optional: TRUE */
-    gboolean (*pointer_helper) (void);                                     /* optional: FALSE */
+    gboolean (*pointer_helper) (char **outputs);                           /* optional: FALSE */
     void (*pointer_foreign) (const char *output, WalpeForeignPointer what, double x, double y,
                              double a, double b);                          /* optional: nothing */
     void (*input_select) (gboolean buttons, gboolean motion);              /* optional: nothing */

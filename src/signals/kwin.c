@@ -12,20 +12,24 @@
  *     providers' Wayland session; WALPE_KWIN_SCRIPT=0 switches the
  *     provider off, =1 takes KWin for granted).
  *   - Nothing but the answer "it would work here" while none of the three
- *     rules is on (pause_fullscreen, pause_covered, focus_action): no
- *     connection to the session bus, no script in KWin.
+ *     rules is on (pause_fullscreen, pause_covered, focus_action) and no
+ *     wallpaper wants the pointer from the Plasma add-on: no connection
+ *     to the session bus, no script in KWin.
  *   - With a rule on: a connection of its own to the session bus (no name
  *     is owned: the script calls the connection's unique name), one
  *     object on it with one method, a watch on the name org.kde.KWin,
- *     and the script in KWin. KWin calls only when an answer changes.
- *     KWin leaving the bus drops the answers; KWin coming back (it was
- *     restarted) gets the script again. The script is unloaded when the
- *     last rule is switched off and when the daemon stops. A daemon that
- *     is killed leaves it in KWin, reporting to a name nobody has; the
- *     next one unloads it by its name before it loads its own (kwin_load).
- * The same connection takes the pointer from the add-on for Plasma while
- * a wallpaper wants it ("the pointer" below): that is the one time the
- * daemon owns a name on the bus.
+ *     and the pause script in KWin. KWin calls only when an answer
+ *     changes. KWin leaving the bus drops the answers; KWin coming back
+ *     (it was restarted) gets the script again. The script is unloaded
+ *     when the last rule is switched off and when the daemon stops. A
+ *     daemon that is killed leaves it in KWin, reporting to a name nobody
+ *     has; the next one unloads it by its name before it loads its own
+ *     (ks_load).
+ *   - While a wallpaper wants the pointer from the Plasma add-on ("the
+ *     pointer" below): the same connection, a second script in KWin that
+ *     tells where the pointer is over Plasma's desktop, and the one name
+ *     the daemon ever owns on the bus, for the buttons and the wheel.
+ * The two scripts come and go independently of each other.
  * Everything runs on the main thread. */
 #include "walpe-build-config.h"
 #include "signals/providers.h"
@@ -36,44 +40,70 @@
 
 #define KWIN_BUS_NAME "org.kde.KWin"
 
+/* The two scripts the daemon can have in KWin. Each is loaded, replaced
+ * and taken out by itself (ks_* below): the pause script while a pause
+ * rule is on, the pointer script while a wallpaper wants the pointer from
+ * the Plasma add-on - which comes and goes with every pause of such a
+ * wallpaper, and must not touch what the pause script has said. */
+typedef enum { KS_PAUSE = 0, KS_POINTER, KS_N } KKind;
+
+typedef struct {
+    const char *name;           /* in KWin */
+    const char *file;           /* of the file KWin is given it in: a printf pattern for the pid */
+    const char *method;         /* what it calls here */
+    const char *what;           /* in messages */
+    gboolean want;              /* it is to be in KWin */
+    char *given;                /* what the text in KWin was made of (ks_inputs); NULL = none loaded */
+    gboolean loading, reload;   /* a load is under way; another one is wanted after it */
+    guint chain;                /* counts the loads: an answer to an earlier one is nobody's */
+    guint retry;                /* a second try to load, pending */
+    gboolean retried;
+    gboolean heard;             /* the script in KWin has called */
+    guint object;
+    char *path;                 /* the one `object` is at: the script that is (being) loaded */
+    const char *trouble;        /* why it reports nothing right now; NULL = it does, or is not wanted */
+    char *trouble_own;          /* storage of a trouble text made here */
+} KScript;
+
 static struct {
     gboolean started;           /* the compositor is KWin: the provider answers for its signals */
     guint rules;                /* WALPE_SIG_BIT () of the rules that are switched on */
-    GDBusConnection *bus;       /* only while a rule is on */
+    GDBusConnection *bus;       /* only while a rule is on or the pointer is wanted */
     GCancellable *cancel;       /* of everything asked on `bus` */
     gboolean connecting;
-    guint watch, object;
+    guint watch;
     guint script;               /* counts the scripts loaded: each has an object path of its own */
-    char *path;                 /* the one `object` is at: the script that is (being) loaded */
     char *owner;                /* KWin's unique name; NULL = not on the bus */
-    gboolean loaded;            /* the script has reported */
-    char *see;                  /* the see-through list the loaded script was given */
-    char *state;                /* its last report */
+    KScript s[KS_N];
+    char *state;                /* the pause script's last report */
     GHashTable *ids;            /* output ids that have a value from it */
-    const char *trouble;        /* why it reports nothing right now; NULL = it does, or no rule is on */
-    char *trouble_own;          /* storage of a trouble text made here */
-    gboolean loading, reload;   /* a load is under way; another one is wanted after it */
-    guint retry;                /* a second try to load, pending */
-    gboolean retried;
     char *address;              /* tests: the bus to use */
     /* the pointer from the Plasma add-on (see "the pointer" below) */
     gboolean ptr_want;
+    char *ptr_outputs;          /* the outputs whose wallpaper wants it, one per line */
+    guint ptr_ms;               /* the least time between two positions */
+    char *ptr_on;               /* the output the pointer script last named; NULL = it is on none */
     WalpeSigPointerFn ptr_fn;
     gpointer ptr_user;
     guint ptr_own, ptr_object, ptr_watch;
     gboolean ptr_named;         /* the bus gave us the name */
     char *ptr_shell;            /* the unique name of Plasma's shell; NULL = not on the bus */
-} K;
+} K = {
+    .s = { [KS_PAUSE] = { .name = WALPE_KWIN_SCRIPT_NAME, .file = "walpe-kwin-%u.js", .method = "Report",
+                          .what = "pause" },
+           [KS_POINTER] = { .name = WALPE_KWIN_POINTER_SCRIPT_NAME, .file = "walpe-kwin-pointer-%u.js",
+                            .method = "Pointer", .what = "pointer" } },
+};
 
 static void kwin_arm (void);
 
-static void kwin_trouble (const char *fixed, char *made)
+static void ks_trouble (KScript *s, const char *fixed, char *made)
 {
-    g_free (K.trouble_own);
-    K.trouble_own = made;
-    K.trouble = made ? made : fixed;
-    if (K.trouble)
-        g_message ("kwin: %s", K.trouble);
+    g_free (s->trouble_own);
+    s->trouble_own = made;
+    s->trouble = made ? made : fixed;
+    if (s->trouble)
+        g_message ("kwin: %s", s->trouble);
 }
 
 /* ---- values */
@@ -122,12 +152,22 @@ static void kwin_apply (void)
     K.ids = seen;
 }
 
-static void kwin_forget (void)
+/* What a script said is no longer true: it is being replaced or taken
+ * out, or KWin is gone. The pause script's answers go; the wallpaper the
+ * pointer script named last is told that the pointer left. */
+static void ks_forget (KScript *s)
 {
-    g_clear_pointer (&K.state, g_free);
-    K.loaded = FALSE;
-    if (K.ids)
-        kwin_apply ();
+    s->heard = FALSE;
+    if (s == &K.s[KS_PAUSE]) {
+        g_clear_pointer (&K.state, g_free);
+        if (K.ids)
+            kwin_apply ();
+    } else if (K.ptr_on) {
+        char *on = g_steal_pointer (&K.ptr_on);
+        if (K.ptr_fn)
+            K.ptr_fn (on, WALPE_KWIN_PTR_LEAVE, 0, 0, 0, 0, K.ptr_user);
+        g_free (on);
+    }
 }
 
 void walpe_sig_kwin_outputs_changed (void)
@@ -136,67 +176,140 @@ void walpe_sig_kwin_outputs_changed (void)
         kwin_apply ();      /* ids are looked up again; a gone output loses its values */
 }
 
-/* the file KWin is given the script in */
-static char *kwin_script_file (void)
+/* the file KWin is given a script in */
+static char *ks_file (const KScript *s)
 {
-    char *base = g_strdup_printf ("walpe-kwin-%u.js", (guint) getpid ());
+    char *base = g_strdup_printf (s->file, (guint) getpid ());
     char *f = g_build_filename (g_get_user_runtime_dir (), base, NULL);
     g_free (base);
     return f;
 }
 
-/* ---- the object the script calls */
+static void ks_unlink (const KScript *s)
+{
+    char *f = ks_file (s);
+    g_unlink (f);
+    g_free (f);
+}
+
+/* what a script's text depends on besides the daemon itself: a change of
+ * it loads the script again */
+static char *ks_inputs (const KScript *s)
+{
+    if (s == &K.s[KS_PAUSE])
+        return g_strdup (walpe_sigprov_see_through () ? walpe_sigprov_see_through () : "");
+    return g_strdup_printf ("%u\n%s", K.ptr_ms, K.ptr_outputs ? K.ptr_outputs : "");
+}
+
+static char *ks_text (const KScript *s)
+{
+    const char *dest = g_dbus_connection_get_unique_name (K.bus);
+    if (s == &K.s[KS_PAUSE])
+        return walpe_kwin_script_text (dest, s->path, (guint) getpid (), walpe_sigprov_see_through ());
+    return walpe_kwin_pointer_script_text (dest, s->path, K.ptr_outputs, K.ptr_ms);
+}
+
+/* ---- the object a script calls */
 
 static const char kwin_xml[] =
     "<node><interface name='" WALPE_KWIN_IFACE "'>"
     "<method name='Report'><arg type='s' name='state' direction='in'/></method>"
+    "<method name='Pointer'><arg type='s' name='where' direction='in'/></method>"
     "</interface></node>";
+
+/* the pause script: per output, what the windows do */
+static void kwin_report (KScript *s, const char *state)
+{
+    if (!strcmp (state, "unsupported")) {
+        ks_forget (s);
+        ks_trouble (s, "this KWin's script interface is older than Plasma 6: its windows cannot be "
+                       "asked about", NULL);
+        return;
+    }
+    if (!s->heard) {
+        ks_trouble (s, NULL, NULL);
+        g_message ("kwin: the pause script is loaded in KWin: it reports, per output, windows "
+                   "that cover it and the focused window (fullscreen or not) when that changes");
+    }
+    s->heard = TRUE;
+    g_free (K.state);
+    K.state = g_strdup (state);
+    kwin_apply ();
+}
+
+/* the pointer script: where the pointer is over Plasma's desktop
+ * (kwinscript.h has the three things it says) */
+static void kwin_pointer_report (KScript *s, const char *where)
+{
+    const char *name;
+    gsize nlen;
+    double x = 0, y = 0;
+    if (!strcmp (where, "unsupported")) {
+        ks_forget (s);
+        ks_trouble (s, "this KWin's script interface does not tell where the pointer is: with the "
+                       "Plasma add-on the wallpaper gets no pointer position", NULL);
+        return;
+    }
+    if (!s->heard) {
+        ks_trouble (s, NULL, NULL);
+        g_message ("kwin: the pointer script is loaded in KWin: it reports where the pointer is over "
+                   "Plasma's desktop on %s", K.ptr_outputs && *K.ptr_outputs ? "the outputs whose "
+                   "wallpaper uses it" : "no output");
+    }
+    s->heard = TRUE;
+    switch (walpe_kwin_pointer_line (where, &name, &nlen, &x, &y)) {
+    case WALPE_KWIN_PTR_MOTION:
+        if (!K.ptr_on || strlen (K.ptr_on) != nlen || strncmp (K.ptr_on, name, nlen)) {
+            g_free (K.ptr_on);
+            K.ptr_on = g_strndup (name, nlen);
+        }
+        if (K.ptr_fn && K.ptr_want)
+            K.ptr_fn (K.ptr_on, WALPE_KWIN_PTR_MOTION, x, y, 0, 0, K.ptr_user);
+        break;
+    case WALPE_KWIN_PTR_LEAVE: {
+        char *on = g_strndup (name, nlen);
+        g_clear_pointer (&K.ptr_on, g_free);
+        if (K.ptr_fn && K.ptr_want)
+            K.ptr_fn (on, WALPE_KWIN_PTR_LEAVE, 0, 0, 0, 0, K.ptr_user);
+        g_free (on);
+        break;
+    }
+    default:
+        break;      /* "ready", or nothing this program knows */
+    }
+}
 
 static void kwin_method (GDBusConnection *c, const char *sender, const char *path, const char *iface,
                          const char *method, GVariant *args, GDBusMethodInvocation *inv, gpointer user)
 {
-    (void) c; (void) iface; (void) user;
+    (void) c; (void) iface;
+    KScript *s = user;
     /* only KWin's own connection is believed (its scripts call from it),
-     * and of its scripts only the one loaded last (kwin_object) */
-    if (g_strcmp0 (method, "Report") || !K.owner || g_strcmp0 (sender, K.owner) || g_strcmp0 (path, K.path)) {
+     * and of its scripts only the one loaded last (ks_object) */
+    if (g_strcmp0 (method, s->method) || !K.owner || g_strcmp0 (sender, K.owner) || g_strcmp0 (path, s->path)) {
         g_dbus_method_invocation_return_error_literal (inv, G_DBUS_ERROR, G_DBUS_ERROR_ACCESS_DENIED,
                                                        "only KWin reports here");
         return;
     }
-    const char *state = NULL;
-    g_variant_get (args, "(&s)", &state);
-    if (!K.loaded) {
-        /* the script runs: KWin has read its file */
-        char *f = kwin_script_file ();
-        g_unlink (f);
-        g_free (f);
-    }
-    if (!strcmp (state, "unsupported")) {
-        kwin_forget ();
-        kwin_trouble ("this KWin's script interface is older than Plasma 6: its windows cannot be "
-                      "asked about", NULL);
-    } else {
-        if (!K.loaded) {
-            kwin_trouble (NULL, NULL);
-            g_message ("kwin: the pause script is loaded in KWin: it reports, per output, windows "
-                       "that cover it and the focused window (fullscreen or not) when that changes");
-        }
-        K.loaded = TRUE;
-        g_free (K.state);
-        K.state = g_strdup (state);
-        kwin_apply ();
-    }
+    const char *text = NULL;
+    g_variant_get (args, "(&s)", &text);
+    if (!s->heard)
+        ks_unlink (s);      /* the script runs: KWin has read its file */
+    if (s == &K.s[KS_PAUSE])
+        kwin_report (s, text);
+    else
+        kwin_pointer_report (s, text);
     g_dbus_method_invocation_return_value (inv, NULL);
 }
 
 static const GDBusInterfaceVTable kwin_vt = { kwin_method, NULL, NULL, { 0 } };
 
-static void kwin_object_off (void)
+static void ks_object_off (KScript *s)
 {
-    if (K.bus && K.object)
-        g_dbus_connection_unregister_object (K.bus, K.object);
-    K.object = 0;
-    g_clear_pointer (&K.path, g_free);
+    if (K.bus && s->object)
+        g_dbus_connection_unregister_object (K.bus, s->object);
+    s->object = 0;
+    g_clear_pointer (&s->path, g_free);
 }
 
 /* The object the next script reports to, at a path no script before it was
@@ -208,206 +321,262 @@ static void kwin_object_off (void)
  * answer stood for good, with "loaded" in status (seen on KWin 6.8.2: a
  * window closed in the moment the list changed, two times out of six).
  * Now such a report finds no object. */
-static void kwin_object (void)
+static void ks_object (KScript *s)
 {
-    kwin_object_off ();
-    K.path = g_strdup_printf (WALPE_KWIN_OBJECT "/s%u", ++K.script);
+    ks_object_off (s);
+    s->path = g_strdup_printf (WALPE_KWIN_OBJECT "/s%u", ++K.script);
     GDBusNodeInfo *info = g_dbus_node_info_new_for_xml (kwin_xml, NULL);
-    K.object = g_dbus_connection_register_object (K.bus, K.path, info->interfaces[0], &kwin_vt, NULL, NULL,
-                                                  NULL);
+    s->object = g_dbus_connection_register_object (K.bus, s->path, info->interfaces[0], &kwin_vt, s, NULL,
+                                                   NULL);
     g_dbus_node_info_unref (info);
 }
 
-/* ---- the script in KWin */
+/* ---- a script in KWin */
 
-static void kwin_load (void);
+/* one load on its way through KWin's three answers */
+typedef struct {
+    KScript *s;
+    guint chain;
+    char *file;
+} KLoad;
+
+static void kload_free (KLoad *l)
+{
+    g_free (l->file);
+    g_free (l);
+}
+
+/* the answer belongs to the load that is under way (not to one from before
+ * the script was taken out or loaded anew, nor to a connection let go) */
+static gboolean kload_current (const KLoad *l, const GError *e)
+{
+    return K.bus && l->s->loading && l->chain == l->s->chain &&
+           !(e && g_error_matches (e, G_IO_ERROR, G_IO_ERROR_CANCELLED));
+}
+
+static void ks_load (KScript *s);
 
 /* A load has come to its end, whichever. One that was asked for meanwhile
  * (the see-through list changed again) starts now: never two at a time,
  * or the second finds the first one's script in KWin. */
-static void kwin_load_done (void)
+static void ks_load_done (KScript *s)
 {
-    K.loading = FALSE;
-    if (K.reload) {
-        K.reload = FALSE;
-        kwin_load ();
+    s->loading = FALSE;
+    if (s->reload) {
+        s->reload = FALSE;
+        ks_load (s);
     }
 }
 
 /* KWin has answered "start". It reads the script's file in a thread of its
- * own after that: the file stays until the script has reported
- * (kwin_method) or the rules go off. */
-static void kwin_ran (GObject *src, GAsyncResult *res, gpointer user)
+ * own after that: the file stays until the script has called (kwin_method)
+ * or is no longer wanted. */
+static void ks_ran (GObject *src, GAsyncResult *res, gpointer user)
 {
-    (void) user;
+    KLoad *l = user;
     GError *e = NULL;
     GVariant *r = g_dbus_connection_call_finish (G_DBUS_CONNECTION (src), res, &e);
-    if (r) {
+    if (r)
         g_variant_unref (r);
-    } else if (g_error_matches (e, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
-        g_clear_error (&e);
-        return;         /* the connection was let go, which has reset everything */
-    } else {
-        kwin_trouble (NULL, g_strdup_printf ("KWin did not run the pause script "
-                                             "(org.kde.kwin.Scripting.start): %s", e->message));
+    if (kload_current (l, e)) {
+        if (!r)
+            ks_trouble (l->s, NULL, g_strdup_printf ("KWin did not run the %s script "
+                                                     "(org.kde.kwin.Scripting.start): %s", l->s->what,
+                                                     e->message));
+        ks_load_done (l->s);
     }
     g_clear_error (&e);
-    kwin_load_done ();
+    kload_free (l);
 }
 
-static gboolean kwin_load_again (gpointer user);
+static gboolean ks_load_again (gpointer user);
 
-static void kwin_loaded (GObject *src, GAsyncResult *res, gpointer user)
+static void ks_loaded (GObject *src, GAsyncResult *res, gpointer user)
 {
-    (void) user;
+    KLoad *l = user;
+    KScript *s = l->s;
     GError *e = NULL;
     GVariant *r = g_dbus_connection_call_finish (G_DBUS_CONNECTION (src), res, &e);
-    if (!r) {
-        if (!g_error_matches (e, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
-            kwin_trouble (NULL, g_strdup_printf ("KWin did not take the pause script "
-                                                 "(org.kde.kwin.Scripting.loadScript): %s", e->message));
-            kwin_load_done ();
-        }
-        g_clear_error (&e);
-        return;
-    }
     gint32 id = -1;
-    g_variant_get (r, "(i)", &id);
-    g_variant_unref (r);
-    if (id < 0 || !K.bus) {
+    if (r) {
+        g_variant_get (r, "(i)", &id);
+        g_variant_unref (r);
+    }
+    if (!kload_current (l, e)) {
+        /* (cancelled: the connection was let go, which has reset everything) */
+    } else if (!r) {
+        ks_trouble (s, NULL, g_strdup_printf ("KWin did not take the %s script "
+                                              "(org.kde.kwin.Scripting.loadScript): %s", s->what,
+                                              e->message));
+        ks_load_done (s);
+    } else if (id < 0 && !s->retried) {
         /* -1: a script of the name is loaded. KWin takes one out a moment
          * after it has answered unloadScript: once more, then give up */
-        if (K.bus && !K.retried) {
-            K.retried = TRUE;
-            K.retry = g_timeout_add (300, kwin_load_again, NULL);
-        } else if (K.bus) {
-            kwin_trouble ("KWin did not take the pause script (org.kde.kwin.Scripting.loadScript "
-                          "answered -1)", NULL);
-            kwin_load_done ();
-        }
-        return;
+        s->retried = TRUE;
+        s->retry = g_timeout_add (300, ks_load_again, s);
+    } else if (id < 0) {
+        ks_trouble (s, NULL, g_strdup_printf ("KWin did not take the %s script "
+                                              "(org.kde.kwin.Scripting.loadScript answered -1)", s->what));
+        ks_load_done (s);
+    } else {
+        s->retried = FALSE;
+        /* Not "run" on the script's own object, /Scripting/Script<id>: the id
+         * KWin answers is the number of scripts it has loaded, so after another
+         * script was unloaded it is the id, and the object, of one that is still
+         * there (KWin 6.8), and "run" would reach that one. "start" runs every
+         * loaded script that is not running yet. */
+        g_dbus_connection_call (K.bus, KWIN_BUS_NAME, "/Scripting", "org.kde.kwin.Scripting", "start", NULL,
+                                NULL, G_DBUS_CALL_FLAGS_NO_AUTO_START, 5000, K.cancel, ks_ran, l);
+        l = NULL;
     }
-    K.retried = FALSE;
-    /* Not "run" on the script's own object, /Scripting/Script<id>: the id
-     * KWin answers is the number of scripts it has loaded, so after another
-     * script was unloaded it is the id, and the object, of one that is still
-     * there (KWin 6.8), and "run" would reach that one. "start" runs every
-     * loaded script that is not running yet. */
-    g_dbus_connection_call (K.bus, KWIN_BUS_NAME, "/Scripting", "org.kde.kwin.Scripting", "start", NULL, NULL,
-                            G_DBUS_CALL_FLAGS_NO_AUTO_START, 5000, K.cancel, kwin_ran, NULL);
+    g_clear_error (&e);
+    if (l)
+        kload_free (l);
 }
 
 /* KWin has answered unloadScript: now the new one */
-static void kwin_unloaded (GObject *src, GAsyncResult *res, gpointer user)
+static void ks_unloaded (GObject *src, GAsyncResult *res, gpointer user)
 {
+    KLoad *l = user;
     GError *e = NULL;
     GVariant *r = g_dbus_connection_call_finish (G_DBUS_CONNECTION (src), res, &e);
-    char *file = user;
     if (r)
         g_variant_unref (r);
-    if (!K.bus || (!r && g_error_matches (e, G_IO_ERROR, G_IO_ERROR_CANCELLED))) {
-        /* (cancelled: the connection was let go, which has reset everything) */
-    } else
+    if (kload_current (l, e)) {
         g_dbus_connection_call (K.bus, KWIN_BUS_NAME, "/Scripting", "org.kde.kwin.Scripting", "loadScript",
-                                g_variant_new ("(ss)", file, WALPE_KWIN_SCRIPT_NAME), G_VARIANT_TYPE ("(i)"),
-                                G_DBUS_CALL_FLAGS_NO_AUTO_START, 5000, K.cancel, kwin_loaded, NULL);
+                                g_variant_new ("(ss)", l->file, l->s->name), G_VARIANT_TYPE ("(i)"),
+                                G_DBUS_CALL_FLAGS_NO_AUTO_START, 5000, K.cancel, ks_loaded, l);
+        l = NULL;
+    }
     g_clear_error (&e);
-    g_free (file);
+    if (l)
+        kload_free (l);
 }
 
-static gboolean kwin_load_again (gpointer user)
+static gboolean ks_load_again (gpointer user)
 {
-    (void) user;
-    K.retry = 0;
-    K.loading = FALSE;
-    kwin_load ();
+    KScript *s = user;
+    s->retry = 0;
+    s->loading = FALSE;
+    ks_load (s);
     return G_SOURCE_REMOVE;
 }
 
-/* (Re)load: a script of an earlier daemon, or the one with the old
- * see-through list, goes first, and the new one when KWin has answered
- * that. */
-static void kwin_load (void)
+/* (Re)load: a script of an earlier daemon, or the one made of the old
+ * inputs, goes first, and the new one when KWin has answered that. */
+static void ks_load (KScript *s)
 {
-    if (!K.bus || !K.owner)
+    if (!K.bus || !K.owner || !s->want)
         return;
-    if (K.loading) {
-        K.reload = TRUE;
+    if (s->loading) {
+        s->reload = TRUE;
         return;
     }
     GError *e = NULL;
-    char *file = kwin_script_file ();
-    kwin_object ();
-    char *text = walpe_kwin_script_text (g_dbus_connection_get_unique_name (K.bus), K.path, (guint) getpid (),
-                                         walpe_sigprov_see_through ());
-    gboolean ok = g_file_set_contents (file, text, -1, &e);
+    KLoad *l = g_new0 (KLoad, 1);
+    l->s = s;
+    l->chain = ++s->chain;
+    l->file = ks_file (s);
+    ks_object (s);
+    char *text = ks_text (s);
+    gboolean ok = g_file_set_contents (l->file, text, -1, &e);
     g_free (text);
+    g_free (s->given);
+    s->given = ks_inputs (s);
+    ks_forget (s);
     if (!ok) {
-        kwin_trouble (NULL, g_strdup_printf ("the pause script could not be written: %s", e->message));
+        ks_trouble (s, NULL, g_strdup_printf ("the %s script could not be written: %s", s->what, e->message));
         g_clear_error (&e);
-        g_free (file);
+        kload_free (l);
         return;
     }
-    K.loading = TRUE;
-    g_free (K.see);
-    K.see = g_strdup (walpe_sigprov_see_through ());
-    kwin_forget ();
+    s->loading = TRUE;
     g_dbus_connection_call (K.bus, KWIN_BUS_NAME, "/Scripting", "org.kde.kwin.Scripting", "unloadScript",
-                            g_variant_new ("(s)", WALPE_KWIN_SCRIPT_NAME), NULL,
-                            G_DBUS_CALL_FLAGS_NO_AUTO_START, 5000, K.cancel, kwin_unloaded, file);
+                            g_variant_new ("(s)", s->name), NULL, G_DBUS_CALL_FLAGS_NO_AUTO_START, 5000,
+                            K.cancel, ks_unloaded, l);
+}
+
+/* A script goes: out of KWin (unload; not when the connection is dead
+ * already or KWin is not there), and with it what it said. An answer to a
+ * load that was under way finds another number in `chain` and does nothing
+ * more; KWin works through what it was sent in order, so the unloadScript
+ * here comes after whatever of that load had gone out. */
+static void ks_off (KScript *s, gboolean unload)
+{
+    if (s->retry)
+        g_source_remove (s->retry);
+    s->retry = 0;
+    s->retried = s->loading = s->reload = FALSE;
+    s->chain++;
+    if (K.bus && unload && K.owner && s->given && !g_dbus_connection_is_closed (K.bus)) {
+        GVariant *r = g_dbus_connection_call_sync (
+            K.bus, KWIN_BUS_NAME, "/Scripting", "org.kde.kwin.Scripting", "unloadScript",
+            g_variant_new ("(s)", s->name), NULL, G_DBUS_CALL_FLAGS_NO_AUTO_START, 1000, NULL, NULL);
+        if (r)
+            g_variant_unref (r);
+    }
+    g_clear_pointer (&s->given, g_free);
+    ks_object_off (s);
+    ks_forget (s);
+    ks_unlink (s);
+}
+
+/* what is wanted of a script against what is in KWin */
+static void ks_sync (KScript *s)
+{
+    if (!s->want) {
+        if (s->given || s->loading || s->retry)
+            ks_off (s, TRUE);
+        ks_trouble (s, NULL, NULL);
+        return;
+    }
+    if (!K.owner)
+        return;         /* kwin_appeared loads it */
+    char *now = ks_inputs (s);
+    if (g_strcmp0 (now, s->given))
+        ks_load (s);
+    g_free (now);
 }
 
 static void kwin_appeared (GDBusConnection *c, const char *name, const char *owner, gpointer user)
 {
     (void) c; (void) name; (void) user;
-    K.retried = FALSE;
     g_free (K.owner);
     K.owner = g_strdup (owner);
-    kwin_trouble (NULL, NULL);
-    kwin_load ();
+    for (int i = 0; i < KS_N; i++) {
+        KScript *s = &K.s[i];
+        s->retried = FALSE;
+        if (s->want) {
+            ks_trouble (s, NULL, NULL);
+            g_clear_pointer (&s->given, g_free);    /* whatever was in the KWin before this one */
+            ks_load (s);
+        }
+    }
 }
 
 static void kwin_vanished (GDBusConnection *c, const char *name, gpointer user)
 {
     (void) c; (void) name; (void) user;
     g_clear_pointer (&K.owner, g_free);
-    K.loading = K.reload = FALSE;
-    kwin_forget ();
-    if (K.bus)
-        kwin_trouble ("KWin is not on the session bus (org.kde.KWin): windows cannot be asked about "
-                      "until it is", NULL);
+    for (int i = 0; i < KS_N; i++) {
+        KScript *s = &K.s[i];
+        if (s->retry)
+            g_source_remove (s->retry);
+        s->retry = 0;
+        s->loading = s->reload = FALSE;
+        s->chain++;
+        g_clear_pointer (&s->given, g_free);
+        ks_forget (s);
+        if (K.bus && s->want)
+            ks_trouble (s, i == KS_PAUSE
+                               ? "KWin is not on the session bus (org.kde.KWin): windows cannot be asked "
+                                 "about until it is"
+                               : "KWin is not on the session bus (org.kde.KWin): the pointer's position "
+                                 "over Plasma's desktop is not known until it is", NULL);
+    }
 }
 
 /* ---- the connection */
-
-/* The pause rules' part of the connection goes: the script out of KWin
- * (unload; not when the connection is dead already), the watch, what the
- * script said. */
-static void kwin_rules_off (gboolean unload)
-{
-    if (K.retry)
-        g_source_remove (K.retry);
-    K.retry = 0;
-    K.retried = K.loading = K.reload = FALSE;
-    if (K.bus && unload && K.owner && !g_dbus_connection_is_closed (K.bus)) {
-        GVariant *r = g_dbus_connection_call_sync (
-            K.bus, KWIN_BUS_NAME, "/Scripting", "org.kde.kwin.Scripting", "unloadScript",
-            g_variant_new ("(s)", WALPE_KWIN_SCRIPT_NAME), NULL, G_DBUS_CALL_FLAGS_NO_AUTO_START, 1000,
-            NULL, NULL);
-        if (r)
-            g_variant_unref (r);
-    }
-    if (K.watch)
-        g_bus_unwatch_name (K.watch);
-    K.watch = 0;
-    g_clear_pointer (&K.owner, g_free);
-    g_clear_pointer (&K.see, g_free);
-    kwin_object_off ();
-    kwin_forget ();
-    char *f = kwin_script_file ();
-    g_unlink (f);
-    g_free (f);
-}
 
 static void kwin_pointer_off (void);
 
@@ -419,7 +588,12 @@ static void kwin_disconnect (gboolean unload)
         g_clear_object (&K.cancel);
     }
     K.connecting = FALSE;
-    kwin_rules_off (unload);
+    for (int i = 0; i < KS_N; i++)
+        ks_off (&K.s[i], unload);
+    if (K.watch)
+        g_bus_unwatch_name (K.watch);
+    K.watch = 0;
+    g_clear_pointer (&K.owner, g_free);
     kwin_pointer_off ();
     if (K.bus) {
         g_signal_handlers_disconnect_by_data (K.bus, &K);
@@ -427,14 +601,14 @@ static void kwin_disconnect (gboolean unload)
             g_dbus_connection_close_sync (K.bus, NULL, NULL);
         g_clear_object (&K.bus);
     }
-    K.object = 0;
 }
 
 static void kwin_closed (GDBusConnection *c, gboolean remote, GError *err, gpointer user)
 {
     (void) c; (void) remote; (void) err; (void) user;
     kwin_disconnect (FALSE);
-    kwin_trouble ("the connection to the session bus ended: windows cannot be asked about", NULL);
+    ks_trouble (&K.s[KS_PAUSE], "the connection to the session bus ended: windows cannot be asked about",
+                NULL);
 }
 
 static void kwin_connected (GObject *src, GAsyncResult *res, gpointer user)
@@ -445,7 +619,8 @@ static void kwin_connected (GObject *src, GAsyncResult *res, gpointer user)
     if (!bus) {
         if (!g_error_matches (e, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
             K.connecting = FALSE;
-            kwin_trouble (NULL, g_strdup_printf ("no connection to the session bus: %s", e->message));
+            ks_trouble (&K.s[KS_PAUSE], NULL,
+                        g_strdup_printf ("no connection to the session bus: %s", e->message));
         }
         g_clear_error (&e);
         return;
@@ -474,25 +649,38 @@ static char *kwin_bus_address (void)
 /* ---- the pointer
  * With the add-on for Plasma (contrib/plasma) Plasma's desktop window lies
  * over the wallpaper and the compositor gives the daemon no pointer there.
- * The add-on's wallpaper type sees the pointer in that window and calls
- * Event here. How it finds the daemon: by a name on the bus,
- * io.github.walpe.Pointer, which the daemon owns only while the platform
- * says a helper can exist and a wallpaper uses the pointer
- * (walpe_platform_pointer_helper) - the type watches for the name and
- * hands nothing on while nobody has it. Any process of the session can
- * take a name, so neither side takes one for more than it is:
- *   - the type sends to the connection that has the name, by that
- *     connection's own name, and only if the bus says it is the process
- *     whose surface KWin sees under the desktop (Script.qml): somebody
- *     else with the name gets nothing, and the daemon, not getting the
- *     name, says so in status;
- *   - the daemon believes the connection that owns org.kde.plasmashell
- *     at the time (as Report believes the one that owns org.kde.KWin).
- *     While Plasma's shell is not on the bus, the first process to take
- *     its name is believed in its place: it can move this pointer and
- *     press buttons 1 to 3 in a wallpaper that uses the pointer. The
- *     session bus has nothing to tell the two apart by; such a process
- *     can do more than that to the session in other ways. */
+ * It comes from two sides, both only while the platform says a helper can
+ * exist and a wallpaper uses the pointer (walpe_platform_pointer_helper):
+ *
+ *   - Where the pointer is: from a script of the daemon's own in KWin (the
+ *     pointer script, kwinscript.h), as the pause rules have theirs. It
+ *     calls Pointer on its object here while the pointer is over Plasma's
+ *     desktop on an output whose wallpaper wants it, at most once in
+ *     ptr_ms, and once more when the pointer leaves. Not the add-on's
+ *     wallpaper type, which did this first: to see the pointer everywhere
+ *     in the desktop window it needs an item above everything in it, and
+ *     Qt then gives Plasma's own icons and widgets no hover (seen on
+ *     Plasma 6.8.2).
+ *   - Buttons and the wheel: from the add-on's wallpaper type, which sees
+ *     them in the desktop window without taking them and calls Event here.
+ *     How it finds the daemon: by a name on the bus,
+ *     io.github.walpe.Pointer, which the daemon owns only while the
+ *     pointer is wanted - the type watches for the name and hands nothing
+ *     on while nobody has it. Any process of the session can take a name,
+ *     so neither side takes one for more than it is:
+ *       - the type sends to the connection that has the name, by that
+ *         connection's own name, and only if the bus says it is the process
+ *         whose surface KWin sees under the desktop (Script.qml): somebody
+ *         else with the name gets nothing, and the daemon, not getting the
+ *         name, says so in status;
+ *       - the daemon believes the connection that owns org.kde.plasmashell
+ *         at the time (as the scripts' reports are believed from the one
+ *         that owns org.kde.KWin). While Plasma's shell is not on the bus,
+ *         the first process to take its name is believed in its place: it
+ *         can move this pointer and press buttons 1 to 3 in a wallpaper
+ *         that uses the pointer. The session bus has nothing to tell the
+ *         two apart by; such a process can do more than that to the
+ *         session in other ways. */
 #define PTR_NAME "io.github.walpe.Pointer"
 #define PTR_PATH "/io/github/walpe/Pointer"
 
@@ -581,10 +769,13 @@ static void kwin_pointer_off (void)
 static void kwin_arm (void)
 {
     gboolean rules = K.started && K.rules != 0, pointer = K.started && K.ptr_want;
+    K.s[KS_PAUSE].want = rules;
+    K.s[KS_POINTER].want = pointer;
     if (!rules && !pointer) {
         if (K.bus || K.connecting)
             kwin_disconnect (TRUE);
-        kwin_trouble (NULL, NULL);
+        for (int i = 0; i < KS_N; i++)
+            ks_trouble (&K.s[i], NULL, NULL);
         return;
     }
     if (!K.bus) {
@@ -592,8 +783,8 @@ static void kwin_arm (void)
             return;
         char *addr = kwin_bus_address ();
         if (!addr) {
-            kwin_trouble ("no session bus (DBUS_SESSION_BUS_ADDRESS is not set and the runtime "
-                          "directory has no bus socket): KWin cannot be asked about its windows", NULL);
+            ks_trouble (&K.s[KS_PAUSE], "no session bus (DBUS_SESSION_BUS_ADDRESS is not set and the "
+                        "runtime directory has no bus socket): KWin cannot be asked about its windows", NULL);
             return;
         }
         K.connecting = TRUE;
@@ -605,13 +796,12 @@ static void kwin_arm (void)
         g_free (addr);
         return;         /* kwin_connected comes back here */
     }
-    if (rules && !K.watch) {
+    /* a script that is not wanted goes before the watch can bring it back */
+    for (int i = 0; i < KS_N; i++)
+        ks_sync (&K.s[i]);
+    if (!K.watch)
         K.watch = g_bus_watch_name_on_connection (K.bus, KWIN_BUS_NAME, G_BUS_NAME_WATCHER_FLAGS_NONE,
                                                   kwin_appeared, kwin_vanished, NULL, NULL);
-    } else if (!rules && K.watch) {
-        kwin_rules_off (TRUE);
-        kwin_trouble (NULL, NULL);
-    }
     if (pointer)
         kwin_pointer_on ();
     else
@@ -631,27 +821,42 @@ void walpe_sig_kwin_set_rules (guint mask)
         kwin_arm ();
 }
 
-void walpe_sig_kwin_set_pointer (gboolean want, WalpeSigPointerFn fn, gpointer user)
+void walpe_sig_kwin_set_pointer (gboolean want, const char *outputs, guint ms, WalpeSigPointerFn fn,
+                                 gpointer user)
 {
     K.ptr_fn = fn;
     K.ptr_user = user;
-    if (!!want == K.ptr_want)
+    ms = CLAMP (ms, 4, 1000);
+    if (!want)
+        outputs = NULL;
+    if (!!want == K.ptr_want && ms == K.ptr_ms && !g_strcmp0 (outputs, K.ptr_outputs))
         return;
     K.ptr_want = !!want;
+    K.ptr_ms = ms;
+    g_free (K.ptr_outputs);
+    K.ptr_outputs = g_strdup (outputs);
     if (K.started)
         kwin_arm ();
 }
 
 const char *walpe_sig_kwin_pointer_state (void)
 {
+    static char *text;
     if (!K.started || !K.ptr_want)
         return NULL;
     if (!K.bus)
         return "wanted from the Plasma add-on, but there is no connection to the session bus";
-    return K.ptr_named ? "taken from the Plasma add-on where a desktop has the wallpaper type WalPE "
-                         "(" PTR_NAME " on the session bus)"
-                       : "wanted from the Plasma add-on; the name " PTR_NAME " on the session bus is "
-                         "not ours (yet)";
+    const KScript *s = &K.s[KS_POINTER];
+    g_free (text);
+    text = g_strdup_printf (
+        "%s; its position: %s",
+        K.ptr_named ? "taken from the Plasma add-on where a desktop has the wallpaper type WalPE "
+                      "(" PTR_NAME " on the session bus)"
+                    : "wanted from the Plasma add-on; the name " PTR_NAME " on the session bus is "
+                      "not ours (yet)",
+        s->trouble ? s->trouble : s->heard ? "from the pointer script in KWin" : "the pointer script is being "
+                                                                                 "loaded into KWin");
+    return text;
 }
 
 void walpe_sig_kwin_use_address (const char *address)
@@ -662,18 +867,19 @@ void walpe_sig_kwin_use_address (const char *address)
 
 const char *walpe_sig_kwin_state (void)
 {
+    const KScript *s = &K.s[KS_PAUSE];
     if (!K.started)
         return NULL;
     if (!K.rules)
         return "off: none of the pause rules it serves is switched on";
-    if (K.trouble)
-        return K.trouble;
-    return K.loaded ? "the pause script is loaded in KWin" : "loading the pause script into KWin";
+    if (s->trouble)
+        return s->trouble;
+    return s->heard ? "the pause script is loaded in KWin" : "loading the pause script into KWin";
 }
 
 const char *walpe_sig_kwin_trouble (void)
 {
-    return K.started && K.rules ? K.trouble : NULL;
+    return K.started && K.rules ? K.s[KS_PAUSE].trouble : NULL;
 }
 
 /* ---- the provider */
@@ -715,17 +921,21 @@ static void kwin_stop (const WalpeSignalProvider *self)
     kwin_disconnect (TRUE);
     K.started = FALSE;
     K.ptr_want = FALSE;
+    g_clear_pointer (&K.ptr_outputs, g_free);
     g_clear_pointer (&K.ids, g_hash_table_unref);
-    g_clear_pointer (&K.trouble_own, g_free);
-    K.trouble = NULL;
+    for (int i = 0; i < KS_N; i++) {
+        K.s[i].want = FALSE;
+        g_clear_pointer (&K.s[i].trouble_own, g_free);
+        K.s[i].trouble = NULL;
+    }
 }
 
 /* the see-through list changed: the script carries it */
 static void kwin_recheck (const WalpeSignalProvider *self, WalpeSignal sig, gboolean now)
 {
     (void) self; (void) now;
-    if (sig == WALPE_SIG_COVERED && K.bus && K.owner && g_strcmp0 (K.see, walpe_sigprov_see_through ()))
-        kwin_load ();
+    if (sig == WALPE_SIG_COVERED && K.bus && K.started)
+        ks_sync (&K.s[KS_PAUSE]);
 }
 
 const WalpeSignalProvider walpe_sig_kwin = {

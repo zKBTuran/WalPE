@@ -2759,17 +2759,25 @@ static gboolean wl_on_desktop (guintptr under)
 static WlPlasmaAddon wl_plasma_addon (void);
 
 /* worth listening: KWin, the add-on installed, a wallpaper that uses the pointer */
-static gboolean wl_pointer_helper (void)
+static gboolean wl_pointer_helper (char **outputs)
 {
     if (!W.is_open || !W.kwin || wl_plasma_addon () == WL_PLASMA_ADDON_NONE)
         return FALSE;
+    GString *names = g_string_new (NULL);
     gboolean want = FALSE;
-    for (GList *l = W.surfaces; l && !want; l = l->next) {
+    for (GList *l = W.surfaces; l; l = l->next) {
         WlSurf *s = l->data;
         g_mutex_lock (&s->lock);
-        want = s->kind == WALPE_SURFACE_WALLPAPER && s->want_pointer;
+        gboolean here = s->kind == WALPE_SURFACE_WALLPAPER && s->want_pointer;
         g_mutex_unlock (&s->lock);
+        want = want || here;
+        if (here && s->out_name && *s->out_name)
+            g_string_append_printf (names, "%s%s", names->len ? "\n" : "", s->out_name);
     }
+    if (outputs && want)
+        *outputs = g_string_free (names, FALSE);
+    else
+        g_string_free (names, TRUE);
     return want;
 }
 

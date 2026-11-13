@@ -65,12 +65,13 @@ void walpe_sigprov_set_window_rules (guint mask)
 #endif
 }
 
-void walpe_sigprov_set_plasma_pointer (gboolean want, WalpeSigPointerFn fn, gpointer user)
+void walpe_sigprov_set_plasma_pointer (gboolean want, const char *outputs, guint ms, WalpeSigPointerFn fn,
+                                       gpointer user)
 {
 #ifdef HAVE_WL_SIGNALS
-    walpe_sig_kwin_set_pointer (want, fn, user);
+    walpe_sig_kwin_set_pointer (want, outputs, ms, fn, user);
 #else
-    (void) want; (void) fn; (void) user;
+    (void) want; (void) outputs; (void) ms; (void) fn; (void) user;
 #endif
 }
 

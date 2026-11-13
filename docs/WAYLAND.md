@@ -412,24 +412,22 @@ script has told it that a surface of the daemon lies under it. How:
 [contrib/plasma/README.md](../contrib/plasma/README.md).
 
 **The pointer with the add-on.** Plasma's desktop window is above the wallpaper and
-KWin gives it every pointer event; the daemon's surface gets none there. The wallpaper
-type hands on what it sees of the pointer in that window, and only while a wallpaper of
+KWin gives it every pointer event; the daemon's surface gets none there. The daemon
+gets the pointer from KWin and from the wallpaper type instead, and only while a wallpaper of
 the daemon uses the pointer (the daemon then has the name `io.github.walpe.Pointer` on
-the session bus, and has no name there at any other time):
+the session bus, and has no name there at any other time, and a script of its own in
+KWin that tells it where the pointer is):
 
 | | |
 |---|---|
-| the position | everywhere on the desktop, also over icons and widgets; at most once per frame of the screen. Scenes that follow the pointer and pages get it as from a pointer of their own |
+| the position | everywhere on the desktop, also over icons and widgets; at most once per frame of the wallpaper. It comes from a second script the daemon loads into KWin for as long as a wallpaper wants the pointer (KWin knows where the pointer is; asking Plasma's window for it took the hover from Plasma's icons). Scenes that follow the pointer and pages get it as from a pointer of their own |
 | the left button, the wheel | over the bare desktop. Over an icon or a widget they are Plasma's alone |
 | the right and the middle button | never: they are Plasma's (the desktop's menu, paste) |
 | the pointer leaves the desktop (onto a window, the panel, a menu) | the wallpaper is told that it left |
 
-Plasma goes on getting every click and the wheel as before: a click on the bare desktop
-also takes the selection off Plasma's icons, and a drag there also draws Plasma's
-selection frame over the wallpaper. What Plasma does not get while a wallpaper uses the
-pointer is the hover: its icons and widgets do not react to the pointer resting on them
-(no frame around the icon under the pointer, no tool tips) until a wallpaper that does
-not use the pointer is shown ([why](../contrib/plasma/README.md#what-it-cannot-do)). A web wallpaper that needs the right button, or a drag without that
+Plasma goes on getting everything as before, the hover of its icons and widgets
+included: a click on the bare desktop also takes the selection off Plasma's icons, and
+a drag there also draws Plasma's selection frame over the wallpaper. A web wallpaper that needs the right button, or a drag without that
 frame, wants a desktop with another wallpaper type (it is then in front and has the
 pointer to itself). `wayland_pointer` = off switches this off with the rest of the
 pointer. If the add-on is installed while a wallpaper that uses the pointer is shown,
@@ -450,7 +448,7 @@ brings them back. `walpe-ctl status` has
 | `wl_plasma_addon` | `not installed`, `installed, no desktop has the wallpaper type WalPE` or `in use: a desktop has the wallpaper type WalPE` |
 | `wl_plasma_icons` | `hidden behind the wallpaper` or `shown over the wallpaper where the wallpaper type is WalPE` |
 | `wl_plasma_hint` | only while the icons are hidden: the sentence of the log |
-| `wl_plasma_pointer` | only while a wallpaper uses the pointer and the add-on is installed: that the pointer is taken from the add-on, or why not |
+| `wl_plasma_pointer` | only while a wallpaper uses the pointer and the add-on is installed: that the pointer is taken from the add-on, or why not, and whether its position comes from the pointer script in KWin |
 
 The daemon reads the first three from the installed package and from the settings file
 of Plasma's desktops, which Plasma writes a few seconds after a change; the

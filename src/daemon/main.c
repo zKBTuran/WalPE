@@ -4526,7 +4526,10 @@ static void pointer_update (void)
     /* KDE Plasma with the add-on: Plasma's desktop window is over the
      * wallpaper and has the pointer; its wallpaper type hands it on while
      * a wallpaper here wants it (and only then is anything listening) */
-    walpe_sigprov_set_plasma_pointer (walpe_platform_pointer_helper (), plasma_pointer_event, NULL);
+    char *ptr_outputs = NULL;
+    gboolean ptr_helper = walpe_platform_pointer_helper (&ptr_outputs);
+    walpe_sigprov_set_plasma_pointer (ptr_helper, ptr_outputs, mouse_poll_ms (), plasma_pointer_event, NULL);
+    g_free (ptr_outputs);
 }
 
 /* one query of the pointer, handed to every monitor that uses it; TRUE = the

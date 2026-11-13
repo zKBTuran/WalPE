@@ -65,12 +65,18 @@ void walpe_sigprov_set_window_rules (guint mask);
 
 /* The pointer from the add-on for KDE Plasma (platform.h,
  * walpe_platform_pointer_foreign has the meaning of the arguments). want:
- * listen for it - a connection to the session bus and the name
- * io.github.walpe.Pointer on it, for as long as want holds and the
- * compositor is KWin; fn is called on the main thread per event. */
+ * listen for it - a connection to the session bus, the name
+ * io.github.walpe.Pointer on it (buttons and the wheel, from the add-on's
+ * wallpaper type) and a script in KWin that tells where the pointer is over
+ * Plasma's desktop, for as long as want holds and the compositor is KWin.
+ * outputs: the names of the outputs whose wallpaper wants the pointer, one
+ * per line - the script reports on those only; ms: the least time between
+ * two positions (the frame time). fn is called on the main thread per
+ * event. */
 typedef void (*WalpeSigPointerFn) (const char *output, guint what, double x, double y, double a,
                                    double b, gpointer user);
-void walpe_sigprov_set_plasma_pointer (gboolean want, WalpeSigPointerFn fn, gpointer user);
+void walpe_sigprov_set_plasma_pointer (gboolean want, const char *outputs, guint ms, WalpeSigPointerFn fn,
+                                       gpointer user);
 
 /* "transparent_windows": comma-separated app ids that never count as
  * covering (X11 matches the same list against WM_CLASS). NULL / "" = none */
@@ -113,7 +119,8 @@ guint walpe_sig_wl_passes (void);
 
 /* ---- KWin (kwin.c; with HAVE_WL_SIGNALS) */
 void walpe_sig_kwin_set_rules (guint mask);
-void walpe_sig_kwin_set_pointer (gboolean want, WalpeSigPointerFn fn, gpointer user);
+void walpe_sig_kwin_set_pointer (gboolean want, const char *outputs, guint ms, WalpeSigPointerFn fn,
+                                 gpointer user);
 /* for status: NULL while the pointer is not wanted from the add-on */
 const char *walpe_sig_kwin_pointer_state (void);
 void walpe_sig_kwin_outputs_changed (void);

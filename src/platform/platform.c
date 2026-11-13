@@ -252,9 +252,11 @@ gboolean walpe_platform_pointer (WalpePointer *out)
     return ops ? ops->pointer (out) : FALSE;
 }
 
-gboolean walpe_platform_pointer_helper (void)
+gboolean walpe_platform_pointer_helper (char **outputs)
 {
-    return ops && ops->pointer_helper ? ops->pointer_helper () : FALSE;
+    if (outputs)
+        *outputs = NULL;
+    return ops && ops->pointer_helper ? ops->pointer_helper (outputs) : FALSE;
 }
 
 void walpe_platform_pointer_foreign (const char *output, WalpeForeignPointer what, double x, double y,

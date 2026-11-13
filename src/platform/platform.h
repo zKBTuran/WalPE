@@ -343,6 +343,8 @@ gboolean walpe_platform_on_desktop (guintptr under);
  * of it (signals/kwin.c receives it on the session bus).
  * walpe_platform_pointer_helper: such a helper can exist here and a
  * wallpaper uses the pointer - the only time the daemon listens for it.
+ * *outputs (may be NULL): the names of the outputs whose wallpaper uses
+ * it, one per line (g_free; NULL with FALSE).
  * walpe_platform_pointer_foreign: one event of it. output: the output's
  * name; x, y: on that output, in the units a pointer has on a surface
  * there (logical pixels from the output's top left corner); a, b: the
@@ -357,7 +359,7 @@ typedef enum {
     WALPE_FOREIGN_WHEEL,
     WALPE_FOREIGN_LEAVE,
 } WalpeForeignPointer;
-gboolean walpe_platform_pointer_helper (void);
+gboolean walpe_platform_pointer_helper (char **outputs);
 void walpe_platform_pointer_foreign (const char *output, WalpeForeignPointer what, double x, double y,
                                      double a, double b);
 /* what the daemon wants to be told about (each costs wake-ups while on):

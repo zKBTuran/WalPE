@@ -1,23 +1,25 @@
-/* Pointer.qml - hands the pointer on to walpe-daemon while a wallpaper there uses it.
+/* Pointer.qml - hands the buttons and the wheel on to walpe-daemon while a wallpaper there
+ * uses the pointer.
  *
  * Plasma's desktop window lies over the wallpaper and gets every pointer event. This item is
- * put on top of everything in that window and only looks: its handlers take passive grabs
- * (PointHandler, HoverHandler) or do not block (WheelHandler), so the icons, the widgets and
- * the desktop's own menu get every press, release and wheel event as before. Not the hover:
- * with the HoverHandler here, on an item above theirs, Plasma's items are not hovered while
- * this file is loaded (no frame around the icon under the pointer, no tool tips), whatever
- * `blocking` says - Qt 6.12 gives the hover to the topmost item that asks for it. A MouseArea
- * in its place does the same; a handler on the window's content item is not told the position
- * over the bare desktop. What it sees goes to the daemon over
- * D-Bus (io.github.walpe.Pointer.Event on the daemon's connection; the daemon has the name
+ * put on top of everything in that window and only looks: its handlers take a passive grab
+ * (PointHandler) or do not block (WheelHandler), so the icons, the widgets and the desktop's
+ * own menu get every event as before. What it sees goes to the daemon over D-Bus
+ * (io.github.walpe.Pointer.Event on the daemon's connection; the daemon has the name
  * io.github.walpe.Pointer only while a wallpaper wants the pointer, and main.qml loads this
  * file only then, after Script.qml has made sure whose connection that is):
- *   the position, at most once per frame of the screen;
- *   the left button and the wheel, where the pointer is over the bare desktop: over an
- *   icon or a widget they are Plasma's alone (found() below says what counts as one);
- *   that the pointer has left the desktop.
+ *   the left button and the wheel, each with its place, where the pointer is over the bare
+ *   desktop: over an icon or a widget they are Plasma's alone (found() below says what
+ *   counts as one).
  * The right and the middle button stay Plasma's (the desktop's menu, paste). A press on the
- * bare desktop also starts Plasma's selection frame; the wallpaper gets the drag as well. */
+ * bare desktop also starts Plasma's selection frame.
+ *
+ * Where the pointer is, is not this file's business any more. Nothing here asks for the
+ * hover: an item that does, above Plasma's own, takes it from them - with a HoverHandler
+ * here (and with a MouseArea in its place) Plasma's icons had no frame under the pointer
+ * and its widgets no tool tips, whatever the handler's `blocking` said (Plasma 6.8.2,
+ * Qt 6.12). The daemon gets the position from a script of its own in KWin instead
+ * (src/signals/kwinscript.h in WalPE), also while a button is down. */
 import QtQuick
 import org.kde.plasma.workspace.dbus as DBus
 
@@ -30,8 +32,7 @@ Item {
     z: 1000000
 
     property bool down: false            // a press was handed on and its release not yet
-    property bool pending: false         // the position changed since the last one sent
-    property point last
+    property point last                  // where: the release is sent with the place of the press or drag
 
     function send(what, x, y, a, b) {
         DBus.SessionBus.asyncCall({
@@ -41,18 +42,6 @@ Item {
                           new DBus.double(y), new DBus.double(a), new DBus.double(b)],
             "signature": "(sudddd)"
         });
-    }
-
-    function motion(p) {
-        if (p.x === last.x && p.y === last.y)
-            return;         // the handlers also fire when only the time of the point changed
-        last = p;
-        if (pace.running) {
-            pending = true;
-        } else {
-            send(0, p.x, p.y, 0, 0);
-            pace.start();
-        }
     }
 
     function release() {
@@ -100,18 +89,6 @@ Item {
         return askedIs;
     }
 
-    Timer {
-        id: pace
-        interval: Math.max(4, Math.round(1000 / Math.max(30, Screen.refreshRate || 60)))
-        onTriggered: {
-            if (tap.pending) {
-                tap.pending = false;
-                tap.send(0, tap.last.x, tap.last.y, 0, 0);
-                start();
-            }
-        }
-    }
-
     PointHandler {
         id: press
         acceptedButtons: Qt.LeftButton
@@ -119,29 +96,14 @@ Item {
             if (!active) {
                 tap.release();
             } else if (tap.found(point.position) === null) {
+                tap.release();      // a release that went elsewhere (a menu took it)
                 tap.last = point.position;
                 tap.down = true;
                 tap.send(1, point.position.x, point.position.y, 1, 0);
             }
         }
-        onPointChanged: if (active) tap.motion(point.position)
+        onPointChanged: if (active) tap.last = point.position
         onCanceled: tap.release()
-    }
-
-    HoverHandler {
-        blocking: false
-        onPointChanged: {
-            // no button is down while the pointer hovers: a release went elsewhere (a menu took it)
-            if (!press.active)
-                tap.release();
-            tap.motion(point.position);
-        }
-        onHoveredChanged: {
-            if (!hovered) {
-                tap.release();
-                tap.send(4, 0, 0, 0, 0);
-            }
-        }
     }
 
     WheelHandler {
@@ -153,8 +115,5 @@ Item {
         }
     }
 
-    Component.onDestruction: {
-        release();
-        send(4, 0, 0, 0, 0);
-    }
+    Component.onDestruction: release()
 }

@@ -180,3 +180,135 @@ static inline gboolean walpe_kwin_report_line (const char *line, gsize len, cons
     }
     return TRUE;
 }
+
+/* ---------------------------------------------------- the pointer script
+ * The second script the daemon can have in KWin: where the pointer is
+ * while it is over Plasma's desktop, for a wallpaper that lies under that
+ * desktop (the add-on for Plasma, contrib/plasma) and uses the pointer.
+ * The daemon loads it only then (kwin.c, "the pointer") and gives it the
+ * outputs whose wallpaper wants the pointer. What it costs KWin: one small
+ * function per movement of the pointer, which does nothing but note the
+ * movement while a look is not yet due; a look (which window is under the
+ * pointer) at most once in MS milliseconds; a call to the daemon only when
+ * a look finds the pointer over Plasma's desktop window on one of those
+ * outputs, or finds that it has left it. Over windows, panels and menus,
+ * on other outputs and while the pointer rests nothing crosses the bus.
+ *
+ * It says one string at a time:
+ *   "NAME<tab>X<tab>Y"  the pointer is on the output NAME, at X, Y from
+ *                       its top left corner in logical pixels
+ *   "NAME<tab>"         it has left Plasma's desktop on NAME
+ *   "ready"             the script runs (once, when it starts)
+ *   "unsupported"       this KWin's script interface cannot tell */
+#define WALPE_KWIN_POINTER_SCRIPT_NAME "io.github.walpe.pointer"
+
+enum {
+    WALPE_KWIN_PTR_NONE = -1,
+    WALPE_KWIN_PTR_MOTION = 0,      /* (the numbers of WalpeForeignPointer, platform.h) */
+    WALPE_KWIN_PTR_LEAVE = 4,
+};
+
+/* output names, one per line, as a JavaScript array; a name with a
+ * character no output name has is left out (nothing of it is ever run as
+ * code). g_free. */
+static inline char *walpe_kwin_outputs_js (const char *names)
+{
+    GString *g = g_string_new ("[");
+    char **v = g_strsplit (names ? names : "", "\n", -1);
+    for (guint i = 0; v[i]; i++) {
+        const char *s = v[i];
+        gboolean ok = *s != 0;
+        for (const char *p = s; *p && ok; p++)
+            ok = g_ascii_isalnum (*p) || *p == '.' || *p == '_' || *p == '-' || *p == ':' || *p == ' ';
+        if (ok)
+            g_string_append_printf (g, "%s\"%s\"", g->len > 1 ? "," : "", s);
+    }
+    g_strfreev (v);
+    g_string_append_c (g, ']');
+    return g_string_free (g, FALSE);
+}
+
+/* dest, path: as for the pause script; outputs: the names of the outputs
+ * whose wallpaper wants the pointer, one per line; ms: the least time
+ * between two looks. g_free. */
+static inline char *walpe_kwin_pointer_script_text (const char *dest, const char *path, const char *outputs,
+                                                    guint ms)
+{
+    static const char body[] =
+        "    function send(what) { callDBus(DEST, PATH, \"" WALPE_KWIN_IFACE "\", \"Pointer\", what); }\n"
+        "    if (typeof workspace.windowAt !== \"function\" || !workspace.cursorPosChanged) { send(\"unsupported\"); return; }\n"
+        "    let on = null;              // the output the daemon was last given a position on\n"
+        "    let x = 0, y = 0;           // and the position\n"
+        "    let busy = false, again = false;\n"
+        "    const pace = new QTimer();\n"
+        "    pace.singleShot = true;\n"
+        "    pace.interval = MS;\n"
+        "    // Plasma's desktop window is the topmost thing under the pointer, on an output of the list\n"
+        "    function look() {\n"
+        "        const p = workspace.cursorPos;\n"
+        "        const top = workspace.windowAt(p, 1)[0];\n"
+        "        const o = top && top.desktopWindow && top.resourceClass === \"plasmashell\" && top.output &&\n"
+        "            OUTS.indexOf(top.output.name) >= 0 ? top.output : null;\n"
+        "        if (o) {\n"
+        "            const nx = p.x - o.geometry.x, ny = p.y - o.geometry.y;\n"
+        "            if (on === o.name && nx === x && ny === y) return;\n"
+        "            on = o.name; x = nx; y = ny;\n"
+        "            send(on + \"\\t\" + x + \"\\t\" + y);\n"
+        "        } else if (on !== null) {\n"
+        "            send(on + \"\\t\");\n"
+        "            on = null;\n"
+        "        }\n"
+        "    }\n"
+        "    // the pointer moves a thousand times a second: one look, then none before MS have passed\n"
+        "    function moved() {\n"
+        "        if (busy) { again = true; return; }\n"
+        "        busy = true;\n"
+        "        look();\n"
+        "        pace.start();\n"
+        "    }\n"
+        "    pace.timeout.connect(function () { busy = false; if (again) { again = false; moved(); } });\n"
+        "    workspace.cursorPosChanged.connect(moved);\n"
+        "    // a window that comes or goes under a pointer that rests\n"
+        "    for (const s of [\"windowAdded\", \"windowRemoved\", \"windowActivated\"])\n"
+        "        workspace[s].connect(function () { again = true; if (!busy) { busy = true; pace.start(); } });\n"
+        "    send(\"ready\");\n"
+        "    moved();\n"
+        "})();\n";
+    char *outs = walpe_kwin_outputs_js (outputs);
+    char *text = g_strdup_printf (
+        "// The pointer script of walpe-daemon (WalPE, live wallpapers). The daemon loads it into KWin\n"
+        "// while a wallpaper that lies under Plasma's desktop (the WalPE add-on for Plasma) uses the\n"
+        "// pointer, and unloads it when none does. It tells the daemon where the pointer is while it\n"
+        "// is over Plasma's desktop on the outputs named here, at most once in MS milliseconds, and\n"
+        "// when it leaves. src/signals/kwinscript.h in WalPE.\n"
+        "(function () {\n"
+        "    const DEST = \"%s\", OUTS = %s, MS = %u;\n"
+        "    const PATH = \"%s\";\n%s",
+        dest, outs, ms, path, body);
+    g_free (outs);
+    return text;
+}
+
+/* One call of the pointer script: WALPE_KWIN_PTR_MOTION (*name, *x, *y),
+ * WALPE_KWIN_PTR_LEAVE (*name) or WALPE_KWIN_PTR_NONE for anything else.
+ * *name points into line (not terminated: *name_len bytes). */
+static inline int walpe_kwin_pointer_line (const char *line, const char **name, gsize *name_len, double *x,
+                                           double *y)
+{
+    const char *tab = strchr (line, '\t');
+    char *end = NULL;
+    if (!tab || tab == line)
+        return WALPE_KWIN_PTR_NONE;
+    *name = line;
+    *name_len = (gsize) (tab - line);
+    if (!tab[1])
+        return WALPE_KWIN_PTR_LEAVE;
+    *x = g_ascii_strtod (tab + 1, &end);
+    if (end == tab + 1 || *end != '\t')
+        return WALPE_KWIN_PTR_NONE;
+    const char *second = end + 1;
+    *y = g_ascii_strtod (second, &end);
+    if (end == second || *end)
+        return WALPE_KWIN_PTR_NONE;
+    return WALPE_KWIN_PTR_MOTION;
+}

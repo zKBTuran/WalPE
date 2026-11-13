@@ -46,14 +46,14 @@ One Plasma package, `wallpaper/` (`io.github.walpe.plasma`), installed to
 | `contents/ui/main.qml` | the wallpaper type: draws no wallpaper, makes Plasma's desktop window see-through, and fills it with a colour or a picture for as long as no surface of `walpe-daemon` lies under it |
 | `contents/code/below.js` | a KWin script: asks Plasma's shell which desktops have the type, tells KWin to keep those desktop windows right above the daemon's surface on the same screen (`workspace.constrain`, KWin 6.5), and tells the type whether such a surface is there |
 | `contents/ui/Script.qml`, `contents/code/shared.js` | load that script into the running KWin over D-Bus while a desktop has the type, and take it out with the last one. It is no KWin package and is not in KWin's list of scripts; each Plasma shell loads it under a name of its own |
-| `contents/ui/Pointer.qml` | hands the pointer on to `walpe-daemon`; loaded only while a wallpaper there uses the pointer |
+| `contents/ui/Pointer.qml` | hands the left button and the wheel on to `walpe-daemon`; loaded only while a wallpaper there uses the pointer (the position comes from a script the daemon itself loads into KWin) |
 | `contents/ui/config.qml`, `contents/config/main.xml` | the type's page in Plasma's dialog and its settings |
 
 `walpe-daemon` goes on doing all the drawing in its own surface on the layer shell's
 bottom layer, and tells the add-on nothing; Plasma's shell repaints only when its icons
 or widgets change. Nothing in the add-on wakes up by itself: the script acts when a
 desktop window or a surface of the daemon comes or goes. The one thing that goes from the add-on
-to the daemon is the pointer (below), and only while the daemon asks for it.
+to the daemon is the pointer's buttons and wheel (below), and only while the daemon asks for them.
 
 ## How the parts keep each other safe
 
@@ -95,28 +95,50 @@ gone when KWin is restarted, with the next login at the latest.
 ## The pointer
 
 Plasma's desktop window is above the wallpaper, and KWin gives it every pointer event.
-`Pointer.qml` sits on top of everything in that window and only looks (Qt's pointer
-handlers with passive grabs): the icons, the widgets and the desktop's menu get every
-press, release and turn of the wheel as before. They do not get the hover while it is
-loaded, see "What it cannot do". What it sees it sends to the daemon
-(`io.github.walpe.Pointer.Event` on the daemon's connection to the session bus):
+While a wallpaper of the daemon uses the pointer (a web wallpaper, a scene that follows
+the pointer), and only then, the daemon gets it from two sides:
 
-- the position, wherever the pointer is on the desktop, at most once per frame of the
-  screen, in the screen's logical pixels;
-- the left button and the wheel where the pointer is over the bare desktop. Over an icon
-  or a widget they are Plasma's alone. What counts as one: anything visible in the window
-  that is smaller than nine tenths of it both in width and in height (the desktop's own
-  layers are as wide or as high as the window);
-- that the pointer left the desktop (for a window, the panel, a menu).
+- **Where the pointer is: from a script of the daemon's own in KWin.** The daemon loads
+  it into KWin over the session bus (`org.kde.kwin.Scripting`, as it does for its pause
+  rules) and takes it out when no wallpaper wants the pointer. The script calls the
+  daemon while the pointer is over Plasma's desktop window (icons and widgets included)
+  on an output whose wallpaper uses the pointer, at most once per frame of the
+  wallpaper however fast the mouse reports, and once more when the pointer leaves the
+  desktop (for a window, the panel, a menu). Over windows and panels, on other outputs
+  and while the pointer rests, nothing is sent. Positions are in the output's logical
+  pixels.
+- **The left button and the wheel: from `Pointer.qml`**, an item on top of everything in
+  the desktop window that only looks (a `PointHandler` with a passive grab, a
+  `WheelHandler` that does not block): the icons, the widgets and the desktop's menu get
+  every event as before. Where the pointer is over the bare desktop it sends the press,
+  the release and the wheel, each with its place, to the daemon
+  (`io.github.walpe.Pointer.Event` on the daemon's connection). Over an icon or a widget
+  they are Plasma's alone. What counts as one: anything visible in the window that is
+  smaller than nine tenths of it both in width and in height (the desktop's own layers
+  are as wide or as high as the window).
 
 The right and the middle button are never sent: they open Plasma's menu and paste.
 
-It costs nothing while no wallpaper wants the pointer. The daemon takes the name
-`io.github.walpe.Pointer` only on KWin, with the add-on installed, while a wallpaper it
-shows uses the pointer (a web wallpaper, a scene that follows the pointer); the type
-watches for the name and loads `Pointer.qml` only while somebody has it and the daemon's
-surface is under the desktop. The daemon treats what comes like a pointer of its own: the
-same coordinates per output, the same button and wheel events.
+Why two sides. `Pointer.qml` used to read the position as well, with a hover handler on
+its item. An item that asks for the hover above Plasma's own takes it from them: while
+a wallpaper used the pointer Plasma's icons had no frame under the pointer and its
+widgets no tool tips (Plasma 6.8.2, Qt 6.12; a `MouseArea` in its place did the same,
+and a handler lower down was not told the position over the bare desktop). KWin knows
+where the pointer is without anybody asking Plasma's window for it.
+
+It costs nothing while no wallpaper wants the pointer: no script in KWin, no name on the
+bus, `Pointer.qml` not loaded. The daemon takes the name `io.github.walpe.Pointer` and
+loads the script only on KWin, with the add-on installed, while a wallpaper it shows uses
+the pointer; the type watches for the name and loads `Pointer.qml` only while somebody
+has it and the daemon's surface is under the desktop. The daemon treats what comes like
+a pointer of its own: the same coordinates per output, the same button and wheel events.
+Measured on a headless Plasma 6.8.2 (software rendering, a page that follows the
+pointer): 55 to 59 calls a second from the script with the pointer moving at 1000 and at
+125 positions a second, 2 in ten seconds with the pointer nearly at rest; see the commit
+that brought the script for the CPU time beside the QML path.
+
+The daemon and the add-on have to be of the same version: this `Pointer.qml` with a
+daemon that has no pointer script gives the wallpaper clicks without a position.
 
 Who is believed. Any program of the session can take a name on the session bus, so:
 
@@ -124,16 +146,17 @@ Who is believed. Any program of the session can take a name on the session bus, 
   process that is, and sends to that connection only if it is the process whose surface
   KWin sees under the desktop (the KWin script writes that process id next to `Under`).
   A program that takes the name before the daemon gets nothing; the daemon then cannot
-  have the name, the wallpaper gets no pointer, and `walpe-ctl status` says in
+  have the name, the wallpaper gets no buttons, and `walpe-ctl status` says in
   `wl_plasma_pointer` that the name is not the daemon's.
-- The daemon takes events from the connection that has the name `org.kde.plasmashell`
-  at the time, as it takes the pause script's reports from the one that has
-  `org.kde.KWin`. While Plasma's shell is not on the bus (it crashed, it is being
-  replaced), the first program to take its name is believed in its place: it can move
-  the wallpaper's pointer and click in a wallpaper that uses the pointer, with the left,
-  middle or right button, and nowhere else. The session bus has no means to tell such a
-  program from the shell, and a program that can do this can already do more to a Plasma
-  session (load a script into KWin, for one).
+- The daemon takes buttons and the wheel from the connection that has the name
+  `org.kde.plasmashell` at the time, and positions, like the pause script's reports,
+  from the one that has `org.kde.KWin` - there only at the object it made for the
+  script it loaded last. While Plasma's shell is not on the bus (it crashed, it is
+  being replaced), the first program to take its name is believed in its place: it can
+  click in a wallpaper that uses the pointer, with the left, middle or right button,
+  and nowhere else. The session bus has no means to tell such a program from the
+  shell, and a program that can do this can already do more to a Plasma session (load
+  a script into KWin, for one).
 
 ## What it cannot do
 
@@ -143,17 +166,6 @@ Who is believed. Any program of the session can take a name on the session bus, 
   over the wallpaper: Plasma cannot be told that the wallpaper has used the event. A web
   wallpaper that needs more wants a desktop with another wallpaper type (the icons are
   then hidden and the wallpaper has the pointer to itself).
-- **While a wallpaper uses the pointer, Plasma's icons and widgets do not react to the
-  pointer resting on them**: no frame around the icon under the pointer, no tool tips,
-  none of what a widget shows only under the pointer. Clicks, the wheel and the menus
-  work. The position is read by a hover handler on an item above everything in the
-  window, and Qt gives the hover to the topmost item that asks for it and to nothing
-  beneath, whatever the handler's `blocking` says (seen on Plasma 6.8.2 with Qt 6.12; a
-  `MouseArea` in its place does the same, and a handler on the window's own content item
-  is not told the position over the bare desktop). With a wallpaper that does not use
-  the pointer (a video, a picture, a scene without it) `Pointer.qml` is not loaded and
-  nothing changes; `wayland_pointer` = off in WalPE's settings keeps it from being
-  loaded at all.
 - If the add-on is installed while a wallpaper that uses the pointer is already shown,
   the daemon notices when that wallpaper is opened again.
 - The Overview shows the desktop's icons without the wallpaper behind them (the small

@@ -26,9 +26,14 @@
  *   unload the script when the last rule goes off and when it is stopped;
  *   not start with WALPE_KWIN_SCRIPT=0;
  *   for the pointer from the Plasma add-on: own io.github.walpe.Pointer
- *   exactly while it is wanted (no script in KWin for that), take events
- *   from the connection that owns org.kde.plasmashell only, and let the
- *   name go when it is no longer wanted and at stop.
+ *   exactly while it is wanted, take events from the connection that owns
+ *   org.kde.plasmashell only, and let the name go when it is no longer
+ *   wanted and at stop; and have a second script in KWin for exactly that
+ *   time, the pointer script, which carries the outputs whose wallpaper
+ *   wants the pointer and the least time between two positions, whose
+ *   calls become motion and "left" per output, which is loaded again when
+ *   the outputs change, and which comes and goes without the pause script
+ *   being touched (and the other way round).
  * The registry is tests/sig_stub.h. */
 #include "walpe-build-config.h"
 #include "sig_stub.h"
@@ -69,16 +74,33 @@ static struct {
     char *text;             /* what the file held when it was run */
     char *dest;             /* the connection the script reports to */
     char *path;             /* and the object there */
+    gboolean run;           /* it was started */
+    /* the same for the pointer script, the second one KWin can be given */
+    gint ploads, punloads, pruns;
+    gboolean ploaded, prun;
+    char *pfile, *ptext, *pdest, *ppath;
     gint report_ok, report_denied;
 } F;
 
-static gboolean fake_unload_later (gpointer u)
+static gboolean fake_unload_later (gpointer pointer_script)
 {
-    (void) u;
     g_mutex_lock (&F.lock);
-    F.loaded = FALSE;
+    if (pointer_script)
+        F.ploaded = FALSE;
+    else
+        F.loaded = FALSE;
     g_mutex_unlock (&F.lock);
     return G_SOURCE_REMOVE;
+}
+
+/* text -> what follows `const NAME = "` in it */
+static char *fake_const (const char *text, const char *name)
+{
+    char *key = g_strdup_printf ("const %s = \"", name);
+    const char *d = text ? strstr (text, key) : NULL;
+    char *v = d ? g_strndup (d + strlen (key), strcspn (d + strlen (key), "\"")) : NULL;
+    g_free (key);
+    return v;
 }
 
 static void fake_method (GDBusConnection *c, const char *sender, const char *path, const char *iface,
@@ -89,28 +111,44 @@ static void fake_method (GDBusConnection *c, const char *sender, const char *pat
         const char *file, *name;
         g_variant_get (args, "(&s&s)", &file, &name);
         g_mutex_lock (&F.lock);
-        g_free (F.file);
-        g_free (F.name);
-        F.file = g_strdup (file);
-        F.name = g_strdup (name);
-        gboolean was = F.loaded;
-        F.loaded = TRUE;
+        gboolean was;
+        if (!strcmp (name, WALPE_KWIN_POINTER_SCRIPT_NAME)) {
+            g_free (F.pfile);
+            F.pfile = g_strdup (file);
+            was = F.ploaded;
+            F.ploaded = TRUE;
+            if (!was)
+                F.prun = FALSE;
+            g_atomic_int_inc (&F.ploads);
+        } else {
+            g_free (F.file);
+            g_free (F.name);
+            F.file = g_strdup (file);
+            F.name = g_strdup (name);
+            was = F.loaded;
+            F.loaded = TRUE;
+            if (!was)
+                F.run = FALSE;
+            g_atomic_int_inc (&F.loads);
+        }
         g_mutex_unlock (&F.lock);
-        g_atomic_int_inc (&F.loads);
         /* KWin answers -1 for a name that is loaded already */
         g_dbus_method_invocation_return_value (inv, g_variant_new ("(i)", was ? -1 : 7));
     } else if (!strcmp (method, "unloadScript")) {
         /* as KWin does it: answered at once, the script gone when its event
          * loop comes round again (a loadScript that arrived together with
          * this call still finds the name taken) */
+        const char *name;
+        g_variant_get (args, "(&s)", &name);
+        gboolean ptr = !strcmp (name, WALPE_KWIN_POINTER_SCRIPT_NAME);
         g_mutex_lock (&F.lock);
-        gboolean was = F.loaded;
+        gboolean was = ptr ? F.ploaded : F.loaded;
         g_mutex_unlock (&F.lock);
         GSource *later = g_idle_source_new ();
-        g_source_set_callback (later, fake_unload_later, NULL, NULL);
+        g_source_set_callback (later, fake_unload_later, GINT_TO_POINTER (ptr), NULL);
         g_source_attach (later, F.ctx);
         g_source_unref (later);
-        g_atomic_int_inc (&F.unloads);
+        g_atomic_int_inc (ptr ? &F.punloads : &F.unloads);
         g_dbus_method_invocation_return_value (inv, g_variant_new ("(b)", was));
     } else if (!strcmp (method, "run")) {
         /* the object at the id loadScript answered is another script's (see
@@ -118,27 +156,33 @@ static void fake_method (GDBusConnection *c, const char *sender, const char *pat
         g_atomic_int_inc (&F.wrong_runs);
         g_dbus_method_invocation_return_value (inv, NULL);
     } else if (!strcmp (method, "start")) {
-        char *text = NULL;
+        /* as KWin does it: every loaded script that is not running yet */
         g_mutex_lock (&F.lock);
-        g_file_get_contents (F.file, &text, NULL, NULL);
-        g_free (F.text);
-        F.text = text;
-        g_free (F.dest);
-        F.dest = NULL;
-        const char *d = text ? strstr (text, "const DEST = \"") : NULL;
-        if (d) {
-            d += strlen ("const DEST = \"");
-            F.dest = g_strndup (d, strcspn (d, "\""));
+        if (F.loaded && !F.run) {
+            char *text = NULL;
+            g_file_get_contents (F.file, &text, NULL, NULL);
+            g_free (F.text);
+            F.text = text;
+            g_free (F.dest);
+            g_free (F.path);
+            F.dest = fake_const (text, "DEST");
+            F.path = fake_const (text, "PATH");
+            F.run = TRUE;
+            g_atomic_int_inc (&F.runs);
         }
-        g_free (F.path);
-        F.path = NULL;
-        d = text ? strstr (text, "const PATH = \"") : NULL;
-        if (d) {
-            d += strlen ("const PATH = \"");
-            F.path = g_strndup (d, strcspn (d, "\""));
+        if (F.ploaded && !F.prun) {
+            char *text = NULL;
+            g_file_get_contents (F.pfile, &text, NULL, NULL);
+            g_free (F.ptext);
+            F.ptext = text;
+            g_free (F.pdest);
+            g_free (F.ppath);
+            F.pdest = fake_const (text, "DEST");
+            F.ppath = fake_const (text, "PATH");
+            F.prun = TRUE;
+            g_atomic_int_inc (&F.pruns);
         }
         g_mutex_unlock (&F.lock);
-        g_atomic_int_inc (&F.runs);
         g_dbus_method_invocation_return_value (inv, NULL);
     } else {
         g_dbus_method_invocation_return_error_literal (inv, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_METHOD, method);
@@ -237,6 +281,22 @@ static void report_from (GDBusConnection *from, const char *state)
 }
 
 static void f_report (gpointer state) { report_from (F.bus, state); }
+
+/* what the pointer script would do: call Pointer at its object (path NULL: its own) */
+static void pointer_script_says (GDBusConnection *from, const char *path, const char *where)
+{
+    g_mutex_lock (&F.lock);
+    char *dest = g_strdup (F.pdest);
+    char *at = g_strdup (path ? path : F.ppath);
+    g_mutex_unlock (&F.lock);
+    if (dest && at)
+        g_dbus_connection_call (from, dest, at, WALPE_KWIN_IFACE, "Pointer", g_variant_new ("(s)", where),
+                                NULL, G_DBUS_CALL_FLAGS_NONE, 3000, NULL, NULL, NULL);
+    g_free (dest);
+    g_free (at);
+}
+
+static void f_pointer (gpointer where) { pointer_script_says (F.bus, NULL, where); }
 /* the script that was in KWin before the last one, which KWin has not taken out yet */
 static char *old_path;
 static void f_report_old (gpointer state) { report_to (F.bus, old_path, state); }
@@ -340,6 +400,11 @@ static gboolean ptr_owned (gpointer want)
     return name_owned (ptr_from, PTR) == GPOINTER_TO_INT (want);
 }
 
+static gboolean ptr_count_is (gpointer n)
+{
+    return P.n >= GPOINTER_TO_INT (n);
+}
+
 static gboolean ptr_state_has (gpointer needle)
 {
     const char *s = walpe_sig_kwin_pointer_state ();
@@ -393,6 +458,14 @@ static gboolean start_provider (void)
     return sp && sp->started;
 }
 
+static gboolean text_has (gpointer needle)
+{
+    g_mutex_lock (&F.lock);
+    gboolean has = F.text && strstr (F.text, needle);
+    g_mutex_unlock (&F.lock);
+    return has;
+}
+
 static char *text_now (void)
 {
     g_mutex_lock (&F.lock);
@@ -427,6 +500,26 @@ int main (void)
     CHECK (!walpe_kwin_report_line ("DP-1", 4, &name, &nlen, &flags) &&
            !walpe_kwin_report_line ("\tc", 2, &name, &nlen, &flags) &&
            !walpe_kwin_report_line ("DP-1\tx", 6, &name, &nlen, &flags), "what is no line");
+    js = walpe_kwin_pointer_script_text (":1.99", WALPE_KWIN_OBJECT "/s8", "DP-1\nbad\"name\n\neDP-1\nx);evil(", 16);
+    CHECK (strstr (js, "const DEST = \":1.99\", OUTS = [\"DP-1\",\"eDP-1\"], MS = 16;") != NULL &&
+           strstr (js, "const PATH = \"" WALPE_KWIN_OBJECT "/s8\";") != NULL &&
+           strstr (js, "callDBus(DEST, PATH, \"" WALPE_KWIN_IFACE "\", \"Pointer\", what)") != NULL,
+           "the pointer script carries where to report, the outputs (a name that could be code is left "
+           "out) and the least time between two looks");
+    CHECK (strstr (js, "workspace.cursorPosChanged.connect(moved)") != NULL && strstr (js, "pace.interval = MS") != NULL,
+           "and looks when the pointer moves, paced");
+    g_free (js);
+    double px = 0, py = 0;
+    CHECK (walpe_kwin_pointer_line ("DP-1\t12.5\t-3", &name, &nlen, &px, &py) == WALPE_KWIN_PTR_MOTION &&
+           nlen == 4 && px == 12.5 && py == -3, "a position of the pointer script");
+    CHECK (walpe_kwin_pointer_line ("DP-1\t", &name, &nlen, &px, &py) == WALPE_KWIN_PTR_LEAVE && nlen == 4,
+           "the pointer left");
+    CHECK (walpe_kwin_pointer_line ("ready", &name, &nlen, &px, &py) == WALPE_KWIN_PTR_NONE &&
+           walpe_kwin_pointer_line ("DP-1\t1", &name, &nlen, &px, &py) == WALPE_KWIN_PTR_NONE &&
+           walpe_kwin_pointer_line ("DP-1\t1\t2\t3", &name, &nlen, &px, &py) == WALPE_KWIN_PTR_NONE &&
+           walpe_kwin_pointer_line ("DP-1\t1\tz", &name, &nlen, &px, &py) == WALPE_KWIN_PTR_NONE &&
+           walpe_kwin_pointer_line ("\t1\t2", &name, &nlen, &px, &py) == WALPE_KWIN_PTR_NONE,
+           "what is neither");
     char *rest = walpe_pause_rule_sources_without ("wl-frame,kwin", "kwin");
     CHECK (!strcmp (rest, "wl-frame") && walpe_pause_rule_has_source ("wl-frame,kwin", "kwin") &&
            !walpe_pause_rule_has_source ("wl-frame", "kwin") && !walpe_pause_rule_has_source ("", "kwin"),
@@ -582,6 +675,9 @@ int main (void)
     walpe_sigprov_set_see_through ("");
     walpe_sigprov_set_see_through ("konsole");
     WAIT_COUNT (F.runs, 3, "two changes in a row end with a loaded script");
+    /* (the first of the two may be the one that ran: the second follows it, after
+     * a second try when "KWin" had not taken the first one out yet) */
+    stub_wait (text_has, "SEE = [\"konsole\"]", 3000);
     settle ();
     text = text_now ();
     CHECK (strstr (text, "SEE = [\"konsole\"]") != NULL && walpe_sig_kwin_trouble () == NULL,
@@ -593,7 +689,7 @@ int main (void)
     /* 9. KWin leaves the bus and comes back (it was restarted) */
     int base = g_atomic_int_get (&F.runs);
     g_mutex_lock (&F.lock);
-    F.loaded = FALSE;
+    F.loaded = F.run = FALSE;
     g_mutex_unlock (&F.lock);
     fake_run (f_own, GINT_TO_POINTER (0));
     WAIT_VALUE (WALPE_SIG_COVERED, id_a, 0, "KWin gone: nothing is covered");
@@ -659,12 +755,72 @@ int main (void)
     settle ();
     CHECK (!name_owned (other, PTR), "the pointer not wanted: nobody has " PTR);
     CHECK (walpe_sig_kwin_pointer_state () == NULL, "and status has nothing about it");
-    walpe_sigprov_set_plasma_pointer (TRUE, pointer_event, NULL);
+    walpe_sigprov_set_plasma_pointer (TRUE, "A\nB", 16, pointer_event, NULL);
     CHECK (stub_wait (ptr_owned, GINT_TO_POINTER (1), 3000), "wanted: the daemon has the name");
+    WAIT_COUNT (F.pruns, 1, "and its pointer script is loaded into KWin and run");
     CHECK (stub_wait (state_has, "off", 1000) && g_atomic_int_get (&F.loads) == loads,
-           "no pause rule is on: no script goes into KWin for the pointer (%s)", walpe_sig_kwin_state ());
+           "no pause rule is on: the pause script does not go into KWin for the pointer (%s)",
+           walpe_sig_kwin_state ());
+    g_mutex_lock (&F.lock);
+    CHECK (F.ptext && strstr (F.ptext, "OUTS = [\"A\",\"B\"], MS = 16;") != NULL && F.pdest &&
+           F.pdest[0] == ':' && F.ppath && g_strcmp0 (F.ppath, F.path),
+           "its text has the outputs whose wallpaper wants the pointer, the least time between two "
+           "positions, the daemon's connection and an object of its own (%s)", F.ppath ? F.ppath : "-");
+    g_mutex_unlock (&F.lock);
     CHECK (stub_wait (ptr_state_has, "taken from", 3000), "status says so: %s", walpe_sig_kwin_pointer_state ());
-    CHECK (!pointer_send (other, "A", 0, 10, 20, 0, 0) && P.n == 0,
+    CHECK (ptr_state_has ("being loaded"), "and that the script has not called yet: %s",
+           walpe_sig_kwin_pointer_state ());
+    /* the pointer script: where the pointer is, and that it left */
+    fake_run (f_pointer, "ready");
+    CHECK (stub_wait (ptr_state_has, "from the pointer script", 3000) && P.n == 0,
+           "the script's first call says that it runs, and is no event: %s", walpe_sig_kwin_pointer_state ());
+    g_mutex_lock (&F.lock);
+    CHECK (F.pfile && !g_file_test (F.pfile, G_FILE_TEST_EXISTS), "its file is removed then");
+    g_mutex_unlock (&F.lock);
+    fake_run (f_pointer, "A\t10.5\t20");
+    CHECK (stub_wait (ptr_count_is, GINT_TO_POINTER (1), 3000) && !g_strcmp0 (P.output, "A") && P.what == 0 &&
+           P.x == 10.5 && P.y == 20, "a position from the script: %d event(s), %s %u %.2f %.2f", P.n,
+           P.output ? P.output : "-", P.what, P.x, P.y);
+    fake_run (f_pointer, "A\t");
+    CHECK (stub_wait (ptr_count_is, GINT_TO_POINTER (2), 3000) && !g_strcmp0 (P.output, "A") && P.what == 4,
+           "the pointer left Plasma's desktop on A: %s %u", P.output ? P.output : "-", P.what);
+    fake_run (f_pointer, "A");
+    fake_run (f_pointer, "A\tx\t1");
+    fake_run (f_pointer, "\t1\t2");
+    settle ();
+    CHECK (P.n == 2, "what is no position is no event (%d)", P.n);
+    pointer_script_says (other, NULL, "B\t1\t2");
+    g_dbus_connection_flush_sync (other, NULL, NULL);
+    settle ();
+    CHECK (P.n == 2, "a position from a connection that is not KWin's is refused");
+    /* the outputs change: the script is loaded again, and the wallpaper it
+     * had the pointer on is told that it left */
+    fake_run (f_pointer, "B\t7\t8");
+    CHECK (stub_wait (ptr_count_is, GINT_TO_POINTER (3), 3000) && !g_strcmp0 (P.output, "B"), "a position on B");
+    g_mutex_lock (&F.lock);
+    char *old_ppath = g_strdup (F.ppath);
+    g_mutex_unlock (&F.lock);
+    walpe_sigprov_set_plasma_pointer (TRUE, "B", 16, pointer_event, NULL);
+    WAIT_COUNT (F.pruns, 2, "other outputs: the pointer script is loaded again");
+    g_mutex_lock (&F.lock);
+    CHECK (F.ptext && strstr (F.ptext, "OUTS = [\"B\"], MS = 16;") != NULL, "with the new list");
+    g_mutex_unlock (&F.lock);
+    CHECK (P.n == 4 && !g_strcmp0 (P.output, "B") && P.what == 4,
+           "and the wallpaper the old script named last is told that the pointer left (%d, %s %u)", P.n,
+           P.output ? P.output : "-", P.what);
+    pointer_script_says (F.bus, old_ppath, "B\t1\t1");
+    g_dbus_connection_flush_sync (F.bus, NULL, NULL);
+    settle ();
+    CHECK (P.n == 4 && ptr_state_has ("being loaded"),
+           "a late call of the script that was replaced is nobody's: %s", walpe_sig_kwin_pointer_state ());
+    g_free (old_ppath);
+    walpe_sigprov_set_plasma_pointer (TRUE, "B", 16, pointer_event, NULL);
+    settle ();
+    CHECK (g_atomic_int_get (&F.pruns) == 2, "the same outputs and rate again load nothing");
+    fake_run (f_pointer, "ready");
+    /* buttons and the wheel: from Plasma's shell, as before */
+    int before = P.n;
+    CHECK (!pointer_send (other, "A", 0, 10, 20, 0, 0) && P.n == before,
            "an event from a connection that is not Plasma's shell is refused");
     GVariant *own = g_dbus_connection_call_sync (other, "org.freedesktop.DBus", "/org/freedesktop/DBus",
                                                  "org.freedesktop.DBus", "RequestName",
@@ -673,32 +829,66 @@ int main (void)
     if (own)
         g_variant_unref (own);
     settle ();
-    CHECK (pointer_send (other, "A", 0, 10.5, 20.25, 0, 0) && P.n == 1 && !g_strcmp0 (P.output, "A") &&
-           P.what == 0 && P.x == 10.5 && P.y == 20.25, "the position from Plasma's shell arrives: %d event(s), "
-           "%s %u %.2f %.2f", P.n, P.output ? P.output : "-", P.what, P.x, P.y);
-    CHECK (pointer_send (other, "B", 1, 3, 4, 1, 0) && P.n == 2 && !g_strcmp0 (P.output, "B") && P.what == 1 &&
-           P.a == 1, "a press with its button");
-    CHECK (pointer_send (other, "B", 3, 3, 4, 0, -120) && P.n == 3 && P.what == 3 && P.b == -120,
+    CHECK (pointer_send (other, "B", 1, 3, 4, 1, 0) && P.n == before + 1 && !g_strcmp0 (P.output, "B") &&
+           P.what == 1 && P.x == 3 && P.y == 4 && P.a == 1, "a press from Plasma's shell with its place and "
+           "button: %d event(s), %s %u", P.n - before, P.output ? P.output : "-", P.what);
+    CHECK (pointer_send (other, "B", 3, 3, 4, 0, -120) && P.n == before + 2 && P.what == 3 && P.b == -120,
            "the wheel with its angle");
-    /* a pause rule comes and goes: the pointer stays, the script comes and goes */
+    /* a pause rule comes and goes: the pointer and its script stay, the pause script comes and goes */
     int runs = g_atomic_int_get (&F.runs);
     walpe_sigprov_set_window_rules (FS);
-    WAIT_COUNT (F.runs, runs + 1, "a rule on while the pointer is wanted: the script is loaded");
+    WAIT_COUNT (F.runs, runs + 1, "a rule on while the pointer is wanted: the pause script is loaded");
     CHECK (name_owned (other, PTR), "the name is still the daemon's");
+    fake_run (f_report, "A\tc\nB\t");
+    WAIT_VALUE (WALPE_SIG_COVERED, id_a, 1, "the pause script reports");
+    /* the pointer script is replaced and goes while the pause script is there: what that one said stands */
+    walpe_sigprov_set_plasma_pointer (TRUE, "A", 8, pointer_event, NULL);
+    WAIT_COUNT (F.pruns, 3, "another rate and output: the pointer script again");
+    walpe_sigprov_set_plasma_pointer (FALSE, NULL, 8, pointer_event, NULL);
+    CHECK (stub_wait (ptr_owned, GINT_TO_POINTER (0), 3000), "no longer wanted: the name is let go");
+    settle ();
+    g_mutex_lock (&F.lock);
+    CHECK (!F.ploaded && F.loaded, "the pointer script is out of KWin, the pause script is not");
+    g_mutex_unlock (&F.lock);
+    CHECK (g_atomic_int_get (&F.runs) == runs + 1 && stub_value (&walpe_sig_kwin, WALPE_SIG_COVERED, id_a) == 1 &&
+           state_has ("loaded"), "and was not loaded again, and what it said stands: %s",
+           walpe_sig_kwin_state ());
+    CHECK (walpe_sig_kwin_pointer_state () == NULL, "status has nothing about the pointer");
+    walpe_sigprov_set_plasma_pointer (TRUE, "A\nB", 16, pointer_event, NULL);
+    CHECK (stub_wait (ptr_owned, GINT_TO_POINTER (1), 3000), "wanted again: the name is back");
+    WAIT_COUNT (F.pruns, 4, "and the script");
+    int pruns = g_atomic_int_get (&F.pruns);
     walpe_sigprov_set_window_rules (0);
     settle ();
-    CHECK (name_owned (other, PTR) && pointer_send (other, "A", 0, 1, 2, 0, 0) && P.n == 4,
-           "the rule off again: the pointer still arrives");
     g_mutex_lock (&F.lock);
-    CHECK (!F.loaded, "and the script is out of KWin");
+    CHECK (!F.loaded && F.ploaded, "the rule off again: the pause script is out of KWin, the pointer script "
+           "is not");
     g_mutex_unlock (&F.lock);
-    walpe_sigprov_set_plasma_pointer (FALSE, pointer_event, NULL);
-    CHECK (stub_wait (ptr_owned, GINT_TO_POINTER (0), 3000), "no longer wanted: the name is let go");
-    CHECK (walpe_sig_kwin_pointer_state () == NULL, "status has nothing about it");
-    walpe_sigprov_set_plasma_pointer (TRUE, pointer_event, NULL);
-    CHECK (stub_wait (ptr_owned, GINT_TO_POINTER (1), 3000), "wanted again: the name is back");
+    CHECK (g_atomic_int_get (&F.pruns) == pruns && stub_value (&walpe_sig_kwin, WALPE_SIG_COVERED, id_a) == 0,
+           "and was not loaded again; the pause script's values are gone");
+    before = P.n;
+    fake_run (f_pointer, "ready");
+    fake_run (f_pointer, "B\t5\t6");
+    CHECK (stub_wait (ptr_count_is, GINT_TO_POINTER (before + 1), 3000) && name_owned (other, PTR) &&
+           pointer_send (other, "A", 2, 1, 2, 1, 0) && P.n == before + 2, "the pointer still arrives from both");
+    /* KWin leaves the bus and comes back: the pointer script goes into the new one */
+    pruns = g_atomic_int_get (&F.pruns);
+    g_mutex_lock (&F.lock);
+    F.ploaded = F.prun = FALSE;
+    g_mutex_unlock (&F.lock);
+    fake_run (f_own, GINT_TO_POINTER (0));
+    CHECK (stub_wait (ptr_state_has, "not on the session bus", 3000), "KWin gone: status says why there is "
+           "no position: %s", walpe_sig_kwin_pointer_state ());
+    CHECK (stub_wait (ptr_count_is, GINT_TO_POINTER (before + 3), 3000) && P.what == 4,
+           "and the wallpaper is told that the pointer left");
+    fake_run (f_own, GINT_TO_POINTER (1));
+    WAIT_COUNT (F.pruns, pruns + 1, "KWin back: the pointer script is loaded again");
     stub_reset ();
     CHECK (stub_wait (ptr_owned, GINT_TO_POINTER (0), 3000), "stopped: the name is let go");
+    settle ();
+    g_mutex_lock (&F.lock);
+    CHECK (!F.ploaded, "and the pointer script is out of KWin");
+    g_mutex_unlock (&F.lock);
     g_free (P.output);
 
     walpe_sig_kwin_use_address (NULL);
