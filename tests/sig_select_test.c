@@ -388,6 +388,17 @@ static void test_real_unavailable (void)
     sp = stub_prov (&walpe_sig_gnome);
     CHECK (sp && sp->failed && !sp->started && sp->why && !*sp->why, "gnome declines without a word");
     CHECK (walpe_sig_gnome_state () == NULL, "and has nothing for the status");
+    /* ... and so does the provider for KWin where the compositor is not
+     * KWin: on sway, on GNOME, nothing names it */
+    sp = stub_prov (&walpe_sig_kwin);
+    CHECK (sp && sp->failed && !sp->started && sp->why && !*sp->why, "kwin declines without a word");
+    CHECK (walpe_sig_kwin_state () == NULL && walpe_sig_kwin_trouble () == NULL,
+           "and has nothing for the status");
+    CHECK (!strstr (walpe_signal_missing (WALPE_SIG_FULLSCREEN), "kwin") &&
+           !strstr (walpe_signal_missing (WALPE_SIG_FULLSCREEN), "gnome") &&
+           !strstr (walpe_signal_missing (WALPE_SIG_COVERED), "kwin") &&
+           !strstr (walpe_signal_missing (WALPE_SIG_COVERED), "gnome"),
+           "neither is among what is missing for a rule");
     CHECK (Stub.n_val == 0 || !walpe_signal_get (WALPE_SIG_IDLE, 0), "nothing is reported as on");
     CHECK (*walpe_signal_sources (WALPE_SIG_FULLSCREEN) == 0, "no source for fullscreen");
     CHECK (strstr (walpe_signal_missing (WALPE_SIG_FULLSCREEN), "no connection") != NULL,

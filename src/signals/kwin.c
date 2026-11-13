@@ -939,8 +939,13 @@ static gboolean kwin_start (const WalpeSignalProvider *self, char **why)
             walpe_wlsess_unref (s);
         }
     }
-    if (!kwin)
-        return FALSE;       /* another compositor: no reason to give, the window list's stands */
+    if (!kwin) {
+        /* another compositor: nothing is missing there, and its users are
+         * not told about KWin (an empty reason: platform/signals.h) */
+        if (why)
+            *why = g_strdup ("");
+        return FALSE;
+    }
     K.started = TRUE;
     K.ids = g_hash_table_new (NULL, NULL);
     kwin_arm ();
