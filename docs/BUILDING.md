@@ -37,7 +37,8 @@ A C compiler (GCC or clang), meson, ninja and pkg-config, and GLib's `glib-compi
 `libglib2.0-dev-bin`, which `libglib2.0-dev` asks for, Arch in `glib2`). Package names are
 Gentoo's; the pkg-config module is what `meson setup` looks for, to map them to another
 distribution. The names of Debian and Ubuntu are listed [below](#64-bit-arm-aarch64), the
-ones of Arch in [Installing on Arch-based systems](#installing-on-arch-based-systems).
+ones of Arch in [Installing on Arch-based systems](#installing-on-arch-based-systems);
+[Debian 13](#debian-13) and [Alpine Linux](#alpine-linux) say what was run there.
 
 | pkg-config module | Gentoo package | Needed for |
 |---|---|---|
@@ -135,6 +136,101 @@ installed) for the elements those files and their sound need, once, in the backg
 logs each missing one with the package to install, and names them in `walpe-ctl status`
 as `web_missing_gst`. A page that makes its sound without a file in its folder (Web Audio,
 a stream) is not looked at.
+
+### Debian 13
+
+> **Run in a chroot, not on a machine.** Debian 13.7 (x86-64) from `debootstrap
+> --variant=minbase`, packages installed with `--no-install-recommends`: GCC 14.2, glibc
+> 2.41, GTK 4.18.6, GLib 2.84.4, gdk-pixbuf 2.42.12, json-glib 1.10.6, WebKitGTK 2.52.6,
+> FFmpeg 7.1.5, Mesa 25.0.7 (its software renderer), QuickJS 2025-04-26. No session of a
+> desktop, no GPU and no sound card has seen WalPE on Debian.
+
+The packages are the ones listed under [64-bit ARM](#64-bit-arm-aarch64), which on Debian
+13 are enough as they stand: `meson setup` finds every module and every optional part
+(X11 and Wayland backend, video, web with both page hosts and its sound sink, audio,
+SceneScript, tray), and the build with the default options compiles and links.
+
+```sh
+apt install build-essential meson ninja-build pkg-config python3 \
+  libglib2.0-dev libjson-glib-dev libgdk-pixbuf-2.0-dev libpango1.0-dev libfontconfig-dev \
+  libepoxy-dev libegl-dev liblz4-dev libgtk-4-dev \
+  libx11-dev libxext-dev libxinerama-dev libxi-dev libxrandr-dev libxrender-dev \
+  libwayland-dev libavcodec-dev libavutil-dev libwebkitgtk-6.0-dev libsoup-3.0-dev \
+  libgstreamer1.0-dev libpulse-dev libquickjs
+```
+
+At run time, besides what that section names (`ffmpeg`, a sound server, the GStreamer
+plugins): **`librsvg2-common`**. It is gdk-pixbuf's SVG loader, which `libgtk-4-1` only
+recommends, so a system set up without recommended packages lacks it. Without it the
+window `walpe` ends with a segmentation fault as it starts on X11, once WalPE's icon
+(`walpe.svg`) is where the icon theme finds it, which is where `meson install` puts it
+(the backtrace is a recursion without end inside `libgtk-4.so.1`, 4.18.6). Seen in the
+chroot above; with the package installed, or without the icon, the window starts.
+
+The tests that need a display were run on Xvfb and on a headless sway (`xvfb`, `sway`,
+`dbus-daemon`, `x11-xserver-utils` for `xrandr`, `xdotool`, `grim`, `procps`): the
+daemon's life on X11 and on Wayland, the window, the tray and web wallpapers on the X11
+page host pass. `parsers` fails in its checks of a text with two JSON values (json-glib
+1.10), and the private page host does not come up (GTK 4.18; see Alpine below).
+Debian 13's sway is 1.10.1, and of the 400 checks of `daemon-wayland` 7 fail there, all
+after a fullscreen window was moved to the second output: that sway goes on naming the
+first output to the daemon (no `output_enter` for the new one in
+wlr-foreign-toplevel-management, while its own tree has the window there; sway 1.12
+sends it, and with sway 1.9 the same checks pass). "Pause behind a fullscreen window"
+then pauses the monitor the window came from.
+
+### Alpine Linux
+
+> **Run in a chroot, not on a machine.** Alpine 3.24.4 (x86-64, the minirootfs): musl
+> 1.2.6, GCC 15.2, GTK 4.22.4, GLib 2.88.1, gdk-pixbuf 2.44.7 (decodes through glycin),
+> json-glib 1.10.8, WebKitGTK 2.48.1, FFmpeg 8.1.3, Mesa 26.1.6 (its software renderer),
+> QuickJS 2025-09-13, busybox 1.37 as `sh` and for the usual tools. It is the only system
+> with another C library than glibc that WalPE was built on. No session of a desktop, no
+> GPU and no sound card has seen it there.
+
+```sh
+apk add build-base meson pkgconf \
+  glib-dev json-glib-dev gdk-pixbuf-dev pango-dev fontconfig-dev libepoxy-dev mesa-dev \
+  lz4-dev gtk4.0-dev \
+  libx11-dev libxext-dev libxinerama-dev libxi-dev libxrandr-dev libxrender-dev \
+  wayland-dev ffmpeg-dev webkit2gtk-6.0-dev libsoup3-dev gstreamer-dev pulseaudio-dev \
+  quickjs-dev
+```
+
+(`meson` brings `samurai` as ninja and python3; `glib-compile-resources` and
+`wayland-scanner` come with `glib-dev` and `wayland-dev`.) With these `meson setup` finds
+every module and every optional part, as on Debian. At run time: `mesa-dri-gallium` (the
+OpenGL drivers, the software renderer among them: `mesa-dev` does not ask for it),
+`ffmpeg`, a font (`font-dejavu`), and for the sound of web wallpapers `gst-plugins-base
+gst-plugins-good`.
+
+What is different with musl:
+
+- glibc's allocator is asked to give freed memory back (`malloc_trim`) and is set up when
+  the daemon starts (`mallopt`); musl has neither call, and nothing takes their place.
+  `WALPE_MALLOC_MMAP_MB` is not read.
+- musl gives a thread 128 KiB of stack where glibc gives 8 MiB. The build asks for 8 MiB
+  (`-Wl,-z,stack-size=8388608`, added by `meson.build` when the C library is not glibc):
+  without it a wallpaper script that calls itself without end ended the daemon instead
+  of getting an error.
+- `scripts/walpe-collect.sh` asks `ps` who started the engine and for its CPU figures
+  (`ps -U`, `ps -p`). busybox's `ps` has neither option, so a report made there lacks
+  those lines (read from the script and tried with busybox's `ps`; the script was not
+  run through on Alpine). `apk add procps-ng` gives them.
+
+Not musl, but the WebKitGTK of this Alpine release: 2.48 has no display throttle of its
+own (`WEBKIT_DISPLAY_REFRESH_THROTTLE_FPS`), and the frame rate limit of a page's
+`requestAnimationFrame` is kept by WalPE's script there.
+
+The tests that need a display were run on Xvfb and on a headless sway (`xvfb`, `sway`,
+`dbus`, `xrandr`, `xdotool`, `grim`, `python3`): the daemon's life on X11 and on Wayland,
+the window, the tray and web wallpapers on the X11 page host pass. What does not pass on
+Alpine 3.24 comes with its library versions and is the same on any system that has them:
+checks of pictures decoded by gdk-pixbuf 2.44 and of a text with two JSON values under
+json-glib 1.10 (`limits`, `parsers`, `thumbs`, `wsnet`), and the private page host for
+web wallpapers on a session without X, which does not come up with GTK 4.18 or newer
+(on Debian 13 as well: `websec-private`). GNOME Shell and KWin were not installed on
+either system.
 
 ## Build options
 
