@@ -174,6 +174,9 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             are measured against it (a machine on which the scene loads in
             under a second cannot tell: the case says so and checks the
             rest).
+  nogl      a start that cannot render (EGL does not come up: libglvnd is
+            given no vendor library here) ends with status 1 and leaves no
+            control socket behind; the next start comes up and answers.
   video     a video's load ends with its first picture: a clip the decoder
             cannot do anything with (its container reads well) is a failed
             load with a reason in status, and the wallpaper from before
@@ -3904,6 +3907,39 @@ def case_diag(env, W):
               (" and prints both lines" if want == 0 else ": it takes no argument and says so"), out[:300])
 
 
+# --------------------------------------------------------------------- nogl
+def case_nogl(env, W):
+    """A start that cannot render ("EGL init failed; cannot render": no
+    driver; here libglvnd is given no vendor library) ends with status 1
+    after the control socket was set up: its file stayed behind with nobody
+    listening."""
+    A = ("A", 320, 180, 0, 0)
+    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False,
+                          "current": W["red"]})
+    started = env.mark()
+    if env.start_daemon([A], extra={"__EGL_VENDOR_LIBRARY_FILENAMES": "/dev/null"}):
+        print("skip nogl (the daemon renders without a vendor library of libglvnd: this libEGL does not "
+              "ask for one, and the start cannot be made to fail this way)")
+        return
+    try:
+        status = env.daemon.wait(timeout=30 * PATIENCE)
+    except subprocess.TimeoutExpired:
+        status = None
+    said = env.since(started)
+    if not check(status == 1 and "EGL init failed; cannot render" in said,
+                 "nogl: a start without a usable EGL says so and ends with 1", (status, said[-400:])):
+        return
+    check(not os.path.lexists(env.sock),
+          "nogl: the start that could not render leaves no control socket behind",
+          sorted(f for f in os.listdir(os.path.dirname(env.sock)) if f.startswith("walpe")))
+    p = subprocess.run([os.path.join(env.build, "walpe-ctl"), "status"], env=env.env, stdin=subprocess.DEVNULL,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60 * PATIENCE)
+    out = p.stdout.decode(errors="replace")
+    check(p.returncode != 0, "nogl: walpe-ctl status after it finds no daemon", (p.returncode, out[:300]))
+    check(env.start_daemon([A]) and env.state().get("monitors") is not None,
+          "nogl: the next start comes up and answers", env.since(started)[-400:])
+
+
 # -------------------------------------------------------------------- panel
 def case_panel(env, W):
     """tests/perf_panel_test.c needs a display: it gets this check's"""
@@ -4039,7 +4075,7 @@ CASES = [("logcap", case_logcap), ("settings", case_settings), ("diag", case_dia
          ("winlost", case_winlost), ("desktop", case_desktop), ("convert", case_convert),
          ("soundstop", case_soundstop),
          ("swaplost", case_swaplost), ("norestart", case_norestart),
-         ("quitload", case_quitload)]
+         ("quitload", case_quitload), ("nogl", case_nogl)]
 
 
 

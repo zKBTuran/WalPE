@@ -11951,6 +11951,13 @@ int main (int argc, char **argv)
         start_display_gone (windowed);  /* (returns when that is not why) */
 #endif
         g_printerr ("EGL init failed; cannot render\n");
+        /* the control socket is served since the lines above: its file and
+         * the single-instance lock go the way they go at an ordinary end.
+         * The file stayed behind with nobody listening (start_failed is
+         * for the starts that end before the socket is served). */
+        char *sp = walpe_socket_path ();
+        walpe_ipc_release (sp);
+        g_free (sp);
         return 1;
     }
 

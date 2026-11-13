@@ -849,6 +849,11 @@ microphone.
 - A restart in place no longer waits without limit for a child process that does not end
   (WebKit's processes): one second after asking, two more after killing it, then the
   restart goes on and the log names the process.
+- A start that cannot render ("EGL init failed; cannot render": no usable graphics
+  driver, or the compositor went away during the start) ends with status 1 as before and
+  no longer leaves the control socket's file (`$XDG_RUNTIME_DIR/walpe.sock`) behind with
+  nobody listening. Nothing depended on it: `walpe-ctl` said that no daemon runs, and the
+  next start removed the file itself.
 
 ### Known limitations
 
