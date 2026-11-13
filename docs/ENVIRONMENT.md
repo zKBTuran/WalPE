@@ -284,6 +284,7 @@ Not for daily use: test hooks, measuring aids and names the programs set for the
 | `WALPE_CHECK_DISPLAY=xvfb\|sway` | the end-to-end checks | the display of a check started by hand without `--display` (the registered tests name theirs) |
 | `WALPE_CHECK_STRICT=1` | the end-to-end checks | a check that cannot run for a missing program, or whose display does not start, fails instead of being skipped; a build without the backend still skips |
 | `WALPE_CHECK_WL_RENDERER=gles2` | the end-to-end checks | run the headless compositor on GLES 2 instead of pixman (needs a DRM render node) |
+| `WALPE_CHECK_RIVER_INIT=command` | `scripts/waylandcheck.py --display river` | the command line river is started with (its `-c`). river up to 0.3 needs none; from 0.4 on it shows nothing, a wallpaper included, until a window manager program is connected, and this names the one to start |
 | `WALPE_LOAD_DELAY_MS=n` | daemon | every wallpaper load takes at least `n` ms more (what must hold while a load runs) |
 | `WALPE_SWAP_FAIL=n[,always][,0xERROR]` | daemon | every monitor's buffer swaps fail from its `n`th frame on, with `EGL_CONTEXT_LOST` or the EGL error given (what the daemon does when a GL context is lost: status `swap_error`, one restart in place); not in the process restarted for it unless `always` |
 | `WALPE_RESTART_EXEC=fail` | daemon | a restart in place cannot be begun, as if the daemon's binary could no longer be executed (the daemon runs on as it is; status `restart_failed`) |
