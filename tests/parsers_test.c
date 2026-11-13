@@ -492,6 +492,48 @@ static void test_json (void)
         CHECK ((n != NULL) == jsonglib_takes ("/* by hand */ {\"first\":1}"));
         CHECK (!n || json_object_has_member (json_node_get_object (n), "first"));
         g_clear_pointer (&n, json_node_unref);
+        /* which value is the first does not depend on the json-glib
+         * underneath: 1.8 keeps the first value as its root while it reads
+         * a second, 1.10 an array of all of them (and gave "no object"
+         * for every text here that has an object first) */
+        static const struct { const char *text, *member; } firsts[] = {
+            { "{\"a\":1} {\"b\":2}", "a" }, { "{\"a\":1}[2]", "a" }, { "{\"a\":1}{\"a2\":2}{\"a3\":3}", "a" },
+            { "{\"a\":{\"x\":[1,{\"y\":2}]}} [[3]] {\"c\":3}", "a" },
+            { "{\"a\":1} {\"b\":", "a" },           /* the second one cut short */
+            { "{\"a\":1} [}", "a" },
+            { "\n\t{\"a\":[]}\n{\"b\":{}}\n", "a" },
+            /* an array, or a plain value, first: no object */
+            { "[1] {\"a\":1}", NULL }, { "7 {\"a\":1}", NULL }, { "\"s\" {\"a\":1}", NULL },
+            { "true [1] {\"a\":1}", NULL },
+            /* anything else behind the first value: refused, as json-glib refuses it */
+            { "{\"a\":1} 7", NULL }, { "{\"a\":1} x", NULL }, { "{\"a\":1}}", NULL }, { "{\"a\":1}]", NULL },
+            { "{\"a\":1} \"s\"", NULL }, { "{\"a\":1},{\"b\":2}", NULL }, { "{\"a\":1} 7 {\"b\":2}", NULL },
+        };
+        for (guint i = 0; i < G_N_ELEMENTS (firsts); i++) {
+            n = wpj_parse_data (firsts[i].text, -1);
+            if ((n != NULL) != (firsts[i].member != NULL))
+                g_printerr ("parsers-test: %s: %s\n", firsts[i].text, n ? "an object" : "nothing");
+            CHECK ((n != NULL) == (firsts[i].member != NULL));
+            CHECK (!n || (json_object_get_size (json_node_get_object (n)) == 1 &&
+                          json_object_has_member (json_node_get_object (n), firsts[i].member)));
+            g_clear_pointer (&n, json_node_unref);
+        }
+        /* ... and for the reader of any first value (a Workshop reply) */
+        static const struct { const char *text; int type; } any[] = {
+            { "[1] [2] {\"a\":1}", JSON_NODE_ARRAY }, { "7 [1]", JSON_NODE_VALUE }, { "\"s\" {\"a\":1}", JSON_NODE_VALUE },
+            { "{\"a\":1} [2]", JSON_NODE_OBJECT }, { "[[1,2],{\"k\":[3]}]{\"a\":1}", JSON_NODE_ARRAY },
+        };
+        for (guint i = 0; i < G_N_ELEMENTS (any); i++) {
+            char *text = g_strdup (any[i].text);
+            n = wpj_parse_first (text, strlen (text), NULL);
+            CHECK (n && (int) json_node_get_node_type (n) == any[i].type);
+            if (n && JSON_NODE_HOLDS_ARRAY (n))
+                CHECK (json_array_get_length (json_node_get_array (n)) == (i == 0 ? 1 : 2));
+            if (n && JSON_NODE_HOLDS_VALUE (n) && i == 1)
+                CHECK (json_node_get_int (n) == 7);
+            g_clear_pointer (&n, json_node_unref);
+            g_free (text);
+        }
         /* one value with a comment or a 'string' behind it is one value */
         static const char *const one[] = { "{\"a\":[1]} /* {\"b\":[2]} */", "{\"a\":[1],\"c\":'{'} " };
         for (guint i = 0; i < G_N_ELEMENTS (one); i++) {

@@ -992,13 +992,23 @@ gboolean wpj_text_is_utf8 (JsonNode *n)
  * hold a second value gets them: json_single_plain() is the plain reading
  * (see above) of "white space, one array or object, nothing that opens
  * another", and no ', / or # outside a string that another reading could
- * make something else of. Every file Wallpaper Engine writes is that. */
+ * make something else of. Every file Wallpaper Engine writes is that.
+ *
+ * Which value is the first is not asked of the parser's root: json-glib
+ * 1.8 has the first value there while a second one is read, 1.10 (seen
+ * with 1.10.8) an array it has begun to collect all of them in - the text
+ * `{"a":1} {"b":2}` parses to the array of both there, and a project.json
+ * with a second value behind its object was refused as "no object". The
+ * first array or object is the one the parser reports complete first; a
+ * plain value in front of it is the root (1.8) or the root's one element
+ * (1.10) when the first array or object begins. */
 typedef struct {
     int depth;        /* arrays / objects open */
     int closed;       /* top-level ones complete */
     char *text;
     gsize len;
-    JsonNode *first;  /* the root when a second value began */
+    JsonNode *done;   /* the first top-level array / object, complete */
+    JsonNode *first;  /* the first value when a second one began */
     gboolean extra;
 } WpjOne;
 
@@ -1008,21 +1018,41 @@ static void wpj_one_start (JsonParser *p, gpointer user)
     if (o->depth++ > 0 || o->extra)
         return;
     JsonNode *root = json_parser_get_root (p);
-    /* the first value, unless a plain value came before it (then the root
-     * is that value: no array, no object) */
-    if (!o->closed && (!root || JSON_NODE_HOLDS_OBJECT (root) || JSON_NODE_HOLDS_ARRAY (root)))
-        return;
+    if (!o->closed && !root)
+        return;         /* the first value */
     o->extra = TRUE;
-    o->first = root ? json_node_copy (root) : NULL;
+    if (o->closed) {
+        o->first = o->done ? json_node_ref (o->done) : NULL;
+    } else if (JSON_NODE_HOLDS_ARRAY (root)) {
+        /* (no array is complete yet: this one is the parser's own, around
+         * the plain value that came first) */
+        JsonArray *all = json_node_get_array (root);
+        o->first = all && json_array_get_length (all) > 0
+            ? json_node_copy (json_array_get_element (all, 0)) : NULL;
+    } else {
+        o->first = json_node_copy (root);
+    }
     memset (o->text, ' ', o->len);
 }
 
-static void wpj_one_end (JsonParser *p, gpointer container, gpointer user)
+static void wpj_one_object_end (JsonParser *p, JsonObject *obj, gpointer user)
 {
-    (void) p; (void) container;
+    (void) p;
     WpjOne *o = user;
-    if (o->depth > 0 && --o->depth == 0)
-        o->closed++;
+    if (o->depth > 0 && --o->depth == 0 && o->closed++ == 0 && !o->extra && obj) {
+        o->done = json_node_alloc ();
+        json_node_init_object (o->done, obj);
+    }
+}
+
+static void wpj_one_array_end (JsonParser *p, JsonArray *arr, gpointer user)
+{
+    (void) p;
+    WpjOne *o = user;
+    if (o->depth > 0 && --o->depth == 0 && o->closed++ == 0 && !o->extra && arr) {
+        o->done = json_node_alloc ();
+        json_node_init_array (o->done, arr);
+    }
 }
 
 static gboolean json_single_plain (const char *d, gsize len)
@@ -1058,10 +1088,11 @@ JsonNode *wpj_parse_first (char *text, gsize len, GError **err)
     g_autoptr (JsonParser) p = json_parser_new ();
     g_signal_connect (p, "object-start", G_CALLBACK (wpj_one_start), &one);
     g_signal_connect (p, "array-start", G_CALLBACK (wpj_one_start), &one);
-    g_signal_connect (p, "object-end", G_CALLBACK (wpj_one_end), &one);
-    g_signal_connect (p, "array-end", G_CALLBACK (wpj_one_end), &one);
+    g_signal_connect (p, "object-end", G_CALLBACK (wpj_one_object_end), &one);
+    g_signal_connect (p, "array-end", G_CALLBACK (wpj_one_array_end), &one);
     GError *e = NULL;
     gboolean ok = json_parser_load_from_data (p, text, (gssize) len, &e);
+    g_clear_pointer (&one.done, json_node_unref);
     if (one.extra) {
         g_clear_error (&e);   /* (of the blanked text, not of the file) */
         return one.first;
