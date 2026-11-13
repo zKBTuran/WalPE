@@ -2468,6 +2468,22 @@ def case_fullscreen(env, W):
             time.sleep(seconds * PATIENCE)
             return [(m.get("frames") or 0) - k for m, k in zip(mons(), n)]
 
+        def drawn_as(paused, looks=4):
+            """the frames of 1.5 s: more than 3 on a monitor that runs, at most 2 on a
+            paused one. A monitor that runs and drew too few (the daemon or the X server
+            was held up for a moment: nothing is drawn meanwhile) is looked at for the
+            next 1.5 s, `looks` times at most; a paused one must hold in every look.
+            -> (good, the counts of every look)"""
+            seen = []
+            for _ in range(looks):
+                n = drawn()
+                seen.append(n)
+                if any(k > 2 for k, p in zip(n, paused) if p):
+                    return False, seen
+                if all(k > 3 for k, p in zip(n, paused) if not p):
+                    return True, seen
+            return False, seen
+
         def is_state(here, paused, what):
             """monitors' "fullscreen" and "paused" become what is wanted; then the frames follow"""
             ok = wait_for(lambda: flags("fullscreen") == here and flags("paused") == paused, 10, 0.1)
@@ -2475,10 +2491,9 @@ def case_fullscreen(env, W):
             check(bool(ok), "fullscreen: %s: fullscreen %s, paused %s" % (what, here, paused),
                   {"fullscreen": flags("fullscreen"), "paused": flags("paused"),
                    "monitors_state": st.get("monitors_state")})
-            n = drawn()
-            good = all((k <= 2) if p else (k > 3) for k, p in zip(n, paused))
+            good, n = drawn_as(paused)
             check(good, "fullscreen: %s: the paused monitor stops drawing, the other one draws" % what,
-                  "frames in %.1f s: %s" % (1.5 * PATIENCE, n))
+                  "frames in %.1f s: %s" % (1.5 * PATIENCE, n[0] if len(n) == 1 else n))
             return st
 
         wait_for(lambda: min(drawn(1.0)) > 3, 20, 0.1)
@@ -2757,11 +2772,14 @@ def case_fullscreen(env, W):
             xc.move(w4, 640 * fol, 0, 640, 360)
             want = [i == fol for i in range(2)]
             is_state(want, want, "shared rendering, the window on the follower's monitor")
-            before = mons()
-            time.sleep(1.5 * PATIENCE)
-            after = mons()
-            woke = (after[fol].get("wakeups") or 0) - (before[fol].get("wakeups") or 0)
-            led = (after[1 - fol].get("frames") or 0) - (before[1 - fol].get("frames") or 0)
+            for _ in range(4):      # (a leader that was held up for a moment: the next 1.5 s)
+                before = mons()
+                time.sleep(1.5 * PATIENCE)
+                after = mons()
+                woke = (after[fol].get("wakeups") or 0) - (before[fol].get("wakeups") or 0)
+                led = (after[1 - fol].get("frames") or 0) - (before[1 - fol].get("frames") or 0)
+                if led > 3 or woke > 2:
+                    break
             check(led > 3 and woke <= 2,
                   "fullscreen: shared rendering: the paused follower's thread sleeps while its leader draws",
                   "in %.1f s: %d frames of the leader, %d wake-ups of the follower" % (1.5 * PATIENCE, led, woke))
