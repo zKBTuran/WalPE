@@ -395,6 +395,8 @@ static struct {
     gboolean leader_first;   /* WALPE_LEADER=first: the old rule (A/B) */
     gboolean fake_vsync;     /* WALPE_FAKE_VSYNC: emulate each monitor's vblank */
     gulong load_delay_us;    /* WALPE_LOAD_DELAY_MS (tests): every load takes at least this */
+    gulong unpark_delay_us;  /* WALPE_UNPARK_DELAY_MS (tests): a render thread that is given an
+                              * output takes this long to put its context on the surface */
     int first_frame_ticks;   /* WALPE_FIRST_FRAME_S in quarter seconds: how long a video
                               * may take for its first picture (0 = not waited for) */
     gboolean restart;        /* main: the monitor layout changed, re-exec after shutdown */
@@ -2297,6 +2299,11 @@ static void mon_park_wait (Mon *m, gboolean *begun)
     if (m->quitting)
         return;
     g_mutex_unlock (&m->lock);
+    /* WALPE_UNPARK_DELAY_MS (tests, scripts/waylandcheck.py): a driver that
+     * takes its time over a context's first surface, for what has to hold
+     * meanwhile (load_held_check) */
+    if (D.unpark_delay_us)
+        g_usleep (D.unpark_delay_us);
     gboolean ok = eglMakeCurrent (D.egl_dpy, m->surf, m->surf, m->ctx);
     const EGLint err = ok ? EGL_SUCCESS : eglGetError ();
     if (ok && *begun) {
@@ -2306,11 +2313,14 @@ static void mon_park_wait (Mon *m, gboolean *begun)
         *begun = TRUE;
     }
     g_mutex_lock (&m->lock);
-    /* (load_held_check: the setting-up of this output is over) */
-    m->in_load = FALSE;
-    m->load_end_us = g_get_monotonic_time ();
-    if (ok)
+    if (ok) {
+        /* (set when the monitor was given the output, mon_attach: its
+         * set-up is over, as mon_thread says for a monitor that starts
+         * with one) */
+        m->in_load = FALSE;
+        m->load_end_us = g_get_monotonic_time ();
         return;
+    }
     /* nothing can be drawn: said like swaps that fail for good (status
      * "swap_error"; the main thread restarts in place to make contexts and
      * surfaces anew, at most once a minute), and this thread waits for
@@ -10186,6 +10196,12 @@ static Mon *mon_attach (Mon *m, const WalpeOutput *o, int idx)
     m->hz = o->refresh_hz;
     m->clip_n = -1;
     m->needs_first_frame = TRUE;
+    /* As make_monitor: until its thread has its context on the new surface
+     * (mon_park_wait) it is setting up, and the wallpaper it is handed next
+     * waits for that, not for a frame that does not end. The wiped record
+     * said "out of every load since the machine started" instead, and a
+     * look by load_held_check in that time restarted the daemon for it. */
+    m->in_load = TRUE;
     g_mutex_unlock (&m->lock);
     mons_parked = g_list_remove (mons_parked, m);
     D.mons = g_list_append (D.mons, m);     /* (layout_follow puts the list in order) */
@@ -11713,6 +11729,8 @@ int main (int argc, char **argv)
     {
         const char *ld = g_getenv ("WALPE_LOAD_DELAY_MS");
         D.load_delay_us = ld && *ld ? (gulong) CLAMP (g_ascii_strtoll (ld, NULL, 10), 0, 60000) * 1000 : 0;
+        const char *ud = g_getenv ("WALPE_UNPARK_DELAY_MS");
+        D.unpark_delay_us = ud && *ud ? (gulong) CLAMP (g_ascii_strtoll (ud, NULL, 10), 0, 60000) * 1000 : 0;
         /* WALPE_SWAP_FAIL=N[,always][,0xERROR] (tests): mon_swap_failed () */
         const char *sf = g_getenv ("WALPE_SWAP_FAIL");
         if (sf && *sf) {

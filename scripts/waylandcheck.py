@@ -72,7 +72,9 @@ not what the daemon believes it drew. Each case starts its own daemon:
             shows the saved wallpaper once a surface is given; with no
             answer to any try it says that it gives up, runs on with no
             monitor (status, walpe-ctl diag), and tries again when the
-            output changes (that last part with wayland_follow on). And a
+            output changes (that last part with wayland_follow on). A
+            render thread that needs 24 s to come to the surface it was
+            given (WALPE_UNPARK_DELAY_MS) is waited for: no restart. And a
             waiting render thread that ended without an EGL context (made up
             with WALPE_WL_NO_CONTEXT) is not waited for when the daemon ends.
   pointer   a scene whose colour follows the pointer follows a pointer
@@ -1094,6 +1096,31 @@ def case_nosurface(env, W):
           "ended", (status, round(took, 1), env.since(begun)[-500:]))
     if status is not None:
         env.daemon = None
+    env.stop_daemon()
+
+    # the first try gives the output its surface, and the render thread that waited for it
+    # takes its time to put its GL context on it (made up with WALPE_UNPARK_DELAY_MS: 24 s,
+    # longer than the 20 s after which the daemon looks whether a wallpaper it handed out
+    # was taken). That is a thread setting up, not one in a frame that does not end: the
+    # daemon does not restart for it (it did, and the next image met the same)
+    begun = env.mark()
+    if not start(env, [("A", 640, 360, 0, 0)], "nosurface, slow thread", config=cfg,
+                 extra={"WALPE_WL_NO_CONFIGURE": "1", "WALPE_SURFACE_RETRY_MS": "1000",
+                        "WALPE_UNPARK_DELAY_MS": "24000"}):
+        return
+    name, pid = env.mons[0][0], env.daemon.pid
+    ok, _ = follow(env, lambda: rects(env) == {name: [0, 0, 640, 360]}, 30)
+    check(ok, "nosurface, slow thread: the first try gives the output its surface", rects(env))
+    t0 = time.time()
+    ok, lk = shows_quad(env, name, size=(640, 360), timeout=60)
+    log = env.since(begun)
+    check(ok, "nosurface, slow thread: the saved wallpaper is shown when the thread has come (%.0f s)"
+          % (time.time() - t0), lk)
+    check(not any(r in log for r in RESTART_LINES) and "restarting in place" not in log and
+          env.daemon.poll() is None and env.daemon.pid == pid,
+          "nosurface, slow thread: the daemon did not restart for it",
+          [ln[-200:] for ln in log.splitlines() if "restart" in ln][:3])
+    healthy(env, begun, "nosurface, slow thread")
     env.stop_daemon()
 
 

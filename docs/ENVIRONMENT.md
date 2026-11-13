@@ -286,6 +286,7 @@ Not for daily use: test hooks, measuring aids and names the programs set for the
 | `WALPE_WL_NO_CONFIGURE=n` | daemon (Wayland) | the first `n` wallpaper surfaces (on GNOME Shell: wallpaper windows) are made in a way the compositor does not answer (a monitor that gets no surface) |
 | `WALPE_WL_NO_CONTEXT=1` | daemon (Wayland) | the render thread of a monitor that starts without a surface gets no EGL context and ends, as with a driver that refuses one (`waylandcheck.py`, case `nosurface`) |
 | `WALPE_SURFACE_RETRY_MS=n` | daemon (Wayland) | the time before the first new try for a monitor that got no surface (default 2000; each further one doubles it) |
+| `WALPE_UNPARK_DELAY_MS=n` | daemon (Wayland) | a render thread that is given an output (one that got its surface at a later try, or with `wayland_follow` one that returned) takes `n` ms to put its GL context on the new surface (`waylandcheck.py`, case `nosurface`) |
 | `WALPE_WL_CLOSE_AFTER_MS=n` | daemon (Wayland) | `n` milliseconds after the start the first wallpaper surface is treated as if the compositor had closed it while its monitor stays |
 | `WALPE_WL_RECREATE=0` | daemon (Wayland) | when the compositor closes a wallpaper surface: never give the surface its role back; that monitor's wallpaper is loaded again on a new surface (with `wayland_follow` off: the daemon restarts in place) |
 | `WALPE_SIG_WAYLAND_DISPLAY=name` | daemon | the Wayland pause providers (idle, window list) connect to this compositor socket instead of the session's |
