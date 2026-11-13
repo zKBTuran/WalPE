@@ -998,6 +998,44 @@ static void test_period (const char *dir)
            "from 2.2 s of a pass of 2.5 s: %d passes, %" G_GINT64_FORMAT " frames", st.plays, st.frames);
     walpe_sound_group_free (g);
     CHECK (threads_gone (), "period: the threads end");
+    /* Paused near the end of a pass. The player fades out with 20 ms more
+     * of the file, which count as part of the pass - and counted past its
+     * end when fewer than 20 ms were left: the pass then had a negative
+     * number of frames to go, and the block that followed the resume
+     * cleared that many frames of its buffer (the daemon ended with
+     * "buffer overflow detected", or wrote over what lay behind the
+     * buffer). A pass of 50 ms, paused and resumed 400 times at any place:
+     * each pass is still exactly as long as it has to be, and the player
+     * lives. (pos stays inside the pass whenever it is looked at.) */
+    {
+        WalpeSoundGroup *gp = walpe_sound_group_new ("/w/period3", 1);
+        WalpeSound *sp = snd_new (gp, two, NULL, WALPE_SOUND_LOOP, 1.0f);
+        const gint64 pass = 2400;
+        walpe_sound_set_period (sp, 0.05);
+        walpe_sound_group_set_active (gp, TRUE);
+        walpe_sound_play (sp);
+        gboolean inside = TRUE;
+        for (int i = 0; i < 400; i++) {
+            WAIT (stats_of (sp).running, 2000);
+            g_usleep (100 + (i * 37) % 900);
+            walpe_sound_group_set_active (gp, FALSE);
+            WAIT (!stats_of (sp).running, 2000);
+            WalpeSoundStats t = stats_of (sp);
+            inside = inside && t.pos >= 0 && t.pos <= pass;
+            walpe_sound_group_set_active (gp, TRUE);
+        }
+        WAIT (stats_of (sp).running, 2000);
+        const int p0 = stats_of (sp).plays;
+        WAIT (stats_of (sp).plays >= p0 + 3, 5000);
+        walpe_sound_group_set_active (gp, FALSE);
+        WAIT (!stats_of (sp).running, 5000);
+        WalpeSoundStats t = stats_of (sp);
+        CHECK (inside && t.plays >= p0 + 3 && t.pos >= 0 && t.pos <= pass,
+               "a pass of 50 ms paused 400 times at any place: inside the pass %d, %d passes, at frame %" G_GINT64_FORMAT,
+               inside, t.plays, t.pos);
+        walpe_sound_group_free (gp);
+        CHECK (threads_gone (), "period, paused near the end of a pass: the threads end");
+    }
     g_remove (two);
     g_free (two);
 }

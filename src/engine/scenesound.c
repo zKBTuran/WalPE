@@ -1008,7 +1008,15 @@ static gpointer sound_thread (gpointer data)
                  * was read and the rest of it thrown away, so the sound
                  * jumped ahead by up to 2048 frames less 20 ms at every
                  * pause, hide, mute or pause of the scene) */
-                int n = have && k_prev > 0 ? src_read (&src, buf, MIN (WALPE_SOUND_BLOCK, MAX (out.rate / 50, 1))) : 0;
+                /* (of a pass with a length - walpe_sound_set_period - no more
+                 * than the pass has left: these frames are part of it, and
+                 * a pass that had fewer than 20 ms to go was counted past
+                 * its end - the block after the resume then had a negative
+                 * number of frames to fill) */
+                int fade = MIN (WALPE_SOUND_BLOCK, MAX (out.rate / 50, 1));
+                if (pass_n > 0)
+                    fade = (int) CLAMP (pass_n - pass_out, 0, (gint64) fade);
+                int n = have && k_prev > 0 && fade > 0 && !pass_pad ? src_read (&src, buf, fade) : 0;
                 if (n > 0) {
                     played += n;
                     pass_out += n;      /* (they are part of the pass they were taken from) */
@@ -1130,6 +1138,16 @@ static gpointer sound_thread (gpointer data)
          * the open output fits.) */
         out_open (&out, src.rate, src.channels, s->name);
         int n;
+        if (pass_n > 0 && pass_out >= pass_n) {
+            /* the pass ended in the frames a pause faded out with: the next
+             * one begins, as after a pass's last block */
+            g_mutex_lock (&s->lock);
+            s->st.plays++;
+            g_mutex_unlock (&s->lock);
+            src_close (&src);
+            have = FALSE;
+            continue;
+        }
         if (pass_n > 0) {
             /* a pass of exactly pass_n frames: the file, then silence if it
              * is shorter; cut if it is longer */
