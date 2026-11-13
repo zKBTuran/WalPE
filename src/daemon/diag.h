@@ -220,6 +220,12 @@ static char *diag_text (gboolean asked)
     g_string_append_c (s, '\n');
     if (!D.mons)
         g_string_append (s, "monitors: NONE - the daemon runs and shows nothing\n");
+#ifdef WALPE_FOLLOW
+    /* (an output that is tried again says so itself: main.c nosurf_update) */
+    if (mons_no_surface && strchr (mons_no_surface, '['))
+        g_string_append_printf (s, "NO WALLPAPER SURFACE on: %s\n", mons_no_surface);
+    else
+#endif
     if (mons_no_surface)
         g_string_append_printf (s, "NO WALLPAPER SURFACE on: %s (the window system gave none at start; "
                                 "nothing is shown there until the daemon is started again)\n",

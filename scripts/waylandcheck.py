@@ -56,6 +56,13 @@ not what the daemon believes it drew. Each case starts its own daemon:
             its role back, or with WALPE_WL_RECREATE=0 that output gets a new
             surface and its wallpaper again; nothing restarts, the other
             output's wallpaper goes on.
+  nosurface the compositor does not answer the daemon's first wallpaper
+            surfaces (made up with WALPE_WL_NO_CONFIGURE): the daemon starts
+            without a monitor, says so, tries again on its schedule and
+            shows the saved wallpaper once a surface is given; with no
+            answer to any try it says that it gives up, runs on with no
+            monitor (status, walpe-ctl diag), and tries again when the
+            output changes.
   pointer   a scene whose colour follows the pointer follows a pointer
             device that moves over the wallpaper, on the output it is on,
             at the right place also on an output with scale 1.5.
@@ -848,6 +855,78 @@ def case_closed(env, W):
         env.stop_daemon()
 
 
+# ---------------------------------------------------------------- nosurface
+def case_nosurface(env, W):
+    """The compositor does not answer the daemon's first wallpaper surfaces (made up with
+    WALPE_WL_NO_CONFIGURE=n: no compositor here stays silent on request; river 0.4 and
+    later does until its window manager is connected). The daemon starts without a
+    monitor and says so, tries again on its schedule and shows the wallpaper once a
+    surface is given; when the tries are used up it says that it gives up, runs on, and
+    tries again when an output changes."""
+    cfg = dict(CONFIG, current=W["quad"])
+
+    def unanswered(mark):
+        return env.since(mark).count("did not configure the wallpaper surface")
+
+    # the start and the first try stay without an answer, the second try gets one
+    begun = env.mark()
+    if not start(env, [("A", 640, 360, 0, 0)], "nosurface", config=cfg,
+                 extra={"WALPE_WL_NO_CONFIGURE": "2", "WALPE_SURFACE_RETRY_MS": "1000"}):
+        return
+    name, pid = env.mons[0][0], env.daemon.pid
+    ok, _ = follow(env, lambda: rects(env) == {name: [0, 0, 640, 360]}, 30)
+    log = env.since(begun)
+    check(ok and unanswered(begun) == 2 and "NO WALLPAPER SURFACE could be made on it" in log and
+          "tries again in 1 s" in log, "nosurface: no surface at the start: the daemon says so and that it "
+          "tries again; the second try gets one", (rects(env), unanswered(begun), log[-600:]))
+    check("has given it a wallpaper surface now (try 3" in log, "nosurface: the log says at which try", log[-400:])
+    check(lc.loaded(env, W["quad"], timeout=30), "nosurface: the saved wallpaper is loaded on it",
+          rc.brief(env.monitors()))
+    ok, lk = shows_quad(env, name, size=(640, 360))
+    check(ok, "nosurface: ... and shown", lk)
+    st = env.state()
+    check("monitors_without_surface" not in st and st.get("render_threads_waiting") == 0 and
+          not any(r in env.since(begun) for r in RESTART_LINES) and env.daemon.pid == pid,
+          "nosurface: status has no output without a surface any more, nothing restarted",
+          {k: st.get(k) for k in ("monitors_without_surface", "render_threads_waiting")})
+    healthy(env, begun, "nosurface")
+    env.stop_daemon()
+
+    # no answer to the start nor to any of the eight tries; the first one after that gets one
+    begun = env.mark()
+    if not start(env, [("A", 640, 360, 0, 0)], "nosurface, given up", config=cfg,
+                 extra={"WALPE_WL_NO_CONFIGURE": "9", "WALPE_SURFACE_RETRY_MS": "100"}):
+        return
+    name, pid = env.mons[0][0], env.daemon.pid
+    gave = wait_for(lambda: "walpe-daemon gives up on it and runs on" in env.since(begun), 60, 0.3)
+    st = env.state()
+    check(bool(gave) and unanswered(begun) == 9, "nosurface: no answer to the start and to eight tries: the "
+          "daemon says that it gives up", (unanswered(begun), env.since(begun)[-500:]))
+    check(st.get("monitors") == [] and "given up after 9 tries" in (st.get("monitors_without_surface") or "") and
+          name in (st.get("monitors_without_surface") or "") and st.get("render_threads_waiting") == 1,
+          "nosurface: it runs on and answers: status has no monitor, names the output without a surface and "
+          "says that it was given up",
+          {k: st.get(k) for k in ("monitors", "monitors_without_surface", "render_threads_waiting")})
+    diag = (env.ipc({"cmd": "diag"}) or {}).get("text") or ""
+    check("NO WALLPAPER SURFACE on: " + name in diag and "given up" in diag,
+          "nosurface: walpe-ctl diag says the same", diag[-500:])
+    time.sleep(2.0 * PATIENCE)
+    check(unanswered(begun) == 9 and env.daemon.poll() is None, "nosurface: no further try by itself")
+    # an output changes: it is tried again
+    m = env.mark()
+    check(env.display.output(name, mode=(800, 450)), "nosurface: the output gets another mode")
+    ok, _ = follow(env, lambda: rects(env) == {name: [0, 0, 800, 450]}, 30)
+    check(ok and "has given it a wallpaper surface now" in env.since(m), "nosurface: the change of the output makes "
+          "the daemon try again, and now it has a monitor", (rects(env), env.since(m)[-400:]))
+    check(lc.loaded(env, W["quad"], timeout=30), "nosurface: the saved wallpaper is loaded on it",
+          rc.brief(env.monitors()))
+    ok, lk = shows_quad(env, name, size=(800, 450))
+    check(ok and not any(r in env.since(begun) for r in RESTART_LINES) and env.daemon.pid == pid,
+          "nosurface: ... and shown; nothing restarted", lk)
+    healthy(env, begun, "nosurface, given up")
+    env.stop_daemon()
+
+
 # ------------------------------------------------------------------ pointer
 def case_pointer(env, W):
     """The scene is blue where the pointer is at the left edge, red at the right edge
@@ -1465,7 +1544,7 @@ def case_fullscreen(env, W):
 OPT_IN = ("cycles",)
 CASES = [("start", case_start), ("layer", case_layer), ("two", case_two), ("mode", case_mode), ("scale", case_scale),
          ("noviewport", case_noviewport), ("rotate", case_rotate), ("hotplug", case_hotplug),
-         ("follow", case_follow), ("closed", case_closed),
+         ("follow", case_follow), ("closed", case_closed), ("nosurface", case_nosurface),
          ("pointer", case_pointer), ("covered", case_covered), ("fullscreen", case_fullscreen),
          ("backend", case_backend),
          ("noshell", case_noshell), ("cycles", case_cycles), ("lost", case_lost)]

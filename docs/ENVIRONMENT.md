@@ -278,6 +278,8 @@ Not for daily use: test hooks, measuring aids and names the programs set for the
 | `WALPE_FAKE_VSYNC=1` | daemon | every swap waits for an emulated vertical blank (X servers without vsync, such as Xvfb) |
 | `WALPE_FAKE_DPMS=file` / `WALPE_FAKE_POWER=file` | daemon | the display's power state / the power source is read from a file instead of from X / the kernel |
 | `WALPE_WL_IGNORE=interface[,interface...]` | daemon (Wayland) | behave as if the compositor lacked these protocols (`wp_viewporter`, `zwlr_layer_shell_v1`, ...) |
+| `WALPE_WL_NO_CONFIGURE=n` | daemon (Wayland) | the first `n` wallpaper surfaces are made in a way the compositor does not answer (a monitor that gets no surface) |
+| `WALPE_SURFACE_RETRY_MS=n` | daemon (Wayland) | the time before the first new try for a monitor that got no surface (default 2000; each further one doubles it) |
 | `WALPE_WL_CLOSE_AFTER_MS=n` | daemon (Wayland) | `n` milliseconds after the start the first wallpaper surface is treated as if the compositor had closed it while its monitor stays |
 | `WALPE_WL_RECREATE=0` | daemon (Wayland) | when the compositor closes a wallpaper surface: never give the surface its role back; that monitor's wallpaper is loaded again on a new surface (with `wayland_follow` off: the daemon restarts in place) |
 | `WALPE_SIG_WAYLAND_DISPLAY=name` | daemon | the Wayland pause providers (idle, window list) connect to this compositor socket instead of the session's |

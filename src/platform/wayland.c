@@ -299,6 +299,10 @@ static struct {
     gboolean prov_started;
     int recreate_max;
     guint test_close_id;        /* WALPE_WL_CLOSE_AFTER_MS (tests): its timer */
+    int test_no_configure;      /* WALPE_WL_NO_CONFIGURE (tests): layer surfaces still to be
+                                 * made in a way the compositor does not answer */
+    gint64 first_wait_us;       /* how long the next surface_new waits for its first
+                                 * configure; 0 = WL_FIRST_CONFIGURE_US */
 
     gint dead;                  /* atomic: the connection is gone */
     gint no_feedback;           /* atomic: wp_presentation was withdrawn */
@@ -1773,7 +1777,13 @@ static gboolean wl_layer_create_locked (WlSurf *s, gint64 now_us)
     zwlr_layer_surface_v1_set_exclusive_zone (s->layer, -1);
     zwlr_layer_surface_v1_set_keyboard_interactivity (
         s->layer, ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE);
-    wl_surface_commit (s->surface);
+    /* (WALPE_WL_NO_CONFIGURE, tests: without this commit the compositor
+     * has nothing to configure, and stays silent as river 0.4 and later
+     * does while no window manager is connected. Main thread and render
+     * threads come by here: atomic.) */
+    if (!(g_atomic_int_get (&W.test_no_configure) > 0 &&
+          g_atomic_int_add (&W.test_no_configure, -1) > 0))
+        wl_surface_commit (s->surface);
     wl_ls_event (&s->ls, WL_LS_EV_CREATE, 0, 0, 0, now_us);
     return TRUE;
 }
@@ -2106,13 +2116,17 @@ static WalpeSurface *wl_surface_new (const WalpeSurfaceSpec *spec, EGLDisplay dp
 
     if (s->role != WL_ROLE_NONE) {
         gint64 now = g_get_monotonic_time ();
+        /* (a wallpaper surface that is tried again waits a shorter time:
+         * walpe_wayland_surface_wait) */
+        const gint64 wait = s->role == WL_ROLE_LAYER && W.first_wait_us > 0 ? W.first_wait_us
+                                                                           : WL_FIRST_CONFIGURE_US;
         g_mutex_lock (&s->rq_lock);
         g_mutex_lock (&s->lock);
         gboolean ok = s->role == WL_ROLE_LAYER ? wl_layer_create_locked (s, now)
                                                : wl_toplevel_create_locked (s, now);
         g_mutex_unlock (&s->lock);
         if (ok) {
-            if (!wl_wait_queue (s->rq, wl_pred_role_settled, s, now + WL_FIRST_CONFIGURE_US))
+            if (!wl_wait_queue (s->rq, wl_pred_role_settled, s, now + wait))
                 wl_mark_dead ("first configure");
             g_mutex_lock (&s->lock);
             ok = wl_role_handshake_end_locked (s, g_get_monotonic_time ());
@@ -2120,10 +2134,9 @@ static WalpeSurface *wl_surface_new (const WalpeSurfaceSpec *spec, EGLDisplay dp
         }
         g_mutex_unlock (&s->rq_lock);
         if (!ok) {
-            g_warning ("wayland: the compositor did not configure the %s%s within %d s: no surface",
+            g_warning ("wayland: the compositor did not configure the %s%s within %.1f s: no surface",
                        s->role == WL_ROLE_LAYER ? "wallpaper surface on " : "window",
-                       s->out_name ? s->out_name : "",
-                       (int) (WL_FIRST_CONFIGURE_US / G_USEC_PER_SEC));
+                       s->out_name ? s->out_name : "", (double) wait / G_USEC_PER_SEC);
             wl_surf_destroy (s);
             return NULL;
         }
@@ -2198,6 +2211,16 @@ static gboolean wl_surface_set_buffer_size (WalpeSurface *ws, int w, int h)
     }
     g_mutex_unlock (&s->lock);
     return TRUE;
+}
+
+/* Main thread: the wallpaper surfaces made from now on wait this long for
+ * the compositor's first configure; 0 = the time of the start
+ * (WL_FIRST_CONFIGURE_US). The wait is the main thread's: a daemon that
+ * tries an output again now and then must not stand still for seconds
+ * each time. */
+void walpe_wayland_surface_wait (int ms)
+{
+    W.first_wait_us = ms > 0 ? (gint64) MIN (ms, 60000) * 1000 : 0;
 }
 
 /* Main thread: the surface's output has this rectangle, scale and refresh
@@ -3184,6 +3207,11 @@ static gboolean wl_open_once (const WalpePlatformOpts *opts, char **err, gint64 
     W.cursor_size = e && *e ? (int) CLAMP (g_ascii_strtoll (e, NULL, 10), 8, 256) : 24;
     e = g_getenv ("WALPE_WL_RECREATE");
     W.recreate_max = e && !strcmp (e, "0") ? 0 : 3;
+    e = opts->probe || opts->windowed ? NULL : g_getenv ("WALPE_WL_NO_CONFIGURE");
+    W.test_no_configure = e && *e ? (int) CLAMP (g_ascii_strtoll (e, NULL, 10), 0, 1000000) : 0;
+    if (W.test_no_configure)
+        g_message ("wayland: WALPE_WL_NO_CONFIGURE: the first %d wallpaper surface(s) are made in a "
+                   "way the compositor does not answer", W.test_no_configure);
     wl_layer_decide (!opts->probe && !opts->windowed);
     if (!opts->probe)
         W.display_node = wl_dmabuf_device (W.dpy, W.registry, W.dmabuf_name, W.dmabuf_version,

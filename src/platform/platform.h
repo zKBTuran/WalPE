@@ -405,8 +405,9 @@ void walpe_surface_want_pointer (WalpeSurface *s, gboolean want);
  * (walpe_surface_follow_output), so the daemon need not restart when an
  * output moves, changes its scale, refresh rate or mode, goes or comes.
  * FALSE (X11, no backend): every change of the outputs is followed by a
- * restart in place. These three exist only in a build that holds the
- * Wayland backend (HAVE_WAYLAND), like the daemon's code that calls them. */
+ * restart in place. The functions of this section exist only in a build
+ * that holds the Wayland backend (HAVE_WAYLAND), like the daemon's code
+ * that calls them. */
 gboolean walpe_platform_follows_outputs (void);
 /* Main thread: `o` is what the surface's output is now (the same output:
  * the id the surface was made for). The backend takes the rectangle (the
@@ -417,6 +418,11 @@ gboolean walpe_platform_follows_outputs (void);
  * closed it, its output is gone, o is another output): nothing was
  * changed, *w and *h are left alone. */
 gboolean walpe_surface_follow_output (WalpeSurface *s, const WalpeOutput *o, int *w, int *h);
+/* Main thread: how long the WALLPAPER surfaces made from now on wait for
+ * the window system's first answer (walpe_surface_new stands still that
+ * long at most); 0 = the backend's own time, which is the one of the
+ * start. For an output that is tried again after it got no surface. */
+void walpe_platform_surface_wait (int ms);
 /* Render thread, between two frames: give the surface's buffers the size
  * the output has since the last walpe_surface_follow_output. *w, *h: the
  * surface size from now on. FALSE = nothing to do or not possible; *w, *h

@@ -140,6 +140,16 @@ renders on a laptop's discrete GPU where there is one (under Graphics cards;
   build without the Wayland backend has none of this code. Run headless on sway 1.9 and
   1.12, labwc 0.20.2, Wayfire 0.11.0, river 0.3.17 and KWin 6.8.2, software renderer
   ([WAYLAND.md](docs/WAYLAND.md)).
+- A monitor that got no wallpaper surface when the daemon started is tried again. A
+  compositor that was not ready to show wallpapers yet - river 0.4 and later before its
+  window manager is connected, a session still starting - left the daemon running with an
+  empty monitor for good: it said so once and never asked again. It now tries again
+  after 2, 4, 8, 16, 32, 60, 60 and 60 seconds and whenever a monitor changes, shows the
+  saved wallpaper at the first try that is answered, and says in its log,
+  `walpe-ctl diag` and `walpe-ctl status` where the tries stand and when it has given up
+  (after about four minutes; it runs on then, as before). Run on river 0.5.0 with a
+  daemon started 18 seconds before a stand-in window manager: the wallpaper was there at
+  the next try.
 - A still wallpaper (a picture, a scene in which nothing moves, anything paused) on an
   output whose scale or resolution changes: until the daemon had restarted for the new
   layout - two to ten seconds - it was shown at its old size: its top left quarter
@@ -157,10 +167,8 @@ renders on a laptop's discrete GPU where there is one (under Graphics cards;
   says per compositor what was run, what was seen and what could not be run; the three
   entries above this one and the application id under "Library window" come from there.
   Hyprland did not start on the test machine (it needs a graphics device) and is still
-  "expected to work". Two things to know: on river 0.4 and later start `walpe-daemon`
-  after the window manager, or it shows nothing and does not try again; on COSMIC nothing
-  reports a fullscreen window, the wallpaper behind one pauses through "pause when
-  covered" (on by default) only.
+  "expected to work". One thing to know: on COSMIC nothing reports a fullscreen window,
+  the wallpaper behind one pauses through "pause when covered" (on by default) only.
 
 ### X11 desktops
 

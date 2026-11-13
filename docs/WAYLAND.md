@@ -166,6 +166,21 @@ only made while the daemon starts. From then on that monitor comes and goes in p
 of the two happened: `monitor layout changed (now: ...): followed in place (...)` or
 `... restarting to follow it`.
 
+### An output without a surface
+
+The daemon asks the compositor for one wallpaper surface per monitor and waits three
+seconds for each to be configured. A compositor that is not ready for that yet - river
+0.4 and later before its window manager is connected, a session that is still starting -
+leaves the monitor without one. The daemon then says `NO WALLPAPER SURFACE could be made`
+in its log, runs on (its window and `walpe-ctl` work), and tries that monitor again:
+after 2, 4, 8, 16, 32, 60, 60 and 60 seconds, each try waiting half a second for the
+compositor, and at once whenever a monitor changes. The first try that is answered loads
+the saved wallpaper. After the eighth (about four minutes) it says that it gives up on
+that monitor and stays as it is until a monitor changes or it is started again.
+`walpe-ctl status` (`monitors_without_surface`) and `walpe-ctl diag` say at any time
+which monitor has no surface and where the tries stand. (Up to 0.14.0 there was no second
+try. With `wayland_follow = off` there still is none.)
+
 When the compositor goes away the daemon shuts down in order and exits with status 1, as it
 does when an X server goes away. `wayland_reconnect = <seconds>` in `gpu.conf`
 ([GPU-PRESENT.md](GPU-PRESENT.md)) makes it restart in place instead and wait that long for
@@ -372,8 +387,8 @@ run by desktops such as GNOME, KDE and Xfce. sway, Hyprland, river, niri, Wayfir
 labwc do not run them by themselves; start the engine from the compositor's configuration
 (sway: `exec walpe-daemon`, `exec walpe-tray`; Hyprland: `exec-once = ...`; niri:
 `spawn-at-startup "walpe-daemon"`; labwc: a line in `~/.config/labwc/autostart`;
-Wayfire: its `autostart` plugin; river: its `init` script, from 0.4 on after the window
-manager, see [below](#compositors-that-were-run)). With the systemd user unit
+Wayfire: its `autostart` plugin; river: its `init` script, from 0.4 on best after the
+window manager, see [below](#compositors-that-were-run)). With the systemd user unit
 (`data/walpe.service`) the user manager must know the display: compositors started outside
 systemd need, once per session, `systemctl --user import-environment WAYLAND_DISPLAY
 XDG_CURRENT_DESKTOP`.
@@ -647,9 +662,11 @@ application id than its dialogs in a session without a D-Bus session bus.
   supports the layer shell (`river_layer_shell_v1`) is connected. Run on 0.5.0: with no
   window manager, or with one that does not bind that protocol, the wallpaper's surface is
   never configured; the daemon says `NO WALLPAPER SURFACE` after three seconds, keeps
-  running and **does not try again**, also when the window manager arrives later. Start
+  running and tries again (see [An output without a surface](#an-output-without-a-surface)):
+  started 18 seconds before a stand-in window manager, it showed the wallpaper at its
+  next try, 30 seconds after its start; up to 0.14.0 it never tried again. Starting
   `walpe-daemon` after the window manager (in river's `init`: the window manager first,
-  then `walpe-daemon`; if the wallpaper is missing, `walpe-ctl quit` and start it again).
+  then `walpe-daemon`) saves the wait.
   With a stand-in window manager that supports the layer shell the wallpaper was shown
   below windows, and a fullscreen window paused it through "pause when covered"; river's
   window list named neither the window's output nor its fullscreen state there, which may
@@ -676,8 +693,8 @@ application id than its dialogs in a session without a D-Bus session bus.
 
 - Nothing above has been confirmed on a real compositor session, a real output or a GPU.
   That includes web wallpapers on the private page host, which were run on sway only.
-- On river 0.4 and later a daemon that is started before the window manager shows
-  nothing and does not try again ([Notes per compositor](#notes-per-compositor)).
+- An output that gets no surface is tried again for about four minutes and then given
+  up until an output changes ([An output without a surface](#an-output-without-a-surface)).
   Not seen at all: `linux-dmabuf`, a hardware EGL on Wayland, connector names of real
   outputs, DPMS on a real connector, presentation feedback with a real refresh period.
 - 8 bits per channel, sRGB; no HDR, no colour management protocol.

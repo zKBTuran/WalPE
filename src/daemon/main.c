@@ -9616,6 +9616,138 @@ static int layout_owed_looks;   /* ... and has done so this often */
 static gboolean layout_pending_set;     /* layout_pending holds a layout (one without
                                          * any output is one too) */
 
+/* ---- an output no surface could be made on
+ * walpe_surface_new waits three seconds for the compositor to configure a
+ * wallpaper surface. Where no answer came the daemon said so once and
+ * left that output empty for good: a daemon started before the compositor
+ * was ready to show layer surfaces - river 0.4 and later until its window
+ * manager is connected, a session that is still starting - ran, answered
+ * and showed nothing until somebody started it again.
+ * Such an output is tried again: NOSURF_TRIES times, the first try two
+ * seconds after the failure and each one twice as long after the one
+ * before, a minute at most (2, 4, 8, 16, 32, 60, 60, 60 s: four minutes
+ * in all), each waiting half a second for the answer, and at once
+ * whenever the outputs change. A render thread waits for it meanwhile
+ * (mon_make_waiting: at the start one is made for an output without a
+ * surface, with its context, so that the surface can be given to it
+ * later). When the tries are used up the log, `walpe-ctl diag` and status
+ * say that it was given up; the next change of an output begins anew. The
+ * daemon runs on either way: its window and walpe-ctl go on working.
+ * Not without layout_follow (X11 has no such failure; `wayland_follow =
+ * off` and --monitor N keep the old way: said once, never tried again). */
+#define NOSURF_TRIES 8
+#define NOSURF_WAIT_MS 500
+static GPtrArray *nosurf;       /* char *: names of the outputs without a surface */
+static int nosurf_tries;        /* tries made since the first failure, or since the outputs
+                                 * changed last */
+static int nosurf_total;        /* tries since the first failure, the failure included */
+static gint64 nosurf_since_us;  /* when that was */
+static guint nosurf_timer;      /* the next try */
+static gboolean nosurf_due;     /* ... is now (layout_check) */
+static gboolean nosurf_gave_up;
+
+static gboolean nosurf_has (const char *name)
+{
+    for (guint i = 0; nosurf && i < nosurf->len; i++)
+        if (!g_strcmp0 (g_ptr_array_index (nosurf, i), name))
+            return TRUE;
+    return FALSE;
+}
+
+/* WALPE_SURFACE_RETRY_MS (tests): the time before the first try, 2000 */
+static guint nosurf_delay_ms (int tries)
+{
+    static guint base;
+    if (!base) {
+        const char *e = g_getenv ("WALPE_SURFACE_RETRY_MS");
+        base = e && *e ? (guint) CLAMP (g_ascii_strtoll (e, NULL, 10), 10, 60000) : 2000;
+    }
+    return MIN (base << MIN (tries, 8), base * 30);
+}
+
+static gboolean layout_check (gpointer user);
+
+static gboolean nosurf_retry_cb (gpointer user)
+{
+    (void) user;
+    nosurf_timer = 0;
+    nosurf_due = TRUE;
+    if (layout_timer)
+        g_source_remove (layout_timer);
+    layout_timer = 0;
+    layout_check (NULL);
+    return G_SOURCE_REMOVE;
+}
+
+/* main: the names in `nosurf` changed, or a round of tries is over: what
+ * status and the summary say, and when the next try is. tried: this was a
+ * try (not the failure that begins a round). */
+static void nosurf_update (gboolean tried)
+{
+    g_clear_pointer (&mons_no_surface, g_free);
+    /* (the time of the next try stands while nothing was tried: a look at
+     * the outputs for another reason must not put it off) */
+    if (nosurf_timer && (tried || !nosurf || !nosurf->len)) {
+        g_source_remove (nosurf_timer);
+        nosurf_timer = 0;
+    }
+    if (!nosurf || !nosurf->len) {
+        nosurf_tries = nosurf_total = 0;
+        nosurf_gave_up = FALSE;
+        return;
+    }
+    GString *names = g_string_new (NULL);
+    for (guint i = 0; i < nosurf->len; i++)
+        g_string_append_printf (names, "%s%s", i ? ", " : "", (char *) g_ptr_array_index (nosurf, i));
+    if (tried)
+        nosurf_tries++;
+    if (!nosurf_total)
+        nosurf_since_us = g_get_monotonic_time ();
+    if (tried || !nosurf_total)
+        nosurf_total++;
+    const int secs = (int) ((g_get_monotonic_time () - nosurf_since_us) / G_USEC_PER_SEC);
+    if (nosurf_tries >= NOSURF_TRIES) {
+        if (!nosurf_gave_up)
+            g_warning ("NO WALLPAPER SURFACE on %s: the window system gave none in %d tries over "
+                       "%d s. walpe-daemon gives up on it and runs on; it begins to try again when "
+                       "an output changes, or start it again (walpe-ctl quit, then walpe-daemon) "
+                       "once the desktop is up", names->str, nosurf_total, secs);
+        nosurf_gave_up = TRUE;
+        mons_no_surface = g_strdup_printf ("%s [given up after %d tries over %d s; tried again when "
+                                           "an output changes]", names->str, nosurf_total, secs);
+    } else {
+        const guint ms = nosurf_delay_ms (nosurf_tries);
+        nosurf_gave_up = FALSE;
+        if (!nosurf_timer)
+            nosurf_timer = g_timeout_add (ms, nosurf_retry_cb, NULL);
+        mons_no_surface = g_strdup_printf ("%s [%d tries without an answer; the next one follows "
+                                           "%g s after the last, %d more at most]", names->str,
+                                           nosurf_total, ms / 1000.0, NOSURF_TRIES - nosurf_tries);
+    }
+    g_string_free (names, TRUE);
+}
+
+/* main, at the start, before the render threads exist: a monitor without
+ * an output, for the output that got no surface. Its thread makes its
+ * context with the others' and waits (mon_thread). */
+static void mon_make_waiting (void)
+{
+    Mon *m = g_new0 (Mon, 1);
+    m->name = g_strdup ("-");
+    m->index = -1;
+    m->ptr_lx = m->ptr_ly = -2.0f;
+    m->surf = EGL_NO_SURFACE;
+    m->present_iv_applied = -1;
+    m->present_iv = 1;
+    m->clip_n = -1;
+    g_mutex_init (&m->lock);
+    g_cond_init (&m->cond);
+    g_cond_init (&m->mem_cond);
+    m->parked = TRUE;
+    m->park_told = TRUE;
+    mons_parked = g_list_append (mons_parked, m);
+}
+
 static gboolean layout_follow_on (void)
 {
     static int on = -1;
@@ -9803,11 +9935,24 @@ typedef enum { FOLLOW_NO, FOLLOW_DONE, FOLLOW_WAIT } FollowResult;
  * thread is still letting go of the output it had: look again shortly.
  * NO: nothing was changed (or nothing that a restart does not make anew):
  * the caller restarts in place. */
-static FollowResult layout_follow (const WalpeOutputList *l)
+static gboolean layout_follows (void)
 {
-    if (!walpe_platform_follows_outputs () || D.windowed || layout_only >= 0 || swap_restart ||
-        !layout_follow_on ())
+    return walpe_platform_follows_outputs () && !D.windowed && layout_only < 0 && layout_follow_on ();
+}
+
+static FollowResult layout_follow (const WalpeOutputList *l, gboolean changed)
+{
+    if (!layout_follows () || swap_restart)
         return FOLLOW_NO;
+    /* outputs that got no surface are tried again when their time has
+     * come, and whenever the outputs changed */
+    const gboolean retry = changed || nosurf_due;
+    nosurf_due = FALSE;
+    if (changed) {
+        /* (and what was given up is tried from the start of the schedule) */
+        nosurf_tries = 0;
+        nosurf_gave_up = FALSE;
+    }
     guint n = g_list_length (D.mons), i = 0;
     Mon **ms = g_new0 (Mon *, n + 1);
     gboolean *dead = g_new0 (gboolean, n + 1);
@@ -9885,26 +10030,50 @@ static FollowResult layout_follow (const WalpeOutputList *l)
     g_free (fit_h);
     /* 3. the outputs without a monitor */
     GList *fresh = NULL;
-    GString *none = g_string_new (NULL);
-    gboolean owed = FALSE;
+    GPtrArray *none = g_ptr_array_new_with_free_func (g_free);
+    gboolean owed = FALSE, tried = FALSE;
     for (int j = 0; j < l->n; j++) {
         gboolean have = p.seen_from[j] >= 0 && !dead[p.seen_from[j]];
         if (have)
             continue;
+        const gboolean before = nosurf_has (l->o[j].name);
+        if (before && !retry) {
+            g_ptr_array_add (none, g_strdup (l->o[j].name));    /* (its next try has a time) */
+            continue;
+        }
         Mon *m = mon_parked_ready ();
         if (!m) {
             owed = TRUE;        /* (its thread is on its way: mon_parked_cb) */
+            if (before)
+                g_ptr_array_add (none, g_strdup (l->o[j].name));
             continue;
         }
-        if (mon_attach (m, &l->o[j], j)) {
+        if (before) {
+            tried = TRUE;
+            walpe_platform_surface_wait (NOSURF_WAIT_MS);
+        }
+        Mon *got = mon_attach (m, &l->o[j], j);
+        walpe_platform_surface_wait (0);
+        if (got) {
             fresh = g_list_prepend (fresh, m);
             attached++;
+            if (before)
+                g_message ("monitor %d (%s): the window system has given it a wallpaper surface now "
+                           "(try %d, %.0f s after the first)", j, l->o[j].name, nosurf_total + 1,
+                           (g_get_monotonic_time () - nosurf_since_us) / 1e6);
         } else {
-            g_string_append_printf (none, "%s%s", none->len ? ", " : "", l->o[j].name);
-            g_warning ("monitor %d (%s): NO WALLPAPER SURFACE could be made on it (the line above "
-                       "says why): nothing is shown there", j, l->o[j].name);
+            g_ptr_array_add (none, g_strdup (l->o[j].name));
+            if (!before)
+                g_warning ("monitor %d (%s): NO WALLPAPER SURFACE could be made on it (the line above "
+                           "says why): nothing is shown there. walpe-daemon tries again in %g s, "
+                           "%d times in all", j, l->o[j].name, nosurf_delay_ms (0) / 1000.0,
+                           NOSURF_TRIES);
         }
     }
+    if (nosurf)
+        g_ptr_array_unref (nosurf);
+    nosurf = none;
+    nosurf_update (tried);
     D.mons = g_list_sort (D.mons, mon_index_cmp);
     /* 4. the layout the daemon runs with, and what is worked out from it */
     walpe_output_list_free (&layout_now);
@@ -9921,8 +10090,6 @@ static FollowResult layout_follow (const WalpeOutputList *l)
                    owed ? "; an output waits for a render thread that is still busy" : "");
         g_string_free (d, TRUE);
     }
-    g_free (mons_no_surface);
-    mons_no_surface = none->len ? g_string_free (none, FALSE) : (g_string_free (none, TRUE), NULL);
     D.max_hz = 0.0;
     for (GList *it = D.mons; it; it = it->next)
         D.max_hz = MAX (D.max_hz, ((Mon *) it->data)->hz);
@@ -9979,8 +10146,8 @@ static gboolean layout_check (gpointer user)
          * layout the daemon is on already, with something still owed) */
         const gboolean same = walpe_output_list_equal (&l, &layout_now);
         const gboolean held = layout_pending_set && walpe_output_list_equal (&l, &layout_pending);
-        if (same ? (layout_force || layout_owed) : held) {
-            FollowResult fr = layout_follow (&l);
+        if (same ? (layout_force || layout_owed || nosurf_due) : held) {
+            FollowResult fr = layout_follow (&l, !same);
             if (fr != FOLLOW_NO) {
                 walpe_output_list_free (&layout_pending);
                 layout_pending_set = FALSE;
@@ -11242,10 +11409,28 @@ int main (int argc, char **argv)
                     nm->hz = o->refresh_hz;
                     D.max_hz = MAX (D.max_hz, o->refresh_hz);
                 } else {
+#ifdef WALPE_FOLLOW
+                    if (layout_follows ()) {
+                        /* tried again later: a render thread waits for it */
+                        if (!nosurf)
+                            nosurf = g_ptr_array_new_with_free_func (g_free);
+                        g_ptr_array_add (nosurf, g_strdup (o->name));
+                        mon_make_waiting ();
+                        g_warning ("monitor %d (%s): NO WALLPAPER SURFACE could be made on it (the "
+                                   "line above says why): nothing is shown there. walpe-daemon tries "
+                                   "again in %g s, %d times in all (each try twice as long after "
+                                   "the one before, a minute at most), and whenever an output "
+                                   "changes", i, o->name, nosurf_delay_ms (0) / 1000.0, NOSURF_TRIES);
+                    } else
+#endif
                     diag_mon_failed (i, o->name);   /* said, and kept for status */
                 }
             }
         diag_mons_checked (nmon);
+#ifdef WALPE_FOLLOW
+        if (nosurf)
+            nosurf_update (FALSE);  /* what status says of them, and the first try */
+#endif
     }
 
     {
@@ -11305,6 +11490,12 @@ int main (int argc, char **argv)
     present_init ();   /* swap interval per monitor, before its thread starts */
     /* one render thread per monitor: owns its EGL context for life */
     ctx_expected = (int) g_list_length (D.mons);
+#ifdef WALPE_FOLLOW
+    /* (and one per output that got no surface: mon_make_waiting) */
+    ctx_expected += (int) g_list_length (mons_parked);
+    for (GList *l = mons_parked; l; l = l->next)
+        ((Mon *) l->data)->thread = g_thread_new ("walpe-mon-w", mon_thread, l->data);
+#endif
     for (GList *l = D.mons; l; l = l->next) {
         Mon *m = l->data;
         m->pause_wanted = m->self_paused = m->own_paused = want_pause_mon (m);
