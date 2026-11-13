@@ -451,9 +451,17 @@ static void cap_ctx_state (pa_context *ctx, void *user)
  * the one it listens to (both names known) */
 static void cap_follow (Cap *c)
 {
-    if (c->chosen || c->restart || !c->checked || !c->sink || !c->def_sink ||
-        !strcmp (c->sink, c->def_sink))
+    if (c->chosen || c->restart || !c->checked || !c->sink || !c->def_sink)
         return;
+    if (!strcmp (c->sink, c->def_sink)) {
+        /* on the default output: the note below has done its work. (It
+         * was kept: a headset that was followed to, unplugged - the
+         * stream ends and is made again on the loudspeakers, which is no
+         * following - and plugged in again was the output "followed
+         * last", and the stream stayed on the loudspeakers' monitor) */
+        g_clear_pointer (c->followed, g_free);
+        return;
+    }
     /* once per default output: a server that names one output as the
      * default and hands out the monitor of another when asked for the
      * default's would have the stream made again for ever */

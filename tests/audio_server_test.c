@@ -22,6 +22,8 @@
  *     monitor (it stayed on the old output's: the bars stood still).
  *  4. That output goes away: the capture goes on with the one that is the
  *     default then, without an error.
+ *  4b. The output that went away comes back and is the default again (a
+ *     headset plugged in a second time): the capture follows once more.
  *  5. WALPE_AUDIO_SOURCE names the microphone: the user's choice is read. */
 #include "common/audio.h"
 #include <glib.h>
@@ -350,6 +352,19 @@ int main (void)
     }
     g_free (st);
     g_free (def);
+
+    /* 4b. the output that went away is back and the default again: it was
+     * the output "followed last" (step 3) and was not followed a second
+     * time - the capture stayed on the monitor of the output nothing
+     * plays on any more */
+    out2 = pactl ("load-module", "module-null-sink", "sink_name=out2", NULL);
+    CHECK (out2 != NULL, "no sink out2 the second time");
+    CHECK (pactl_ok ("set-default-sink", "out2", NULL, NULL), "default sink out2, the second time");
+    CHECK (status_is ("capturing out2.monitor", 5000), "the capture did not follow to an output that came back");
+    t = tone_start ("out2", 1000.0);
+    CHECK (hears (35, 5000), "the output that came back is not heard");
+    tone_stop (t);
+    g_free (out2);
 
     /* 5. the user names the microphone. (The capture thread reads the
      * variable when it makes a stream: it has ended by then, 3 s after
