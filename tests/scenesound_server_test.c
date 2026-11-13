@@ -423,27 +423,57 @@ static void test_stalled_stream (const char *wav)
     CHECK (line && strstr (line, "1 stream(s) through") && !g_atomic_int_get (&said_nothing),
            "... and nothing is said to play into nothing: %s", line ? line : "(null)");
     g_free (line);
+    /* The stream that took its place plays, is paused (its drain is
+     * answered) and after the resume takes nothing either: the same fault,
+     * of this stream - not "the new stream stalls too". A new one with
+     * the next block again, and no five seconds into nothing (two such
+     * resumes within half a minute: about one resume in thirty does it on
+     * pipewire-pulse 1.0.5, and a wallpaper under windows is paused and
+     * resumed every few seconds). */
+    WAIT (frames_of (p) > f + 48000, 3000);
+    walpe_sound_group_set_active (g, FALSE);
+    g_usleep (300000);
+    CHECK (g_atomic_int_get (&closed) == closed0 + 2 && g_atomic_int_get (&opened) == opened0 + 3,
+           "paused again, the drain answered: the stream is kept");
+    f = frames_of (p);
+    g_atomic_int_set (&stall_write, 1);
+    g_atomic_int_set (&said_nothing, 0);
+    t0 = g_get_monotonic_time ();
+    walpe_sound_group_set_active (g, TRUE);
+    WAIT (g_atomic_int_get (&opened) == opened0 + 4 && frames_of (p) > f + 9600, 3000);
+    ms = (g_get_monotonic_time () - t0) / 1e3;
+    line = walpe_sound_status ();
+    CHECK (g_atomic_int_get (&opened) == opened0 + 4 && g_atomic_int_get (&closed) == closed0 + 3 &&
+           frames_of (p) > f + 9600 && ms < 1500.0 && !g_atomic_int_get (&said_nothing) &&
+           line && strstr (line, "1 stream(s) through"),
+           "resumed a second time within half a minute, the write after the answered drain not taken: a new "
+           "stream with the next block (%d opened, wanted 4; %d closed, wanted 3; heard again after %.0f ms; "
+           "\"playing into nothing\" said %d time(s), wanted 0; %s)",
+           g_atomic_int_get (&opened) - opened0, g_atomic_int_get (&closed) - closed0, ms,
+           g_atomic_int_get (&said_nothing), line ? line : "(null)");
+    g_free (line);
+    const gint c1 = closed0 + 1;    /* (what follows counts from the stream that plays now) */
     /* the new stream is not taken either, nor the next: it is not the
      * stream (a suspended sink). No stream after stream: into nothing, the
      * next one after the usual five seconds; said once. */
     const gint o3 = g_atomic_int_get (&opened);
     g_atomic_int_set (&stall_write, 1);
-    WAIT (g_atomic_int_get (&closed) == closed0 + 3, 3000);
+    WAIT (g_atomic_int_get (&closed) == c1 + 3, 3000);
     f = frames_of (p);
     g_usleep (2000000);
-    CHECK (g_atomic_int_get (&closed) == closed0 + 3 && g_atomic_int_get (&opened) == o3 &&
+    CHECK (g_atomic_int_get (&closed) == c1 + 3 && g_atomic_int_get (&opened) == o3 &&
            g_atomic_int_get (&said_nothing) == 1 && frames_of (p) > f + 48000,
            "the new stream stalls too: no other one for now (%d opened in 2 s), the player goes on into nothing "
            "(%" G_GINT64_FORMAT " frames) and says so once (%d)", g_atomic_int_get (&opened) - o3,
            frames_of (p) - f, g_atomic_int_get (&said_nothing));
     g_atomic_int_set (&stall_write, 1);
     const gint lines0 = g_atomic_int_get (&said_lines);
-    WAIT (g_atomic_int_get (&closed) == closed0 + 4, 6000);
+    WAIT (g_atomic_int_get (&closed) == c1 + 4, 6000);
     g_usleep (100000);
-    CHECK (g_atomic_int_get (&closed) == closed0 + 4 && g_atomic_int_get (&opened) == o3 + 1 &&
+    CHECK (g_atomic_int_get (&closed) == c1 + 4 && g_atomic_int_get (&opened) == o3 + 1 &&
            g_atomic_int_get (&said_lines) == lines0,
            "... the stream asked for five seconds later stalls as well: given up (%d closed, wanted 4), and "
-           "nothing more is said (%d line(s))", g_atomic_int_get (&closed) - closed0,
+           "nothing more is said (%d line(s))", g_atomic_int_get (&closed) - c1,
            g_atomic_int_get (&said_lines) - lines0);
     WAIT (g_atomic_int_get (&opened) == o3 + 2 && frames_of (p) > 0, 7000);
     f = frames_of (p);

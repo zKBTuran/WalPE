@@ -486,7 +486,8 @@ it was). A bare window manager on X11 - dwm, i3, openbox - gets the window of 0.
   (WirePlumber 0.5.19) or PulseAudio 16.1. Every call into the sound server now has a
   time limit, a stream that does not answer in time is given up, and a new one is opened
   with the next sound: with PipeWire 1.0.5 the sound is then back about half a second
-  after the resume where it was gone before (no silent resume in 460; 11 in 270 before). A
+  after the resume where it was gone before (no resume silent for more than three seconds
+  in 800, 12 streams given up and replaced; 10 of 300 silent for good before). A
   sound server that is stopped, or a sink that is suspended, no longer holds a sound
   thread either: the wallpaper plays on without sound and asks again every 5 seconds.
   WalPE makes these calls with libpulse itself; `libpulse-simple.so.0` is no longer

@@ -419,6 +419,8 @@ typedef struct {
     gboolean slot;        /* holds one of the process's streams (stream_take): from
                            * before the player opens a file until out_close */
     gboolean drained;     /* the server has played all the stream was given (out_drain) */
+    gboolean redrained;   /* the stream was drained (answered) and has taken less than ... */
+    gint64 redrained_n;   /* ... AFTER_DRAIN_S of sound since: so many frames */
     gint64 next_us;       /* null device: when the next block is due */
     gint64 retry_us;      /* nowhere: ask the server again then */
     gint64 stall_us;      /* when a stream of this player last stalled (out_write); 0 = none did */
@@ -428,6 +430,9 @@ typedef struct {
 #define SERVER_RETRY_US (5 * G_USEC_PER_SEC)
 /* a stream that stalls so soon after the one it replaced: not the stream */
 #define STALL_AGAIN_US (30 * G_USEC_PER_SEC)
+/* ... unless it had been drained and stalls with the first sound after
+ * that (less than this much taken since the answer): that is the stream */
+#define AFTER_DRAIN_S 1
 
 /* ---- the process's streams ----
  * Every player with an output has a connection of its own to the sound
@@ -703,6 +708,7 @@ static void out_close (Out *o, int how)
     o->rate = o->channels = 0;
     o->null_out = FALSE;
     o->drained = FALSE;
+    o->redrained = FALSE;
     o->next_us = o->retry_us = 0;
     if (o->slot) {
         o->slot = FALSE;
@@ -732,10 +738,12 @@ static void out_drain (Out *o)
 #ifdef HAVE_PULSE
     if (o->pa && !o->drained) {
         int e = 0;
-        if (Pas.drain (o->pa, &e) == 0)
-            o->drained = TRUE;
-        else
+        if (Pas.drain (o->pa, &e) == 0) {
+            o->drained = o->redrained = TRUE;
+            o->redrained_n = 0;
+        } else {
             out_close (o, OUT_DROP);
+        }
     }
 #else
     (void) o;
@@ -782,6 +790,8 @@ static void out_write (Out *o, const gint16 *buf, int frames, const char *name)
         int e = 0;
         if (Pas.write (o->pa, buf, (size_t) frames * (size_t) o->channels * 2, &e) == 0) {
             o->drained = FALSE;
+            if (o->redrained && (o->redrained_n += frames) >= (gint64) o->rate * AFTER_DRAIN_S)
+                o->redrained = FALSE;
             return;
         }
         /* A stream the server stopped taking data into (the time limit of
@@ -793,10 +803,21 @@ static void out_write (Out *o, const gint16 *buf, int frames, const char *name)
          * STALL_AGAIN_US): it is not the stream - a sink that is suspended
          * takes nothing from any - and the player goes on into nothing and
          * asks every SERVER_RETRY_US like after any other loss, which is
-         * said once for as long as that lasts. */
+         * said once for as long as that lasts.
+         * Not so a stream that played, was drained at a pause (answered)
+         * and stalls with the first sound after it: that is the fault of
+         * this stream once more, whenever the one before it stalled. It
+         * was taken for "the new stream stalls too": two resumes that met
+         * the fault within STALL_AGAIN_US - one resume in about thirty
+         * does on pipewire-pulse 1.0.5, and a wallpaper under windows is
+         * paused and resumed every few seconds - and the second one was
+         * silent for SERVER_RETRY_US (seen 1.9 s after the first, with a
+         * server that took the next stream at once). A sink that is
+         * suspended is still found out: the stream that follows a drained
+         * one there has not been drained when it stalls. */
         const gint64 now = g_get_monotonic_time ();
         const gboolean stalled = e == PA_ERR_TIMEOUT;
-        const gboolean again = stalled && o->stall_us && now - o->stall_us < STALL_AGAIN_US;
+        const gboolean again = stalled && !o->redrained && o->stall_us && now - o->stall_us < STALL_AGAIN_US;
         if (!stalled)
             g_message ("sound: %s: output lost (%s): playing into nothing, asking again every %d s",
                        walpe_log_str (name), pa_strerror (e), (int) (SERVER_RETRY_US / G_USEC_PER_SEC));
@@ -818,6 +839,7 @@ static void out_write (Out *o, const gint16 *buf, int frames, const char *name)
         o->said = !stalled;     /* (a stalled stream: what there is to say was said above) */
         o->null_out = TRUE;
         o->drained = FALSE;
+        o->redrained = FALSE;
         out_set_nowhere (o, TRUE);
         o->next_us = 0;
         o->retry_us = now + (stalled && !again ? 0 : SERVER_RETRY_US);

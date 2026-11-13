@@ -106,7 +106,9 @@ covered monitor, mute) the server plays out what the stream holds and is waited 
 one second more than that takes. A stream that runs out of time is given up without
 another word to it, and a new one is opened with the next sound - at once when it was the
 stream that stalled; after the usual 5 seconds when the new one stalls as well (a sink
-that is suspended takes nothing from any stream) or when none is given. For a stream that
+that is suspended takes nothing from any stream; not so a stream that had played and been
+played out itself before it stalled: that is the stream again, and the next one is opened
+at once) or when none is given. For a stream that
 was played out and is then used again - a resume within two seconds of the pause - the
 limit is 0.3 seconds until the server asks for more sound for the first time:
 `pipewire-pulse` 1.0.5 (Ubuntu 24.04) now and then leaves such a stream standing - it
