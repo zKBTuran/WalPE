@@ -66,7 +66,9 @@ not what the daemon believes it drew. Each case starts its own daemon:
             shows the saved wallpaper once a surface is given; with no
             answer to any try it says that it gives up, runs on with no
             monitor (status, walpe-ctl diag), and tries again when the
-            output changes (that last part with wayland_follow on).
+            output changes (that last part with wayland_follow on). And a
+            waiting render thread that ended without an EGL context (made up
+            with WALPE_WL_NO_CONTEXT) is not waited for when the daemon ends.
   pointer   a scene whose colour follows the pointer follows a pointer
             device that moves over the wallpaper, on the output it is on,
             at the right place also on an output with scale 1.5.
@@ -1016,6 +1018,37 @@ def case_nosurface(env, W):
     check(ok and not any(r in env.since(begun) for r in RESTART_LINES) and env.daemon.pid == pid,
           "nosurface: ... and shown; nothing restarted", lk)
     healthy(env, begun, "nosurface, given up")
+    env.stop_daemon()
+
+    # The render thread that waits for the output has ended meanwhile: it got no EGL
+    # context (made up with WALPE_WL_NO_CONTEXT) and said so. The monitor is given its
+    # surface at the next try all the same, and the record that is made anew for it
+    # must go on saying that its thread has ended: the daemon's end waits for every
+    # thread that has not (it waited its ten seconds for this one and then left without
+    # taking itself apart).
+    begun = env.mark()
+    if not start(env, [("A", 640, 360, 0, 0)], "nosurface, no context", config=cfg,
+                 extra={"WALPE_WL_NO_CONFIGURE": "1", "WALPE_SURFACE_RETRY_MS": "1000", "WALPE_WL_NO_CONTEXT": "1"}):
+        return
+    given = wait_for(lambda: "has given it a wallpaper surface now" in env.since(begun), 20)
+    log = env.since(begun)
+    check(bool(given) and "EGL context unusable; thread exits" in log, "nosurface, no context: the waiting "
+          "thread ends without a context, the next try gives the monitor its surface", log[-600:])
+    time.sleep(2.0)
+    check(env.daemon.poll() is None and not any(r in env.since(begun) for r in RESTART_LINES),
+          "nosurface, no context: the daemon runs on and does not restart for it")
+    t0 = time.time()
+    env.ipc({"cmd": "quit"})
+    try:
+        status = env.daemon.wait(timeout=30 * PATIENCE)
+    except subprocess.TimeoutExpired:
+        status = None
+    took = time.time() - t0
+    check(status == 0 and took < 5.0 and "has not come back from a frame or a load" not in env.since(begun),
+          "nosurface, no context: quit ends the daemon at once, with status 0: it waits for no thread that has "
+          "ended", (status, round(took, 1), env.since(begun)[-500:]))
+    if status is not None:
+        env.daemon = None
     env.stop_daemon()
 
 

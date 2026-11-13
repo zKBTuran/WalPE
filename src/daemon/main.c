@@ -2344,6 +2344,15 @@ static gpointer mon_thread (gpointer data)
 #else
     const gboolean begun = TRUE;
 #endif
+#ifdef WALPE_FOLLOW
+    /* WALPE_WL_NO_CONTEXT (tests): the thread of a monitor that starts
+     * without an output gets no context, as from a driver that refuses
+     * one more. (Read here, once per such thread, before any frame.) */
+    if (!begun && m->ctx != EGL_NO_CONTEXT && g_getenv ("WALPE_WL_NO_CONTEXT")) {
+        eglDestroyContext (D.egl_dpy, m->ctx);
+        m->ctx = EGL_NO_CONTEXT;
+    }
+#endif
     if (m->ctx == EGL_NO_CONTEXT ||
         (begun && !eglMakeCurrent (D.egl_dpy, m->surf, m->surf, m->ctx))) {
         g_warning ("monitor %d: EGL context unusable; thread exits", m->index);
@@ -10073,9 +10082,10 @@ static void mon_park (Mon *m, const char *why)
     g_mutex_unlock (&m->lock);
 }
 
-/* main, m->lock held, m's thread waits in mon_park_wait: the record as
- * g_new0 gave it, but for what the waiting thread stands on (the lock, the
- * conditions, the thread, its context) and its count of outputs */
+/* main, m->lock held, m's thread waits in mon_park_wait (or has ended
+ * without a context): the record as g_new0 gave it, but for what the
+ * waiting thread stands on (the lock, the conditions, the thread, its
+ * context), its count of outputs, and whether the thread has ended */
 static void mon_wipe (Mon *m)
 {
     g_free (m->load_path);
@@ -10102,6 +10112,11 @@ static void mon_wipe (Mon *m)
     const EGLContext ctx = m->ctx;
     const guint life = m->life;
     const gboolean quitting = m->quitting;
+    /* (a thread that got no context has left for good, mon_thread: the
+     * new record must not say that it is still there - the daemon's end
+     * waits ten seconds for every thread that has not ended, and then
+     * leaves without taking itself apart) */
+    const gint ended = g_atomic_int_get (&m->thread_ended);
     char *base = (char *) m;
     /* [start, lock) [thread, mem_cond) (mem_cond, end): lock and cond lie
      * side by side */
@@ -10116,12 +10131,13 @@ static void mon_wipe (Mon *m)
     m->ctx = ctx;
     m->life = life + 1;
     m->quitting = quitting;
+    g_atomic_int_set (&m->thread_ended, ended);
     m->parked = TRUE;
     m->park_told = TRUE;
     /* as make_monitor: until its thread has its context on the new surface
      * and is in its loop again (mon_park_wait), it is setting up - not in a
      * frame that does not end (load_held_check) */
-    m->in_load = TRUE;
+    m->in_load = !ended;
 }
 
 static int mons_waiting (void)

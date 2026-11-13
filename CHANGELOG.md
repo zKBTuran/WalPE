@@ -186,6 +186,10 @@ it was). A bare window manager on X11 - dwm, i3, openbox - gets the window of 0.
   for the compositor's answer, and the daemon answers nothing else meanwhile; on GNOME
   Shell with the extension, where wallpapers are windows, it waited the three seconds of
   the start, longer than `walpe-ctl` waits for an answer. Half a second there too now.
+  And where the graphics driver gave the render thread that waits for such a monitor no
+  context, the daemon took ten seconds to quit once the monitor had its surface, and
+  left with "its render thread has not come back" (found in review, made up for the
+  test; no driver was seen to do it).
 - A still wallpaper (a picture, a scene in which nothing moves, anything paused) on an
   output whose scale or resolution changes: until the daemon had restarted for the new
   layout - two to ten seconds - it was shown at its old size: its top left quarter
