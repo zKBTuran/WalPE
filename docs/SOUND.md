@@ -9,8 +9,9 @@ thread, no connection to the sound server. The same switch, volume and mute are 
 makes.
 
 > **State of testing.** Measured against PulseAudio 16.1 and against PipeWire 1.0.5
-> (`pipewire-pulse`) with a null sink, by recording the sink's monitor and analysing the
-> recording: no loudspeaker, no sound card (so no drift against a device clock). The
+> (`pipewire-pulse`, WirePlumber 0.4.17) with a null sink, by recording the sink's monitor
+> and analysing the recording: no loudspeaker, no sound card (so no drift against a device
+> clock). Web wallpapers also against PipeWire 1.6.11 with WirePlumber 0.5.19. The
 > maintainer has heard scene sound on his own machine with 0.14.0.
 
 ## Hearing something
@@ -184,6 +185,18 @@ named after the wallpaper.
 - Needs `ffmpeg` in `PATH` with its `flac` encoder (part of every build of FFmpeg), and
   `walpe-video.so`'s FLAC decoder, as scene sound does. Without ffmpeg the log says so
   and the video stays silent.
+- Measured over 21 minutes of a 4 s clip (315 passes, PulseAudio 16.1, a machine of four
+  cores at a load of 15): the picture corrected the track twice, and the tone's phase
+  against the recorder's clock moved by 1.9 ms in all - the two do not drift apart. In
+  the same recording the sound had 14 gaps of 10 to 35 ms that no correction explains:
+  the stream holds a fifth of a second, and a player thread that does not get the CPU
+  for longer than that leaves a gap (scene sound has the same stream). An idle machine
+  was not measured.
+- When a video starts, and each time it goes on after a pause, the track can jump once to
+  three times in the first three seconds (the fade above): the stream opens a moment
+  after the picture goes on, the track is told the picture's place, and on a busy machine
+  the answer is late enough to be corrected again. Counted here at a load of 3 to 10:
+  three jumps at each of two resumes, one or two at a start.
 - Not measured: how far the sound is behind the picture (the stream's buffer, about a
   fifth of a second at most, and the moment the first frame of a pass is drawn).
 
@@ -207,7 +220,10 @@ the application name `WebKit` in the desktop's mixer. The same three settings de
   the work of a script that runs among the page's own - nothing else reaches an `Audio`
   object or an AudioContext - and is an agreement, not a wall: a page that sets out to
   defeat it can be louder than the volume says, never louder than off. (The same page
-  was at 0.252 of its amplitude with `volume=0.25`: it did not get round it either.) A
+  was at 0.252 of its amplitude with `volume=0.25`: it did not get round it either. A
+  second test page, which makes elements and AudioContexts from a frame's constructors
+  and feeds elements from MediaStreams, did: more than half its full level at
+  `volume=0.25` - and digital silence, every sample 0, in each of the hard cases.) A
   frame from another site keeps the level it had when it was made, and the mute.
 - **The sound server is left alone.** WebKit's own way to be louder, quieter or muted is
   the volume and the mute of its stream *in the sound server*: its GStreamer output
@@ -275,6 +291,20 @@ The cure, once, while the page plays: in the desktop's mixer unmute the stream "
 and turn it up (Plasma: the volume applet, "Applications"; pavucontrol: "Playback"), or
 `pactl set-sink-input-mute <n> 0; pactl set-sink-input-volume <n> 100%` with the number
 `walpe-ctl soundcheck` prints. The server stores that too, and it stays.
+
+### After the sound server was restarted a web wallpaper stays silent
+
+A scene's or a video's sound is back within five seconds when PipeWire or PulseAudio comes
+back (the player asks again). A web page's sound is not: WebKit's sound output in the page
+process does not recover from a lost connection. An `<audio>` or `<video>` ends with an
+error ("... Connection terminated"), an AudioContext goes on saying "running" over a
+clock that stands still, and loading the element again from script gets no new stream
+either (tried). Measured with PipeWire 1.6.11 (`pipewire-pulse` stopped and started) and
+PulseAudio 16.1. `walpe-ctl soundcheck` then finds no stream of WebKit.
+
+What brings it back today: show another wallpaper and then this one again (the page is
+made anew), or restart the engine (`walpe-ctl quit`, then start it). `walpe-ctl open` with
+the wallpaper that is already shown does not reload its page, and no command does.
 
 If `soundcheck` finds nothing wrong: the daemon's log says at the first web wallpaper
 whether `libgstwalpesound.so` is used; a page plays only what GStreamer can decode and put

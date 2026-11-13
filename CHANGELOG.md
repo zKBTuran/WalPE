@@ -244,6 +244,12 @@ renders on a laptop's discrete GPU where there is one (under Graphics cards;
   kept apart for every page. Off and mute are enforced by WebKit's own mute of the page,
   which no page script can undo; the volume in between is scaled by a script inside the
   page, which a page that fights it could defeat. [SOUND.md](docs/SOUND.md#web-wallpapers).
+- **`walpe-ctl soundcheck`: why a web wallpaper is silent.** The status line `sound` now
+  names web wallpapers too (it said "nothing is playing" under a page that was heard),
+  and `soundcheck` asks the sound server once whether the page's stream ("WebKit") is
+  muted or at 0 % there - which the server remembers for every later start, and which
+  no setting of WalPE changes - and prints the two commands that undo it.
+  [SOUND.md](docs/SOUND.md#a-web-wallpaper-stays-silent-although-the-settings-say-on).
 - **Web wallpapers: a looping Ogg Vorbis sound goes on after its first pass.** With
   WebKitGTK 2.52 and GStreamer 1.24 the jump back to the start of an `<audio loop>` or a
   looping `Audio` object with an Ogg Vorbis file mostly never ended: the sound played
