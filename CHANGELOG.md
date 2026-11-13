@@ -525,6 +525,10 @@ microphone.
   becomes 274 MB of FLAC in half a minute, six hours up to 2 GB. It now has the floor
   every conversion has - not begun, and stopped, when less than 256 MB are free
   (`WALPE_CONVERT_FREE_MB`, new, for both).
+- The cache of converted videos and sound tracks (`~/.cache/walpe/video`) can be given a
+  size: `WALPE_VIDEO_CACHE_MB=<MiB>` in the daemon's environment removes, when the daemon
+  starts, what was not played for the longest time until the rest fits. Without it
+  nothing changes: no limit on the sum, 90 days without use.
 - New with the changes above, and closed before anybody had them: a web page could undo
   mute and "off" for its own sound (now WebKit's own mute, under Sound), and with the
   Plasma add-on another program of the session could take the pointer's bus name and be

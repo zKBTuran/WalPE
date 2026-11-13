@@ -17,6 +17,7 @@
  *  - the ffmpeg of a conversion does not outlive the process that started
  *    it (this program, started again with --hold, is killed mid-way). */
 #include <glib.h>
+#include <utime.h>
 #include <glib/gstdio.h>
 #include <signal.h>
 #include <stdio.h>
@@ -26,6 +27,15 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include "common/import.h"
+
+/* is file n in directory dir? */
+static gboolean cache_has (const char *dir, const char *n)
+{
+    char *p = g_build_filename (dir, n, NULL);
+    gboolean has = g_file_test (p, G_FILE_TEST_EXISTS);
+    g_free (p);
+    return has;
+}
 
 static int fails;
 #define CHECK(c) do { if (!(c)) { fails++; g_printerr ("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); } } while (0)
@@ -448,6 +458,69 @@ static void test_runs (void)
         goto out;
     }
     g_file_set_contents (junk, "this is not a video\n", -1, NULL);
+
+    /* the cache at the daemon's start (walpe_video_cache_tidy): what is
+     * unfinished and what nothing played for the given days goes; the
+     * files that stay have no limit in all unless WALPE_VIDEO_CACHE_MB
+     * names one, and then the longest unused go first and the one used
+     * last stays whatever its size */
+    {
+        char *vdir = g_build_filename (g_get_user_cache_dir (), "walpe", "video", NULL);
+        g_mkdir_with_parents (vdir, 0700);
+        const struct { const char *name; int mb, days; } f[] = {
+            { "a.mp4", 3, 100 }, { "b-sound.flac", 1, 95 }, { "c.mp4.part", 1, 0 }, { "d-sound.flac.part", 1, 0 },
+            { "e.mp4", 2, 50 }, { "f-sound.flac", 2, 40 }, { "g-scene-640x360.mp4", 2, 30 }, { "h.mp4", 2, 20 },
+            { "i-sound.flac", 3, 1 }, { "notes.txt", 1, 400 },
+        };
+        char *block = g_malloc0 (1024 * 1024);
+        const gint64 now = g_get_real_time () / G_USEC_PER_SEC;
+#define CF(n) g_build_filename (vdir, n, NULL)
+#define HAS(n) cache_has (vdir, n)
+        for (int round = 0; round < 3; round++) {
+            for (guint i = 0; i < G_N_ELEMENTS (f); i++) {
+                char *p = CF (f[i].name);
+                FILE *o = fopen (p, "wb");
+                for (int k = 0; o && k < f[i].mb; k++)
+                    fwrite (block, 1, 1024 * 1024, o);
+                if (o)
+                    fclose (o);
+                struct utimbuf ut = { (time_t) (now - (gint64) f[i].days * 86400), (time_t) (now - (gint64) f[i].days * 86400) };
+                utime (p, &ut);
+                g_free (p);
+            }
+            if (round == 0) {
+                /* no limit named: only the age and the unfinished ones */
+                g_unsetenv ("WALPE_VIDEO_CACHE_MB");
+                CHECK (walpe_video_cache_tidy (90, NULL, NULL) == 4);
+                CHECK (!HAS ("a.mp4") && !HAS ("b-sound.flac") && !HAS ("c.mp4.part") && !HAS ("d-sound.flac.part"));
+                CHECK (HAS ("e.mp4") && HAS ("f-sound.flac") && HAS ("g-scene-640x360.mp4") && HAS ("h.mp4") &&
+                       HAS ("i-sound.flac") && HAS ("notes.txt"));
+            } else if (round == 1) {
+                /* 11 MiB stay after the age rule; 6 are allowed: e and f go (7 left
+                 * would still be too many: g goes too), h and i stay */
+                g_setenv ("WALPE_VIDEO_CACHE_MB", "6", TRUE);
+                CHECK (walpe_video_cache_tidy (90, NULL, NULL) == 7);
+                CHECK (!HAS ("e.mp4") && !HAS ("f-sound.flac") && !HAS ("g-scene-640x360.mp4"));
+                CHECK (HAS ("h.mp4") && HAS ("i-sound.flac") && HAS ("notes.txt"));
+            } else {
+                /* less than the one used last: that one stays */
+                g_setenv ("WALPE_VIDEO_CACHE_MB", "1", TRUE);
+                CHECK (walpe_video_cache_tidy (90, NULL, NULL) == 8);
+                CHECK (!HAS ("h.mp4") && HAS ("i-sound.flac") && HAS ("notes.txt"));
+            }
+        }
+        g_unsetenv ("WALPE_VIDEO_CACHE_MB");
+        for (guint i = 0; i < G_N_ELEMENTS (f); i++) {
+            char *p = CF (f[i].name);
+            g_remove (p);
+            g_free (p);
+        }
+#undef CF
+#undef HAS
+        g_rmdir (vdir);
+        g_free (block);
+        g_free (vdir);
+    }
 
     /* the sound track of a video wallpaper (walpe_video_sound_extract) */
     {

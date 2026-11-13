@@ -124,6 +124,19 @@ char   **walpe_import_scene_argv (const char *src, const WalpeImportScene *sc, c
  * plain name the copies had while that size was built in, so those stay
  * in use. NULL when src cannot be stat'ed. g_free. */
 char        *walpe_video_cache_file (const char *src, const WalpeVideoBox *box);
+/* The daemon's start (nothing is being converted then): tidies
+ * <user cache dir>/walpe/video. Removed are
+ *  - what a conversion or a sound track left unfinished ("*.part"),
+ *  - converted copies and sound tracks that nothing played for max_days
+ *    (their modification time: the player touches what it plays),
+ *  - and, only when WALPE_VIDEO_CACHE_MB=<MiB> is set (default: no limit
+ *    on what the files add up to), the ones unused for the longest time
+ *    until the rest is within that size. The one used last is never
+ *    removed for the size: a single copy larger than the limit would be
+ *    made again at every start.
+ * said (may be NULL) is told each file and why. Returns how many went. */
+typedef void (*WalpeCacheSaid) (const char *path, const char *why, gpointer user);
+int          walpe_video_cache_tidy (int max_days, WalpeCacheSaid said, gpointer user);
 /* The sound track of a video wallpaper. The player (engine/video.c) does
  * not decode it out of the video: it is taken out once, with ffmpeg, into
  * <user cache dir>/walpe/video/<hash of path, size, mtime>-sound.flac

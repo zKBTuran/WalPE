@@ -5199,35 +5199,19 @@ static GError *convert_start (const char *src, const char *wp, const char *mon, 
 /* start-up (this daemon holds the instance lock, so nothing is being
  * converted): remove the partial outputs a killed daemon left behind, and
  * copies no wallpaper has played for CONV_CACHE_DAYS (the player touches
- * the copy it plays: engine/video.c) so the cache does not grow for ever */
+ * the copy it plays: engine/video.c) so the cache does not grow for ever;
+ * with WALPE_VIDEO_CACHE_MB also the longest unused ones beyond that size
+ * (common/import.h walpe_video_cache_tidy) */
 #define CONV_CACHE_DAYS 90
+static void conv_cache_note (const char *path, const char *why, gpointer user)
+{
+    (void) user;
+    g_message ("video: removing %s (%s)", path, why);
+}
+
 static void conv_cache_tidy (void)
 {
-    char *dir = g_build_filename (g_get_user_cache_dir (), "walpe", "video", NULL);
-    GDir *d = g_dir_open (dir, 0, NULL);
-    gint64 now = g_get_real_time () / G_USEC_PER_SEC;
-    const char *n;
-    while (d && (n = g_dir_read_name (d))) {
-        /* (and the sound tracks taken out of video wallpapers, import.h
-         * walpe_video_sound_file, under the same two rules) */
-        gboolean part = g_str_has_suffix (n, ".mp4.part") || g_str_has_suffix (n, "-sound.flac.part");
-        if (!part && !g_str_has_suffix (n, ".mp4") && !g_str_has_suffix (n, "-sound.flac"))
-            continue;
-        char *p = g_build_filename (dir, n, NULL);
-        GStatBuf st;
-        if (g_lstat (p, &st) == 0 && S_ISREG (st.st_mode) &&
-            (part || now - (gint64) st.st_mtime > (gint64) CONV_CACHE_DAYS * 86400)) {
-            g_message ("video: removing %s (%s)", p,
-                       part ? "unfinished conversion"
-                       : g_str_has_suffix (n, ".flac") ? "sound track not used for a long time"
-                       : "converted copy not used for a long time");
-            g_remove (p);
-        }
-        g_free (p);
-    }
-    if (d)
-        g_dir_close (d);
-    g_free (dir);
+    walpe_video_cache_tidy (CONV_CACHE_DAYS, conv_cache_note, NULL);
 }
 
 /* a wallpaper some monitor is set to (saved config, a forgotten cache)

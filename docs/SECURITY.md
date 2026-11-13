@@ -246,8 +246,9 @@ Tests: `meson test -C build websec websec-private web-x11 web-wayland webhost-wl
   hours and 2 GB of it, within the 60 minutes, and not below the 256 MB of
   free disk. It is not stopped when the wallpaper is left - the file is
   for the next time - and the cache has no limit on what all its files
-  add up to: a copy or a sound track that nothing played for 90 days is
-  removed when the daemon starts.
+  add up to unless you name one (`WALPE_VIDEO_CACHE_MB`: the longest
+  unused go when the daemon starts): a copy or a sound track that nothing
+  played for 90 days is removed when the daemon starts.
 - The environment the daemon is started with is trusted like the daemon
   itself (`LD_*`, `GST_*`, `WEBKIT_*`, `LIBGL_*`, `__EGL_VENDOR_LIBRARY_*`,
   every `WALPE_*` switch): the restarts in place hand the start

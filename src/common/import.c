@@ -1002,6 +1002,74 @@ char *walpe_video_cache_file (const char *src, const WalpeVideoBox *box)
     return p;
 }
 
+/* ------------------------------------------------- the cache's size */
+
+typedef struct { char *path; gint64 size, mtime; } CacheFile;
+
+static int cache_file_cmp (gconstpointer a, gconstpointer b)
+{
+    const CacheFile *x = a, *y = b;
+    return x->mtime < y->mtime ? -1 : x->mtime > y->mtime ? 1 : strcmp (x->path, y->path);
+}
+
+int walpe_video_cache_tidy (int max_days, WalpeCacheSaid said, gpointer user)
+{
+    char *dir = g_build_filename (g_get_user_cache_dir (), "walpe", "video", NULL);
+    GDir *d = g_dir_open (dir, 0, NULL);
+    const gint64 now = g_get_real_time () / G_USEC_PER_SEC;
+    const gint64 max_bytes = limit_env ("WALPE_VIDEO_CACHE_MB", 0) * 1024 * 1024;
+    GArray *kept = g_array_new (FALSE, FALSE, sizeof (CacheFile));
+    gint64 total = 0;
+    int gone = 0;
+    const char *n;
+    while (d && (n = g_dir_read_name (d))) {
+        const gboolean part = g_str_has_suffix (n, ".mp4.part") || g_str_has_suffix (n, "-sound.flac.part");
+        const gboolean flac = g_str_has_suffix (n, "-sound.flac");
+        if (!part && !flac && !g_str_has_suffix (n, ".mp4"))
+            continue;
+        char *p = g_build_filename (dir, n, NULL);
+        GStatBuf st;
+        if (g_lstat (p, &st) != 0 || !S_ISREG (st.st_mode)) {
+            g_free (p);
+            continue;
+        }
+        if (part || (max_days > 0 && now - (gint64) st.st_mtime > (gint64) max_days * 86400)) {
+            if (said)
+                said (p, part ? "unfinished conversion"
+                           : flac ? "sound track not used for a long time"
+                           : "converted copy not used for a long time", user);
+            g_remove (p);
+            g_free (p);
+            gone++;
+            continue;
+        }
+        CacheFile f = { p, (gint64) st.st_size, (gint64) st.st_mtime };
+        g_array_append_val (kept, f);
+        total += f.size;
+    }
+    if (d)
+        g_dir_close (d);
+    if (max_bytes > 0 && total > max_bytes) {
+        g_array_sort (kept, cache_file_cmp);    /* the longest unused first */
+        for (guint i = 0; i + 1 < kept->len && total > max_bytes; i++) {
+            CacheFile *f = &g_array_index (kept, CacheFile, i);
+            if (said)
+                said (f->path, g_str_has_suffix (f->path, ".flac")
+                               ? "sound track, the cache is over WALPE_VIDEO_CACHE_MB"
+                               : "converted copy, the cache is over WALPE_VIDEO_CACHE_MB", user);
+            if (g_remove (f->path) == 0) {
+                total -= f->size;
+                gone++;
+            }
+        }
+    }
+    for (guint i = 0; i < kept->len; i++)
+        g_free (g_array_index (kept, CacheFile, i).path);
+    g_array_free (kept, TRUE);
+    g_free (dir);
+    return gone;
+}
+
 /* ------------------------------------------- the sound track of a video */
 
 char *walpe_video_sound_file (const char *src)
