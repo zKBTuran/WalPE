@@ -2,7 +2,7 @@
  *
  * Test builds and the release they are made after all answer the same
  * version: the version says what was released, not which tree was built.
- * walpe_source_id () is the commit of the tree, abbreviated as git does
+ * walpe_source_id () is the commit of the tree, its first seven digits
  * ("077a0dd"), with a "+" behind it when the build was made in a checkout
  * with changed files, or "unknown" (built outside git from files that do
  * not say). It is found by scripts/source-id.sh when the program is built:

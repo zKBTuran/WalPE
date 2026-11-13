@@ -384,10 +384,11 @@ hand, and such a copy can be the one that starts:
 started it, in its second the commit of the source it was built from;
 `readlink /proc/$(pidof walpe-daemon)/exe` names its file.
 
-That commit (`walpe-daemon --version`, `walpe-ctl status`: `source_id`) is found at build
-time by `scripts/source-id.sh`: a tree made by `git archive` - a release tarball, the
-forge's download of a tag, a test build's zip - has it in the file `SOURCE-ID`
-(`.gitattributes`: `export-subst`), and git is not asked; a checkout asks git, and marks
+That commit (`walpe-daemon --version`, `walpe-ctl status`: `source_id`) - its first seven
+digits everywhere, whatever length git abbreviates to on a machine or a forge - is found
+at build time by `scripts/source-id.sh`: a tree made by `git archive` - a release tarball,
+the forge's download of a tag, a test build's zip - has the whole commit in the file
+`SOURCE-ID` (`.gitattributes`: `export-subst`), and git is not asked; a checkout asks git, and marks
 a tree with changed files by a `+`; a copy of the files without `.git` and with the
 placeholder still in `SOURCE-ID` (an archive made by another tool) says `unknown`. The
 step runs with every build and changes its header only when the id changed, so a build

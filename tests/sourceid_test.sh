@@ -6,6 +6,9 @@
 #   (the tree lies inside another repository whose commit is a different one);
 #   a checkout says its commit, a "+" behind it while a tracked file is changed, the
 #   new commit after a commit;
+#   the word is the commit's first seven digits everywhere - in a checkout and in an
+#   archive, whatever length git abbreviates to there (core.abbrev, the size of the
+#   repository; a forge has its own) - and the archive's bytes do not depend on it;
 #   files without .git and with the placeholder say "unknown" - also inside somebody
 #   else's repository;
 #   the header is written once: a second run leaves the file alone (nothing is compiled
@@ -30,6 +33,7 @@ is () {     # what, got, wanted
     echo "FAIL: $1: '$2', expected '$3'"
 }
 id_of () { sh "$script" "$1"; }
+seven () { git -C "$1" rev-parse "${2:-HEAD}" | cut -c 1-7; }
 
 # a repository with the two files that make the id work in an archive
 repo=$tmp/repo
@@ -39,14 +43,14 @@ echo one > "$repo/file"
 git -C "$repo" init -q
 git -C "$repo" add -A
 git -C "$repo" commit -q -m one
-c1=$(git -C "$repo" rev-parse --short HEAD)
-is "the placeholder is in the checkout's SOURCE-ID" "$(cat "$repo/SOURCE-ID")" '$Format:%h$'
+c1=$(seven "$repo")
+is "the placeholder is in the checkout's SOURCE-ID" "$(cat "$repo/SOURCE-ID")" '$Format:%H$'
 is "a checkout" "$(id_of "$repo")" "$c1"
 echo two >> "$repo/file"
 is "a checkout with a changed file" "$(id_of "$repo")" "$c1+"
 echo untracked > "$repo/new"
 git -C "$repo" commit -q -a -m two
-c2=$(git -C "$repo" rev-parse --short HEAD)
+c2=$(seven "$repo")
 [ "$c1" != "$c2" ] || { echo "FAIL: the two commits have one id"; fails=$((fails + 1)); }
 is "after a commit (an untracked file is no change)" "$(id_of "$repo")" "$c2"
 
@@ -74,7 +78,7 @@ is "no id found, no header yet" "$(grep '^#define' "$tmp/new.h")" '#define WALPE
 # the file says the commit, the repository around it is not asked
 mkdir "$repo/unpacked"
 git -C "$repo" archive --prefix=x/ "$c1" | tar -x -C "$repo/unpacked"
-is "git archive fills SOURCE-ID in" "$(cat "$repo/unpacked/x/SOURCE-ID")" "$c1"
+is "git archive fills SOURCE-ID in" "$(cat "$repo/unpacked/x/SOURCE-ID")" "$(git -C "$repo" rev-parse "$c1")"
 is "a tree made by git archive" "$(id_of "$repo/unpacked/x")" "$c1"
 # ... and plain files there, with the placeholder: not the commit of the repository around
 mkdir "$repo/copy"
@@ -87,12 +91,37 @@ if command -v unzip > /dev/null 2>&1; then
     is "a zip made by git archive" "$(id_of "$tmp/z")" "$c2"
 fi
 
+# a repository in which git abbreviates to another length (core.abbrev here; the number
+# of objects does the same, and a forge's archive has the forge's length): the word is
+# the same seven digits in the checkout and in an archive, and the archive is the same
+# file whatever the length is
+git -C "$repo" config core.abbrev 12
+is "a checkout where git abbreviates to 12 digits" "$(id_of "$repo")" "$c2"
+mkdir "$tmp/long" "$tmp/short"
+git -C "$repo" archive --prefix=x/ "$c2" > "$tmp/long.tar"
+tar -x -C "$tmp/long" -f "$tmp/long.tar"
+is "an archive made where git abbreviates to 12 digits" "$(id_of "$tmp/long/x")" "$c2"
+git -C "$repo" config core.abbrev 5
+is "a checkout where git abbreviates to 5 digits" "$(id_of "$repo")" "$c2"
+git -C "$repo" archive --prefix=x/ "$c2" > "$tmp/short.tar"
+tar -x -C "$tmp/short" -f "$tmp/short.tar"
+is "an archive made where git abbreviates to 5 digits" "$(id_of "$tmp/short/x")" "$c2"
+cmp -s "$tmp/long.tar" "$tmp/short.tar" || { echo "FAIL: the archive of one commit differs with the length git abbreviates to"; fails=$((fails + 1)); }
+git -C "$repo" config --unset core.abbrev
+# what SOURCE-ID may hold: a commit of seven digits or more (an archive made before the
+# file held the whole commit has seven or more of them); anything else does not say
+mkdir "$tmp/words"
+for w in 0123abc:0123abc 0123abcdef01:0123abc 0123ab:unknown 0123abg:unknown '$Format:%H$:unknown' :unknown; do
+    printf '%s\n' "${w%:*}" > "$tmp/words/SOURCE-ID"
+    is "SOURCE-ID \"${w%:*}\"" "$(id_of "$tmp/words")" "${w##*:}"
+done
+
 # the tree under test: an archive of its HEAD names HEAD
-if [ -e "$src/.git" ] && head=$(git -C "$src" rev-parse --short HEAD 2> /dev/null); then
+if [ -e "$src/.git" ] && head=$(seven "$src" 2> /dev/null) && [ -n "$head" ]; then
     mkdir "$tmp/export"
     if git -C "$src" cat-file -e HEAD:SOURCE-ID 2> /dev/null && git -C "$src" cat-file -e HEAD:scripts/source-id.sh 2> /dev/null; then
         git -C "$src" archive HEAD SOURCE-ID .gitattributes scripts/source-id.sh | tar -x -C "$tmp/export"
-        is "git archive HEAD of this tree: SOURCE-ID" "$(cat "$tmp/export/SOURCE-ID")" "$head"
+        is "git archive HEAD of this tree: SOURCE-ID" "$(cat "$tmp/export/SOURCE-ID")" "$(git -C "$src" rev-parse HEAD)"
         is "git archive HEAD of this tree: the id" "$(sh "$tmp/export/scripts/source-id.sh" "$tmp/export")" "$head"
     else
         echo "(SOURCE-ID is not committed in this tree yet: the archive of HEAD was not looked at)"

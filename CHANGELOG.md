@@ -623,7 +623,7 @@ microphone.
   summary the daemon writes into its log at start does not ask the sound server.
 - The daemon says which source it was built from. Every test build since 0.14.0 and
   0.14.0 itself answer "0.14.0", so nothing told a tester which one was running. The
-  commit of the source (`077a0dd`; with a `+` when the build was made in a checkout
+  commit of the source (`077a0dd`, its first seven digits; with a `+` when the build was made in a checkout
   with changed files; `unknown` where neither git nor the files say) is the member
   `source_id` of `walpe-ctl status`, the line `source:` of `walpe-ctl diag`, in the
   daemon's first line in its log, and in what `walpe-collect` prints and writes down.
