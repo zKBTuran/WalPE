@@ -59,10 +59,17 @@ const INTERFACE = `
 </interface></node>`;
 
 /* GNOME Shell 46 to 48: the Wayland clients the shell has started for a
- * daemon, as {client, process}. They are kept while their process lives,
- * also while the extension is disabled: the shell disables and enables
- * extensions whenever another one is switched on or off, and the compositor
- * closes a client's connection when its object here is let go. */
+ * daemon, as {client, running}. Each is kept until the compositor says its
+ * connection is closed ("client-destroyed"), also while the extension is
+ * disabled (the shell disables and enables extensions whenever another one
+ * is switched on or off) and also after its process has ended: the
+ * compositor closes a client's connection when its object here is let go,
+ * and it does that inside the garbage collector, where the shell's own
+ * handlers for a window that goes away are not run - the window's last
+ * picture then stays on the desktop until the session ends. (`pkill
+ * walpe-daemon` ends the process the shell started at once and the daemon
+ * a second later.) running: the process lives, and only then can the
+ * compositor be asked whose a window is. */
 const donors = [];
 
 function connectorOf(window) {
@@ -192,7 +199,7 @@ export default class WalpeExtension extends Extension {
             if (this._canSetType) {
                 window.set_type(Meta.WindowType.DESKTOP);
             } else {
-                const donor = donors.find(d => d.client.owns_window(window));
+                const donor = donors.find(d => d.running && d.client.owns_window(window));
                 if (!donor) {
                     /* (a walpe-daemon that did not ask for its connection, or
                      * some other program using the name: an ordinary window) */
@@ -445,9 +452,10 @@ export default class WalpeExtension extends Extension {
                         throw new Error(`the program of process ${pid} is not a file any more (${exe})`);
                     const client = Meta.WaylandClient.new(global.context, launcher);
                     const process = client.spawnv(global.display, [exe, '--wayland-socket-to', '4']);
-                    const donor = {client, process};
+                    const donor = {client, running: true};
                     donors.push(donor);
-                    process.wait_async(null, () => donors.splice(donors.indexOf(donor), 1));
+                    client.connect('client-destroyed', () => donors.splice(donors.indexOf(donor), 1));
+                    process.wait_async(null, () => { donor.running = false; });
                     invocation.return_value(null);
                 } catch (e) {
                     launcher.close();

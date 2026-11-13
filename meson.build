@@ -1956,6 +1956,26 @@ if lifecheck_py.found()
     timeout: 300)
 endif
 
+# -------------------------------------- the daemon on GNOME Shell (Wayland)
+# scripts/gnomecheck.py: the daemon and the WalPE extension for GNOME Shell
+# (contrib/gnome, which no build installs: the check copies it from the
+# source tree into a private HOME) on a private headless gnome-shell with
+# the software renderer. The extension runs inside the shell, so this is
+# the only place where what it does can be checked: the wallpaper window
+# becomes a desktop window on its monitor, and nothing of it stays in the
+# shell when the daemon, or the process GNOME Shell 46 to 48 starts for its
+# connection, ends in whatever order. Skipped (77) without gnome-shell,
+# gdbus and dbus-daemon, where the shell does not come up headless, and in
+# a build without the Wayland backend.
+if lifecheck_py.found() and have_wayland
+  test('gnome-shell', lifecheck_py,
+    args: ['-I', meson.current_source_dir() / 'scripts/gnomecheck.py',
+           '--build', meson.current_build_dir()],
+    depends: [daemon, ctl],
+    is_parallel: false,
+    timeout: 600)
+endif
+
 # ------------------------------------------------------ sanitizer runs
 # The sanitizers are meson's own option:
 #   meson setup build-asan -Dtests=true -Db_sanitize=address,undefined -Db_lto=false -Db_lundef=false
