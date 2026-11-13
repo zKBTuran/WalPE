@@ -94,8 +94,11 @@ the window Cinnamon gets; that was not tried on them.
 - The desktop's own wallpaper is behind WalPE's and its setting changes nothing you see.
 - **The wallpaper window ends with the desktop window it is in.** When the file manager is
   closed or restarted (`xfdesktop --quit`, the commands above for MATE, LXQt and LXDE, a
-  crash) the daemon makes its windows anew - a restart in place, about two seconds - and
-  shows the wallpaper on the root, or in the new desktop window when one appears.
+  crash) the daemon makes its windows anew - a restart in place, two to three seconds
+  without a wallpaper - and shows the wallpaper on the root, or in the new desktop window
+  when one appears. Restarts in place are at least ten seconds apart: a file manager that
+  goes twice within that time leaves the screen without a wallpaper until the ten seconds
+  are over.
 - "Skip hidden areas" (`skip_hidden`, off by default) counts everything as visible while a
   wallpaper window is inside a desktop window: nothing is skipped there.
 - KWin without Plasma's desktop (kwin_x11 alone, or with another desktop's panel and no
@@ -114,8 +117,10 @@ Both are read from the daemon's environment at start ([ENVIRONMENT.md](ENVIRONME
 - `WALPE_X11_DESKTOP=root` keeps the wallpaper window the lowest window of the root on
   every desktop, as up to 0.14.0. Behind an opaque desktop window it is not seen; the log
   says so once. Use it together with switching the file manager's desktop off.
-  `WALPE_X11_DESKTOP=window` puts it into a see-through desktop window as well (over
-  Cinnamon's icons).
+  `WALPE_X11_DESKTOP=window` puts it into a see-through desktop window as well, when that
+  window lies over the whole monitor. Cinnamon's does not where a panel takes room:
+  nemo-desktop's window is as large as the work area (1280x760 on the 1280x800 screen run
+  here), and with `window` the wallpaper window stayed where `auto` puts it.
 - `WALPE_X11_WINDOW=override` makes the wallpaper window override-redirect under Mutter
   and KWin too; `WALPE_X11_WINDOW=managed` makes it a managed window of the desktop type
   under any window manager.
