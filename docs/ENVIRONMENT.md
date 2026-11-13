@@ -89,7 +89,7 @@ The other way round, `WALPE_MEM_STATS=1` switches memory numbers by kind in
 | `WALPE_VIDEO_CACHE_MB=n` | unset | MiB that the converted copies and sound tracks in `~/.cache/walpe/video` may add up to: when the daemon starts, the ones that were not played for the longest time are removed until the rest fits (never the file used last: one file - the copy and the sound track of a wallpaper are two, and a size below what the wallpaper on screen needs removes its copy at every start, which is then made again). Unset or `0`: no limit on the sum - what nothing played for 90 days is removed, as before |
 | `WALPE_STEAMCMD_TIMEOUT=s` | 1800 | time limit of one steamcmd download |
 | `WALPE_FIRST_FRAME_S=n` | 20 | seconds a video wallpaper may take for its first picture before the load counts as failed (the previous wallpaper is opened again; `walpe-ctl status` shows `load_error`). `0` = a video counts as loaded once its file was opened |
-| `WALPE_MALLOC_MMAP_MB=n` | 4 | `walpe-daemon`: memory blocks from this size on get their own mapping and return to the system when freed (at most 32). `0` = glibc's adaptive threshold (more memory stays resident after a load) |
+| `WALPE_MALLOC_MMAP_MB=n` | 4 | `walpe-daemon`: memory blocks from this size on get their own mapping and return to the system when freed (at most 32). `0` = glibc's adaptive threshold (more memory stays resident after a load). A switch of glibc's allocator: a build for another C library (musl) does not read it |
 
 ## Rendering on the CPU, monitors, pacing
 

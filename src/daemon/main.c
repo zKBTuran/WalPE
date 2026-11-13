@@ -30,7 +30,6 @@
 #include <poll.h>
 #include <locale.h>
 #include <math.h>
-#include <malloc.h>
 #include <signal.h>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -39,6 +38,7 @@
 #include <linux/netlink.h>
 #include <sys/eventfd.h>
 
+#include "common/heaptrim.h"         /* malloc_trim, where the C library has it */
 #include "common/lazy.h"
 #include "engine/content.h"
 #include "engine/glutil.h"
@@ -11642,6 +11642,7 @@ int main (int argc, char **argv)
     g_log_set_default_handler (log_guard, NULL);   /* rate limit + file size cap */
     /* libmpv refuses to initialize with a non-C LC_NUMERIC */
     setlocale (LC_NUMERIC, "C");
+#ifdef __GLIBC__   /* (mallopt and both of its switches are glibc's: musl has neither) */
     /* threads + libmpv fragment glibc arenas (one 64M arena per thread);
      * capping them keeps RSS flat for a long-running daemon */
     mallopt (M_ARENA_MAX, 2);
@@ -11660,6 +11661,7 @@ int main (int argc, char **argv)
         if (mb > 0)
             mallopt (M_MMAP_THRESHOLD, (int) (CLAMP (mb, 0.125, 32.0) * 1048576.0));
     }
+#endif
 
     D.cfg = walpe_config_load ();
     {

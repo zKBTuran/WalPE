@@ -3,10 +3,10 @@
 #include "winstate.h"
 #include "common/config.h"   /* WALPE_PREVIEW_* */
 #include "common/gifcheck.h"
+#include "common/heaptrim.h" /* malloc_trim, where the C library has it */
 #include "common/util.h"     /* walpe_picture_decode_file */
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <glib/gstdio.h>
-#include <malloc.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>

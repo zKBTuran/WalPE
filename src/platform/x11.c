@@ -31,7 +31,6 @@
 #endif
 #include <epoxy/egl.h>
 #include <dlfcn.h>
-#include <malloc.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,6 +40,7 @@
 #include "platform/fsplace.h"
 #include "platform/x11desk.h"
 #include "common/config.h"
+#include "common/heaptrim.h"   /* malloc_trim, where the C library has it */
 #include "common/pace.h"
 
 typedef struct { int x, y, width, height; } XRect;
