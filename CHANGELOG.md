@@ -662,10 +662,12 @@ microphone.
   `exec`: an import that was cancelled, a conversion that reached one of its limits and a
   sound track that was given up ended the script only, and the real ffmpeg ran on to the
   end of its source as nobody's child. Every ffmpeg and ffprobe the daemon starts now
-  leads a process group of its own, and the group is what is ended. (Behind such a
-  wrapper the real ffmpeg still outlives a daemon that is killed or crashes; its
+  leads a process group of its own, and the group is what is ended. A daemon that quits
+  or restarts itself now ends the ffmpeg of a sound track itself and removes its
+  unfinished file, instead of leaving both to the kernel and to the next start. (Behind
+  such a wrapper the real ffmpeg still outlives a daemon that is killed or crashes; its
   unfinished file is removed at the next start.) Imports and conversions of 0.14.0 have
-  this too.
+  the first of these too.
 - The cache of converted videos and sound tracks (`~/.cache/walpe/video`) can be given a
   size: `WALPE_VIDEO_CACHE_MB=<MiB>` in the daemon's environment removes, when the daemon
   starts, what was not played for the longest time until the rest fits. Without it

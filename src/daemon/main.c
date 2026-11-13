@@ -12184,6 +12184,9 @@ int main (int argc, char **argv)
      * and the thread frees what it has. (The exit waited for the whole
      * load: seconds for a large scene, with the socket already closed.) */
     walpe_load_stop ();
+    /* and the sound track of a video that is being taken out is given up
+     * (told now, waited for below while the monitors are taken apart) */
+    walpe_video_sound_extract_end (0);
 
     /* release the socket BEFORE the (slow) EGL/X teardown: if a new daemon
      * starts during shutdown, our late unlink would otherwise delete its
@@ -12244,6 +12247,7 @@ int main (int argc, char **argv)
                        again ? "restarts" : "ends");
             g_free (was);
             walpe_import_settle (400);
+            walpe_video_sound_extract_end (400);
             if (again) {
                 restart_exec (D.restart);   /* returns only when it failed (socket released) */
             } else if (sock_kept) {
@@ -12292,6 +12296,9 @@ int main (int argc, char **argv)
      * ".part" file in the cache) goes now. Bounded: a child that is still
      * not gone leaves its file to the next start (conv_cache_tidy). */
     walpe_import_settle (400);
+    /* (the same for the ffmpeg of a video's sound track: its thread has
+     * killed it and removed its file by now, or does within this wait) */
+    walpe_video_sound_extract_end (400);
     if (restarting) {
         /* "Render on CPU" changed, the monitor layout changed or web
          * hardware acceleration was switched: the same daemon again (same

@@ -1185,8 +1185,31 @@ int walpe_video_sound_extract (const char *src, const char *dst, char **err)
     return walpe_video_sound_extract_stoppable (src, dst, NULL, NULL, err);
 }
 
+static gint sound_ending;   /* atomic: walpe_video_sound_extract_end was called: every call gives up */
+static gint sound_calls;    /* atomic: calls that are inside walpe_video_sound_extract_stoppable */
+
+void walpe_video_sound_extract_end (guint max_ms)
+{
+    const gint64 end = g_get_monotonic_time () + (gint64) max_ms * 1000;
+    g_atomic_int_set (&sound_ending, 1);
+    while (g_atomic_int_get (&sound_calls) > 0 && g_get_monotonic_time () < end)
+        g_usleep (2000);
+}
+
+static int sound_extract (const char *src, const char *dst, gboolean (*stop) (gpointer user), gpointer user,
+                          char **err);
+
 int walpe_video_sound_extract_stoppable (const char *src, const char *dst, gboolean (*stop) (gpointer user),
                                          gpointer user, char **err)
+{
+    g_atomic_int_inc (&sound_calls);
+    const int res = sound_extract (src, dst, stop, user, err);
+    g_atomic_int_add (&sound_calls, -1);
+    return res;
+}
+
+static int sound_extract (const char *src, const char *dst, gboolean (*stop) (gpointer user), gpointer user,
+                          char **err)
 {
     static GMutex one;      /* one at a time in this process: they share the ".part" of a video */
     int res = -1;
@@ -1195,9 +1218,13 @@ int walpe_video_sound_extract_stoppable (const char *src, const char *dst, gbool
     /* (a caller that can be stopped does not wait behind another video's
      * track for longer than it wants to) */
     while (!g_mutex_trylock (&one)) {
-        if (stop && stop (user))
+        if (g_atomic_int_get (&sound_ending) || (stop && stop (user)))
             return -2;
         g_usleep (50000);
+    }
+    if (g_atomic_int_get (&sound_ending)) {         /* the process ends: nothing is started */
+        g_mutex_unlock (&one);
+        return -2;
     }
     if (g_file_test (dst, G_FILE_TEST_EXISTS)) {    /* made while this call waited */
         GStatBuf st;
@@ -1261,7 +1288,8 @@ int walpe_video_sound_extract_stoppable (const char *src, const char *dst, gbool
                 disk_at = now;
                 low_disk = disk_free_mb (dir) < floor_mb;
             }
-            stopped = !timed_out && !low_disk && stop && stop (user);
+            /* (... or the process that ends: walpe_video_sound_extract_end) */
+            stopped = !timed_out && !low_disk && (g_atomic_int_get (&sound_ending) || (stop && stop (user)));
             if (timed_out || low_disk || stopped) {
                 child_kill (pid);   /* (and the real ffmpeg behind a wrapper script) */
                 while (waitpid (pid, &status, 0) < 0 && errno == EINTR)

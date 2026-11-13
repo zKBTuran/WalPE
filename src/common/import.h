@@ -160,6 +160,15 @@ int          walpe_video_sound_extract (const char *src, const char *dst, char *
  * is killed, nothing is left behind, -2 is returned (*err stays NULL). */
 int          walpe_video_sound_extract_stoppable (const char *src, const char *dst,
                                                   gboolean (*stop) (gpointer user), gpointer user, char **err);
+/* The process is about to end (or to start itself again): every call of the
+ * two above that runs or waits gives up as if its caller had said stop -
+ * ffmpeg and what it started is killed, the ".part" removed, -2 - and none
+ * begins from now on. Waits up to max_ms for the calls to have returned
+ * (0: tells them only; a call notices within a tenth of a second). Without
+ * this the process was gone before the waiting thread looked: its ffmpeg
+ * was left to the kernel (ended with its parent - not the real program
+ * behind a wrapper script) and the ".part" to the next start. Any thread. */
+void         walpe_video_sound_extract_end (guint max_ms);
 /* argv of that run (tests; NULL-terminated, g_strfreev) */
 char       **walpe_video_sound_argv (const char *src, const char *dst_part);
 int          walpe_import_percent (WalpeImport *imp); /* -1 = unknown */

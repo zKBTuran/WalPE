@@ -1954,7 +1954,10 @@ test('diag-paths', executable('diagpath-test', 'tests/diagpath_test.c',
 # a wallpaper whose frame does not end (another one is shown all the same,
 # `quit` ends the daemon), and one that only loads for long (no restart),
 # a video the decoder refuses (the clip is made with the ffmpeg program:
-# that case is skipped where there is none).
+# that case is skipped where there is none),
+# a video's sound track that is being taken out by an `ffmpeg` which is a
+# wrapper script when the wallpaper is replaced and when the daemon quits
+# (the program behind the script ends, no ".part" stays).
 # Skipped (77) without Xvfb. `meson test -C build daemon-life`
 lifecheck_py = find_program('python3', required: false)
 # lifecheck.py loads the modules the build has through the daemon (the

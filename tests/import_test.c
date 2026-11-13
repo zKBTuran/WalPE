@@ -21,6 +21,10 @@
  *    started ends too when the track is given up and when an import is
  *    cancelled - the child leads a process group of its own, and that is
  *    what is killed;
+ *  - the process ends (walpe_video_sound_extract_end): a track that is being
+ *    taken out is given up without its caller saying so, the program behind
+ *    a wrapper script included, nothing is left, and nothing is begun after
+ *    that (last: it holds for the rest of the process);
  *  - the unfinished outputs of a killed daemon are removed
  *    (walpe_import_tidy_parts), and only those;
  *  - the ffmpeg of a conversion does not outlive the process that started
@@ -170,6 +174,62 @@ static void test_sound_stop_wrapper (const char *any_file)
         CHECK (!g_file_test (dst_a, G_FILE_TEST_EXISTS) && !g_file_test (part_a, G_FILE_TEST_EXISTS));
         g_free (a.err);
         g_atomic_int_set (&stop_a, 0);
+        g_setenv ("PATH", old_path, TRUE);
+    }
+    g_remove (fake);
+    g_remove (pidf);
+    g_remove (pidt);
+    g_rmdir (dir);
+    g_free (dir); g_free (fake); g_free (pidf); g_free (pidt); g_free (dst_a); g_free (part_a); g_free (text);
+    g_free (q_pid); g_free (q_tmp); g_free (sh); g_free (old_path); g_free (path);
+}
+
+/* The process is about to end while a track is being taken out, and the
+ * caller's stop function says "go on" (the daemon at `quit`: the thread
+ * that waits for ffmpeg was not asked before the process was gone - ffmpeg
+ * was left to the kernel, the program behind a wrapper script ran on, the
+ * ".part" stayed). The stand-in is such a script, and makes its output. */
+static void test_sound_end (const char *any_file)
+{
+    char *dir = P ("end"), *fake = P ("end/ffmpeg"), *pidf = P ("end/pid"), *pidt = P ("end/pid.tmp"),
+         *dst_a = P ("end/a-sound.flac"), *part_a = P ("end/a-sound.flac.part"), *text = NULL;
+    char *q_pid = g_shell_quote (pidf), *q_tmp = g_shell_quote (pidt);
+    char *sh = g_strdup_printf ("#!/bin/sh\nfor a in \"$@\"; do out=$a; done\n: > \"${out#file:}\"\nsleep 60 &\n"
+                                "echo $! > %s\nmv %s %s\nwait $!\nexit $?\n", q_tmp, q_tmp, q_pid);
+    char *old_path = g_strdup (g_getenv ("PATH")), *path = g_strconcat (dir, ":", old_path, NULL);
+    g_mkdir_with_parents (dir, 0700);
+    if (!g_file_set_contents (fake, sh, -1, NULL) || g_chmod (fake, 0700)) {
+        CHECK (!"the stand-in ffmpeg could not be written");
+    } else {
+        g_setenv ("PATH", path, TRUE);
+        g_atomic_int_set (&stop_a, 0);
+        Extract a = { any_file, dst_a, 99, NULL };
+        GThread *t = g_thread_new ("extract", extract_thread, &a);
+        for (int i = 0; i < 5000 && !g_file_get_contents (pidf, &text, NULL, NULL); i++)
+            g_usleep (1000);
+        const long real = text ? atol (text) : 0;
+        CHECK (real > 1 && pid_runs (real) && g_file_test (part_a, G_FILE_TEST_EXISTS) && a.res == 99);
+        const gint64 t0 = g_get_monotonic_time ();
+        walpe_video_sound_extract_end (3000);
+        const double el = (g_get_monotonic_time () - t0) / 1e6;
+        /* back when the call has returned: within the tenth of a second it looks after */
+        CHECK (el < 1.5 && a.res == -2);
+        g_thread_join (t);
+        CHECK (a.res == -2 && !a.err);
+        gboolean gone = real <= 1;
+        for (int i = 0; real > 1 && i < 200 && !(gone = !pid_runs (real)); i++)
+            g_usleep (10000);
+        CHECK (gone);
+        if (real > 1 && !gone)
+            kill ((pid_t) real, SIGKILL);
+        CHECK (!g_file_test (dst_a, G_FILE_TEST_EXISTS) && !g_file_test (part_a, G_FILE_TEST_EXISTS));
+        g_free (a.err);
+        /* and nothing begins after that */
+        g_remove (pidf);
+        char *err = NULL;
+        CHECK (walpe_video_sound_extract (any_file, dst_a, &err) == -2 && !err &&
+               !g_file_test (pidf, G_FILE_TEST_EXISTS) && !g_file_test (part_a, G_FILE_TEST_EXISTS));
+        g_free (err);
         g_setenv ("PATH", old_path, TRUE);
     }
     g_remove (fake);
@@ -1032,6 +1092,14 @@ int main (int argc, char **argv)
         g_free (any);
     }
     test_runs ();
+    {
+        /* (last: no track is taken out in this process afterwards) */
+        char *any = P ("any.mp4");
+        g_file_set_contents (any, "stands for a video\n", -1, NULL);
+        test_sound_end (any);
+        g_remove (any);
+        g_free (any);
+    }
     g_rmdir (tmp);
     if (fails)
         g_printerr ("import-test: %d check(s) failed\n", fails);

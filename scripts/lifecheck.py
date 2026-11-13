@@ -55,6 +55,12 @@ reading): generated scenes only, nothing of the user's is read or written. Each 
             that shows nothing); status lines that say what the last one
             said draw no frame in it (counted by the window's own probe,
             WALPE_UI_STATS). Skipped in a build without the window.
+  soundstop a video's sound track is being taken out by an `ffmpeg` that is a
+            wrapper script (a stand-in that starts its program without
+            `exec`): the wallpaper is replaced, and the daemon quits - the
+            program behind the script ends each time and no ".part" stays
+            in the cache. Skipped without the video module or an ffmpeg
+            program that makes the clip.
   scan      the scan of the windows that decides "covered" and "an
             application has the focus" (X11): what it keeps of a window
             between two scans is dropped when the window's type or state
@@ -1654,6 +1660,100 @@ def case_video(env, W):
           rc.brief([m]))
     check(env.daemon.poll() is None, "video: the daemon is running")
     env.stop_daemon()
+
+
+# ---------------------------------------------------------------- soundstop
+def case_soundstop(env, W):
+    """The sound track of a video is being taken out (ffmpeg; here a stand-in
+    script that starts its program without `exec`, as the wrappers of some
+    distributions do, and makes the output file) when the wallpaper is
+    replaced, and when the daemon is told to quit: the program behind the
+    script ends too and nothing stays in the cache. (Replaced: only the
+    script was killed. Quit: the daemon was gone before its thread had
+    looked, the program ran on and the ".part" stayed.)"""
+    if not gen_clip(W["clip"]) or not os.path.exists(os.path.join(env.build, "walpe-video.so")):
+        print("skip  soundstop: needs the video module and an ffmpeg program that writes an H.264 clip", flush=True)
+        return
+    bindir = os.path.join(env.tmp, "standin")
+    pidf = os.path.join(bindir, "pid")
+    put(os.path.join(bindir, "ffmpeg"), "#!/bin/sh\nfor a in \"$@\"; do out=$a; done\n: > \"${out#file:}\"\n"
+        f"sleep 300 &\necho $! > '{pidf}.tmp'\nmv '{pidf}.tmp' '{pidf}'\nwait $!\nexit $?\n")
+    os.chmod(os.path.join(bindir, "ffmpeg"), 0o755)
+    cache = os.path.join(env.env["XDG_CACHE_HOME"], "walpe", "video")
+    try:
+        before = set(os.listdir(cache))     # (what earlier cases left: other clips' "no track" files)
+    except OSError:
+        before = set()
+
+    def parts():
+        try:
+            return sorted(n for n in os.listdir(cache) if "-sound.flac" in n and n not in before)
+        except OSError:
+            return []
+
+    def program():
+        """the process the stand-in started, once it says so"""
+        def read():
+            try:
+                return int(open(pidf).read().strip() or 0)
+            except (OSError, ValueError):
+                return 0
+        return wait_for(read, 20, 0.05) or 0
+
+    def runs(pid):
+        try:
+            return open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[0] not in "ZX"
+        except (OSError, IndexError):
+            return False
+
+    A = ("A", 640, 360, 0, 0)
+    rc.jdump(env.config, {"config_version": 3, "fps": 30, "pause_covered": False, "pause_dpms": False,
+                          "scene_sound": True})
+    started = []
+    try:
+        if not check(env.start_daemon([A], extra={"PATH": bindir + os.pathsep + os.environ.get("PATH", ""),
+                                                  "WALPE_SOUND_NULL": "1"}), "soundstop: daemon started"):
+            return
+        env.open(W["red"])
+        loaded(env, W["red"])
+        env.open(W["clip"])
+        pid = program()
+        started.append(pid)
+        check(pid > 1 and runs(pid) and len(parts()) == 1 and parts()[0].endswith(".part"),
+              "soundstop: the track of the video is being taken out", (pid, parts()))
+        os.unlink(pidf)
+        env.open(W["red"])
+        check(bool(wait_for(lambda: not runs(pid), 5, 0.05)),
+              "soundstop: the wallpaper is replaced: the program behind the script has ended", pid)
+        check(bool(wait_for(lambda: not parts(), 5, 0.05)), "soundstop: ... and nothing is left in the cache",
+              parts())
+        loaded(env, W["red"])
+        env.open(W["clip"])
+        pid = program()
+        started.append(pid)
+        check(pid > 1 and runs(pid) and len(parts()) == 1, "soundstop: shown again: taken out again",
+              (pid, parts()))
+        env.ipc({"cmd": "quit"})
+        try:
+            st = env.daemon.wait(timeout=20 * PATIENCE)
+        except subprocess.TimeoutExpired:
+            st = None
+        if st is not None:
+            env.daemon = None
+        check(st == 0, "soundstop: quit: the daemon ends with status 0", st)
+        check(bool(wait_for(lambda: not runs(pid), 3, 0.05)),
+              "soundstop: quit: the program behind the script has ended", pid)
+        check(not parts(), "soundstop: quit: nothing is left in the cache", parts())
+    finally:
+        for p in started:
+            if p > 1 and runs(p):
+                try:
+                    os.kill(p, signal.SIGKILL)      # not left behind by a failing run
+                except OSError:
+                    pass
+        env.stop_daemon()
+        shutil.rmtree(cache, ignore_errors=True)
+        shutil.rmtree(bindir, ignore_errors=True)
 
 
 # ------------------------------------------------------------------- layout
@@ -3901,6 +4001,7 @@ CASES = [("logcap", case_logcap), ("settings", case_settings), ("diag", case_dia
          ("layout", case_layout), ("stats", case_stats), ("push", case_push), ("scan", case_scan), ("tray", case_tray), ("traymenu", case_traymenu), ("trayreg", case_trayreg), ("window", case_window), ("panel", case_panel), ("busy", case_busy), ("held", case_held), ("slowload", case_slowload), ("probe", case_probe),
          ("fullscreen", case_fullscreen), ("video", case_video), ("webunload", case_webunload),
          ("winlost", case_winlost), ("desktop", case_desktop), ("convert", case_convert),
+         ("soundstop", case_soundstop),
          ("swaplost", case_swaplost), ("norestart", case_norestart),
          ("quitload", case_quitload)]
 
