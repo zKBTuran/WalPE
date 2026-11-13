@@ -2286,6 +2286,9 @@ static void mon_park_wait (Mon *m, gboolean *begun)
         *begun = TRUE;
     }
     g_mutex_lock (&m->lock);
+    /* (load_held_check: the setting-up of this output is over) */
+    m->in_load = FALSE;
+    m->load_end_us = g_get_monotonic_time ();
     if (ok)
         return;
     /* nothing can be drawn: said like swaps that fail for good (status
@@ -10037,6 +10040,8 @@ static void mon_wipe (Mon *m)
     g_free (m->qdescribe);
     g_free (m->res_note);
     g_free (m->mem_json);
+    g_free (m->given_path);
+    g_free (m->busy_path);
     walpe_region_clear (&m->vis);
     if (m->ptr_q)
         g_array_unref (m->ptr_q);
@@ -10062,6 +10067,10 @@ static void mon_wipe (Mon *m)
     m->quitting = quitting;
     m->parked = TRUE;
     m->park_told = TRUE;
+    /* as make_monitor: until its thread has its context on the new surface
+     * and is in its loop again (mon_park_wait), it is setting up - not in a
+     * frame that does not end (load_held_check) */
+    m->in_load = TRUE;
 }
 
 static int mons_waiting (void)
