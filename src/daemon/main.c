@@ -11488,6 +11488,7 @@ int main (int argc, char **argv)
     gboolean windowed = FALSE;
     const char *cli_backend = NULL;     /* --backend NAME */
 #ifdef HAVE_WAYLAND
+    gint64 waited_t0 = 0;   /* an image that waits for its display opened it early: since when */
     /* GNOME Shell 46 to 48 started this process for a daemon that asked
      * its extension for a connection to the compositor (platform/
      * wl_gnome.h): hand that connection on and wait. Nothing of the daemon
@@ -11740,6 +11741,41 @@ int main (int argc, char **argv)
                 g_printerr ("walpe-daemon: %s\n", berr ? berr : "no display to draw on");
                 return start_failed ();
             }
+#ifdef HAVE_WAYLAND
+            /* An image that waits for its display to come back
+             * (wayland_reconnect) waits here, before the questions that
+             * need a display to be answered: the test of the software
+             * renderer just below draws on it, the test of hardware
+             * acceleration for pages too. They were asked while the
+             * compositor was still away: "software rendering is switched
+             * on but not available: cannot connect to the Wayland
+             * compositor ... Rendering on the GPU", and a daemon told to
+             * render on the CPU was on the GPU driver from the first
+             * compositor that came back, until it was started anew. So
+             * this image opens its display now, the way it is opened
+             * further down for every other start; nothing below minds:
+             * the backend makes no EGL call and no thread when it opens. */
+            if (Bk.lost && D.backend == WALPE_BACKEND_WAYLAND) {
+                char *xs = walpe_socket_path (), *xm = loadmark_file (), *perr = NULL;
+                WalpePlatformOpts po = {
+                    .cfg = D.cfg,
+                    .windowed = windowed,
+                    .reconnect_wait_s = reconnect_wait_s (),
+                    .crash_marker_path = xm,
+                    .socket_path = xs,
+                    .events = &plat_events,
+                };
+                waited_t0 = g_get_monotonic_time ();
+                wait_signals_init ();   /* a signal while this image waits for its display */
+                gboolean opened = walpe_platform_open (D.backend, &po, &perr);
+                g_free (xs);
+                g_free (xm);
+                if (!opened) {
+                    g_printerr ("%s\n", perr ? perr : "cannot open the display");
+                    return start_failed ();
+                }
+            }
+#endif
             sw_setup ();
             /* GPU choice: hand-over point for the window-system layer
              * (call 1 of 2, gpu_glue.h). After the software decision
@@ -11793,9 +11829,15 @@ int main (int argc, char **argv)
         };
         gint64 open_t0 = Bk.lost ? g_get_monotonic_time () : 0;
 #ifdef HAVE_WAYLAND
-        wait_signals_init ();   /* a signal while this image waits for its display */
-#endif
+        /* (an image that waited for its display has it open already: above) */
+        if (waited_t0)
+            open_t0 = waited_t0;
+        else
+            wait_signals_init ();   /* a signal while this image waits for its display */
+        gboolean opened = waited_t0 || walpe_platform_open (D.backend, &po, &perr);
+#else
         gboolean opened = walpe_platform_open (D.backend, &po, &perr);
+#endif
         g_free (xs);
         g_free (xm);
         if (!opened) {

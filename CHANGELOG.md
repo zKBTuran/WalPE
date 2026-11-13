@@ -246,6 +246,15 @@ it was). A bare window manager on X11 - dwm, i3, openbox - gets the window of 0.
   daemon that KWin died of would have come back until they were used up. The two numbers
   are fixed, there is no new setting, and the default is unchanged (0: the daemon ends at
   the first loss).
+- `wayland_reconnect` and "Render on CPU": a daemon that had waited for its compositor
+  rendered on the GPU driver from then on, whatever the setting said. The daemon that
+  waits tests Mesa's software renderer on the display as every start does, and did so
+  before it waited: with the compositor still away the test failed ("software rendering
+  is switched on but not available: cannot connect to the Wayland compositor ...
+  Rendering on the GPU"), and that stayed until the daemon was started anew. It waits
+  for its display first now and asks then. The same order holds for the test of hardware
+  acceleration for web wallpapers, which asks the display too (not run: the test machine
+  has no graphics card). In the code since 0.14.0; found in review.
 - More compositors than sway and KWin have been run now, all headless on the software
   renderer: sway 1.12, labwc 0.20.2, Wayfire 0.11.0, river 0.3.17 and 0.5.0, niri 26.04
   and COSMIC's compositor 1.11.0. [WAYLAND.md](docs/WAYLAND.md#compositors-that-were-run)

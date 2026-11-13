@@ -115,7 +115,9 @@ not what the daemon believes it drew. Each case starts its own daemon:
             its socket takes connections: at whatever moment of its own
             start that catches the daemon, it waits on (it ended when the
             display went while EGL was being set up), and shows its
-            wallpaper when the compositor stays at last.
+            wallpaper when the compositor stays at last. Before all that: a
+            daemon told to render on the CPU still does when the compositor
+            is back.
   flap      a compositor that does not keep the daemon's connection, under a
             daemon with wayland_reconnect (a stand-in socket in front of the
             compositor's that hands every connection through and ends it
@@ -1529,11 +1531,48 @@ def case_lost(env, W):
 
 
 # ---------------------------------------------------------------- reconnect
+def reconnect_software(env, W, wait_s):
+    """"Render on CPU" (here: WALPE_SOFTWARE=1) is still on when the compositor is back. The
+    image that waits for its display asked its questions about the display - the test of
+    Mesa's software renderer is one - before the display was there: "software rendering
+    is switched on but not available: cannot connect to the Wayland compositor ...
+    Rendering on the GPU", for as long as that daemon ran."""
+    what = "reconnect, render on CPU"
+    if not start(env, [("A", 640, 360, 0, 0)], what, config=dict(CONFIG, current=W["red"]),
+                 extra={"WALPE_WAYLAND_RECONNECT": str(wait_s), "WALPE_SOFTWARE": "1"}):
+        return
+    try:
+        lc.loaded(env, W["red"])
+        st = env.state()
+        if not check(st.get("software_active") is True, f"{what}: the daemon renders on the CPU because it was told to",
+                     (st.get("software_active"), st.get("software_note"))):
+            return
+        pid, mark = env.daemon.pid, env.mark()
+        env.display.end(hard=True)
+        said = wait_for(lambda: "waiting up to %d s" % wait_s in env.since(mark), 15)
+        time.sleep(2.0)
+        check(bool(said) and env.display.start(640, 360), f"{what}: the compositor is killed, the daemon waits, "
+              "the compositor is started again", env.since(mark)[-600:])
+        back = wait_for(lambda: bool(env.state().get("monitors")), 40)
+        st = env.state()
+        check(bool(back) and env.daemon.poll() is None and env.daemon.pid == pid and lc.loaded(env, W["red"]),
+              f"{what}: the daemon is there again, the same process, its wallpaper loaded", env.since(mark)[-800:])
+        check(st.get("software_active") is True and not st.get("software_note") and
+              "software rendering is switched on but not available" not in env.since(mark),
+              f"{what}: it still renders on the CPU by its setting, and no line says otherwise",
+              (st.get("software_active"), st.get("software_note"),
+               [ln[-200:] for ln in env.since(mark).splitlines() if "software rendering" in ln][:3]))
+        healthy(env, mark, what)
+    finally:
+        env.stop_daemon()
+
+
 def case_reconnect(env, W):
     """The compositor goes away and comes back in the same place, under a daemon that is
     to wait for it (wayland_reconnect). It runs before `lost`, which ends the compositor
     for good."""
     wait_s = 40
+    reconnect_software(env, W, wait_s)
     extra = {"WALPE_WAYLAND_RECONNECT": str(wait_s), "WALPE_WL_SHORT_STAY_MS": "0"}
     if not start(env, [("A", 640, 360, 0, 0)], "reconnect", extra=extra):
         return
