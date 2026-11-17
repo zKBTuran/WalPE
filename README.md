@@ -1,3 +1,12 @@
+## Bugs/Development
+infinite fable 5.2 glitch patched so quality will drop
+### on wayland:
+- desktop icons doesnt exist
+- audio is broken
+- positioning
+- tray quit bugs 
+- cli ctl-c doesnt close the daemon properly
+
 # WalPE
 
 Animated desktop wallpapers for Linux, on X11 and on Wayland compositors with the layer
