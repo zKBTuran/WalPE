@@ -56,8 +56,42 @@ else
 	meson setup "$dir" "$@"
 fi
 
-# the installed programs only (meson.build: alias_target programs). Tests and
-# developer tools exist only in a build directory set up with -Dtests=true
-# (./build.sh -Dtests=true); there `meson test` or `ninja -C <dir> <name>`
-# builds them, this script still does not
-exec ninja -C "$dir" -j "$jobs" -l "$load" programs
+# Ninja cannot always see that a library behind a stable -lfoo argument was
+# replaced in place. Relink the installed executables/modules every time so
+# updated SONAMEs and static archives are picked up, without recompiling the
+# unchanged source objects.
+is_linux=false
+if [ "$(uname -s 2>/dev/null || echo unknown)" = Linux ]; then
+	is_linux=true
+	python3 scripts/force-relink-installed.py "$(command -v meson)" "$dir"
+fi
+
+# First link gives us the real app/module DT_NEEDED graph. On native Linux,
+# inspect those outputs, wildcard-index the directories containing their
+# resolved dependencies, then follow DT_NEEDED recursively and match exact
+# DT_SONAMEs. If this changes the set of private directories, reconfigure with
+# an inherited DT_RPATH and relink. This is intentionally app-specific: no
+# unrelated plugin directories from the whole host are added to WalPE.
+ninja -C "$dir" -j "$jobs" -l "$load" programs
+
+if [ "$is_linux" = true ]; then
+	runtime_update=$(python3 scripts/update-private-runtime-dirs.py "$(command -v meson)" "$dir" "$(command -v readelf)")
+	case "$runtime_update" in
+		changed)
+			private_dirs=$(awk 'NF { if (out != "") out = out ":"; out = out $0 } END { print out }' "$dir/private-runtime-dirs.txt")
+			meson setup --reconfigure "$dir" "-Dprivate_runtime_dirs=$private_dirs"
+			python3 scripts/force-relink-installed.py "$(command -v meson)" "$dir"
+			ninja -C "$dir" -j "$jobs" -l "$load" programs
+			;;
+		unchanged)
+			;;
+		*)
+			echo "build: unexpected runtime discovery result: $runtime_update" >&2
+			exit 1
+			;;
+	esac
+
+	# Inspect the complete runtime dependency closure of every installed
+	# executable/module after the final link.
+	python3 scripts/check-runtime-deps.py "$(command -v meson)" "$dir"
+fi

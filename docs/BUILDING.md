@@ -30,10 +30,45 @@ install` build what is installed and nothing else.
 The default is a release build (`-O3`, `NDEBUG`, LTO, hardening flags) with **generic CPU
 tuning**: the binaries run on any CPU of the architecture they were built for.
 
+Dependencies that are private to one executable/module, or are stateless, are linked from
+**static archives (`.a`) by default**: this includes FFmpeg, PulseAudio, QuickJS, LZ4 and the
+math/runtime helper archives when available. Meson is asked to select static variants and
+their private/transitive dependencies through each dependency provider. Install your
+distribution's static-library development packages (on Gentoo, enable the relevant
+`static-libs` USE flags); pkg-config packages that do not publish complete private
+dependency metadata may still need their dependent static archives installed separately.
+
+The GLib/GObject/GIO, GTK, text/rendering, and window-system stack remains shared on purpose.
+WalPE loads `walpe-video.so` and `walpe-web.so` into the daemon and passes GLib/GObject objects
+across that module ABI. Embedding independent copies of those libraries in the daemon and each
+module can split process-wide type registries and other global state. The C runtime, dynamic
+loader, graphics drivers and components deliberately loaded at run time are also system/runtime
+dependencies. Static archives pulled into `.so` modules, notably LZ4/libm and FFmpeg in
+`walpe-video.so`, must be position-independent code (PIC); the configure step checks those
+archive sets and reports an actionable error when they cannot be linked into a module.
+
+To use shared libraries for the otherwise-static private dependencies on a system without
+the required archives, configure with `-Dstatic_deps=false`.
+
+On a native Linux build, `build.sh` also discovers versioned *private* shared-library directories
+automatically after the first link. It examines every installed WalPE executable and module, follows
+their ELF `DT_NEEDED` graph, and searches nested library directories with version-agnostic
+`lib*.so*` globs. A candidate is accepted only when its ELF `DT_SONAME` exactly matches the
+requested dependency. Only matching directories are added to the binaries' inherited ELF
+`DT_RPATH` (not `DT_RUNPATH`, so indirect transitive dependencies are covered too). This handles distro layouts such as
+PulseAudio's private `libpulsecommon-<release>.so` without hardcoding a PulseAudio release or
+adding every plugin directory to the search path; a wildcard never substitutes an
+ABI-incompatible version. After a library update or downgrade, run
+`./build.sh` again: it reruns discovery and relinks the installed executables/modules against the
+current archives and shared-library SONAMEs without recompiling unchanged source files.
+The build then checks all installed executable/module outputs for unresolved shared dependencies. Cross builds
+skip the host scan; target library paths must come from the cross toolchain/sysroot.
+
 ## Dependencies
 
-A C compiler (GCC or clang), meson, ninja and pkg-config, and GLib's `glib-compile-resources`
-(the window's stylesheet is compiled into the program; Debian and Ubuntu have it in
+A C compiler (GCC or clang), meson, ninja, pkg-config, Python 3, `readelf` from binutils,
+`ldd` (native Linux builds), and GLib's `glib-compile-resources` (the window's stylesheet is compiled into the program;
+Debian and Ubuntu have it in
 `libglib2.0-dev-bin`, which `libglib2.0-dev` asks for, Arch in `glib2`). Package names are
 Gentoo's; the pkg-config module is what `meson setup` looks for, to map them to another
 distribution. The names of Debian and Ubuntu are listed [below](#64-bit-arm-aarch64), the

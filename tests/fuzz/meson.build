@@ -37,7 +37,7 @@ fuzz_extra = {'sound': {'src': have_ffmpeg ? files('../../src/engine/sounddec.c'
               # (the library scan of the GUI: no GTK in it)
               'library': {'src': files('../../src/ui/store.c'), 'deps': [], 'args': []},
               'scenejson': {'src': [], 'deps': [], 'args': fuzz_assets},
-              'scenefile': {'src': [], 'deps': [cc.find_library('dl', required: false)],
+              'scenefile': {'src': [], 'deps': [cc.find_library('dl', static: static_deps, required: false)],
                             'args': ['-DFUZZ_ASSETS="' + meson.current_source_dir() / 'seeds' /
                                      'scenefile.assets' + '"']}}
 

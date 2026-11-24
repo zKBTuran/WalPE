@@ -1,5 +1,5 @@
 #!/bin/sh
-# linkage_test.sh <build dir> <wayland|nowayland> [x11|nox11] [modules.dynlist]
+# linkage_test.sh <build dir> <wayland|nowayland> [x11|nox11] [modules.dynlist] [static|shared]
 # What the built programs make the dynamic loader load, read from the files
 # themselves (readelf -d, nm -D): a part that is not built must not leave a
 # library behind in walpe-daemon or in the web module.
@@ -23,7 +23,7 @@
 #   function marked WALPE_API is exported, a module loads without its
 #   function in the list, and the same tree fails to load it elsewhere.
 # Exit 77 (skipped) without readelf / nm. No display, no daemon.
-B=$1; WL=$2; X=${3:-x11}; L=${4:-}
+B=$1; WL=$2; X=${3:-x11}; L=${4:-}; STATIC=${5:-shared}
 command -v readelf >/dev/null 2>&1 && command -v nm >/dev/null 2>&1 || { echo "linkage: no readelf / nm: skipped"; exit 77; }
 [ -f "$B/walpe-daemon" ] || { echo "linkage: $B/walpe-daemon is not there"; exit 1; }
 fail=0; checks=0
@@ -79,6 +79,18 @@ if [ -n "$L" ]; then
         echo "$exported" | grep -q -x -F -- "$s" || miss="$miss $s"
     done
     check $([ -z "$miss" ] && echo 1 || echo 0) "walpe-daemon: what modules.dynlist names of its functions is exported (not exported:${miss:- none})"
+fi
+if [ "$STATIC" = static ]; then
+    # These are the libraries intentionally selected as static: FFmpeg,
+    # LZ4, PulseAudio, QuickJS, XRender (tray-only) and libm. The shared
+    # GLib/GTK/window-system stack is deliberately kept common to the daemon
+    # and its dlopen() modules; see meson.build and docs/BUILDING.md.
+    static_re='^lib(avcodec|avutil|lz4|pulse-simple|pulse|quickjs|Xrender|m)([.]|$)'
+    for f in walpe-daemon walpe walpe-ctl walpe-web.so walpe-video.so walpe-tray libgstwalpesound.so; do
+        [ -f "$B/$f" ] || continue
+        bad=$(needed "$B/$f" | grep -E "$static_re" || true)
+        check $([ -z "$bad" ] && echo 1 || echo 0) "$f: no shared DT_NEEDED entry for a statically linked third-party library (${bad:-none})"
+    done
 fi
 n=$(needed "$B/walpe-daemon" | grep -c '^libpulse-simple')
 check $([ "$n" = 0 ] && echo 1 || echo 0) "walpe-daemon: libpulse-simple is not NEEDED (wallpaper sound calls libpulse itself)"

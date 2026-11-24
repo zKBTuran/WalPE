@@ -203,18 +203,56 @@ endif
 web_opt = get_option('web')
 audio_opt = get_option('audio')
 ffmpeg_opt = get_option('video')
+# Prefer static archives for dependencies that are private to one
+# executable/module or stateless (FFmpeg, PulseAudio, QuickJS, LZ4, math).
+# The process-wide GLib/GTK/rendering/window-system stack stays shared: the
+# daemon dlopens modules and passes GLib/GObject objects across that ABI, so
+# embedding another copy in each module would split global type/state tables.
+# This is separate from default_library: WalPE still builds .so modules.
+static_deps = get_option('static_deps')
 
-glib      = dependency('glib-2.0')
-gobject   = dependency('gobject-2.0')
-gio       = dependency('gio-2.0')
-gtk4      = dependency('gtk4')
-jsonglib  = dependency('json-glib-1.0')
-pixbuf    = dependency('gdk-pixbuf-2.0')
-pangocairo = dependency('pangocairo')  # scene text layers
-pangoft2  = dependency('pangoft2')    # text: fontconfig font map (pkg / WE fonts)
-fontconfig = dependency('fontconfig')
-epoxy     = dependency('epoxy')
-egl       = dependency('egl')
+# Some shared libraries have private, versioned companion DSOs in nested
+# library directories that are not in ld.so.cache (PulseAudio is one example).
+# build.sh first links the actual WalPE outputs, follows their DT_NEEDED graph
+# with wildcard lib*.so* discovery and exact DT_SONAME verification, then
+# reconfigures with the discovered directories. DT_RPATH is used rather than
+# DT_RUNPATH because it is inherited while resolving indirect dependencies.
+# This option is internal and populated by scripts/update-private-runtime-dirs.py.
+private_runtime_dirs = []
+have_private_runtime_scan = false
+if host_machine.system() == 'linux' and not meson.is_cross_build()
+  runtime_python = find_program('python3')
+  runtime_readelf = find_program('readelf')
+  runtime_ldd = find_program('ldd')
+  have_private_runtime_scan = true
+  private_runtime_text = get_option('private_runtime_dirs').strip()
+  if private_runtime_text != ''
+    private_runtime_dirs = private_runtime_text.split(':')
+    add_project_link_arguments(
+      ['-Wl,--disable-new-dtags', '-Wl,-rpath,' + private_runtime_text],
+      language: 'c')
+    message('Private runtime library directories: ' + private_runtime_text)
+  endif
+endif
+
+# The oldest release of each library that the code compiles against, named
+# here so that an older one stops the configure step with a sentence instead
+# of dozens of errors in the sources. Newer ones are taken as they come: no
+# other version is written down anywhere in the build.
+#   GLib 2.68: g_memdup2 (2.58 is the oldest GLIB_CHECK_VERSION guard)
+#   GTK 4.12: gtk_css_provider_load_from_string (the file and alert dialogs
+#             are 4.10); the two guards above 4.12 name their release
+glib      = dependency('glib-2.0', static: false, version: '>= 2.68')
+gobject   = dependency('gobject-2.0', static: false, version: '>= 2.68')
+gio       = dependency('gio-2.0', static: false, version: '>= 2.68')
+gtk4      = dependency('gtk4', static: false, version: '>= 4.12')
+jsonglib  = dependency('json-glib-1.0', static: false)
+pixbuf    = dependency('gdk-pixbuf-2.0', static: false)
+pangocairo = dependency('pangocairo', static: false)  # scene text layers
+pangoft2  = dependency('pangoft2', static: false)    # text: fontconfig font map (pkg / WE fonts)
+fontconfig = dependency('fontconfig', static: false)
+epoxy     = dependency('epoxy', static: false)
+egl       = dependency('egl', static: false)
 # mpv backend removed (resource decision): ffmpeg-only video
 
 # ---- the window systems the daemon can draw on (src/platform): X11 and /
@@ -228,12 +266,29 @@ wayland_opt = get_option('wayland')
 # libX11 is looked for whatever -Dx11 says: the tray is an X11 client of its
 # own (XEmbed) where the library is there. -Dx11=disabled leaves X out of
 # walpe-daemon and of the web module (its X11 page host, see below).
-x11       = dependency('x11', required: x11_opt.enabled())
-xext      = dependency('xext', required: x11_opt.enabled())
-xinerama  = dependency('xinerama', required: x11_opt.enabled())
+x11       = dependency('x11', static: false, required: x11_opt.enabled())
+xext      = dependency('xext', static: false, required: x11_opt.enabled())
+xinerama  = dependency('xinerama', static: false, required: x11_opt.enabled())
 have_x11  = not x11_opt.disabled() and x11.found() and xext.found() and xinerama.found()
-lz4       = dependency('liblz4')  # WE .tex compressed mips
-m_lib     = cc.find_library('m')
+lz4       = dependency('liblz4', static: static_deps)  # WE .tex compressed mips
+m_lib     = cc.find_library('m', static: static_deps)
+if static_deps and host_machine.system() == 'linux'
+  # walpecore is PIC and is linked into the daemon and dlopen() modules.
+  # Check the statically selected common archives before attempting the full
+  # build, rather than leaving a cryptic relocation error to the final link.
+  core_archives_pic_ok = cc.links('''
+    #include <lz4.h>
+    #include <math.h>
+    int walpe_core_archives_pic_probe (const char *src, char *dst, int n) {
+      return LZ4_decompress_safe (src, dst, n, n) + (int) sqrt ((double) n);
+    }''',
+    args: ['-fPIC', '-shared', '-Wl,-z,defs'],
+    dependencies: [lz4, m_lib],
+    name: 'static LZ4 and libm archives are PIC and link into modules')
+  if not core_archives_pic_ok
+    error('static LZ4/libm archives cannot link into WalPE shared modules: install PIC-built static archives, or set -Dstatic_deps=false')
+  endif
+endif
 
 deps_core = [glib, gobject, gio, jsonglib, pixbuf, pangocairo, pangoft2, fontconfig, epoxy, egl]
 if have_x11
@@ -246,18 +301,18 @@ deps_core += [lz4, m_lib]
 tsan_deps = []
 if tsan
   tsan_shim = static_library('walpe-tsan-shim', 'tests/tsan/gsync_shim.c',
-    dependencies: [glib, dependency('threads'), cc.find_library('dl', required: false)],
+    dependencies: [glib, dependency('threads'), cc.find_library('dl', static: static_deps, required: false)],
     pic: true)
   tsan_deps = [declare_dependency(link_whole: tsan_shim)]
 endif
 # optional: XInput2 raw button events = desktop clicks for SceneScript cursor events
-xi = dependency('xi', required: false)
+xi = dependency('xi', static: false, required: false)
 if xi.found() and have_x11
   deps_core += xi
 endif
 # optional: RandR 1.5 monitor names (per-monitor wallpapers are saved by
 # output name, e.g. HDMI-0; without it monitors are named mon0, mon1, ...)
-xrandr = dependency('xrandr', required: false)
+xrandr = dependency('xrandr', static: false, required: false)
 if xrandr.found() and have_x11
   deps_core += xrandr
 endif
@@ -272,8 +327,8 @@ deps_wayland = []
 wayland_backend_src = []
 wl_generated = []
 if not wayland_opt.disabled()
-  wayland_client = dependency('wayland-client', required: wayland_opt)
-  wayland_egl = dependency('wayland-egl', required: wayland_opt)
+  wayland_client = dependency('wayland-client', static: false, required: wayland_opt)
+  wayland_egl = dependency('wayland-egl', static: false, required: wayland_opt)
   wl_scanner = find_program('wayland-scanner', native: true, required: wayland_opt)
   if wayland_client.found() and wayland_egl.found() and wl_scanner.found()
     if fs.exists('src/platform/wayland.c')
@@ -295,10 +350,10 @@ if have_wayland
   # GNOME Shell with the WalPE extension (src/platform/wl_gnome.c): one
   # descriptor travels in a D-Bus call, which is the gio-unix part of GLib
   # (its headers come with GLib's own; no further library is linked)
-  gio_unix = dependency('gio-unix-2.0')
+  gio_unix = dependency('gio-unix-2.0', static: false)
   deps_wayland += gio_unix
   # optional: a pointer image over the wallpaper while it takes pointer input
-  wayland_cursor = dependency('wayland-cursor', required: false)
+  wayland_cursor = dependency('wayland-cursor', static: false, required: false)
   if wayland_cursor.found()
     deps_wayland += wayland_cursor
     have_wl_cursor = true
@@ -335,7 +390,7 @@ have_ffmpeg = false
 deps_ffmpeg = []
 if ffmpeg_opt != 'disabled'
   foreach d : ['libavcodec', 'libavutil']
-    dep = dependency(d, required: false)
+    dep = dependency(d, required: false, static: static_deps)
     if dep.found()
       deps_ffmpeg += dep
     else
@@ -345,18 +400,41 @@ if ffmpeg_opt != 'disabled'
     have_ffmpeg = true
   endforeach
   if not have_ffmpeg and ffmpeg_opt == 'enabled'
-    error('video=enabled but libavcodec and libavutil (FFmpeg, with their development files) were not found')
+    if static_deps
+      error('video=enabled but static libavcodec.a and libavutil.a (plus their static dependencies) were not found')
+    else
+      error('video=enabled but libavcodec and libavutil (FFmpeg, with their development files) were not found')
+    endif
+  elif not have_ffmpeg and ffmpeg_opt == 'auto' and static_deps
+    warning('FFmpeg video backend omitted: static libavcodec/libavutil archives were not found; install the static FFmpeg development files or use -Dstatic_deps=false')
+  endif
+  if have_ffmpeg and static_deps and host_machine.system() == 'linux'
+    # walpe-video.so is a shared module. A static FFmpeg archive and every
+    # archive in its private dependency closure therefore have to contain PIC
+    # objects. Meson cannot infer that from pkg-config's --static response.
+    ffmpeg_pic_ok = cc.links('''
+      #include <libavcodec/avcodec.h>
+      #include <libavutil/avutil.h>
+      int walpe_ffmpeg_pic_probe (void) {
+        return (int) (avcodec_version () ^ avutil_version ());
+      }''',
+      args: ['-fPIC', '-shared', '-Wl,-z,defs'],
+      dependencies: deps_ffmpeg,
+      name: 'static FFmpeg archives are PIC and link into walpe-video.so')
+    if not ffmpeg_pic_ok
+      error('static FFmpeg archives cannot link into walpe-video.so: build FFmpeg and its static dependencies with PIC (for FFmpeg, use --enable-pic), or set -Dstatic_deps=false')
+    endif
   endif
 endif
 
 have_web = false
 deps_web = []
 if web_opt != 'disabled'
-  w = dependency('webkitgtk-6.0', required: web_opt == 'enabled')
+  w = dependency('webkitgtk-6.0', static: false, required: web_opt == 'enabled')
   if w.found()
     have_web = true
     # libsoup: loopback file server for page media (WebKit depends on it)
-    deps_web = [w, dependency('libsoup-3.0')]
+    deps_web = [w, dependency('libsoup-3.0', static: false)]
   endif
 endif
 # Where the page of a web wallpaper lives while nobody sees its window
@@ -378,18 +456,18 @@ endif
 # listener and wl_surface.offset (wl_surface 5) in the page host's request
 # table; with an older libwayland those files would not compile, so the
 # Wayland parts are left out instead)
-wl_client_dep = dependency('wayland-client', version: '>= 1.20', required: false)
-wl_server_dep = dependency('wayland-server', version: '>= 1.20', required: false)
+wl_client_dep = dependency('wayland-client', static: false, version: '>= 1.20', required: false)
+wl_server_dep = dependency('wayland-server', static: false, version: '>= 1.20', required: false)
 wl_scanner_prog = find_program('wayland-scanner', native: true, required: false)
 have_wl_scan = wl_scanner_prog.found()
 have_webhost_x11 = false
 have_webhost_wl = false
 if have_web
-  gtk4_wayland_dep = dependency('gtk4-wayland', required: false)
+  gtk4_wayland_dep = dependency('gtk4-wayland', static: false, required: false)
   have_webhost_wl = (have_wayland and have_wl_scan and wl_server_dep.found() and
                      wl_client_dep.found() and gtk4_wayland_dep.found())
   if not x11_opt.disabled() and x11.found()
-    have_webhost_x11 = dependency('gtk4-x11', required: false).found()
+    have_webhost_x11 = dependency('gtk4-x11', static: false, required: false).found()
   endif
   if not have_webhost_x11 and not have_webhost_wl
     web_why = ('no page host can be built: the X11 one needs libX11 and GTK\'s X11 backend ' +
@@ -412,7 +490,7 @@ endif
 # says so in the log (docs/SOUND.md, "Without the plugin").
 have_web_sound_sink = false
 if have_web
-  gst_dep = dependency('gstreamer-1.0', version: '>= 1.14', required: web_opt == 'enabled')
+  gst_dep = dependency('gstreamer-1.0', static: false, version: '>= 1.14', required: web_opt == 'enabled')
   have_web_sound_sink = gst_dep.found()
   if not have_web_sound_sink
     warning('gstreamer-1.0 (headers) not found: web wallpapers are built without ' +
@@ -434,18 +512,29 @@ endif
 have_pulse = false
 deps_audio = []
 if audio_opt != 'disabled'
-  pa = dependency('libpulse-simple', required: audio_opt == 'enabled')
+  pa = dependency('libpulse-simple', static: static_deps, required: audio_opt == 'enabled')
   if pa.found()
     have_pulse = true
-    deps_audio = [pa, dependency('libpulse')]
+    deps_audio = [pa, dependency('libpulse', static: static_deps)]
+  elif audio_opt == 'auto' and static_deps
+    warning('PulseAudio support omitted: static libpulse-simple/libpulse archives were not found; install the static PulseAudio development files or use -Dstatic_deps=false')
   endif
 endif
 
-# SceneScript: QuickJS (no pkg-config file upstream; Gentoo dev-lang/quickjs
-# and Debian/Ubuntu install libquickjs.a under <libdir>/quickjs)
+# SceneScript: QuickJS. The original library has no pkg-config file; its
+# Makefile installs libquickjs.a and libquickjs.so under <libdir>/quickjs.
+# Newer packages install the shared library only (Gentoo's dev-lang/quickjs
+# since 2026 does) and put a quickjs.pc next to it. The archive is looked
+# for first: the shared library's soname is the release's date
+# (libquickjs.so.2026.06.04, upstream's -soname), so every QuickJS update
+# renames it and a program linked against it stops starting until it is
+# rebuilt. A static library has no such name. Both are used as they are:
+# nothing in the code depends on which one it is.
 have_quickjs = false
 quickjs_old = false
 quickjs_malloc_state = false
+quickjs_static = false       # linked from libquickjs.a
+quickjs_how = ''             # for the summary
 deps_js = []
 if get_option('scenescript') != 'disabled'
   qjs_dirs = ['/usr/lib/quickjs', '/usr/lib64/quickjs', '/usr/local/lib/quickjs',
@@ -500,21 +589,26 @@ if get_option('scenescript') != 'disabled'
     qjs = dependency('', required: false)
     qjs_wrong = []
     foreach qjs_d : qjs_cross_dirs
-      if not qjs.found()
-        qjs_try = cc.find_library('quickjs', required: false, dirs: [qjs_d])
-        if qjs_try.found()
-          if cc.links('''
-              #include <quickjs/quickjs.h>
-              int main (void) { return JS_NewRuntime () != 0; }''',
-              dependencies: [qjs_try, cc.find_library('m', required: false),
-                             cc.find_library('dl', required: false), dependency('threads')],
-              name: 'libquickjs of ' + qjs_d + ' links for ' + host_cpu)
-            qjs = qjs_try
-          else
-            qjs_wrong += [qjs_d]
+      # try the selected library type in each target directory
+      foreach qjs_want_static : [static_deps]
+        if not qjs.found()
+          qjs_try = cc.find_library('quickjs', required: false, dirs: [qjs_d],
+                                     static: qjs_want_static)
+          if qjs_try.found()
+            if cc.links('''
+                #include <quickjs/quickjs.h>
+                int main (void) { return JS_NewRuntime () != 0; }''',
+                dependencies: [qjs_try, cc.find_library('m', static: static_deps, required: false),
+                               cc.find_library('dl', static: static_deps, required: false), dependency('threads')],
+                name: 'libquickjs of ' + qjs_d + ' links for ' + host_cpu)
+              qjs = qjs_try
+              quickjs_static = qjs_want_static
+            elif not qjs_wrong.contains(qjs_d)
+              qjs_wrong += [qjs_d]
+            endif
           endif
         endif
-      endif
+      endforeach
     endforeach
     if not qjs.found() and qjs_wrong.length() > 0
       qjs_wrong_msg = ('QuickJS: the libquickjs of ' + ', '.join(qjs_wrong) + ' does not link for ' +
@@ -527,11 +621,33 @@ if get_option('scenescript') != 'disabled'
       warning(qjs_wrong_msg + ' SceneScript is left out of this build.')
     endif
   else
-    qjs = cc.find_library('quickjs', required: false, dirs: qjs_dirs)
+    # Find QuickJS in the selected library mode (static by default).
+    # -Dquickjs_libdir is searched first; a shared-only installation is
+    # accepted only when -Dstatic_deps=false.
+    qjs = cc.find_library('quickjs', required: false, dirs: qjs_dirs,
+                          static: static_deps)
+    if qjs.found()
+      quickjs_static = static_deps
+    elif not static_deps
+      qjs_pc = dependency('quickjs', static: false, required: false)
+      if qjs_pc.found()
+        qjs = qjs_pc
+      else
+        qjs = cc.find_library('quickjs', static: false, required: false, dirs: qjs_dirs)
+      endif
+    endif
   endif
   if qjs.found() and cc.has_header('quickjs/quickjs.h')
     have_quickjs = true
-    deps_js = [qjs, cc.find_library('dl', required: false), dependency('threads')]
+    if quickjs_static
+      quickjs_how = 'static'
+    else
+      quickjs_how = 'shared'
+    endif
+    # -lm: QuickJS's Date and math built-ins call libm; a shared library
+    # has it in its own NEEDED, a static one needs it on the link line.
+    deps_js = [qjs, cc.find_library('m', static: static_deps, required: false),
+               cc.find_library('dl', static: static_deps, required: false), dependency('threads')]
     # Wallpaper scripts are untrusted and the interpreter is their only
     # container. QuickJS has no version number in its header; releases
     # from 2024-01-13 on declare JS_EVAL_FLAG_ASYNC. 2021-03-27 (what
@@ -561,13 +677,28 @@ if get_option('scenescript') != 'disabled'
       args: ['-Werror=incompatible-pointer-types'],
       name: 'QuickJS allocator interface with JSMallocState')
   elif get_option('scenescript') == 'enabled'
-    error('scenescript=enabled but QuickJS (quickjs/quickjs.h + libquickjs) was not found')
+    error('scenescript=enabled but QuickJS (quickjs/quickjs.h + libquickjs, static or shared) ' +
+          'was not found')
+  elif cc.has_header('quickjs.h')
+    # quickjs-ng puts <quickjs.h> and its own library in place, with a
+    # changed interface: it is another library, not a newer QuickJS.
+    warning('QuickJS: found what looks like quickjs-ng (<quickjs.h>, not <quickjs/quickjs.h>). ' +
+            'It is another library with a changed interface; WalPE builds with the original ' +
+            'QuickJS (quickjs/quickjs.h + libquickjs, a static libquickjs.a preferred), named ' +
+            'with -Dquickjs_libdir=<dir> when it is not where the build looks. SceneScript is ' +
+            'left out of this build.')
+  elif static_deps and cc.has_header('quickjs/quickjs.h')
+    warning('QuickJS: quickjs/quickjs.h was found but libquickjs.a was not; SceneScript is left out. Install the static QuickJS development archive or use -Dstatic_deps=false.')
+  elif qjs.found()
+    warning('QuickJS: libquickjs was found but its header quickjs/quickjs.h was not (install ' +
+            'the development files, or add -Dc_args=-I<dir>), so SceneScript is left out of ' +
+            'this build.')
   endif
 endif
 
 # media integration (MPRIS over GDBus, always built): libsoup fetches
 # http(s) album art when available (WebKit already depends on it)
-soup_dep = dependency('libsoup-3.0', required: false)
+soup_dep = dependency('libsoup-3.0', static: false, required: false)
 have_soup = soup_dep.found()
 deps_media = have_soup ? [soup_dep] : []
 
@@ -670,7 +801,7 @@ core = static_library('walpecore', core_srcs,
 
 core_dep = declare_dependency(link_with: core, include_directories: inc,
   dependencies: deps_core + deps_audio + deps_js + deps_media + tsan_deps +
-                [cc.find_library('dl', required: false)])
+                [cc.find_library('dl', static: static_deps, required: false)])
 
 # ------------------------------------------------- Wayland protocol code
 # wayland-scanner output for the protocols used outside the drawing code:
@@ -913,7 +1044,7 @@ if have_wl_scan and wl_server_dep.found() and wl_client_dep.found()
     # (only `inc`: with src/engine itself on the include path the C library's
     # <features.h> would resolve to src/engine/features.h)
     include_directories: inc,
-    dependencies: [glib, wl_server_dep, wl_client_dep, cc.find_library('m', required: false)],
+    dependencies: [glib, wl_server_dep, wl_client_dep, cc.find_library('m', static: static_deps, required: false)],
     install: false, build_by_default: false), timeout: 60)
 endif
 # GTK brought up on the private page host the way web.c does it
@@ -926,7 +1057,7 @@ if have_webhost_wl
   test('webgtkinit', executable('webgtkinit-test', 'tests/webgtkinit_test.c',
     'src/engine/webhost_wl.c', wl_gen['xdg-shell'][1], wl_gen['xdg-shell'][2],
     include_directories: inc,
-    dependencies: [glib, gtk4, gtk4_wayland_dep, wl_server_dep, wl_client_dep, cc.find_library('dl', required: false)],
+    dependencies: [glib, gtk4, gtk4_wayland_dep, wl_server_dep, wl_client_dep, cc.find_library('dl', static: static_deps, required: false)],
     install: false, build_by_default: false),
     env: ['GTK_A11Y=none', 'GSETTINGS_BACKEND=memory', 'GDK_DEBUG=', 'GTK_DEBUG='],
     timeout: 60)
@@ -1015,8 +1146,18 @@ endif
 test('linkage', find_program('sh'),
   args: [files('tests/linkage_test.sh'), meson.current_build_dir(),
          have_wayland ? 'wayland' : 'nowayland',
-         have_x11 or have_webhost_x11 ? 'x11' : 'nox11', dynlist],
+         have_x11 or have_webhost_x11 ? 'x11' : 'nox11', dynlist,
+         static_deps ? 'static' : 'shared'],
   depends: linkage_deps, timeout: 60)
+
+# The runtime path scanner uses wildcard discovery but accepts only a file
+# whose ELF SONAME exactly matches a DT_NEEDED entry. This fixture covers a
+# synthetic versioned private DSO in a non-default directory.
+if have_private_runtime_scan
+  test('private-library-discovery', runtime_python,
+    args: [files('tests/private_libdir_test.py'), runtime_readelf.full_path()] + cc.cmd_array(),
+    timeout: 60)
+endif
 
 # docs/ENVIRONMENT.md names every variable of WalPE's own that a test
 # program (tests/*.c) or a check script (scripts/*.py) reads from its
@@ -1030,10 +1171,10 @@ ui_res = import('gnome').compile_resources('walpe-ui-resources',
   'data/walpe-ui.gresource.xml', source_dir: 'data', c_name: 'walpe_ui')
 
 # X11: the GUI sees its window manager hide the window (winstate.c)
-ui_x11_dep = dependency('gtk4-x11', required: false)
+ui_x11_dep = dependency('gtk4-x11', static: false, required: false)
 ui_x11_args = ui_x11_dep.found() and x11.found() ? ['-DWALPE_UI_X11'] : []
 # Wayland: every window of the GUI says the application's id (wlappid.c)
-ui_wl_dep = dependency('gtk4-wayland', required: false)
+ui_wl_dep = dependency('gtk4-wayland', static: false, required: false)
 ui_wl_args = ui_wl_dep.found() ? ['-DWALPE_UI_WAYLAND'] : []
 
 # the Steam Workshop browser is a tab of the GUI (walpe_workshop_page_new)
@@ -2550,7 +2691,7 @@ endif  # with_tests
 tray_opt = get_option('tray')
 have_tray = tray_opt != 'disabled'
 if have_tray
-  xrender = dependency('xrender', required: false)
+  xrender = dependency('xrender', static: static_deps, required: false)
   tray_srcs = ['src/tray/main.c', 'src/tray/icon.c', 'src/tray/trayipc.c', 'src/tray/trayconf.c',
                'src/tray/popup.c', 'src/tray/sni.c', 'src/ui/store.c',
                'src/ui/resmodel.c']   # which monitors are new (the tray announces them when the window is closed)
@@ -2585,7 +2726,7 @@ if have_tray
   # that registers walpe-tray's item, dumps icon/tooltip/menu and clicks
   # menu items over dbusmenu
   sni_host_stub = executable('sni-host-stub', 'tests/tray/sni_host_stub.c',
-    dependencies: [gio, glib, dependency('cairo')],
+    dependencies: [gio, glib, dependency('cairo', static: static_deps)],
     install: false, build_by_default: false)
   if have_tray_xembed
     executable('xembed-host-stub', 'tests/tray/xembed_host_stub.c',
@@ -2604,7 +2745,7 @@ if have_tray
   # keeps its id. No display, no bus.
   test('tray-ids', executable('tray-ids-test', 'tests/tray_ids_test.c',
     include_directories: inc,
-    dependencies: [glib, dependency('cairo')],
+    dependencies: [glib, dependency('cairo', static: static_deps)],
     install: false, build_by_default: false))
   # walpe-tray next to a real daemon (scripts/lifecheck.py, case tray: own
   # Xvfb, private XDG dirs): what it writes while the engine sends status
@@ -2656,14 +2797,14 @@ endif
 # is compiled without one whatever the build's options say.
 if with_tests and lifecheck_py.found() and have_wayland
   # (GUnixFDList, for the pipe KWin writes its screenshot to: a part of GLib)
-  kwin_fd_dep = dependency('gio-unix-2.0', required: false)
+  kwin_fd_dep = dependency('gio-unix-2.0', static: false, required: false)
   if kwin_fd_dep.found()
     kwin_bus = executable('kwin-bus', 'tests/kwin/kwin_bus.c',
       dependencies: [gio, kwin_fd_dep, jsonglib],
       install: false, build_by_default: false)
     kwin_shim = shared_module('kwincheck-udmabuf', 'tests/kwin/udmabuf_shim.c',
       name_prefix: '',
-      dependencies: [cc.find_library('dl', required: false)],
+      dependencies: [cc.find_library('dl', static: static_deps, required: false)],
       override_options: ['b_sanitize=none', 'b_lundef=false', 'b_lto=false'],
       install: false, build_by_default: false)
     kwin_check_deps = [daemon, ctl, kwin_bus, kwin_shim]
@@ -2734,3 +2875,6 @@ test('scene-texlimit-still', executable('scene-texlimit-still-test', 'tests/scen
   dependencies: [core_dep],
   install: false, build_by_default: false), timeout: 120)
 endif  # with_tests
+
+summary({'private dependency mode': static_deps ? 'static archives (.a)' : 'shared libraries'},
+  section: 'Linking')
