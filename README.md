@@ -1,6 +1,5 @@
 ## Bugs/Development
 infinite fable 5.2 glitch patched so quality will drop
-- lib updates break walpe because fr, its only linked to specific version of that lib like libavcodec.so.62 
 ### on wayland:
 - desktop icons doesnt exist
 - audio is broken
