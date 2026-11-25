@@ -80,12 +80,16 @@ if [ -n "$L" ]; then
     done
     check $([ -z "$miss" ] && echo 1 || echo 0) "walpe-daemon: what modules.dynlist names of its functions is exported (not exported:${miss:- none})"
 fi
+for b in walpe-daemon walpe walpe-tray; do
+    [ -f "$B/$b" ] || continue
+    pc=$(needed "$B/$b" | grep '^libpulsecommon-' || true)
+    check $([ -z "$pc" ] && echo 1 || echo 0) "$b: private libpulsecommon-* is not directly NEEDED (${pc:-none})"
+done
 if [ "$STATIC" = static ]; then
-    # These are the libraries intentionally selected as static: FFmpeg,
-    # LZ4, PulseAudio, QuickJS, XRender (tray-only) and libm. The shared
-    # GLib/GTK/window-system stack is deliberately kept common to the daemon
-    # and its dlopen() modules; see meson.build and docs/BUILDING.md.
-    static_re='^lib(avcodec|avutil|lz4|pulse-simple|pulse|quickjs|Xrender|m)([.]|$)'
+    # These are the libraries intentionally selected as static when
+    # -Dstatic_deps=true: FFmpeg, LZ4, QuickJS. The shared
+    # GLib/GTK/PulseAudio/window-system stack stays dynamic.
+    static_re='^lib(avcodec|avutil|lz4|quickjs)([.]|$)'
     for f in walpe-daemon walpe walpe-ctl walpe-web.so walpe-video.so walpe-tray libgstwalpesound.so; do
         [ -f "$B/$f" ] || continue
         bad=$(needed "$B/$f" | grep -E "$static_re" || true)

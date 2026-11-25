@@ -1813,7 +1813,7 @@ char *walpe_sound_status_with (const WalpeSoundPages *web)
     if (!web)
         web = &none;
     int own_on = web->own_on, speaking = 0, held = 0;
-    char *why = NULL;
+    char *why = NULL, *broken_err = NULL;
     g_mutex_lock (&reg_lock);
     for (guint i = 0; groups && i < groups->len; i++) {
         WalpeSoundGroup *g = groups->pdata[i];
@@ -1822,6 +1822,17 @@ char *walpe_sound_status_with (const WalpeSoundPages *web)
         /* sound is on for it and it has players, but it is paused (or not
          * shown yet): the one reason for silence the line did not name */
         held += !g->active && g->players->len > 0 && group_on_locked (g);
+        if (!broken_err) {
+            for (guint j = 0; j < g->players->len; j++) {
+                WalpeSound *s = g->players->pdata[j];
+                g_mutex_lock (&s->lock);
+                if (s->broken && s->st.error[0])
+                    broken_err = g_strdup (s->st.error);
+                g_mutex_unlock (&s->lock);
+                if (broken_err)
+                    break;
+            }
+        }
     }
     g_mutex_unlock (&reg_lock);
     g_mutex_lock (&err_lock);
@@ -1852,7 +1863,11 @@ char *walpe_sound_status_with (const WalpeSoundPages *web)
                                  "sleeps, walpe-ctl pause)", scope, held);
         else {
             idle = speaking == 0;
-            r = g_strdup_printf ("%s: nothing is playing (%d wallpaper(s) with sound shown)", scope, speaking);
+            if (speaking > 0 && broken_err)
+                r = g_strdup_printf ("%s: nothing is playing (%d wallpaper(s) with sound shown; error: %s)",
+                                     scope, speaking, broken_err);
+            else
+                r = g_strdup_printf ("%s: nothing is playing (%d wallpaper(s) with sound shown)", scope, speaking);
         }
 #else
         (void) real;
@@ -1903,5 +1918,6 @@ char *walpe_sound_status_with (const WalpeSoundPages *web)
         }
     }
     g_free (why);
+    g_free (broken_err);
     return r;
 }

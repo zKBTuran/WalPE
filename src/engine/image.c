@@ -520,7 +520,7 @@ GdkPixbufAnimation *walpe_picture_animation_open (const char *path, GError **err
     return anim;
 }
 
-WalpeContent *walpe_image_new (const char *path, GError **err)
+WalpeContent *walpe_image_new_opts (const char *path, const char *origin_dir, GError **err)
 {
     if (!walpe_file_exists (path)) {
         g_set_error (err, G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "no such file: %s", path);
@@ -537,6 +537,11 @@ WalpeContent *walpe_image_new (const char *path, GError **err)
     s->base.gl_free = image_gl_free;
     s->base.set_paused = image_set_paused;
     s->base.free = image_free;
-    walpe_content_fit (path, &s->fit);
+    walpe_content_fit (origin_dir && *origin_dir ? origin_dir : path, &s->fit);
     return &s->base;
+}
+
+WalpeContent *walpe_image_new (const char *path, GError **err)
+{
+    return walpe_image_new_opts (path, NULL, err);
 }

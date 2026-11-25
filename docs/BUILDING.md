@@ -30,25 +30,27 @@ install` build what is installed and nothing else.
 The default is a release build (`-O3`, `NDEBUG`, LTO, hardening flags) with **generic CPU
 tuning**: the binaries run on any CPU of the architecture they were built for.
 
-Dependencies that are private to one executable/module, or are stateless, are linked from
-**static archives (`.a`) by default**: this includes FFmpeg, PulseAudio, QuickJS, LZ4 and the
-math/runtime helper archives when available. Meson is asked to select static variants and
-their private/transitive dependencies through each dependency provider. Install your
-distribution's static-library development packages (on Gentoo, enable the relevant
-`static-libs` USE flags); pkg-config packages that do not publish complete private
-dependency metadata may still need their dependent static archives installed separately.
+Dependencies that are shared across the system (GLib/GObject/GIO, GTK, PulseAudio,
+text/rendering, and the window-system stack) and module-private dependencies (FFmpeg, LZ4)
+are linked from **shared system libraries by default (`-Dstatic_deps=false`)**. Static
+`libquickjs.a` is still preferred when present because upstream `libquickjs.so` encodes its
+release date in `DT_SONAME`. To link module-private/stateless dependencies (FFmpeg, LZ4,
+QuickJS) from static archives instead, install your distribution's static-library development
+packages (`static-libs` USE flags on Gentoo; PIC required in `.so` modules) and configure with
+`-Dstatic_deps=true`. PulseAudio (`libpulse` / `libpulse-simple`) always stays shared so
+private versioned DSOs (`libpulsecommon-X.Y.so`) are never leaked into `DT_NEEDED`.
 
-The GLib/GObject/GIO, GTK, text/rendering, and window-system stack remains shared on purpose.
+The GLib/GObject/GIO, GTK, text/rendering, PulseAudio, and window-system stack remains shared on purpose.
 WalPE loads `walpe-video.so` and `walpe-web.so` into the daemon and passes GLib/GObject objects
 across that module ABI. Embedding independent copies of those libraries in the daemon and each
 module can split process-wide type registries and other global state. The C runtime, dynamic
 loader, graphics drivers and components deliberately loaded at run time are also system/runtime
-dependencies. Static archives pulled into `.so` modules, notably LZ4/libm and FFmpeg in
-`walpe-video.so`, must be position-independent code (PIC); the configure step checks those
-archive sets and reports an actionable error when they cannot be linked into a module.
+dependencies. When `-Dstatic_deps=true` is used, static archives pulled into `.so` modules, notably
+LZ4 and FFmpeg in `walpe-video.so`, must be position-independent code (PIC); the configure step checks
+those archive sets and reports an actionable error when they cannot be linked into a module.
 
-To use shared libraries for the otherwise-static private dependencies on a system without
-the required archives, configure with `-Dstatic_deps=false`.
+On systems with static FFmpeg/LZ4/QuickJS archives, you can enable static private linking with
+`-Dstatic_deps=true`.
 
 On a native Linux build, `build.sh` also discovers versioned *private* shared-library directories
 automatically after the first link. It examines every installed WalPE executable and module, follows

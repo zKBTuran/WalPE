@@ -203,11 +203,12 @@ endif
 web_opt = get_option('web')
 audio_opt = get_option('audio')
 ffmpeg_opt = get_option('video')
-# Prefer static archives for dependencies that are private to one
-# executable/module or stateless (FFmpeg, PulseAudio, QuickJS, LZ4, math).
-# The process-wide GLib/GTK/rendering/window-system stack stays shared: the
-# daemon dlopens modules and passes GLib/GObject objects across that ABI, so
-# embedding another copy in each module would split global type/state tables.
+# Prefer shared system libraries by default (static_deps=false), or link
+# module-private/stateless dependencies (FFmpeg, QuickJS, LZ4) from static
+# archives when static_deps=true. The process-wide GLib/GTK/PulseAudio/
+# window-system stack always stays shared: libpulse.so.0 has a stable ABI and
+# linking it statically leaks private versioned DSOs (libpulsecommon-X.Y.so)
+# into DT_NEEDED, while GLib/GObject state is shared across dlopen'd modules.
 # This is separate from default_library: WalPE still builds .so modules.
 static_deps = get_option('static_deps')
 
@@ -271,11 +272,11 @@ xext      = dependency('xext', static: false, required: x11_opt.enabled())
 xinerama  = dependency('xinerama', static: false, required: x11_opt.enabled())
 have_x11  = not x11_opt.disabled() and x11.found() and xext.found() and xinerama.found()
 lz4       = dependency('liblz4', static: static_deps)  # WE .tex compressed mips
-m_lib     = cc.find_library('m', static: static_deps)
+m_lib     = cc.find_library('m', static: false)
 if static_deps and host_machine.system() == 'linux'
   # walpecore is PIC and is linked into the daemon and dlopen() modules.
-  # Check the statically selected common archives before attempting the full
-  # build, rather than leaving a cryptic relocation error to the final link.
+  # Check statically selected core archives before attempting the full build,
+  # rather than leaving a cryptic relocation error to the final link.
   core_archives_pic_ok = cc.links('''
     #include <lz4.h>
     #include <math.h>
@@ -284,9 +285,9 @@ if static_deps and host_machine.system() == 'linux'
     }''',
     args: ['-fPIC', '-shared', '-Wl,-z,defs'],
     dependencies: [lz4, m_lib],
-    name: 'static LZ4 and libm archives are PIC and link into modules')
+    name: 'static LZ4 archive is PIC and links into modules')
   if not core_archives_pic_ok
-    error('static LZ4/libm archives cannot link into WalPE shared modules: install PIC-built static archives, or set -Dstatic_deps=false')
+    error('static LZ4 archive cannot link into WalPE shared modules: install a PIC-built liblz4.a, or set -Dstatic_deps=false')
   endif
 endif
 
@@ -509,15 +510,16 @@ endif
 
 # audio-reactive wallpapers: PulseAudio simple API (also PipeWire via
 # pipewire-pulse). Optional: without it the spectrum stays silent.
+# Always link libpulse shared: libpulse.so.0 has a stable ABI, whereas
+# `pkg-config --static` pulls private versioned libpulsecommon-X.Y.so
+# directly into DT_NEEDED of every binary.
 have_pulse = false
 deps_audio = []
 if audio_opt != 'disabled'
-  pa = dependency('libpulse-simple', static: static_deps, required: audio_opt == 'enabled')
+  pa = dependency('libpulse-simple', static: false, required: audio_opt == 'enabled')
   if pa.found()
     have_pulse = true
-    deps_audio = [pa, dependency('libpulse', static: static_deps)]
-  elif audio_opt == 'auto' and static_deps
-    warning('PulseAudio support omitted: static libpulse-simple/libpulse archives were not found; install the static PulseAudio development files or use -Dstatic_deps=false')
+    deps_audio = [pa, dependency('libpulse', static: false)]
   endif
 endif
 
@@ -621,13 +623,12 @@ if get_option('scenescript') != 'disabled'
       warning(qjs_wrong_msg + ' SceneScript is left out of this build.')
     endif
   else
-    # Find QuickJS in the selected library mode (static by default).
-    # -Dquickjs_libdir is searched first; a shared-only installation is
-    # accepted only when -Dstatic_deps=false.
-    qjs = cc.find_library('quickjs', required: false, dirs: qjs_dirs,
-                          static: static_deps)
+    # Try static libquickjs.a first even when static_deps=false because
+    # upstream libquickjs.so uses a release-date SONAME, then fall back to
+    # shared libquickjs.so unless static_deps=true.
+    qjs = cc.find_library('quickjs', required: false, dirs: qjs_dirs, static: true)
     if qjs.found()
-      quickjs_static = static_deps
+      quickjs_static = true
     elif not static_deps
       qjs_pc = dependency('quickjs', static: false, required: false)
       if qjs_pc.found()
@@ -646,8 +647,8 @@ if get_option('scenescript') != 'disabled'
     endif
     # -lm: QuickJS's Date and math built-ins call libm; a shared library
     # has it in its own NEEDED, a static one needs it on the link line.
-    deps_js = [qjs, cc.find_library('m', static: static_deps, required: false),
-               cc.find_library('dl', static: static_deps, required: false), dependency('threads')]
+    deps_js = [qjs, cc.find_library('m', static: false, required: false),
+               cc.find_library('dl', static: false, required: false), dependency('threads')]
     # Wallpaper scripts are untrusted and the interpreter is their only
     # container. QuickJS has no version number in its header; releases
     # from 2024-01-13 on declare JS_EVAL_FLAG_ASYNC. 2021-03-27 (what
@@ -724,6 +725,7 @@ conf.set_quoted('WALPE_CODENAME', walpe_codename)
 # optional heavy backends are dlopen'd modules (src/engine/modules.h)
 moddir = get_option('prefix') / get_option('libdir') / 'walpe'
 conf.set_quoted('WALPE_MODULEDIR', moddir)
+conf.set_quoted('WALPE_DATADIR', get_option('prefix') / get_option('datadir') / 'walpe')
 # named apart from src/common/config.h (user config): which one a bare
 # #include "config.h" resolved to depended on the including file's dir
 configure_file(output: 'walpe-build-config.h', configuration: conf)
@@ -801,7 +803,7 @@ core = static_library('walpecore', core_srcs,
 
 core_dep = declare_dependency(link_with: core, include_directories: inc,
   dependencies: deps_core + deps_audio + deps_js + deps_media + tsan_deps +
-                [cc.find_library('dl', static: static_deps, required: false)])
+                [cc.find_library('dl', static: false, required: false)])
 
 # ------------------------------------------------- Wayland protocol code
 # wayland-scanner output for the protocols used outside the drawing code:
@@ -1044,7 +1046,7 @@ if have_wl_scan and wl_server_dep.found() and wl_client_dep.found()
     # (only `inc`: with src/engine itself on the include path the C library's
     # <features.h> would resolve to src/engine/features.h)
     include_directories: inc,
-    dependencies: [glib, wl_server_dep, wl_client_dep, cc.find_library('m', static: static_deps, required: false)],
+    dependencies: [glib, wl_server_dep, wl_client_dep, cc.find_library('m', static: false, required: false)],
     install: false, build_by_default: false), timeout: 60)
 endif
 # GTK brought up on the private page host the way web.c does it
@@ -1057,7 +1059,7 @@ if have_webhost_wl
   test('webgtkinit', executable('webgtkinit-test', 'tests/webgtkinit_test.c',
     'src/engine/webhost_wl.c', wl_gen['xdg-shell'][1], wl_gen['xdg-shell'][2],
     include_directories: inc,
-    dependencies: [glib, gtk4, gtk4_wayland_dep, wl_server_dep, wl_client_dep, cc.find_library('dl', static: static_deps, required: false)],
+    dependencies: [glib, gtk4, gtk4_wayland_dep, wl_server_dep, wl_client_dep, cc.find_library('dl', static: false, required: false)],
     install: false, build_by_default: false),
     env: ['GTK_A11Y=none', 'GSETTINGS_BACKEND=memory', 'GDK_DEBUG=', 'GTK_DEBUG='],
     timeout: 60)
@@ -2648,6 +2650,11 @@ install_data('scripts/walpe-collect.sh', rename: 'walpe-collect',
 install_data('data/walpe-autostart.desktop',
   install_dir: get_option('sysconfdir') / 'xdg/autostart')
 install_data('data/style.css', install_dir: get_option('datadir') / 'walpe')
+if have_wayland
+  install_subdir('contrib/plasma/wallpaper', install_dir: get_option('datadir') / 'walpe' / 'plasma')
+  install_data('contrib/plasma/install.sh', install_dir: get_option('datadir') / 'walpe' / 'plasma',
+    install_mode: 'rwxr-xr-x')
+endif
 # licence texts next to the installed programs: WalPE's own (BSD 3-Clause),
 # QuickJS's MIT notice (libquickjs is a static library on most systems, so
 # the binaries contain it) and the notices of the Wayland protocol
@@ -2691,7 +2698,7 @@ endif  # with_tests
 tray_opt = get_option('tray')
 have_tray = tray_opt != 'disabled'
 if have_tray
-  xrender = dependency('xrender', static: static_deps, required: false)
+  xrender = dependency('xrender', static: false, required: false)
   tray_srcs = ['src/tray/main.c', 'src/tray/icon.c', 'src/tray/trayipc.c', 'src/tray/trayconf.c',
                'src/tray/popup.c', 'src/tray/sni.c', 'src/ui/store.c',
                'src/ui/resmodel.c']   # which monitors are new (the tray announces them when the window is closed)
@@ -2726,7 +2733,7 @@ if have_tray
   # that registers walpe-tray's item, dumps icon/tooltip/menu and clicks
   # menu items over dbusmenu
   sni_host_stub = executable('sni-host-stub', 'tests/tray/sni_host_stub.c',
-    dependencies: [gio, glib, dependency('cairo', static: static_deps)],
+    dependencies: [gio, glib, dependency('cairo', static: false)],
     install: false, build_by_default: false)
   if have_tray_xembed
     executable('xembed-host-stub', 'tests/tray/xembed_host_stub.c',
@@ -2745,7 +2752,7 @@ if have_tray
   # keeps its id. No display, no bus.
   test('tray-ids', executable('tray-ids-test', 'tests/tray_ids_test.c',
     include_directories: inc,
-    dependencies: [glib, dependency('cairo', static: static_deps)],
+    dependencies: [glib, dependency('cairo', static: false)],
     install: false, build_by_default: false))
   # walpe-tray next to a real daemon (scripts/lifecheck.py, case tray: own
   # Xvfb, private XDG dirs): what it writes while the engine sends status
@@ -2804,7 +2811,7 @@ if with_tests and lifecheck_py.found() and have_wayland
       install: false, build_by_default: false)
     kwin_shim = shared_module('kwincheck-udmabuf', 'tests/kwin/udmabuf_shim.c',
       name_prefix: '',
-      dependencies: [cc.find_library('dl', static: static_deps, required: false)],
+      dependencies: [cc.find_library('dl', static: false, required: false)],
       override_options: ['b_sanitize=none', 'b_lundef=false', 'b_lto=false'],
       install: false, build_by_default: false)
     kwin_check_deps = [daemon, ctl, kwin_bus, kwin_shim]
@@ -2876,5 +2883,5 @@ test('scene-texlimit-still', executable('scene-texlimit-still-test', 'tests/scen
   install: false, build_by_default: false), timeout: 120)
 endif  # with_tests
 
-summary({'private dependency mode': static_deps ? 'static archives (.a)' : 'shared libraries'},
+summary({'private dependency mode': static_deps ? 'static archives (.a)' : 'shared libraries (static libquickjs.a preferred)'},
   section: 'Linking')

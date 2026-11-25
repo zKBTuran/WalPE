@@ -273,13 +273,16 @@ static const char BUILTIN_FLAT_PROPS[] =
     "{\"label\":\"Fit (whole picture, black bars)\",\"value\":\"contain\"},"
     "{\"label\":\"Stretch\",\"value\":\"stretch\"},"
     "{\"label\":\"Center (original size)\",\"value\":\"center\"}]},"
-    "\"walpe_pos_x\":{\"type\":\"slider\",\"order\":900002,\"text\":\"Horizontal position\","
+    "\"walpe_zoom\":{\"type\":\"slider\",\"order\":900002,\"text\":\"Zoom (%)\","
+    "\"condition\":\"walpe_fit.value != 'stretch'\","
+    "\"min\":25,\"max\":300,\"step\":1,\"fraction\":false,\"value\":100},"
+    "\"walpe_pos_x\":{\"type\":\"slider\",\"order\":900003,\"text\":\"Horizontal position\","
     "\"condition\":\"walpe_fit.value != 'stretch'\","
     "\"min\":0,\"max\":100,\"step\":1,\"fraction\":false,\"value\":50},"
-    "\"walpe_pos_y\":{\"type\":\"slider\",\"order\":900003,\"text\":\"Vertical position\","
+    "\"walpe_pos_y\":{\"type\":\"slider\",\"order\":900004,\"text\":\"Vertical position\","
     "\"condition\":\"walpe_fit.value != 'stretch'\","
     "\"min\":0,\"max\":100,\"step\":1,\"fraction\":false,\"value\":50},"
-    "\"walpe_flip\":{\"type\":\"bool\",\"order\":900004,\"text\":\"Flip horizontally\",\"value\":false}"
+    "\"walpe_flip\":{\"type\":\"bool\",\"order\":900005,\"text\":\"Flip horizontally\",\"value\":false}"
     "}";
 
 /* web wallpapers: network access of the page (engine/web.c, default on) */
@@ -405,6 +408,12 @@ void walpe_content_fit (const char *origin, void *fitp)
         double d = g_ascii_strtod (v, NULL);
         if (isfinite (d))
             f->pos_y = (float) CLAMP (d / 100.0, 0.0, 1.0);
+        g_free (v);
+    }
+    if ((v = walpe_config_get_prop (origin, "walpe_zoom"))) {
+        double d = g_ascii_strtod (v, NULL);
+        if (isfinite (d) && d > 0.0)
+            f->zoom = (float) CLAMP (d / 100.0, 0.25, 4.0);
         g_free (v);
     }
     if ((v = walpe_config_get_prop (origin, "walpe_flip"))) {
@@ -604,10 +613,10 @@ WalpeContent *walpe_content_new (const char *path, const WalpeLoadOpts *opts, GE
         c = walpe_video_content_new (media ? media : abs, opts, err);
         break;
     case WALPE_TYPE_GIF:
-        c = walpe_gif_new (media ? media : abs, err);
+        c = walpe_gif_new_opts (media ? media : abs, o2.origin_dir, err);
         break;
     case WALPE_TYPE_IMAGE:
-        c = walpe_image_new (media ? media : abs, err);
+        c = walpe_image_new_opts (media ? media : abs, o2.origin_dir, err);
         break;
     case WALPE_TYPE_WEB:
 #ifdef HAVE_WEB

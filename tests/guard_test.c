@@ -121,8 +121,28 @@ int main (void)
     CHECK (f.pos_x == 0.5f && f.pos_y == 0.5f);
     walpe_config_set_prop (cfg, vid, "walpe_pos_x", "25");
     walpe_config_set_prop (cfg, vid, "walpe_pos_y", "400");
+    walpe_config_set_prop (cfg, vid, "walpe_zoom", "150");
     walpe_content_fit (vid, &f);
-    CHECK (f.pos_x == 0.25f && f.pos_y == 1.0f);
+    CHECK (f.pos_x == 0.25f && f.pos_y == 1.0f && fabsf (f.zoom - 1.5f) < 1e-4f);
+    walpe_config_set_prop (cfg, vid, "walpe_zoom", "nan");
+    walpe_content_fit (vid, &f);
+    CHECK (f.zoom == 1.0f);
+    {
+        /* 16:9 on 16:9: panning moves the quad and signals background clear */
+        float m[9], k = 0;
+        WalpeFit pf = { WALPE_FIT_COVER, TRUE, 0.25f, 0.75f, 1.0f };
+        gboolean clr = walpe_fit_matrix (&pf, 1920, 1080, 1920, 1080, m, &k);
+        CHECK (clr == TRUE);
+        CHECK (fabsf (m[0] + 1.0f) < 1e-4f && fabsf (m[4] - 1.0f) < 1e-4f);
+        CHECK (fabsf (m[6] + 0.5f) < 1e-4f && fabsf (m[7] + 0.5f) < 1e-4f);
+        /* centered 16:9 cover needs no clear */
+        WalpeFit cf = WALPE_FIT_DEFAULT;
+        CHECK (walpe_fit_matrix (&cf, 1920, 1080, 1920, 1080, m, &k) == FALSE);
+        /* zoomed 16:9 crops edges and clears only when panned past bounds */
+        WalpeFit zf = { WALPE_FIT_COVER, FALSE, 0.0f, 0.5f, 1.5f };
+        CHECK (walpe_fit_matrix (&zf, 1920, 1080, 1920, 1080, m, &k) == FALSE);
+        CHECK (fabsf (k - 1.5f) < 1e-4f && fabsf (m[6] - 0.5f) < 1e-4f);
+    }
     walpe_config_free (cfg);
     g_free (web);
     g_free (vid);

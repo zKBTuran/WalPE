@@ -337,11 +337,6 @@ static gboolean vc_gl_render (WalpeContent *c, int w, int h, float px, float py)
     VideoContent *s = (VideoContent *) c;
     g_autoptr (GError) err = NULL;
     s->v->next_frame_us = 0;
-    if (s->v->fit.mode != WALPE_FIT_COVER && s->v->fit.mode != WALPE_FIT_STRETCH) {
-        /* the frame may not cover the monitor: black bars */
-        glClearColor (0, 0, 0, 1);
-        glClear (GL_COLOR_BUFFER_BIT);
-    }
     video_frame_limit = s->fps;     /* walpe_video_frame_limit (), "video_limit" */
     s->v->render_w = c->render_w;   /* the size chosen for this monitor's picture */
     s->v->render_h = c->render_h;
@@ -449,7 +444,7 @@ WalpeContent *walpe_video_content_new (const char *path, const WalpeLoadOpts *op
         vc_free (&s->base);
         return NULL;
     }
-    walpe_content_fit (opts ? opts->origin_dir : path, &s->v->fit);
+    walpe_content_fit (opts && opts->origin_dir ? opts->origin_dir : path, &s->v->fit);
     vc_sound_new (s, opts && opts->origin_dir ? opts->origin_dir : path);
     if (s->trk.group)       /* (the daemon says "paused" when it is: set_paused) */
         walpe_sound_group_set_active (s->trk.group, TRUE);

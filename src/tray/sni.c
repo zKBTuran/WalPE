@@ -632,6 +632,7 @@ static void sni_stop (void)
     retry_cancel ();
     g_clear_pointer (&S.name, g_free);
     g_clear_pointer (&S.tip_sent, g_free);
+    g_dbus_connection_flush_sync (S.bus, NULL, NULL);
     g_clear_object (&S.bus);
 }
 

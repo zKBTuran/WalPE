@@ -3725,11 +3725,24 @@ receive:
                 cv_note_format (src);
             /* our packet pts are in 1/timescale units and the decoder
              * may override avctx->time_base from SPS timing info —
-             * always scale by OUR demuxer's timescale */
-            double raw = src->frame->pts != AV_NOPTS_VALUE
-                ? src->frame->pts / (double) src->demux->timescale : -1;
+             * always scale by OUR demuxer's timescale; fall back to
+             * best_effort_timestamp or synthetic monotonic position so
+             * video audio tracking never stalls at raw == -1. */
+            int64_t pts = src->frame->pts != AV_NOPTS_VALUE ? src->frame->pts
+                        : src->frame->best_effort_timestamp;
             double iv = src->frame_interval > 0.001 ? src->frame_interval
                       : keep > 0 ? src->clip_iv : 1.0 / 30.0;
+            double raw;
+            if (pts != AV_NOPTS_VALUE) {
+                raw = pts / (double) src->demux->timescale;
+                if (raw < 0.0)
+                    raw = 0.0;
+            } else {
+                raw = src->last_raw >= 0 ? src->last_raw + iv : 0.0;
+                double period = src->orig_fps > 0 ? src->orig_n / src->orig_fps : 0.0;
+                if (period > 0.0 && raw >= period)
+                    raw = fmod (raw, period);
+            }
             /* restarted at a keyframe (resume after a park): the frames
              * before the one that was on screen are decoded, not shown */
             if (src->skip_until >= 0) {
@@ -4557,10 +4570,13 @@ static gboolean cvv_gl_render (WalpeVideo *v, int w, int h, GError **err)
         return TRUE;
 
     /* placed by the wallpaper's alignment option (fit.h; default cover):
-     * the frame is shown at k x its size */
+     * the frame is shown at k x its size; clear first when edges/bars show */
     WalpeMat3 m;
     float k = 1.0f;
-    walpe_fit_matrix (&v->fit, (float) bw, (float) bh, (float) w, (float) h, m.m, &k);
+    if (walpe_fit_matrix (&v->fit, (float) bw, (float) bh, (float) w, (float) h, m.m, &k)) {
+        glClearColor (0, 0, 0, 1);
+        glClear (GL_COLOR_BUFFER_BIT);
+    }
     /* What the decoder is asked to keep (want_w / want_h): the size the
      * frame has at the render resolution chosen for this monitor (video.h
      * render_w / render_h), else on the surface. The frame itself is drawn

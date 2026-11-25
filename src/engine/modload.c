@@ -108,7 +108,12 @@ static gpointer mod_load (const char *name, const char *entry, char **why)
         } else if (g_file_test (path, G_FILE_TEST_IS_REGULAR)) {
             void *h = dlopen (path, RTLD_NOW | RTLD_LOCAL);
             if (!h) {
-                g_string_append_printf (err, "%s%s", err->len ? "; " : "", dlerror ());
+                const char *dlerr = dlerror ();
+                if (dlerr && strstr (dlerr, "cannot open shared object file"))
+                    g_string_append_printf (err, "%s%s (a system library was updated; rebuild WalPE with ./build.sh)",
+                                            err->len ? "; " : "", dlerr);
+                else
+                    g_string_append_printf (err, "%s%s", err->len ? "; " : "", dlerr ? dlerr : "dlopen failed");
             } else if (!(sym = dlsym (h, entry))) {
                 g_string_append_printf (err, "%s%s: no %s", err->len ? "; " : "", path, entry);
                 dlclose (h);

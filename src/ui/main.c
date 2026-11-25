@@ -10,6 +10,7 @@
  * uiipc (worker threads, hard deadlines), thumbnails through thumbs (pool +
  * disk cache), library scans and copies through GTask threads. */
 #include <gtk/gtk.h>
+#include <glib-unix.h>
 #include <json-glib/json-glib.h>
 #include <errno.h>
 #include <glib/gstdio.h>
@@ -17,6 +18,7 @@
 #include <signal.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "store.h"
@@ -44,6 +46,7 @@
 #endif
 #include "walpe-build-config.h"   /* WALPE_VERSION, WALPE_CODENAME: --version */
 #include "common/config.h"
+#include "common/ipc.h"
 #include "common/sourceid.h"      /* --version: which tree it was built from */
 #include "common/ipcsub.h"
 #include "common/util.h"
@@ -224,6 +227,14 @@ static struct {
     GFileMonitor *impmon;   /* <library>/imported */
     gboolean closing;           /* the main window was destroyed (on_win_destroy) */
     gboolean want_res_dialog;   /* started with --resolution: the dialog opens with the window */
+    gboolean tray_spawned;      /* walpe-tray was spawned by this CLI/GUI run */
+    /* KDE Plasma desktop-icons add-on banner (Wayland) */
+    GtkWidget *plasma_bar;
+    GtkLabel *plasma_lbl;
+    GtkWidget *plasma_btn;
+    gboolean plasma_dismissed;
+    gboolean plasma_busy;
+    gboolean plasma_addon_installed;
 } U;
 
 /* supervisor of the engine process */
@@ -852,6 +863,7 @@ static gboolean parse_monitors (JsonObject *st)
 static void settings_software_info (void);
 static void settings_sound_info (void);
 static void settings_follow (void);
+static char *find_plasma_install_script (void);
 
 static void on_status_reply (JsonObject *reply, const char *err, gpointer u)
 {
@@ -989,6 +1001,30 @@ static void on_status_reply (JsonObject *reply, const char *err, gpointer u)
     walpe_layers_panel_set_state (U.layers_panel, e && is_active (e->path), U.layer_adjust);
     if (e && cur_changed)
         update_details (e);
+    if (U.plasma_bar) {
+        const char *hint = wpj_str (st, "wl_plasma_hint", NULL);
+        const char *addon = wpj_str (st, "wl_plasma_addon", "");
+        if (hint && *hint) {
+            U.plasma_addon_installed = g_str_has_prefix (addon, "installed");
+            char *script = find_plasma_install_script ();
+            if (script) {
+                gtk_label_set_text (U.plasma_lbl,
+                    "KDE Plasma desktop icons are hidden behind the wallpaper. Enable the "
+                    "WalPE Plasma add-on (Plasma 6.5+) to show icons over live wallpapers.");
+                gtk_button_set_label (GTK_BUTTON (U.plasma_btn),
+                    U.plasma_addon_installed ? "Enable Plasma add-on" : "Install & enable Plasma add-on");
+                gtk_widget_set_visible (U.plasma_btn, TRUE);
+                g_free (script);
+            } else {
+                gtk_label_set_text (U.plasma_lbl, hint);
+                gtk_widget_set_visible (U.plasma_btn, FALSE);
+            }
+            gtk_widget_set_visible (U.plasma_bar, !U.plasma_dismissed);
+        } else {
+            gtk_widget_set_visible (U.plasma_bar, FALSE);
+            U.plasma_dismissed = FALSE;
+        }
+    }
     if (U.pending_apply) {
         char *p = U.pending_apply;
         U.pending_apply = NULL;
@@ -2139,6 +2175,8 @@ static gboolean tray_start (char **err)
         return TRUE;
     GError *e = NULL;
     gboolean ok = walpe_tray_spawn (&e);
+    if (ok)
+        U.tray_spawned = TRUE;
     if (!ok && err)
         *err = g_strdup (e ? e->message : "cannot start walpe-tray");
     g_clear_error (&e);
@@ -3861,6 +3899,126 @@ static GtkWidget *build_details (void)
     return right;
 }
 
+static char *find_plasma_install_script (void)
+{
+    char *exe = g_file_read_link ("/proc/self/exe", NULL);
+    char *dir = exe ? g_path_get_dirname (exe) : NULL;
+    char *cand[] = {
+        dir ? g_build_filename (dir, "..", "contrib", "plasma", "install.sh", NULL) : NULL,
+        dir ? g_build_filename (dir, "contrib", "plasma", "install.sh", NULL) : NULL,
+        g_build_filename (WALPE_DATADIR, "plasma", "install.sh", NULL),
+    };
+    g_free (exe);
+    g_free (dir);
+    char *found = NULL;
+    for (guint i = 0; i < G_N_ELEMENTS (cand); i++) {
+        if (!found && cand[i] && g_file_test (cand[i], G_FILE_TEST_IS_REGULAR))
+            found = g_steal_pointer (&cand[i]);
+        g_free (cand[i]);
+    }
+    return found;
+}
+
+static void on_plasma_action_done (GObject *src, GAsyncResult *res, gpointer u)
+{
+    (void) u;
+    GError *err = NULL;
+    char *out = NULL, *err_s = NULL;
+    gboolean ok = g_subprocess_communicate_utf8_finish (G_SUBPROCESS (src), res, &out, &err_s, &err);
+    gboolean exited_ok = ok && g_subprocess_get_successful (G_SUBPROCESS (src));
+    U.plasma_busy = FALSE;
+    if (U.closing) {
+        g_free (out);
+        g_free (err_s);
+        g_clear_error (&err);
+        return;
+    }
+    if (U.plasma_btn)
+        gtk_widget_set_sensitive (U.plasma_btn, TRUE);
+    if (exited_ok) {
+        set_status ("WalPE Plasma add-on enabled. Desktop icons appear over live wallpapers.", FALSE);
+        sup_poll_now ();
+    } else {
+        const char *msg = err ? err->message
+                        : (err_s && *g_strstrip (err_s)) ? err_s
+                        : (out && *g_strstrip (out)) ? out
+                        : "Plasma add-on installer failed";
+        char *m = g_strdup_printf ("Plasma add-on: %s", msg);
+        set_status (m, TRUE);
+        g_free (m);
+    }
+    g_free (out);
+    g_free (err_s);
+    g_clear_error (&err);
+}
+
+static void on_plasma_enable (GtkButton *b, gpointer u)
+{
+    (void) b; (void) u;
+    if (U.plasma_busy)
+        return;
+    char *script = find_plasma_install_script ();
+    if (!script) {
+        set_status ("Cannot find contrib/plasma/install.sh to install the Plasma add-on.", TRUE);
+        return;
+    }
+    U.plasma_busy = TRUE;
+    gtk_widget_set_sensitive (U.plasma_btn, FALSE);
+    const char *cmd = U.plasma_addon_installed
+        ? "\"$1\" select"
+        : "\"$1\" install && \"$1\" select";
+    const char *argv[] = { "sh", "-c", cmd, "_", script, NULL };
+    GError *err = NULL;
+    GSubprocess *proc = g_subprocess_newv (argv, G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE, &err);
+    g_free (script);
+    if (!proc) {
+        U.plasma_busy = FALSE;
+        gtk_widget_set_sensitive (U.plasma_btn, TRUE);
+        char *m = g_strdup_printf ("Plasma add-on: %s", err ? err->message : "cannot start installer");
+        set_status (m, TRUE);
+        g_free (m);
+        g_clear_error (&err);
+        return;
+    }
+    g_subprocess_communicate_utf8_async (proc, NULL, NULL, on_plasma_action_done, NULL);
+    g_object_unref (proc);
+}
+
+static void on_plasma_dismiss (GtkButton *b, gpointer u)
+{
+    (void) b; (void) u;
+    U.plasma_dismissed = TRUE;
+    if (U.plasma_bar)
+        gtk_widget_set_visible (U.plasma_bar, FALSE);
+}
+
+static GtkWidget *build_plasma_banner (void)
+{
+    GtkWidget *bar = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_margin_start (bar, 10);
+    gtk_widget_set_margin_end (bar, 10);
+    gtk_widget_set_margin_top (bar, 6);
+    gtk_widget_set_margin_bottom (bar, 6);
+    U.plasma_lbl = GTK_LABEL (gtk_label_new (""));
+    gtk_label_set_xalign (U.plasma_lbl, 0);
+    gtk_label_set_wrap (U.plasma_lbl, TRUE);
+    gtk_widget_set_hexpand (GTK_WIDGET (U.plasma_lbl), TRUE);
+    gtk_box_append (GTK_BOX (bar), GTK_WIDGET (U.plasma_lbl));
+    U.plasma_btn = gtk_button_new_with_label ("Install & enable Plasma add-on");
+    gtk_widget_add_css_class (U.plasma_btn, "suggested-action");
+    gtk_widget_set_valign (U.plasma_btn, GTK_ALIGN_CENTER);
+    g_signal_connect (U.plasma_btn, "clicked", G_CALLBACK (on_plasma_enable), NULL);
+    gtk_box_append (GTK_BOX (bar), U.plasma_btn);
+    GtkWidget *dis = gtk_button_new_with_label ("Dismiss");
+    gtk_widget_add_css_class (dis, "flat");
+    gtk_widget_set_valign (dis, GTK_ALIGN_CENTER);
+    g_signal_connect (dis, "clicked", G_CALLBACK (on_plasma_dismiss), NULL);
+    gtk_box_append (GTK_BOX (bar), dis);
+    gtk_widget_set_visible (bar, FALSE);
+    U.plasma_bar = bar;
+    return bar;
+}
+
 static GtkWidget *build_statusbar (void)
 {
     GtkWidget *sb = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
@@ -3927,6 +4085,9 @@ static void on_win_destroy (GtkWidget *w, gpointer user)
         Sup.sub = NULL;
     }
     walpe_res_ui_shutdown ();   /* its dialog goes with the window, its notification is taken back */
+    U.plasma_bar = NULL;
+    U.plasma_lbl = NULL;
+    U.plasma_btn = NULL;
     U.status = NULL;    /* set_status () and friends return early from here on */
     U.win = NULL;
     if (U.app)
@@ -4021,6 +4182,7 @@ static void activate (GtkApplication *app, gpointer user)
         gtk_stack_switcher_set_stack (GTK_STACK_SWITCHER (sw), GTK_STACK (U.stack));
         gtk_header_bar_set_title_widget (GTK_HEADER_BAR (hdr), sw);
     }
+    gtk_box_append (GTK_BOX (outer), build_plasma_banner ());
     gtk_box_append (GTK_BOX (outer), U.stack);
     gtk_box_append (GTK_BOX (outer), statusbar);
     gtk_window_set_child (GTK_WINDOW (U.win), outer);
@@ -4103,6 +4265,68 @@ static gint on_local_options (GApplication *app, GVariantDict *opts, gpointer u)
     return -1;
 }
 
+static gboolean on_ui_term_signal (gpointer u)
+{
+    (void) u;
+    static gboolean stopping;
+    if (stopping)
+        return G_SOURCE_REMOVE;
+    stopping = TRUE;
+    Sup.auto_restart = FALSE;
+    Sup.quit_told = TRUE;
+    if (Sup.retry_id) {
+        g_source_remove (Sup.retry_id);
+        Sup.retry_id = 0;
+    }
+    /* CLI Ctrl+C / SIGTERM: stop the engine and any tray spawned by this run
+     * so the desktop background is closed instead of staying detached. */
+    char *sp = walpe_socket_path ();
+    char *rep = sp ? walpe_ipc_request (sp, "{\"cmd\":\"quit\"}", 1500) : NULL;
+    g_free (rep);
+    g_free (sp);
+    if (Sup.child > 0) {
+        GPid pid = Sup.child;
+        gboolean exited = FALSE;
+        for (int i = 0; i < 20; i++) {
+            int st = 0;
+            pid_t r = waitpid (pid, &st, WNOHANG);
+            if (r == pid || (r < 0 && errno == ECHILD)) {
+                exited = TRUE;
+                break;
+            }
+            g_usleep (25000);
+        }
+        if (!exited) {
+            kill (pid, SIGTERM);
+            for (int i = 0; i < 20; i++) {
+                int st = 0;
+                pid_t r = waitpid (pid, &st, WNOHANG);
+                if (r == pid || (r < 0 && errno == ECHILD)) {
+                    exited = TRUE;
+                    break;
+                }
+                g_usleep (25000);
+            }
+        }
+        if (!exited)
+            kill (pid, SIGKILL);
+        if (Sup.child_watch) {
+            g_source_remove (Sup.child_watch);
+            Sup.child_watch = 0;
+        }
+        if (exited)
+            g_spawn_close_pid (pid);
+        Sup.child = 0;
+    }
+    if (U.tray_spawned)
+        walpe_tray_request_quit ();
+    if (U.win)
+        gtk_window_destroy (GTK_WINDOW (U.win));
+    else if (U.app)
+        g_application_quit (G_APPLICATION (U.app));
+    return G_SOURCE_REMOVE;
+}
+
 int main (int argc, char **argv)
 {
     /* --version: this program's version and the commit it was built from, in
@@ -4154,6 +4378,8 @@ int main (int argc, char **argv)
                                    G_OPTION_ARG_NONE,
                                    "Open the dialog that sets each monitor's render resolution", NULL);
     g_signal_connect (U.app, "handle-local-options", G_CALLBACK (on_local_options), NULL);
+    g_unix_signal_add (SIGINT, on_ui_term_signal, NULL);
+    g_unix_signal_add (SIGTERM, on_ui_term_signal, NULL);
     int rc = g_application_run (G_APPLICATION (U.app), argc, argv);
     /* requests already handed to the IPC workers (an option changed a
      * moment before Ctrl+Q) still go out: on_win_destroy quits at once */

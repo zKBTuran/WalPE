@@ -25,3 +25,4 @@ typedef struct _GdkPixbufAnimation GdkPixbufAnimation;
 GdkPixbufAnimation *walpe_picture_animation_open (const char *path, GError **err);
 
 WalpeContent *walpe_image_new (const char *path, GError **err);
+WalpeContent *walpe_image_new_opts (const char *path, const char *origin_dir, GError **err);

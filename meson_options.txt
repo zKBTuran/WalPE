@@ -1,7 +1,7 @@
 option('video', type: 'combo', choices: ['auto', 'enabled', 'disabled'], value: 'auto',
   description: 'Video wallpapers and video textures: the module walpe-video.so (FFmpeg: libavcodec, libavutil). H.264, decoded on the CPU unless the setting hwdec asks for a hardware decoder')
-option('static_deps', type: 'boolean', value: true,
-  description: 'Link module-private/stateless dependencies from static .a archives (PIC required in .so modules); keep process-wide GLib/GTK/window-system libraries shared. Set false to use shared libraries for private dependencies too')
+option('static_deps', type: 'boolean', value: false,
+  description: 'Link module-private/stateless dependencies (FFmpeg, LZ4, QuickJS) from static .a archives (PIC required in .so modules); keep process-wide GLib/GTK/PulseAudio/window-system libraries shared. False (default) uses shared system libraries (still preferring static libquickjs.a when present)')
 option('private_runtime_dirs', type: 'string', value: '',
   description: 'Internal: private transitive ELF runtime directories discovered by build.sh; do not set manually')
 option('web', type: 'combo', choices: ['auto', 'enabled', 'disabled'], value: 'auto',

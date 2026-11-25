@@ -1339,7 +1339,9 @@ static int sound_extract (const char *src, const char *dst, gboolean (*stop) (gp
         } else if (!timed_out && !low_disk && WIFEXITED (status) && WEXITSTATUS (status) == 0 &&
                    g_stat (part, &st) == 0 && st.st_size > 0 && g_rename (part, dst) == 0) {
             res = 1;
-        } else if (!timed_out && !low_disk && strstr (said->str, "matches no streams")) {
+        } else if (!timed_out && !low_disk &&
+                   (strstr (said->str, "matches no streams") ||
+                    strstr (said->str, "does not contain any stream"))) {
             /* the video has no sound track: an empty file says so from now
              * on, and nobody asks ffmpeg again */
             g_remove (part);

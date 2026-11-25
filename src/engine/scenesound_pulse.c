@@ -45,6 +45,7 @@ typedef struct {
     pa_threaded_mainloop *ml;
     pa_context *ctx;
     pa_stream *st;
+    size_t frame_bytes;
     GMutex m;
     GCond c;
     gboolean event;     /* m: something happened since the caller last looked */
@@ -146,6 +147,8 @@ static pa_simple *pulse_new (const char *server, const char *app, pa_stream_dire
     const gint64 until = g_get_monotonic_time () + SRV_CONNECT_US;
     int e = PA_ERR_INTERNAL;
     Srv *s = g_new0 (Srv, 1);
+    size_t fs = spec ? pa_frame_size (spec) : 0;
+    s->frame_bytes = fs > 0 ? fs : 1;
     g_mutex_init (&s->m);
     g_cond_init (&s->c);
     if (dir != PA_STREAM_PLAYBACK) {
@@ -220,9 +223,10 @@ static int pulse_write (pa_simple *p, const void *data, size_t bytes, int *error
             if (n == (size_t) -1) {
                 n = 0;
                 e = pa_context_errno (s->ctx) ? pa_context_errno (s->ctx) : PA_ERR_INTERNAL;
-            } else if (n > 0) {
+            } else {
                 n = MIN (n, bytes);
-                if (pa_stream_write (s->st, d, n, NULL, 0LL, PA_SEEK_RELATIVE) < 0)
+                n -= n % s->frame_bytes;
+                if (n > 0 && pa_stream_write (s->st, d, n, NULL, 0LL, PA_SEEK_RELATIVE) < 0)
                     e = pa_context_errno (s->ctx) ? pa_context_errno (s->ctx) : PA_ERR_INTERNAL;
             }
         }

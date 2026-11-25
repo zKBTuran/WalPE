@@ -14,7 +14,9 @@
  *   walpe-tray [--backend=auto|sni|xembed] [--quit] [--export-icon=FILE]
  */
 #include <gtk/gtk.h>
+#include <glib-unix.h>
 #include <json-glib/json-glib.h>
+#include <signal.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -416,6 +418,8 @@ static void on_status (const char *reply, gpointer user)
 {
     (void) user;
     T.poll_inflight = FALSE;
+    if (T.quitting)
+        return;
     JsonNode *n = reply ? wpj_parse_data (reply, -1) : NULL;
     JsonObject *st = n && JSON_NODE_HOLDS_OBJECT (n) ? wpj_obj (json_node_get_object (n), "state") : NULL;
     gboolean was_alive = T.alive;
@@ -519,6 +523,13 @@ static gboolean poll_tick (gpointer user);
 
 static void poll_reschedule (void)
 {
+    if (T.quitting) {
+        if (T.poll_timer)
+            g_source_remove (T.poll_timer);
+        T.poll_timer = 0;
+        T.poll_ms = 0;
+        return;
+    }
     guint ms = in_transition () ? FAST_POLL_MS
                : (!T.sub || walpe_ipc_sub_unsupported (T.sub)) ? POLL_MS : 0;
     if (ms == T.poll_ms)
@@ -532,6 +543,11 @@ static void poll_reschedule (void)
 static gboolean poll_tick (gpointer user)
 {
     (void) user;
+    if (T.quitting) {
+        T.poll_timer = 0;
+        T.poll_ms = 0;
+        return G_SOURCE_REMOVE;
+    }
     poll_now ();
     guint ms = in_transition () ? FAST_POLL_MS
                : (!T.sub || walpe_ipc_sub_unsupported (T.sub)) ? POLL_MS : 0;
@@ -548,6 +564,8 @@ static gboolean poll_tick (gpointer user)
 static void on_sub (const char *line, gpointer user)
 {
     (void) user;
+    if (T.quitting)
+        return;
     /* the engine's last line when it leaves on request ({"event":"quit"}):
      * no state in it and nothing to act on - the end of the connection
      * follows, and that is what a restart started here waits for */
@@ -836,6 +854,8 @@ static void open_settings (void)
 static void ui_appeared (GDBusConnection *c, const char *name, const char *owner, gpointer u)
 {
     (void) c; (void) name; (void) owner; (void) u;
+    if (T.quitting)
+        return;
     T.ui_running = TRUE;
     if (T.pending_settings) {
         T.pending_settings = FALSE;
@@ -975,22 +995,44 @@ static void res_update (JsonObject *st)
 
 /* ================================================================ actions */
 
+static GtkWidget *quit_win;
+static GtkWidget *quit_detail_lbl;
+
 static void on_quit_reply (const char *reply, gpointer user)
 {
     (void) reply; (void) user;
     g_application_quit (G_APPLICATION (T.app));
 }
 
+static void tray_quit_gui (void)
+{
+    if (!T.bus)
+        return;
+    g_dbus_connection_call (T.bus, WALPE_UI_APP_ID, WALPE_UI_OBJECT, "org.freedesktop.Application",
+                            "ActivateAction", g_variant_new ("(sava{sv})", "quit", NULL, NULL),
+                            NULL, G_DBUS_CALL_FLAGS_NO_AUTO_START, 1500, NULL, NULL, NULL);
+}
+
 static void quit_all (void)
 {
+    if (T.quitting)
+        return;
     T.quitting = TRUE;
-    tray_popup_hide ();
-    if (T.alive) {
-        g_message ("quit: stopping walpe-daemon");
-        tray_ipc ("{\"cmd\":\"quit\"}", IPC_TIMEOUT_MS, on_quit_reply, NULL);
-    } else {
-        g_application_quit (G_APPLICATION (T.app));
+    if (T.poll_timer) {
+        g_source_remove (T.poll_timer);
+        T.poll_timer = 0;
+        T.poll_ms = 0;
     }
+    if (T.sub) {
+        walpe_ipc_sub_free (T.sub);
+        T.sub = NULL;
+    }
+    if (quit_win)
+        gtk_window_destroy (GTK_WINDOW (quit_win));
+    tray_popup_hide ();
+    tray_quit_gui ();
+    g_message ("quit: stopping walpe-daemon");
+    tray_ipc ("{\"cmd\":\"quit\"}", IPC_TIMEOUT_MS, on_quit_reply, NULL);
 }
 
 static void on_confirm (GObject *src, GAsyncResult *res, gpointer user)
@@ -1020,7 +1062,6 @@ static const char *quit_detail (void)
  * nothing else on the screen saying that "Quit WalPE" waits for an answer.
  * Without a token (a panel that gives none) the window is shown as any new
  * window is. */
-static GtkWidget *quit_win;
 
 static void on_quit_answer (GtkButton *b, gpointer user)
 {
@@ -1049,7 +1090,8 @@ static void ask_quit_window (void)
         GtkWidget *head = gtk_label_new ("Quit WalPE?");
         gtk_widget_add_css_class (head, "title-2");
         gtk_box_append (GTK_BOX (box), head);
-        GtkWidget *detail = gtk_label_new (quit_detail ());
+        GtkWidget *detail = quit_detail_lbl = gtk_label_new (quit_detail ());
+        g_object_add_weak_pointer (G_OBJECT (detail), (gpointer *) &quit_detail_lbl);
         gtk_label_set_wrap (GTK_LABEL (detail), TRUE);
         gtk_label_set_max_width_chars (GTK_LABEL (detail), 48);
         gtk_label_set_xalign (GTK_LABEL (detail), 0);
@@ -1075,6 +1117,8 @@ static void ask_quit_window (void)
             gtk_shortcut_new (gtk_keyval_trigger_new (GDK_KEY_Escape, 0),
                               gtk_named_action_new ("window.close")));
         gtk_widget_add_controller (w, keys);
+    } else if (quit_detail_lbl) {
+        gtk_label_set_text (GTK_LABEL (quit_detail_lbl), quit_detail ());
     }
     /* before it is shown: the token goes out with the window's first
      * appearance. For a question that is already open (a second click on
@@ -1089,6 +1133,8 @@ static gboolean session_is_x11 (void);
 
 static void ask_quit (void)
 {
+    if (T.quitting)
+        return;
     if (!T.conf->confirm_quit || !gdk_display_get_default ()) {
         quit_all ();
         return;
@@ -1651,13 +1697,42 @@ static void on_activate (GApplication *app, gpointer u)
     (void) app; (void) u;
 }
 
+static gboolean on_term_signal (gpointer u)
+{
+    (void) u;
+    T.quitting = TRUE;
+    if (T.app)
+        g_application_quit (G_APPLICATION (T.app));
+    return G_SOURCE_REMOVE;
+}
+
 static void on_shutdown (GApplication *app, gpointer u)
 {
     (void) app; (void) u;
+    T.quitting = TRUE;
+    if (T.poll_timer) {
+        g_source_remove (T.poll_timer);
+        T.poll_timer = 0;
+        T.poll_ms = 0;
+    }
+    if (T.sub) {
+        walpe_ipc_sub_free (T.sub);
+        T.sub = NULL;
+    }
+    if (T.ui_watch) {
+        g_bus_unwatch_name (T.ui_watch);
+        T.ui_watch = 0;
+    }
+    if (quit_win)
+        gtk_window_destroy (GTK_WINDOW (quit_win));
     tray_popup_hide ();
     if (T.backend)
         T.backend->stop ();
     T.backend = NULL;
+    if (T.bus) {
+        g_dbus_connection_flush_sync (T.bus, NULL, NULL);
+        g_clear_object (&T.bus);
+    }
 }
 
 int main (int argc, char **argv)
@@ -1734,6 +1809,8 @@ int main (int argc, char **argv)
     g_signal_connect (T.app, "startup", G_CALLBACK (on_startup), NULL);
     g_signal_connect (T.app, "activate", G_CALLBACK (on_activate), NULL);
     g_signal_connect (T.app, "shutdown", G_CALLBACK (on_shutdown), NULL);
+    g_unix_signal_add (SIGINT, on_term_signal, NULL);
+    g_unix_signal_add (SIGTERM, on_term_signal, NULL);
     char *args[] = { argv[0], NULL };
     int rc = g_application_run (G_APPLICATION (T.app), 1, args);
     g_object_unref (T.app);
