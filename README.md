@@ -1,11 +1,9 @@
 ## Bugs/Development
 infinite fable 5.2 glitch patched so quality will drop
+### todo
+- update checker shit
 ### on wayland:
-- desktop icons doesnt exist
-- audio is broken
-- positioning
-- tray quit bugs 
-- cli ctl-c doesnt close the daemon properly
+- positioning (?) no tests
 
 # WalPE
 
