@@ -19,6 +19,14 @@
 # with: give --tuning= once to change its tuning.
 set -eu
 
+# Ensure build directories and modules are never world-writable: the daemon
+# refuses to load a module that is world-writable or in a world-writable
+# directory (src/engine/modload.c).
+case "$(umask)" in
+	0000|000) umask 022 ;;
+	*) umask o-w ;;
+esac
+
 # a relative WALPE_BUILDDIR is meant from where the script was called, not
 # from the source directory the script changes to
 case "${WALPE_BUILDDIR:-}" in
@@ -95,3 +103,7 @@ if [ "$is_linux" = true ]; then
 	# executable/module after the final link.
 	python3 scripts/check-runtime-deps.py "$(command -v meson)" "$dir"
 fi
+
+# A pre-existing build directory created under umask 0000 keeps world-writable
+# permissions across reconfigures; clear o+w so modules pass trust checks.
+find "$dir" -perm -0002 ! -type l -exec chmod o-w {} + 2>/dev/null || true
